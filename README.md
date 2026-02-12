@@ -1,62 +1,126 @@
-# O6U MedBank SQL Database
+# O6U MedBank MVP Prototype
 
-This folder contains a real relational PostgreSQL database setup for the MCQ platform.
+A dependency-free browser MVP for October 6 University Faculty of Medicine MCQ practice workflows.
 
-## Files
+## Run
 
-- `schema.sql`: full production-style schema (tables, constraints, indexes, triggers, views)
-- `seed.sql`: seed data for O6U users, curriculum courses, topics, enrollments, invites, and sample question data
-- `supabase_app_state.sql`: canonical lightweight sync table used by current frontend (`app_state` + `storage_key`)
-- `supabase_appstate_compat.sql`: compatibility migration for legacy setups that created `appstate` + `storagekey`
-- `supabase_full_setup.sql`: one-shot Supabase setup (schema + seed + sync compatibility)
-- `supabase_verify.sql`: post-setup verification queries for schema and sync write/read
+Open `/Users/youssefayoub/Documents/Apps/MCQs Website/index.html` in your browser.
 
-## Quick start (PostgreSQL)
+## Included MVP flows
 
-1. Create database:
+- Public pages: Home, Features, Pricing, About, Contact + support form
+- Auth: Sign up, Login, Forgot password via Supabase Auth (with local demo fallback)
+- Create a test: choose assigned course + topic, set count, mode (`timed`/`tutor`), source (`all`/`unused`/`incorrect`/`flagged`), and randomization
+- Attempt interface: select answers, flag, strike-through, notes, navigator, autosave, pause/resume timer
+- Review: score summary, per-question explanation, add to incorrect queue
+- Analytics: overall performance + topic breakdown + weak areas
+- Profile: update account/email/password and view incorrect queue size
+- Admin portal: assign courses to accounts, create/edit/delete/publish questions, and bulk import by course/topic
+
+## Demo accounts
+
+- Admin: `admin@o6umed.local` / `admin123`
+- Student: `student@o6umed.local` / `student123`
+
+## Data/storage
+
+Current UI data is stored in browser `localStorage`.
+
+Keys used:
+
+- `mcq_users`
+- `mcq_current_user_id`
+- `mcq_questions`
+- `mcq_sessions`
+- `mcq_filter_presets`
+- `mcq_incorrect_queue`
+- `mcq_invites`
+- `mcq_curriculum`
+- `mcq_course_topics`
+
+Supabase sync is now wired (prototype mode) via:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
+- table SQL: `/Users/youssefayoub/Documents/Apps/MCQs Website/database/supabase_app_state.sql`
+- compatibility SQL: `/Users/youssefayoub/Documents/Apps/MCQs Website/database/supabase_appstate_compat.sql`
+
+Notes:
+
+- The frontend uses only `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
+- Do not put `SUPABASE_SERVICE_ROLE_KEY` in frontend files.
+- Supabase Auth is used for sign up/login/reset email. Local demo users still work for quick testing.
+
+## Supabase Auth setup checklist
+
+In Supabase Dashboard:
+
+1. Authentication -> Providers -> Email: enable Email provider.
+2. Authentication -> URL Configuration:
+   - Site URL: your deployed URL
+   - Redirect URLs: add your deployed URL and `http://localhost:5500` (or your local dev URL)
+3. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
+
+## Publish to web
+
+This project is static (`index.html` + `main.js` + `styles.css`), so GitHub Pages works.
+
+Quick GitHub Pages steps:
+
+1. Push the project to a GitHub repository.
+2. Repo Settings -> Pages:
+   - Source: Deploy from branch
+   - Branch: `main` and `/ (root)`
+3. Wait for Pages to publish, then open your site URL.
+4. Put that URL into Supabase Authentication URL Configuration (Site URL + Redirect URLs).
+
+Alternative hosts (often easier for env management): Netlify, Vercel, Cloudflare Pages.
+
+## Real SQL database (added)
+
+A real PostgreSQL schema and seed setup is now included:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/schema.sql`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/seed.sql`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/README.md`
+
+Quick run:
 
 ```bash
 createdb o6umedbank
-```
-
-2. Apply schema:
-
-```bash
 psql -d o6umedbank -f database/schema.sql
-```
-
-3. Seed data:
-
-```bash
 psql -d o6umedbank -f database/seed.sql
 ```
 
-## Demo seeded accounts
+Supabase SQL editor run order:
 
-- Admin email: `admin@o6umed.local` (password source in seed script: `admin123`)
-- Student email: `student@o6umed.local` (password source in seed script: `student123`)
+```sql
+-- 1) Full website tables
+--    run file: database/schema.sql
 
-`seed.sql` stores hashed passwords using `pgcrypto` (`crypt(...)`).
+-- 2) Seed starter data
+--    run file: database/seed.sql
 
-## Core entities included
+-- 3) Sync table compatibility (handles appstate/storagekey and app_state/storage_key)
+--    run file: database/supabase_appstate_compat.sql
+```
 
-- Users and roles (`student`, `admin`)
-- Courses by academic year/semester
-- Course topics
-- Enrollment mapping (student -> courses)
-- Questions, answer choices, tags, and revisions
-- Test blocks/sessions, block items, and responses
-- Incorrect queue and flashcards
-- Bulk import jobs and import errors
-- Feedback and support messages
-- Invite codes
+Or run one file:
+
+```sql
+-- run file: database/supabase_full_setup.sql
+```
+
+Then verify:
+
+```sql
+-- run file: database/supabase_verify.sql
+```
 
 ## Notes
 
-- This SQL setup is real and normalized, but your current frontend still reads from `localStorage`.
-- Supabase sync bridge is now available for prototype persistence:
-  - run `schema.sql` (full website tables)
-  - run `seed.sql` (starter records)
-  - run `supabase_appstate_compat.sql` (normalizes `appstate/storagekey` to `app_state/storage_key` if needed)
-  - configure `supabase.config.js` with project URL and anon key
-- Next step to fully use normalized schema is wiring full API/auth flows and replacing local-storage style JSON blobs with table-level CRUD.
+This is still a frontend prototype UI. SQL database files are production-style, but API wiring is still needed.
+
+1. Replace localStorage with a real backend + database.
+2. Add secure auth (hashed passwords, email verification, reset tokens).
+3. Add media upload/storage, moderation workflow, and version history.
+4. Add server-side analytics aggregation and backup strategy.

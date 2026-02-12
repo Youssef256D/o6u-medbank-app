@@ -975,9 +975,9 @@ function render() {
     state.route = "create-test";
   }
 
-  const isSessionRoute = state.route === "session";
-  document.body.classList.toggle("is-session-route", isSessionRoute);
-  appEl.classList.toggle("is-session", isSessionRoute);
+  const isExamWideRoute = state.route === "session" || state.route === "review";
+  document.body.classList.toggle("is-session-route", isExamWideRoute);
+  appEl.classList.toggle("is-session", isExamWideRoute);
   topbarEl?.classList.toggle("hidden", false);
 
   syncTopbar();
@@ -1718,10 +1718,10 @@ function wireDashboard() {
       }
 
       const publishedMap = new Map(getPublishedQuestionsForUser(user).map((question) => [question.id, question]));
-      const wrongIds = getIncorrectQuestionIdsForSession(session);
-      const pool = wrongIds.map((id) => publishedMap.get(id)).filter(Boolean);
+      const retryMeta = getRetryQuestionMetaForSession(session);
+      const pool = retryMeta.questionIds.map((id) => publishedMap.get(id)).filter(Boolean);
       if (!pool.length) {
-        toast("No available wrong questions to retry for this test.");
+        toast("No available wrong/unsolved questions to retry for this test.");
         return;
       }
 
@@ -1738,7 +1738,7 @@ function wireDashboard() {
 
       state.sessionId = created.id;
       navigate("session");
-      toast("Retry test created from wrong questions.");
+      toast(`Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved.`);
     });
   });
 }
@@ -2907,7 +2907,7 @@ function renderReviewFeedbackPane(question, response, isCorrect) {
   return `
     <section class="exam-feedback-block bad">
       <header class="exam-feedback-head">
-        <h4>No answer submitted.</h4>
+        <h4>Your answer is incorrect (not submitted).</h4>
       </header>
       <p class="exam-review-rationale">${escapeHtml(question.explanation)}</p>
       <p class="exam-feedback-answer">The correct answer is: ${escapeHtml(correctAnswerText || correctIds.join(", "))}</p>
@@ -4349,12 +4349,42 @@ function getIncorrectQuestionIdsForSession(session, questionsById = null) {
     const question = map[qid];
     const response = session.responses?.[qid];
     if (!question || !response) return;
-    const isCorrect = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+    const isCorrect = isSubmittedResponseCorrect(question, response);
     if (!isCorrect) {
       wrongIds.push(qid);
     }
   });
   return wrongIds;
+}
+
+function getRetryQuestionMetaForSession(session, questionsById = null) {
+  if (!session || !Array.isArray(session.questionIds)) {
+    return { questionIds: [], wrongSubmitted: 0, unsolved: 0 };
+  }
+
+  const map = questionsById || Object.fromEntries(getQuestions().map((question) => [question.id, question]));
+  const questionIds = [];
+  let wrongSubmitted = 0;
+  let unsolved = 0;
+
+  session.questionIds.forEach((qid) => {
+    const question = map[qid];
+    if (!question) {
+      return;
+    }
+    const response = session.responses?.[qid];
+    if (!response || !response.submitted) {
+      questionIds.push(qid);
+      unsolved += 1;
+      return;
+    }
+    if (!isSubmittedResponseCorrect(question, response)) {
+      questionIds.push(qid);
+      wrongSubmitted += 1;
+    }
+  });
+
+  return { questionIds, wrongSubmitted, unsolved };
 }
 
 function getSessionPerformanceSummary(session, questionsById = null) {
@@ -4369,7 +4399,7 @@ function getSessionPerformanceSummary(session, questionsById = null) {
     const response = session.responses?.[qid];
     if (!question || !response) return;
     total += 1;
-    const isCorrect = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+    const isCorrect = isSubmittedResponseCorrect(question, response);
     if (isCorrect) {
       correct += 1;
     }
@@ -5240,7 +5270,7 @@ function applySourceFilter(questions, source, userId) {
       const question = getQuestions().find((entry) => entry.id === qid);
       if (!question || !response) return;
 
-      const isCorrect = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+      const isCorrect = isSubmittedResponseCorrect(question, response);
       if (!isCorrect) {
         incorrect.add(qid);
       }
@@ -5284,7 +5314,7 @@ function getMissRateByQuestion(userId) {
       const question = getQuestions().find((entry) => entry.id === qid);
       if (!question || !response) return;
 
-      const correct = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+      const correct = isSubmittedResponseCorrect(question, response);
       if (!map[qid]) {
         map[qid] = { miss: 0, total: 0 };
       }
@@ -5320,7 +5350,7 @@ function getQuestionOptionStats(questionId) {
     if (!response || !Array.isArray(response.selected) || response.selected.length === 0) {
       return;
     }
-    if (session.status !== "completed" && !response.submitted) {
+    if (!response.submitted) {
       return;
     }
     totalSubmissions += 1;
@@ -5371,16 +5401,12 @@ function getUserStats(userId, courseFilter = "") {
 
         sessionEligibleCount += 1;
 
-        const answered = response.selected.length > 0;
-        const correct = arraysEqual([...response.selected].sort(), [...question.correct].sort());
-
-        if (answered) {
-          totalAnswered += 1;
-          if (correct) {
-            totalCorrect += 1;
-          } else {
-            sessionAllCorrect = false;
-          }
+        const correct = isSubmittedResponseCorrect(question, response);
+        totalAnswered += 1;
+        if (correct) {
+          totalCorrect += 1;
+        } else {
+          sessionAllCorrect = false;
         }
 
         totalTime += response.timeSpentSec || 0;
@@ -5422,7 +5448,7 @@ function getTopicStats(userId, courseFilter = "") {
       }
 
       byTopic[topic].total += 1;
-      if (arraysEqual([...response.selected].sort(), [...question.correct].sort())) {
+      if (isSubmittedResponseCorrect(question, response)) {
         byTopic[topic].correct += 1;
       }
     });
@@ -5693,7 +5719,7 @@ function renderSessionPanel(session, question, response) {
   if (state.sessionPanel === "aiTutor") {
     const userAnswer = response.selected.length ? response.selected.join(", ") : "No answer submitted";
     const correctAnswer = question.correct.join(", ");
-    const wasCorrect = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+    const wasCorrect = isSubmittedResponseCorrect(question, response);
     content = `
       <div class="exam-panel-stack">
         <p><b>Question:</b> ${escapeHtml(question.topic)} • ${escapeHtml(question.system)}</p>
@@ -5878,6 +5904,18 @@ function nowISO() {
 
 function arraysEqual(a, b) {
   return a.length === b.length && a.every((entry, idx) => entry === b[idx]);
+}
+
+function isSubmittedResponseCorrect(question, response) {
+  if (!question || !response || !response.submitted) {
+    return false;
+  }
+  const selected = Array.isArray(response.selected) ? [...response.selected].sort() : [];
+  const correct = Array.isArray(question.correct) ? [...question.correct].sort() : [];
+  if (!selected.length || !correct.length) {
+    return false;
+  }
+  return arraysEqual(selected, correct);
 }
 
 function shuffle(list) {
