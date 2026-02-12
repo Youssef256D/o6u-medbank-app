@@ -1321,50 +1321,69 @@ function renderAuth(mode) {
 }
 
 function wireAuth(mode) {
+  const lockAuthForm = (form, submitting, busyLabel = "Please wait...") => {
+    if (!form) return;
+    form.dataset.submitting = submitting ? "1" : "0";
+    const submitButton = form.querySelector('button[type="submit"]');
+    if (!submitButton) return;
+    if (!submitButton.dataset.baseLabel) {
+      submitButton.dataset.baseLabel = submitButton.textContent || "";
+    }
+    submitButton.disabled = submitting;
+    submitButton.textContent = submitting ? busyLabel : submitButton.dataset.baseLabel;
+  };
+
   if (mode === "login") {
     const form = document.getElementById("login-form");
     form?.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (form.dataset.submitting === "1") {
+        return;
+      }
+      lockAuthForm(form, true, "Logging in...");
       const formData = new FormData(form);
       const email = String(formData.get("email") || "").trim().toLowerCase();
       const password = String(formData.get("password") || "");
       const authClient = getSupabaseAuthClient();
-
-      if (authClient) {
-        const { data, error } = await authClient.auth.signInWithPassword({ email, password });
-        if (!error && data?.user) {
-          const user = upsertLocalUserFromAuth(data.user);
-          if (!user) {
-            toast("Could not map account profile after login.");
+      try {
+        if (authClient) {
+          const { data, error } = await authClient.auth.signInWithPassword({ email, password });
+          if (!error && data?.user) {
+            const user = upsertLocalUserFromAuth(data.user);
+            if (!user) {
+              toast("Could not map account profile after login.");
+              return;
+            }
+            navigate(user.role === "admin" ? "admin" : "dashboard");
+            toast(`Welcome back, ${user.name}.`);
             return;
           }
-          navigate(user.role === "admin" ? "admin" : "dashboard");
-          toast(`Welcome back, ${user.name}.`);
+
+          const localDemoUser = getUsers().find(
+            (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
+          );
+          if (localDemoUser) {
+            save(STORAGE_KEYS.currentUserId, localDemoUser.id);
+            navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
+            toast(`Welcome back, ${localDemoUser.name}.`);
+            return;
+          }
+
+          toast(error?.message || "Invalid credentials.");
           return;
         }
 
-        const localDemoUser = getUsers().find(
-          (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
-        );
-        if (localDemoUser) {
-          save(STORAGE_KEYS.currentUserId, localDemoUser.id);
-          navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
-          toast(`Welcome back, ${localDemoUser.name}.`);
+        const user = getUsers().find((candidate) => candidate.email.toLowerCase() === email && candidate.password === password);
+        if (!user) {
+          toast("Invalid credentials.");
           return;
         }
-
-        toast(error?.message || "Invalid credentials.");
-        return;
+        save(STORAGE_KEYS.currentUserId, user.id);
+        navigate(user.role === "admin" ? "admin" : "dashboard");
+        toast(`Welcome back, ${user.name}.`);
+      } finally {
+        lockAuthForm(form, false);
       }
-
-      const user = getUsers().find((candidate) => candidate.email.toLowerCase() === email && candidate.password === password);
-      if (!user) {
-        toast("Invalid credentials.");
-        return;
-      }
-      save(STORAGE_KEYS.currentUserId, user.id);
-      navigate(user.role === "admin" ? "admin" : "dashboard");
-      toast(`Welcome back, ${user.name}.`);
     });
     return;
   }
@@ -1430,6 +1449,10 @@ function wireAuth(mode) {
 
     form?.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (form.dataset.submitting === "1") {
+        return;
+      }
+      lockAuthForm(form, true, "Creating account...");
       const data = new FormData(form);
       const users = getUsers();
       const name = String(data.get("name") || "").trim();
@@ -1460,74 +1483,79 @@ function wireAuth(mode) {
       }
       if (!selectedCourses.length) {
         toast("Select at least one course for your enrollment.");
+        lockAuthForm(form, false);
         return;
       }
 
       const authClient = getSupabaseAuthClient();
-      if (authClient) {
-        const { data: authData, error } = await authClient.auth.signUp({
+      try {
+        if (authClient) {
+          const { data: authData, error } = await authClient.auth.signUp({
+            email,
+            password,
+            options: {
+              data: {
+                full_name: name,
+                academic_year: academicYear,
+                academic_semester: academicSemester,
+              },
+            },
+          });
+          if (error) {
+            toast(error.message || "Could not create Supabase account.");
+            return;
+          }
+
+          if (!authData?.user) {
+            toast("Signup failed. Please try again.");
+            return;
+          }
+
+          const user = upsertLocalUserFromAuth(authData.user, {
+            name,
+            role: "student",
+            academicYear,
+            academicSemester,
+            assignedCourses: selectedCourses,
+            verified: Boolean(authData.session),
+          });
+          if (!user) {
+            toast("Account created but profile mapping failed.");
+            return;
+          }
+
+          if (authData.session) {
+            navigate("dashboard");
+            toast("Account created.");
+          } else {
+            localStorage.removeItem(STORAGE_KEYS.currentUserId);
+            toast("Account created. Check your email to verify, then log in.");
+            navigate("login");
+          }
+          return;
+        }
+
+        const user = {
+          id: makeId("u"),
+          name,
           email,
           password,
-          options: {
-            data: {
-              full_name: name,
-              academic_year: academicYear,
-              academic_semester: academicSemester,
-            },
-          },
-        });
-        if (error) {
-          toast(error.message || "Could not create Supabase account.");
-          return;
-        }
-
-        if (!authData?.user) {
-          toast("Signup failed. Please try again.");
-          return;
-        }
-
-        const user = upsertLocalUserFromAuth(authData.user, {
-          name,
           role: "student",
+          verified: true,
+          assignedCourses: selectedCourses,
           academicYear,
           academicSemester,
-          assignedCourses: selectedCourses,
-          verified: Boolean(authData.session),
-        });
-        if (!user) {
-          toast("Account created but profile mapping failed.");
-          return;
-        }
+          createdAt: nowISO(),
+        };
 
-        if (authData.session) {
-          navigate("dashboard");
-          toast("Account created.");
-        } else {
-          localStorage.removeItem(STORAGE_KEYS.currentUserId);
-          toast("Account created. Check your email to verify, then log in.");
-          navigate("login");
-        }
-        return;
+        users.push(user);
+        save(STORAGE_KEYS.users, users);
+        save(STORAGE_KEYS.currentUserId, user.id);
+        toast("Account created and verified.");
+        navigate("dashboard");
+      } finally {
+        lockAuthForm(form, false);
       }
-
-      const user = {
-        id: makeId("u"),
-        name,
-        email,
-        password,
-        role: "student",
-        verified: true,
-        assignedCourses: selectedCourses,
-        academicYear,
-        academicSemester,
-        createdAt: nowISO(),
-      };
-
-      users.push(user);
-      save(STORAGE_KEYS.users, users);
-      save(STORAGE_KEYS.currentUserId, user.id);
-      toast("Account created and verified.");
-      navigate("dashboard");
     });
     return;
   }
@@ -1535,23 +1563,30 @@ function wireAuth(mode) {
   const form = document.getElementById("forgot-form");
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "1") {
+      return;
+    }
+    lockAuthForm(form, true, "Sending...");
     const data = new FormData(form);
     const email = String(data.get("email") || "").trim().toLowerCase();
     const authClient = getSupabaseAuthClient();
-
-    if (authClient) {
-      const redirectTo = `${window.location.origin}${window.location.pathname}`;
-      const { error } = await authClient.auth.resetPasswordForEmail(email, { redirectTo });
-      if (error) {
-        toast(error.message || "Could not send reset email.");
+    try {
+      if (authClient) {
+        const redirectTo = `${window.location.origin}${window.location.pathname}`;
+        const { error } = await authClient.auth.resetPasswordForEmail(email, { redirectTo });
+        if (error) {
+          toast(error.message || "Could not send reset email.");
+          return;
+        }
+        toast("Password reset email sent.");
+        navigate("login");
         return;
       }
-      toast("Password reset email sent.");
-      navigate("login");
-      return;
-    }
 
-    toast("Supabase auth is not configured. Password reset email is unavailable.");
+      toast("Supabase auth is not configured. Password reset email is unavailable.");
+    } finally {
+      lockAuthForm(form, false);
+    }
   });
 }
 
