@@ -1138,20 +1138,6 @@ function renderLanding() {
         </div>
       </div>
     </section>
-
-    <section class="panel simple-demo-wrap">
-      <h3 class="simple-demo-title">Try Demo Accounts</h3>
-      <p class="subtle">Use O6U demo users to explore student and admin workflows.</p>
-      <div class="stack">
-        <button class="btn good" data-action="quick-login-student">Enter as Student</button>
-        <button class="btn warn" data-action="quick-login-admin">Enter as Admin</button>
-      </div>
-      <hr />
-      <small>
-        Admin: <code>${DEMO_ADMIN_EMAIL}</code> / <code>admin123</code><br />
-        Student: <code>${DEMO_STUDENT_EMAIL}</code> / <code>student123</code>
-      </small>
-    </section>
   `;
 }
 
