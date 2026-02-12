@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>O6U MedBank</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="background-glow"></div>
+    <header class="topbar">
+      <div class="brand-wrap">
+        <button class="brand" data-nav="landing">O6U MedBank</button>
+        <span class="pill">Faculty of Medicine</span>
+      </div>
+      <nav id="public-nav" class="top-nav">
+        <button data-nav="landing">Home</button>
+        <button data-nav="features">Features</button>
+        <button data-nav="pricing">Pricing</button>
+        <button data-nav="about">About</button>
+        <button data-nav="contact">Contact</button>
+      </nav>
+      <nav id="private-nav" class="top-nav hidden">
+        <button data-nav="dashboard">Dashboard</button>
+        <button data-nav="create-test">Create a Test</button>
+        <button data-nav="analytics">Analytics</button>
+        <button data-nav="profile">Profile</button>
+        <button id="admin-link" class="hidden" data-nav="admin">Admin</button>
+      </nav>
+      <div class="auth-actions" id="auth-actions"></div>
+    </header>
+
+    <main id="app" class="app-shell"></main>
+
+    <template id="toast-template">
+      <div class="toast"></div>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="supabase.config.js"></script>
+    <script src="main.js"></script>
+  </body>
+</html>
