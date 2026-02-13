@@ -4330,11 +4330,12 @@ function wireAdmin() {
         return;
       }
 
+      let supabaseDeleteWarning = "";
       if (target.supabaseAuthId) {
         const deleteResult = await deleteSupabaseAuthUserAsAdmin(target.supabaseAuthId);
         if (!deleteResult.ok) {
-          toast(deleteResult.message || "Could not delete user from Supabase Auth.");
-          return;
+          supabaseDeleteWarning = deleteResult.message || "Could not delete user from Supabase Auth.";
+          console.warn("Supabase auth user delete warning:", supabaseDeleteWarning);
         }
       }
 
@@ -4355,7 +4356,11 @@ function wireAdmin() {
       delete flashcards[userId];
       save(STORAGE_KEYS.flashcards, flashcards);
 
-      toast("User removed.");
+      if (supabaseDeleteWarning) {
+        toast(`User removed locally. Supabase auth delete issue: ${supabaseDeleteWarning}`);
+      } else {
+        toast("User removed.");
+      }
       render();
     });
   });
@@ -4704,19 +4709,41 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
     return { ok: false, message: "Supabase auth client is not available." };
   }
 
-  const { data, error } = await authClient.functions.invoke("admin-delete-user", {
-    body: { targetAuthId },
-  });
-
-  if (error) {
-    return { ok: false, message: error.message || "Supabase function call failed." };
+  const { data: sessionData, error: sessionError } = await authClient.auth.getSession();
+  if (sessionError) {
+    return { ok: false, message: sessionError.message || "Could not verify Supabase session." };
+  }
+  if (!sessionData?.session?.access_token) {
+    return {
+      ok: false,
+      message: "No active Supabase session for admin delete. Log in with a Supabase admin account.",
+    };
   }
 
-  if (!data?.ok) {
-    return { ok: false, message: data?.error || "Supabase user delete failed." };
-  }
+  try {
+    const { data, error } = await authClient.functions.invoke("admin-delete-user", {
+      body: { targetAuthId },
+    });
 
-  return { ok: true };
+    if (error) {
+      const msg = String(error.message || "Supabase function call failed.");
+      if (msg.toLowerCase().includes("non-2xx")) {
+        return {
+          ok: false,
+          message: "Edge Function admin-delete-user failed. Check function deployment and JWT settings.",
+        };
+      }
+      return { ok: false, message: msg };
+    }
+
+    if (!data?.ok) {
+      return { ok: false, message: data?.error || "Supabase user delete failed." };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error?.message || "Unexpected error during Supabase auth delete." };
+  }
 }
 
 function getSessionsForUser(userId) {
