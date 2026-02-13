@@ -6052,23 +6052,40 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
   }
 
   try {
-    const { data, error } = await authClient.functions.invoke("admin-delete-user", {
-      body: { targetAuthId },
-    });
-
-    if (error) {
-      const msg = String(error.message || "Supabase function call failed.");
-      if (msg.toLowerCase().includes("non-2xx")) {
-        return {
-          ok: false,
-          message: "Edge Function admin-delete-user failed. Check function deployment and JWT settings.",
-        };
-      }
-      return { ok: false, message: msg };
+    if (!SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
+      return {
+        ok: false,
+        message: "Supabase function endpoint is not configured in this app.",
+      };
     }
 
-    if (!data?.ok) {
-      return { ok: false, message: data?.error || "Supabase user delete failed." };
+    const response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionData.session.access_token}`,
+        apikey: SUPABASE_CONFIG.anonKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ targetAuthId }),
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const details = String(payload?.error || payload?.message || "").trim();
+      return {
+        ok: false,
+        message: details || `Admin delete request failed (${response.status}).`,
+      };
+    }
+
+    if (!payload?.ok) {
+      return { ok: false, message: payload?.error || "Supabase user delete failed." };
     }
 
     return { ok: true };
