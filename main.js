@@ -3971,7 +3971,7 @@ function wireAdmin() {
   });
 
   appEl.querySelectorAll("[data-action='remove-user']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       const current = getCurrentUser();
@@ -3992,6 +3992,14 @@ function wireAdmin() {
 
       if (!window.confirm(`Remove user ${target.name}?`)) {
         return;
+      }
+
+      if (target.supabaseAuthId) {
+        const deleteResult = await deleteSupabaseAuthUserAsAdmin(target.supabaseAuthId);
+        if (!deleteResult.ok) {
+          toast(deleteResult.message || "Could not delete user from Supabase Auth.");
+          return;
+        }
       }
 
       save(
@@ -4348,6 +4356,31 @@ function getCurrentUser() {
   }
 
   return getUsers().find((user) => user.id === userId) || null;
+}
+
+async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
+  if (!targetAuthId) {
+    return { ok: true };
+  }
+
+  const authClient = getSupabaseAuthClient();
+  if (!authClient) {
+    return { ok: false, message: "Supabase auth client is not available." };
+  }
+
+  const { data, error } = await authClient.functions.invoke("admin-delete-user", {
+    body: { targetAuthId },
+  });
+
+  if (error) {
+    return { ok: false, message: error.message || "Supabase function call failed." };
+  }
+
+  if (!data?.ok) {
+    return { ok: false, message: data?.error || "Supabase user delete failed." };
+  }
+
+  return { ok: true };
 }
 
 function getSessionsForUser(userId) {
