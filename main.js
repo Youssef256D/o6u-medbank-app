@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.8").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.9").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const PRESENCE_HEARTBEAT_MS = 25000;
@@ -135,6 +135,7 @@ let adminPresencePollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
+let supabaseAuthStateUnsubscribe = null;
 let globalEventsBound = false;
 const presenceRuntime = {
   timer: null,
@@ -783,7 +784,16 @@ async function initSupabaseAuth() {
       }
     }
 
-    supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
+    if (supabaseAuthStateUnsubscribe) {
+      try {
+        supabaseAuthStateUnsubscribe();
+      } catch {
+        // Ignore stale subscription cleanup errors.
+      }
+      supabaseAuthStateUnsubscribe = null;
+    }
+
+    const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
         let localUser = upsertLocalUserFromAuth(session.user);
         localUser = await refreshLocalUserFromRelationalProfile(session.user, localUser);
@@ -859,6 +869,10 @@ async function initSupabaseAuth() {
         render();
       }
     });
+    const subscription = authStateData?.subscription;
+    if (subscription && typeof subscription.unsubscribe === "function") {
+      supabaseAuthStateUnsubscribe = () => subscription.unsubscribe();
+    }
   } catch (error) {
     console.warn("Supabase auth unavailable. Falling back to local auth only.", error);
     supabaseAuth.enabled = false;
@@ -2949,6 +2963,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     const ready = await ensureRelationalSyncReady({ force });
     if (!ready) {
       state.adminDataSyncError = "Relational sync is unavailable.";
+      state.adminDataLastSyncAt = Date.now();
       return false;
     }
     await hydrateRelationalCoursesAndTopics();
@@ -2961,13 +2976,10 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     return true;
   } catch (error) {
     state.adminDataSyncError = String(error?.message || "Failed to refresh admin data.");
+    state.adminDataLastSyncAt = Date.now();
     return false;
   } finally {
     state.adminDataRefreshing = false;
-    if (state.route === "admin") {
-      state.skipNextRouteAnimation = true;
-      render();
-    }
   }
 }
 
@@ -3110,6 +3122,11 @@ function render() {
       if (user?.role === "admin" && shouldRefreshAdminData(user)) {
         refreshAdminDataSnapshot(user, { force: !state.adminDataLastSyncAt }).catch((error) => {
           console.warn("Admin data refresh failed.", error?.message || error);
+        }).finally(() => {
+          if (state.route === "admin") {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
         });
       }
       if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
