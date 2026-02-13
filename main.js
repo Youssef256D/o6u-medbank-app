@@ -1067,7 +1067,7 @@ function syncTopbar() {
   privateNavEl.querySelectorAll("[data-nav]").forEach((button) => {
     const route = button.getAttribute("data-nav");
     if (isAdmin) {
-      button.classList.toggle("hidden", route !== "admin");
+      button.classList.toggle("hidden", false);
     } else {
       button.classList.toggle("hidden", route === "admin");
     }
