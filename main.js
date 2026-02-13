@@ -101,6 +101,7 @@ const relationalSync = {
   pendingWrites: new Map(),
   flushTimer: null,
   flushing: false,
+  profilesBackfillAttempted: false,
 };
 
 let timerHandle = null;
@@ -1007,10 +1008,24 @@ async function hydrateRelationalProfiles(currentUser) {
   if (error) {
     return;
   }
+  const profileRows = Array.isArray(profiles) ? profiles : [];
+  if (!profileRows.length) {
+    const hasLocalRelationalUsers = usersBefore.some((entry) => isUuidValue(entry?.supabaseAuthId));
+    if (isAdmin && hasLocalRelationalUsers && !relationalSync.profilesBackfillAttempted) {
+      relationalSync.profilesBackfillAttempted = true;
+      try {
+        await syncProfilesToRelational(usersBefore);
+      } catch (syncError) {
+        console.warn("Profiles backfill failed.", syncError?.message || syncError);
+      }
+    }
+    saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
+    return;
+  }
 
   const allCourses = [...CURRICULUM_COURSE_LIST];
   const localByAuthId = new Map(usersBefore.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry]));
-  const mapped = (profiles || []).map((profile) => {
+  const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || 1) : null;
