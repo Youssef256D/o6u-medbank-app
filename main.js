@@ -809,6 +809,12 @@ function isForcedAdminEmail(email) {
   return FORCED_ADMIN_EMAILS.has(String(email || "").trim().toLowerCase());
 }
 
+function isLegacyDemoUser(user) {
+  const id = String(user?.id || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  return id === "u_admin" || id === "u_student" || email === DEMO_ADMIN_EMAIL || email === DEMO_STUDENT_EMAIL;
+}
+
 function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   if (!authUser?.id) {
     return null;
@@ -1226,6 +1232,46 @@ async function hydrateRelationalCoursesAndTopics() {
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
 }
 
+async function loadBackupUsersFromSyncStore() {
+  const client = supabaseSync.client || getRelationalClient();
+  if (!client) {
+    return [];
+  }
+
+  let tableName = supabaseSync.tableName;
+  let keyColumn = supabaseSync.storageKeyColumn;
+  if (!tableName || !keyColumn) {
+    const shape = await detectSupabaseStorageShape(client);
+    if (!shape) {
+      return [];
+    }
+    tableName = shape.tableName;
+    keyColumn = shape.storageKeyColumn;
+  }
+
+  const candidates = getSyncQueryCandidates(STORAGE_KEYS.users, "");
+  if (!candidates.length) {
+    return [];
+  }
+
+  const { data, error } = await client
+    .from(tableName)
+    .select(`${keyColumn},payload,updated_at`)
+    .in(keyColumn, candidates)
+    .order("updated_at", { ascending: false })
+    .limit(5);
+  if (error || !Array.isArray(data)) {
+    return [];
+  }
+
+  for (const row of data) {
+    if (Array.isArray(row?.payload)) {
+      return row.payload;
+    }
+  }
+  return [];
+}
+
 async function hydrateRelationalProfiles(currentUser) {
   const client = getRelationalClient();
   if (!client || !relationalSync.enabled) {
@@ -1285,8 +1331,22 @@ async function hydrateRelationalProfiles(currentUser) {
     };
   });
 
-  const preservedLocalOnly = usersBefore.filter((entry) => !entry.supabaseAuthId);
-  const nextUsers = [...preservedLocalOnly, ...mapped];
+  const mappedAuthIds = new Set(mapped.map((entry) => String(entry.supabaseAuthId || "").trim()).filter(Boolean));
+  const preserveUnmappedRelationalUsers = isAdmin && profileRows.length <= 1;
+  const backupUsers = preserveUnmappedRelationalUsers ? await loadBackupUsersFromSyncStore() : [];
+  const preservedRelationalMap = new Map();
+  [...backupUsers, ...usersBefore].forEach((entry) => {
+    const authId = String(entry?.supabaseAuthId || "").trim();
+    if (!isUuidValue(authId) || mappedAuthIds.has(authId) || preservedRelationalMap.has(authId)) {
+      return;
+    }
+    preservedRelationalMap.set(authId, entry);
+  });
+  const preservedRelational = preserveUnmappedRelationalUsers
+    ? Array.from(preservedRelationalMap.values())
+    : [];
+  const preservedLocalOnly = usersBefore.filter((entry) => !entry.supabaseAuthId && !isLegacyDemoUser(entry));
+  const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
 }
