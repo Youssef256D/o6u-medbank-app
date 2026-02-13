@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.8").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const PRESENCE_HEARTBEAT_MS = 25000;
@@ -30,6 +30,8 @@ const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
+const inMemoryStorage = new Map();
+let storageFallbackWarned = false;
 
 const state = {
   route: "landing",
@@ -133,6 +135,7 @@ let adminPresencePollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
+let globalEventsBound = false;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -232,6 +235,14 @@ let CURRICULUM_COURSE_LIST = [];
 let COURSE_TOPIC_OVERRIDES = {};
 let QBANK_COURSE_TOPICS = {};
 rebuildCurriculumCatalog();
+
+function warnStorageFallback(error) {
+  if (storageFallbackWarned) {
+    return;
+  }
+  storageFallbackWarned = true;
+  console.warn("Persistent browser storage is unavailable. Using temporary in-memory storage for this tab.", error);
+}
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
 const DEMO_STUDENT_EMAIL = "student@o6umed.local";
@@ -630,7 +641,7 @@ async function init() {
   } else if (SUPABASE_CONFIG.enabled && !window.supabase?.createClient) {
     scheduleSupabaseBootstrapRetry();
   }
-  sessionStorage.removeItem(BOOT_RECOVERY_FLAG);
+  removeSessionStorageKey(BOOT_RECOVERY_FLAG);
   render();
 }
 
@@ -2640,6 +2651,11 @@ function seedData() {
 }
 
 function bindGlobalEvents() {
+  if (globalEventsBound) {
+    return;
+  }
+  globalEventsBound = true;
+
   document.body.addEventListener("click", (event) => {
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
@@ -8344,7 +8360,7 @@ function captureElapsedForCurrentQuestion(session) {
 }
 
 function load(key, fallback) {
-  const raw = localStorage.getItem(key);
+  const raw = readStorageKey(key);
   if (!raw) {
     return fallback;
   }
@@ -8371,12 +8387,64 @@ function save(key, value) {
   scheduleSupabaseWrite(key, value);
 }
 
+function readStorageKey(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    warnStorageFallback(error);
+    return inMemoryStorage.get(key) ?? null;
+  }
+}
+
 function writeStorageKey(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  let serialized = null;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    console.warn(`Could not serialize storage key "${key}".`, error);
+    return;
+  }
+
+  try {
+    localStorage.setItem(key, serialized);
+    inMemoryStorage.delete(key);
+  } catch (error) {
+    warnStorageFallback(error);
+    inMemoryStorage.set(key, serialized);
+  }
 }
 
 function removeStorageKey(key) {
-  localStorage.removeItem(key);
+  inMemoryStorage.delete(key);
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    warnStorageFallback(error);
+  }
+}
+
+function readSessionStorageKey(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionStorageKey(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    // Ignore when sessionStorage is blocked.
+  }
+}
+
+function removeSessionStorageKey(key) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // Ignore when sessionStorage is blocked.
+  }
 }
 
 async function loginAsDemo(email, password) {
@@ -8497,15 +8565,46 @@ function toast(message) {
   }, 2400);
 }
 
+function renderBootstrapFallback() {
+  try {
+    document.body.classList.remove("is-routing");
+    appEl.classList.remove("route-enter", "route-enter-active", "is-session", "is-admin");
+    topbarEl?.classList.remove("hidden", "admin-only-header");
+    publicNavEl?.classList.remove("hidden");
+    privateNavEl?.classList.add("hidden");
+    adminLinkEl?.classList.add("hidden");
+    authActionsEl?.classList.remove("hidden");
+    if (authActionsEl) {
+      authActionsEl.innerHTML = `
+        <button data-nav="login">Login</button>
+        <button class="btn" data-nav="signup">Sign up</button>
+      `;
+    }
+    appEl.innerHTML = renderLanding();
+  } catch (fallbackError) {
+    console.error("Fallback render failed:", fallbackError);
+  }
+}
+
 init().catch((error) => {
   console.error("Application bootstrap failed:", error);
-  const alreadyAttemptedRecovery = sessionStorage.getItem(BOOT_RECOVERY_FLAG) === "1";
+  const alreadyAttemptedRecovery = readSessionStorageKey(BOOT_RECOVERY_FLAG) === "1";
   if (!alreadyAttemptedRecovery) {
-    sessionStorage.setItem(BOOT_RECOVERY_FLAG, "1");
-    Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
-    window.location.reload();
+    writeSessionStorageKey(BOOT_RECOVERY_FLAG, "1");
+    Object.values(STORAGE_KEYS).forEach((key) => removeStorageKey(key));
+    init()
+      .then(() => {
+        removeSessionStorageKey(BOOT_RECOVERY_FLAG);
+      })
+      .catch((retryError) => {
+        console.error("Recovery bootstrap failed:", retryError);
+        removeSessionStorageKey(BOOT_RECOVERY_FLAG);
+        renderBootstrapFallback();
+        toast("App failed to initialize. A safe fallback view was loaded.");
+      });
     return;
   }
-  sessionStorage.removeItem(BOOT_RECOVERY_FLAG);
-  toast("App failed to initialize. Check console for details.");
+  removeSessionStorageKey(BOOT_RECOVERY_FLAG);
+  renderBootstrapFallback();
+  toast("App failed to initialize. A safe fallback view was loaded.");
 });
