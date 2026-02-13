@@ -197,6 +197,10 @@ button {
   min-height: 75vh;
 }
 
+.app-shell.is-admin {
+  width: min(1840px, 98.8vw);
+}
+
 .app-shell.is-session {
   width: min(1700px, 99vw);
   margin: 0.35rem auto 0.8rem;

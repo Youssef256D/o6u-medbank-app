@@ -108,6 +108,7 @@ const relationalSync = {
   flushTimer: null,
   flushing: false,
   profilesBackfillAttempted: false,
+  questionsBackfillAttempted: false,
 };
 
 let timerHandle = null;
@@ -1048,11 +1049,54 @@ async function updateRelationalProfileApproval(profileIds, approved) {
     return { ok: false, message: "Supabase relational client is not available." };
   }
 
-  const { error } = await client.from("profiles").update({ approved: Boolean(approved) }).in("id", ids);
+  const targetApproved = Boolean(approved);
+  const { data: updatedRows, error } = await client
+    .from("profiles")
+    .update({ approved: targetApproved })
+    .in("id", ids)
+    .select("id,approved");
   if (error) {
     return { ok: false, message: error.message || "Could not update profile approval in database." };
   }
+
+  const appliedById = new Map((updatedRows || []).map((row) => [row.id, Boolean(row.approved)]));
+  const unresolvedIds = ids.filter((id) => appliedById.get(id) !== targetApproved);
+  if (unresolvedIds.length) {
+    const { data: verifyRows, error: verifyError } = await client
+      .from("profiles")
+      .select("id,approved")
+      .in("id", unresolvedIds);
+    if (verifyError) {
+      return {
+        ok: false,
+        message: verifyError.message || "Could not verify profile approval status after update.",
+      };
+    }
+    const verifiedById = new Map((verifyRows || []).map((row) => [row.id, Boolean(row.approved)]));
+    const stillUnresolved = unresolvedIds.filter((id) => verifiedById.get(id) !== targetApproved);
+    if (stillUnresolved.length) {
+      return {
+        ok: false,
+        message: "Some selected users were not updated in database. Check admin permissions and try again.",
+      };
+    }
+  }
+
   return { ok: true };
+}
+
+async function syncUsersBackupState(usersPayload) {
+  if (!supabaseSync.enabled) {
+    return;
+  }
+
+  const users = Array.isArray(usersPayload) ? usersPayload : getUsers();
+  try {
+    scheduleSupabaseWrite(STORAGE_KEYS.users, users);
+    await flushSupabaseWrites();
+  } catch (error) {
+    console.warn("Users backup sync failed.", error?.message || error);
+  }
 }
 
 async function deleteRelationalProfile(profileId) {
@@ -1254,6 +1298,8 @@ async function hydrateRelationalQuestions() {
   }
 
   const users = getUsers();
+  const localQuestionsBefore = getQuestions();
+  const currentUser = getCurrentUser();
   const courses = await client.from("courses").select("id,course_name");
   if (courses.error) {
     return;
@@ -1262,12 +1308,40 @@ async function hydrateRelationalQuestions() {
   if (topics.error) {
     return;
   }
-  const questionsResult = await client
+  let questionsResult = await client
     .from("questions")
     .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
     .order("created_at", { ascending: true });
   if (questionsResult.error) {
     return;
+  }
+  const remoteQuestionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
+  if (!remoteQuestionRows.length) {
+    const hasLocalQuestions = localQuestionsBefore.some((question) => String(question?.stem || "").trim());
+    if (
+      currentUser?.role === "admin" &&
+      hasLocalQuestions &&
+      !relationalSync.questionsBackfillAttempted
+    ) {
+      relationalSync.questionsBackfillAttempted = true;
+      try {
+        await syncQuestionsToRelational(localQuestionsBefore);
+        const retryResult = await client
+          .from("questions")
+          .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+          .order("created_at", { ascending: true });
+        if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
+          questionsResult = retryResult;
+        } else {
+          return;
+        }
+      } catch (syncError) {
+        console.warn("Questions backfill failed.", syncError?.message || syncError);
+        return;
+      }
+    } else if (hasLocalQuestions) {
+      return;
+    }
   }
 
   const questionIds = (questionsResult.data || []).map((question) => question.id);
@@ -1994,6 +2068,47 @@ async function syncQuestionsToRelational(questionsPayload) {
   }
 }
 
+async function persistImportedQuestionsNow(questionsPayload) {
+  const currentUser = getCurrentUser();
+  if (currentUser?.role !== "admin") {
+    return { ok: false, message: "Only admin users can import and sync questions." };
+  }
+  if (!isUuidValue(currentUser?.supabaseAuthId)) {
+    return {
+      ok: false,
+      message: "Database sync requires a signed-in Supabase admin account. Please log out and sign in again.",
+    };
+  }
+
+  const questions = Array.isArray(questionsPayload) ? questionsPayload : getQuestions();
+  if (!questions.length) {
+    return { ok: true };
+  }
+
+  const ready = await ensureRelationalSyncReady().catch(() => false);
+  if (!ready) {
+    return { ok: false, message: "Relational database sync is unavailable." };
+  }
+
+  try {
+    const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    const topics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    await syncCoursesTopicsToRelational(curriculum, topics);
+    await syncQuestionsToRelational(questions);
+  } catch (error) {
+    return { ok: false, message: error?.message || "Could not persist imported questions to database." };
+  }
+
+  scheduleSupabaseWrite(STORAGE_KEYS.questions, questions);
+  try {
+    await flushSupabaseWrites();
+  } catch (syncError) {
+    console.warn("Legacy sync backup failed for imported questions.", syncError?.message || syncError);
+  }
+
+  return { ok: true };
+}
+
 async function syncSessionsToRelational(sessionsPayload) {
   const client = getRelationalClient();
   const currentUser = getCurrentUser();
@@ -2353,8 +2468,10 @@ function render() {
   }
 
   const isExamWideRoute = state.route === "session" || state.route === "review";
+  const isAdminRoute = state.route === "admin";
   document.body.classList.toggle("is-session-route", isExamWideRoute);
   appEl.classList.toggle("is-session", isExamWideRoute);
+  appEl.classList.toggle("is-admin", isAdminRoute);
   topbarEl?.classList.toggle("hidden", false);
 
   syncTopbar();
@@ -5380,6 +5497,7 @@ function wireAdmin() {
     }
 
     save(STORAGE_KEYS.users, users);
+    await syncUsersBackupState(users);
     toast(`${approvedCount} pending account(s) approved.`);
     render();
   });
@@ -5498,6 +5616,7 @@ function wireAdmin() {
       users[idx].approvedAt = nextApproved ? nowISO() : null;
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
+      await syncUsersBackupState(users);
       toast(nextApproved ? "Account approved." : "Account suspended.");
       render();
     });
@@ -5842,7 +5961,7 @@ function wireAdmin() {
   });
 
   const importForm = document.getElementById("admin-import-form");
-  importForm?.addEventListener("submit", (event) => {
+  importForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(importForm);
     const raw = String(data.get("importText") || "").trim();
@@ -5865,7 +5984,17 @@ function wireAdmin() {
       errors: [...result.errors],
     };
 
-    if (result.errors.length) {
+    let syncMessage = "";
+    if (result.added) {
+      const syncResult = await persistImportedQuestionsNow(getQuestions());
+      if (!syncResult.ok) {
+        syncMessage = syncResult.message || "Database sync failed.";
+      }
+    }
+
+    if (syncMessage) {
+      toast(`Imported ${result.added}/${result.total} rows locally, but DB sync failed: ${syncMessage}`);
+    } else if (result.errors.length) {
       toast(`Imported ${result.added}/${result.total} rows with ${result.errors.length} error(s).`);
     } else {
       toast(`Imported ${result.added}/${result.total} rows successfully.`);
