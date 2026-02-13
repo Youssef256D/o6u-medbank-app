@@ -545,16 +545,35 @@ async function initSupabaseAuth() {
     if (error) {
       console.warn("Supabase auth session bootstrap failed.", error.message);
     } else if (data?.session?.user) {
-      upsertLocalUserFromAuth(data.session.user);
+      const localUser = upsertLocalUserFromAuth(data.session.user);
+      if (localUser && !isUserAccessApproved(localUser)) {
+        localStorage.removeItem(STORAGE_KEYS.currentUserId);
+        await supabaseAuth.client.auth.signOut().catch(() => {});
+      }
     }
 
     supabaseAuth.client.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
-        upsertLocalUserFromAuth(session.user);
+        const localUser = upsertLocalUserFromAuth(session.user);
+        if (localUser && !isUserAccessApproved(localUser)) {
+          localStorage.removeItem(STORAGE_KEYS.currentUserId);
+          if (event !== "SIGNED_OUT") {
+            supabaseAuth.client.auth.signOut().catch((signOutError) => {
+              console.warn("Supabase sign-out failed for pending account.", signOutError?.message || signOutError);
+            });
+          }
+          toast("Your account is pending admin approval.");
+          if (state.route !== "login") {
+            navigate("login");
+            return;
+          }
+          render();
+          return;
+        }
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
-          const localUser = getCurrentUser();
-          if (localUser) {
-            navigate(localUser.role === "admin" ? "admin" : "dashboard");
+          const current = getCurrentUser();
+          if (current) {
+            navigate(current.role === "admin" ? "admin" : "dashboard");
             return;
           }
         }
@@ -596,6 +615,16 @@ function getSupabaseAuthClient() {
   return supabaseAuth.client;
 }
 
+function isUserAccessApproved(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.role === "admin") {
+    return true;
+  }
+  return user.isApproved !== false;
+}
+
 function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   if (!authUser?.id) {
     return null;
@@ -615,6 +644,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
   const nextName = String(profileOverrides.name || authUser.user_metadata?.full_name || previous?.name || fallbackName).trim();
   const nextRole = (previous?.role || profileOverrides.role || "student") === "admin" ? "admin" : "student";
+  const nextPhone = String(profileOverrides.phone || authUser.user_metadata?.phone_number || previous?.phone || "").trim();
 
   const nextYear =
     nextRole === "student"
@@ -648,13 +678,26 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     }
   }
 
+  const nextIsApproved =
+    nextRole === "admin"
+      ? true
+      : typeof profileOverrides.isApproved === "boolean"
+        ? profileOverrides.isApproved
+        : typeof previous?.isApproved === "boolean"
+          ? previous.isApproved
+          : false;
+
   const nextUser = {
     id: previous?.id || makeId("u"),
     name: nextName || fallbackName,
     email,
     password: previous?.password || "",
+    phone: nextPhone,
     role: nextRole,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || profileOverrides.verified || false),
+    isApproved: nextIsApproved,
+    approvedAt: nextIsApproved ? profileOverrides.approvedAt || previous?.approvedAt || nowISO() : null,
+    approvedBy: nextIsApproved ? profileOverrides.approvedBy || previous?.approvedBy || (nextRole === "admin" ? "system" : null) : null,
     assignedCourses: nextCourses,
     academicYear: nextRole === "student" ? nextYear : null,
     academicSemester: nextRole === "student" ? nextSemester : null,
@@ -787,8 +830,12 @@ function seedData() {
         name: "O6U Admin",
         email: DEMO_ADMIN_EMAIL,
         password: "admin123",
+        phone: "",
         role: "admin",
         verified: true,
+        isApproved: true,
+        approvedAt: nowISO(),
+        approvedBy: "system",
         assignedCourses: [...allCourses],
         academicYear: null,
         academicSemester: null,
@@ -799,8 +846,12 @@ function seedData() {
         name: "O6U Demo Student",
         email: DEMO_STUDENT_EMAIL,
         password: "student123",
+        phone: "",
         role: "student",
         verified: true,
+        isApproved: true,
+        approvedAt: nowISO(),
+        approvedBy: "system",
         assignedCourses: getCurriculumCourses(1, 1),
         academicYear: 1,
         academicSemester: 1,
@@ -825,6 +876,28 @@ function seedData() {
           user.name = "O6U Demo Student";
           changed = true;
         }
+      }
+
+      const normalizedPhone = String(user.phone || "").trim();
+      if (user.phone !== normalizedPhone) {
+        user.phone = normalizedPhone;
+        changed = true;
+      }
+      const shouldApprove = user.role === "admin" ? true : typeof user.isApproved === "boolean" ? user.isApproved : true;
+      if (user.isApproved !== shouldApprove) {
+        user.isApproved = shouldApprove;
+        changed = true;
+      }
+      if (user.isApproved) {
+        const approvedAt = String(user.approvedAt || "").trim();
+        if (!approvedAt) {
+          user.approvedAt = nowISO();
+          changed = true;
+        }
+      } else if (user.approvedAt || user.approvedBy) {
+        user.approvedAt = null;
+        user.approvedBy = null;
+        changed = true;
       }
 
       if (user.role === "student") {
@@ -960,6 +1033,12 @@ function render() {
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
+  }
+
+  if (privateRoutes.includes(state.route) && user && !isUserAccessApproved(user)) {
+    localStorage.removeItem(STORAGE_KEYS.currentUserId);
+    state.route = "login";
+    toast("Your account is pending admin approval.");
   }
 
   if (state.route === "admin" && user?.role !== "admin") {
@@ -1260,6 +1339,9 @@ function renderAuth(mode) {
           </div>
           <div class="form-row">
             <label>Password <input type="password" name="password" minlength="6" required /></label>
+            <label>Phone number <input type="tel" name="phone" placeholder="+20 10 0000 0000" required /></label>
+          </div>
+          <div class="form-row">
             <label>Invite code (optional) <input name="inviteCode" /></label>
           </div>
           <div class="form-row">
@@ -1354,6 +1436,12 @@ function wireAuth(mode) {
               toast("Could not map account profile after login.");
               return;
             }
+            if (!isUserAccessApproved(user)) {
+              localStorage.removeItem(STORAGE_KEYS.currentUserId);
+              await authClient.auth.signOut().catch(() => {});
+              toast("Your account is pending admin approval.");
+              return;
+            }
             navigate(user.role === "admin" ? "admin" : "dashboard");
             toast(`Welcome back, ${user.name}.`);
             return;
@@ -1363,6 +1451,10 @@ function wireAuth(mode) {
             (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
           );
           if (localDemoUser) {
+            if (!isUserAccessApproved(localDemoUser)) {
+              toast("Your account is pending admin approval.");
+              return;
+            }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
             navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
             toast(`Welcome back, ${localDemoUser.name}.`);
@@ -1376,6 +1468,10 @@ function wireAuth(mode) {
         const user = getUsers().find((candidate) => candidate.email.toLowerCase() === email && candidate.password === password);
         if (!user) {
           toast("Invalid credentials.");
+          return;
+        }
+        if (!isUserAccessApproved(user)) {
+          toast("Your account is pending admin approval.");
           return;
         }
         save(STORAGE_KEYS.currentUserId, user.id);
@@ -1458,14 +1554,15 @@ function wireAuth(mode) {
       const name = String(data.get("name") || "").trim();
       const email = String(data.get("email") || "").trim().toLowerCase();
       const password = String(data.get("password") || "");
+      const phone = String(data.get("phone") || "").trim();
       const inviteCode = String(data.get("inviteCode") || "").trim();
       const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
       const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
       const selectedCourses = getSelectedSignupCourses().filter((course) => availableCourses.includes(course));
 
-      if (!name || !email || !password) {
-        toast("Name, email, and password are required.");
+      if (!name || !email || !password || !phone) {
+        toast("Name, email, password, and phone number are required.");
         return;
       }
 
@@ -1498,6 +1595,7 @@ function wireAuth(mode) {
                 full_name: name,
                 academic_year: academicYear,
                 academic_semester: academicSemester,
+                phone_number: phone,
               },
             },
           });
@@ -1517,7 +1615,11 @@ function wireAuth(mode) {
             academicYear,
             academicSemester,
             assignedCourses: selectedCourses,
+            phone,
             verified: Boolean(authData.session),
+            isApproved: false,
+            approvedAt: null,
+            approvedBy: null,
           });
           if (!user) {
             toast("Account created but profile mapping failed.");
@@ -1525,13 +1627,11 @@ function wireAuth(mode) {
           }
 
           if (authData.session) {
-            navigate("dashboard");
-            toast("Account created.");
-          } else {
-            localStorage.removeItem(STORAGE_KEYS.currentUserId);
-            toast("Account created. Check your email to verify, then log in.");
-            navigate("login");
+            await authClient.auth.signOut().catch(() => {});
           }
+          localStorage.removeItem(STORAGE_KEYS.currentUserId);
+          toast("Account created. Await admin approval before first login.");
+          navigate("login");
           return;
         }
 
@@ -1540,8 +1640,12 @@ function wireAuth(mode) {
           name,
           email,
           password,
+          phone,
           role: "student",
           verified: true,
+          isApproved: false,
+          approvedAt: null,
+          approvedBy: null,
           assignedCourses: selectedCourses,
           academicYear,
           academicSemester,
@@ -1550,9 +1654,9 @@ function wireAuth(mode) {
 
         users.push(user);
         save(STORAGE_KEYS.users, users);
-        save(STORAGE_KEYS.currentUserId, user.id);
-        toast("Account created and verified.");
-        navigate("dashboard");
+        localStorage.removeItem(STORAGE_KEYS.currentUserId);
+        toast("Account created. Await admin approval before first login.");
+        navigate("login");
       } finally {
         lockAuthForm(form, false);
       }
@@ -3047,6 +3151,8 @@ function renderProfile() {
           <hr />
           <p><b>Role:</b> ${escapeHtml(user.role)}</p>
           ${user.role === "student" ? `<p><b>Year/Semester:</b> ${user.academicYear || 1} / ${user.academicSemester || 1}</p>` : ""}
+          <p><b>Phone:</b> ${escapeHtml(user.phone || "-")}</p>
+          <p><b>Access approved:</b> ${isUserAccessApproved(user) ? "Yes" : "Pending admin approval"}</p>
           <p><b>Assigned courses:</b> ${escapeHtml((user.assignedCourses || []).join(", "))}</p>
           <p><b>Email verified:</b> ${user.verified ? "Yes" : "No"}</p>
         </article>
@@ -3167,6 +3273,7 @@ function renderAdmin() {
     .map((account) => {
       const year = account.role === "student" ? sanitizeAcademicYear(account.academicYear || 1) : null;
       const semester = account.role === "student" ? sanitizeAcademicSemester(account.academicSemester || 1) : null;
+      const isApproved = isUserAccessApproved(account);
       const visibleCourses =
         account.role === "student"
           ? getCurriculumCourses(year || 1, semester || 1)
@@ -3177,7 +3284,12 @@ function renderAdmin() {
       const isSelf = account.id === user.id;
       return `
         <tr data-user-id="${escapeHtml(account.id)}">
-          <td class="admin-user-account"><b>${escapeHtml(account.name)}</b><br /><small>${escapeHtml(account.email)}</small></td>
+          <td class="admin-user-account">
+            <b>${escapeHtml(account.name)}</b><br />
+            <small>${escapeHtml(account.email)}</small><br />
+            <small>${escapeHtml(account.phone || "No phone")}</small><br />
+            <small><span class="badge ${isApproved ? "good" : "bad"}">${isApproved ? "approved" : "pending"}</span></small>
+          </td>
           <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
           <td>
             ${
@@ -3206,6 +3318,9 @@ function renderAdmin() {
           <td class="admin-user-actions-cell">
             <div class="admin-user-actions">
               <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
+              <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
+                ${isApproved ? "Suspend access" : "Approve access"}
+              </button>
               <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf ? "disabled" : ""}>
                 ${account.role === "admin" ? "Make student" : "Make admin"}
               </button>
@@ -3885,8 +4000,12 @@ function wireAdmin() {
       name,
       email,
       password,
+      phone: "",
       role: normalizedRole,
       verified: true,
+      isApproved: true,
+      approvedAt: nowISO(),
+      approvedBy: "admin",
       assignedCourses,
       academicYear: normalizedRole === "student" ? academicYear : null,
       academicSemester: normalizedRole === "student" ? academicSemester : null,
@@ -3959,13 +4078,49 @@ function wireAdmin() {
         users[idx].academicYear = sanitizeAcademicYear(users[idx].academicYear || 1);
         users[idx].academicSemester = sanitizeAcademicSemester(users[idx].academicSemester || 1);
         users[idx].assignedCourses = getCurriculumCourses(users[idx].academicYear, users[idx].academicSemester);
+        users[idx].isApproved = true;
+        users[idx].approvedAt = users[idx].approvedAt || nowISO();
+        users[idx].approvedBy = users[idx].approvedBy || current?.email || "admin";
       } else {
         users[idx].academicYear = null;
         users[idx].academicSemester = null;
         users[idx].assignedCourses = [...allCourses];
+        users[idx].isApproved = true;
+        users[idx].approvedAt = nowISO();
+        users[idx].approvedBy = current?.email || "admin";
       }
       save(STORAGE_KEYS.users, users);
       toast("User role updated.");
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='toggle-user-approval']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = button.closest("tr[data-user-id]");
+      const userId = row?.getAttribute("data-user-id");
+      if (!userId) {
+        return;
+      }
+
+      const current = getCurrentUser();
+      const users = getUsers();
+      const idx = users.findIndex((entry) => entry.id === userId);
+      if (idx === -1) {
+        toast("Account not found.");
+        return;
+      }
+      if (users[idx].role === "admin") {
+        toast("Admin accounts are always approved.");
+        return;
+      }
+
+      const nextApproved = !isUserAccessApproved(users[idx]);
+      users[idx].isApproved = nextApproved;
+      users[idx].approvedAt = nextApproved ? nowISO() : null;
+      users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
+      save(STORAGE_KEYS.users, users);
+      toast(nextApproved ? "Account approved." : "Account suspended.");
       render();
     });
   });
@@ -4818,6 +4973,28 @@ function syncUsersWithCurriculum() {
   let changed = false;
 
   users.forEach((user) => {
+    const normalizedPhone = String(user.phone || "").trim();
+    if (user.phone !== normalizedPhone) {
+      user.phone = normalizedPhone;
+      changed = true;
+    }
+    const shouldApprove = user.role === "admin" ? true : typeof user.isApproved === "boolean" ? user.isApproved : true;
+    if (user.isApproved !== shouldApprove) {
+      user.isApproved = shouldApprove;
+      changed = true;
+    }
+    if (user.isApproved) {
+      const approvedAt = String(user.approvedAt || "").trim();
+      if (!approvedAt) {
+        user.approvedAt = nowISO();
+        changed = true;
+      }
+    } else if (user.approvedAt || user.approvedBy) {
+      user.approvedAt = null;
+      user.approvedBy = null;
+      changed = true;
+    }
+
     if (user.role === "student") {
       const year = sanitizeAcademicYear(user.academicYear || 1);
       const semester = sanitizeAcademicSemester(user.academicSemester || 1);
@@ -5911,6 +6088,10 @@ function loginAsDemo(email, password) {
   const user = getUsers().find((entry) => entry.email === email && entry.password === password);
   if (!user) {
     toast("Demo account unavailable.");
+    return;
+  }
+  if (!isUserAccessApproved(user)) {
+    toast("This account is pending admin approval.");
     return;
   }
 
