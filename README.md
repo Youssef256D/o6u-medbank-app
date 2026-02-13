@@ -49,6 +49,9 @@ Notes:
 - The frontend uses only `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
 - Do not put `SUPABASE_SERVICE_ROLE_KEY` in frontend files.
 - Supabase Auth is used for sign up/login/reset email. Local demo users still work for quick testing.
+- Sync keys now support scale-safe namespacing:
+  - global keys: `g:<storage_key>`
+  - user-scoped keys: `u:<auth.uid>:<storage_key>`
 
 ## Supabase Auth setup checklist
 
@@ -58,7 +61,8 @@ In Supabase Dashboard:
 2. Authentication -> URL Configuration:
    - Site URL: your deployed URL
    - Redirect URLs: add your deployed URL and `http://localhost:5500` (or your local dev URL)
-3. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
+3. Enable leaked-password protection (recommended for production).
+4. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
 
 ## Publish to web
 
@@ -124,3 +128,16 @@ This is still a frontend prototype UI. SQL database files are production-style, 
 2. Add secure auth (hashed passwords, email verification, reset tokens).
 3. Add media upload/storage, moderation workflow, and version history.
 4. Add server-side analytics aggregation and backup strategy.
+
+## 2,000-user hardening (completed in this repo)
+
+- Frontend sync now isolates high-churn user data (`sessions`, `incorrect queue`, `flashcards`) into user-scoped cloud keys.
+- Supabase `app_state` RLS policies were migrated to support global/user-scoped key patterns.
+- Duplicate index and RLS policy performance issues were resolved.
+- Core relational tables were created in Supabase (`profiles`, `courses`, `course_topics`, `questions`, `question_choices`, `test_blocks`, `test_block_items`, `test_responses`) with indexes and RLS.
+
+Applied Supabase migrations:
+
+- `scale_app_state_keys_and_rls_for_2000_users`
+- `optimize_app_state_rls_and_indexes`
+- `create_core_relational_tables_for_2000_users`

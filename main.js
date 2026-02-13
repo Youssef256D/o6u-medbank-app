@@ -69,6 +69,10 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.courseTopics,
 ];
 
+const USER_SCOPED_SYNC_KEYS = [STORAGE_KEYS.sessions, STORAGE_KEYS.incorrectQueue, STORAGE_KEYS.flashcards];
+const USER_SCOPED_SYNC_KEY_SET = new Set(USER_SCOPED_SYNC_KEYS);
+const GLOBAL_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
+
 const supabaseSync = {
   enabled: false,
   client: null,
@@ -487,8 +491,8 @@ async function initSupabaseSync() {
   try {
     supabaseSync.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
       auth: {
-        persistSession: false,
-        autoRefreshToken: false,
+        persistSession: true,
+        autoRefreshToken: true,
         detectSessionInUrl: false,
       },
     });
@@ -500,33 +504,17 @@ async function initSupabaseSync() {
     }
     supabaseSync.tableName = syncShape.tableName;
     supabaseSync.storageKeyColumn = syncShape.storageKeyColumn;
+    supabaseSync.enabled = true;
 
-    const { data, error } = await supabaseSync.client
-      .from(supabaseSync.tableName)
-      .select(`${supabaseSync.storageKeyColumn},payload`)
-      .in(supabaseSync.storageKeyColumn, SYNCABLE_STORAGE_KEYS);
-
-    if (error) {
+    const syncResult = await hydrateSupabaseSyncKeys(GLOBAL_SYNC_KEYS);
+    if (syncResult?.error) {
+      const error = syncResult.error;
       console.warn("Supabase sync unavailable. Falling back to local storage only.", error.message);
+      supabaseSync.enabled = false;
       return { enabled: false, hadRemoteData: false };
     }
 
-    if (Array.isArray(data) && data.length) {
-      data.forEach((row) => {
-        const storageKey = row?.[supabaseSync.storageKeyColumn];
-        if (!storageKey) {
-          return;
-        }
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(row.payload));
-        } catch {
-          // Ignore malformed remote entries and keep local fallback.
-        }
-      });
-    }
-
-    supabaseSync.enabled = true;
-    return { enabled: true, hadRemoteData: Boolean(data?.length) };
+    return { enabled: true, hadRemoteData: Boolean(syncResult?.hadRemoteData) };
   } catch (error) {
     console.warn("Supabase client bootstrap failed. Using local storage only.", error);
     return { enabled: false, hadRemoteData: false };
@@ -541,6 +529,9 @@ async function initSupabaseAuth() {
   try {
     supabaseAuth.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey);
     supabaseAuth.enabled = true;
+    if (supabaseSync.enabled) {
+      supabaseSync.client = supabaseAuth.client;
+    }
 
     const { data, error } = await supabaseAuth.client.auth.getSession();
     if (error) {
@@ -550,6 +541,10 @@ async function initSupabaseAuth() {
       if (localUser && !isUserAccessApproved(localUser)) {
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
+      } else if (localUser) {
+        await hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
+          console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+        });
       }
     }
 
@@ -578,6 +573,9 @@ async function initSupabaseAuth() {
             return;
           }
         }
+        hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
+          console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+        });
         render();
         return;
       }
@@ -744,12 +742,154 @@ async function detectSupabaseStorageShape(client) {
   return null;
 }
 
+function getSyncScopeForUser(user = null) {
+  const current = user || getCurrentUser();
+  const scope = String(current?.supabaseAuthId || "").trim();
+  return scope || "";
+}
+
+function isUserScopedSyncKey(storageKey) {
+  return USER_SCOPED_SYNC_KEY_SET.has(storageKey);
+}
+
+function buildRemoteSyncKey(storageKey, scope = "") {
+  if (!SYNCABLE_STORAGE_KEYS.includes(storageKey)) {
+    return "";
+  }
+  if (isUserScopedSyncKey(storageKey)) {
+    return scope ? `u:${scope}:${storageKey}` : "";
+  }
+  return `g:${storageKey}`;
+}
+
+function getSyncQueryCandidates(storageKey, scope = "") {
+  const candidates = [];
+  const primary = buildRemoteSyncKey(storageKey, scope);
+  if (primary) {
+    candidates.push(primary);
+  }
+  // Backward compatibility for old deployments that used raw storage keys.
+  if (!isUserScopedSyncKey(storageKey)) {
+    candidates.push(storageKey);
+  }
+  return [...new Set(candidates)];
+}
+
+function sanitizeUserScopedPayload(storageKey, payload, user = null) {
+  if (!isUserScopedSyncKey(storageKey)) {
+    return payload;
+  }
+  const current = user || getCurrentUser();
+  const currentUserId = String(current?.id || "").trim();
+  if (!currentUserId) {
+    return payload;
+  }
+
+  if (storageKey === STORAGE_KEYS.sessions) {
+    const list = Array.isArray(payload) ? payload : [];
+    return list
+      .filter((session) => {
+        const owner = String(session?.userId || "").trim();
+        return !owner || owner === currentUserId;
+      })
+      .map((session) => ({
+        ...session,
+        userId: currentUserId,
+      }));
+  }
+
+  if (storageKey === STORAGE_KEYS.incorrectQueue || storageKey === STORAGE_KEYS.flashcards) {
+    const source = payload && typeof payload === "object" ? payload : {};
+    if (Array.isArray(source)) {
+      return { [currentUserId]: source };
+    }
+    const currentValue = source[currentUserId];
+    if (currentValue !== undefined) {
+      return { [currentUserId]: currentValue };
+    }
+    return { [currentUserId]: [] };
+  }
+
+  return payload;
+}
+
+async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
+  if (
+    !supabaseSync.enabled ||
+    !supabaseSync.client ||
+    !supabaseSync.tableName ||
+    !supabaseSync.storageKeyColumn ||
+    !Array.isArray(storageKeys) ||
+    !storageKeys.length
+  ) {
+    return { hadRemoteData: false };
+  }
+
+  const keySpecs = storageKeys.map((storageKey) => ({
+    storageKey,
+    candidates: getSyncQueryCandidates(storageKey, scope),
+  }));
+  const remoteKeys = [...new Set(keySpecs.flatMap((entry) => entry.candidates))];
+  if (!remoteKeys.length) {
+    return { hadRemoteData: false };
+  }
+
+  const { data, error } = await supabaseSync.client
+    .from(supabaseSync.tableName)
+    .select(`${supabaseSync.storageKeyColumn},payload,updated_at`)
+    .in(supabaseSync.storageKeyColumn, remoteKeys);
+
+  if (error) {
+    return { hadRemoteData: false, error };
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  let hadRemoteData = false;
+  keySpecs.forEach(({ storageKey, candidates }) => {
+    const matching = rows
+      .filter((row) => candidates.includes(String(row?.[supabaseSync.storageKeyColumn] || "")))
+      .sort((a, b) => new Date(b?.updated_at || 0) - new Date(a?.updated_at || 0));
+    if (!matching.length) {
+      return;
+    }
+    hadRemoteData = true;
+    try {
+      const payload = sanitizeUserScopedPayload(storageKey, matching[0].payload);
+      localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch {
+      // Ignore malformed remote payloads and keep local fallback.
+    }
+  });
+
+  return { hadRemoteData };
+}
+
+async function hydrateUserScopedSupabaseState(user) {
+  const scope = getSyncScopeForUser(user);
+  if (!scope) {
+    return { hadRemoteData: false };
+  }
+  const result = await hydrateSupabaseSyncKeys(USER_SCOPED_SYNC_KEYS, scope);
+  if (!result?.hadRemoteData) {
+    scheduleFullSupabaseSync({ includeUserScoped: true, scope, user });
+  }
+  return result;
+}
+
 function scheduleSupabaseWrite(storageKey, value) {
   if (!supabaseSync.enabled || !SYNCABLE_STORAGE_KEYS.includes(storageKey)) {
     return;
   }
 
-  supabaseSync.pendingWrites.set(storageKey, value);
+  const currentUser = getCurrentUser();
+  const scope = getSyncScopeForUser(currentUser);
+  const remoteKey = buildRemoteSyncKey(storageKey, scope);
+  if (!remoteKey) {
+    return;
+  }
+
+  const payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
+  supabaseSync.pendingWrites.set(remoteKey, { storageKey, payload });
   if (supabaseSync.flushTimer) {
     return;
   }
@@ -758,11 +898,19 @@ function scheduleSupabaseWrite(storageKey, value) {
     flushSupabaseWrites().catch((error) => {
       console.warn("Supabase write flush failed.", error);
     });
-  }, 250);
+  }, 1200);
 }
 
-function scheduleFullSupabaseSync() {
-  SYNCABLE_STORAGE_KEYS.forEach((storageKey) => {
+function scheduleFullSupabaseSync(options = {}) {
+  const includeUserScoped = Boolean(options?.includeUserScoped);
+  const currentUser = options?.user || getCurrentUser();
+  const scope = options?.scope || getSyncScopeForUser(currentUser);
+  const keys = includeUserScoped ? [...GLOBAL_SYNC_KEYS, ...USER_SCOPED_SYNC_KEYS] : GLOBAL_SYNC_KEYS;
+
+  keys.forEach((storageKey) => {
+    if (isUserScopedSyncKey(storageKey) && !scope) {
+      return;
+    }
     const localValue = load(storageKey, null);
     if (localValue != null) {
       scheduleSupabaseWrite(storageKey, localValue);
@@ -782,9 +930,9 @@ async function flushSupabaseWrites() {
     return;
   }
 
-  const rows = Array.from(supabaseSync.pendingWrites.entries()).map(([storageKey, payload]) => ({
-    [supabaseSync.storageKeyColumn]: storageKey,
-    payload,
+  const rows = Array.from(supabaseSync.pendingWrites.entries()).map(([remoteStorageKey, pending]) => ({
+    [supabaseSync.storageKeyColumn]: remoteStorageKey,
+    payload: pending.payload,
     updated_at: nowISO(),
   }));
   supabaseSync.pendingWrites.clear();
@@ -796,9 +944,13 @@ async function flushSupabaseWrites() {
   if (error) {
     console.warn("Supabase sync error:", error.message);
     rows.forEach((row) => {
-      const storageKey = row[supabaseSync.storageKeyColumn];
-      if (storageKey) {
-        supabaseSync.pendingWrites.set(storageKey, row.payload);
+      const remoteStorageKey = row[supabaseSync.storageKeyColumn];
+      if (remoteStorageKey) {
+        const storageKey = String(remoteStorageKey).split(":").slice(-1)[0] || "";
+        supabaseSync.pendingWrites.set(remoteStorageKey, {
+          storageKey,
+          payload: row.payload,
+        });
       }
     });
     if (!supabaseSync.flushTimer) {
@@ -806,7 +958,7 @@ async function flushSupabaseWrites() {
         flushSupabaseWrites().catch((flushError) => {
           console.warn("Supabase retry failed.", flushError);
         });
-      }, 1500);
+      }, 3000);
     }
   }
 }
