@@ -74,7 +74,15 @@ body {
 }
 
 .topbar.admin-only-header {
-  justify-content: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 1rem;
+}
+
+.topbar.admin-only-header .brand-wrap {
+  justify-self: start;
+  min-width: 0;
 }
 
 .topbar::after {
@@ -129,15 +137,20 @@ body.is-routing .topbar::after {
 }
 
 .topbar.admin-only-header .top-nav {
+  justify-self: center;
   justify-content: center;
+  flex-wrap: nowrap;
 }
 
 .topbar.admin-only-header .top-nav button {
-  pointer-events: none;
-  cursor: default;
-  font-weight: 700;
-  background: var(--brand-soft);
-  color: var(--brand-strong);
+  font-weight: 600;
+}
+
+.topbar.admin-only-header .auth-actions {
+  justify-self: end;
+  width: auto;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
 }
 
 .top-nav button,
@@ -2441,7 +2454,9 @@ hr {
   }
 
   .topbar.admin-only-header {
-    flex-wrap: nowrap;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
   }
 
   .top-nav {
@@ -2454,11 +2469,23 @@ hr {
   }
 
   .topbar.admin-only-header .top-nav {
-    order: 0;
-    width: auto;
-    overflow: visible;
-    padding-bottom: 0;
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 0.3rem;
     justify-content: center;
+  }
+
+  .topbar.admin-only-header .auth-actions {
+    width: auto;
+    order: 2;
+    margin-left: auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+  }
+
+  .topbar.admin-only-header .auth-actions .help {
+    width: auto;
   }
 
   .top-nav button {

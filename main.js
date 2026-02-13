@@ -11,6 +11,8 @@ const STORAGE_KEYS = {
   flashcards: "mcq_flashcards",
   curriculum: "mcq_curriculum",
   courseTopics: "mcq_course_topics",
+  appVersionSeen: "mcq_app_version_seen",
+  appVersionForced: "mcq_app_version_forced",
 };
 
 const appEl = document.getElementById("app");
@@ -20,6 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.1").trim();
 
 const state = {
   route: "landing",
@@ -50,6 +53,8 @@ const state = {
   adminImportReport: null,
   skipNextRouteAnimation: false,
 };
+
+let appVersionCheckPromise = null;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -488,9 +493,86 @@ const SAMPLE_QUESTIONS = [
   },
 ];
 
+function initVersionTracking() {
+  const seen = String(load(STORAGE_KEYS.appVersionSeen, "") || "").trim();
+  if (!seen) {
+    saveLocalOnly(STORAGE_KEYS.appVersionSeen, APP_VERSION);
+  }
+
+  const forced = String(load(STORAGE_KEYS.appVersionForced, "") || "").trim();
+  if (forced && forced === APP_VERSION) {
+    saveLocalOnly(STORAGE_KEYS.appVersionSeen, APP_VERSION);
+    localStorage.removeItem(STORAGE_KEYS.appVersionForced);
+  }
+}
+
+async function fetchPublishedAppVersion() {
+  try {
+    const checkUrl = new URL(window.location.href);
+    checkUrl.searchParams.set("__app_version_check", String(Date.now()));
+    const response = await fetch(checkUrl.toString(), {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache" },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const html = await response.text();
+    const match = html.match(/<meta\s+name=["']app-version["']\s+content=["']([^"']+)["']/i);
+    return String(match?.[1] || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function enforceRefreshAfterSignIn() {
+  if (appVersionCheckPromise) {
+    return appVersionCheckPromise;
+  }
+
+  appVersionCheckPromise = (async () => {
+    const seenVersion = String(load(STORAGE_KEYS.appVersionSeen, "") || "").trim();
+    const publishedVersion = (await fetchPublishedAppVersion()) || APP_VERSION;
+    if (!publishedVersion) {
+      return false;
+    }
+
+    if (!seenVersion) {
+      saveLocalOnly(STORAGE_KEYS.appVersionSeen, publishedVersion);
+      return false;
+    }
+
+    if (seenVersion === publishedVersion) {
+      if (publishedVersion === APP_VERSION) {
+        localStorage.removeItem(STORAGE_KEYS.appVersionForced);
+      }
+      return false;
+    }
+
+    const forcedVersion = String(load(STORAGE_KEYS.appVersionForced, "") || "").trim();
+    if (forcedVersion === publishedVersion) {
+      return false;
+    }
+
+    saveLocalOnly(STORAGE_KEYS.appVersionSeen, publishedVersion);
+    saveLocalOnly(STORAGE_KEYS.appVersionForced, publishedVersion);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("appv", publishedVersion);
+    window.location.replace(nextUrl.toString());
+    return true;
+  })();
+
+  try {
+    return await appVersionCheckPromise;
+  } finally {
+    appVersionCheckPromise = null;
+  }
+}
+
 async function init() {
   const syncBootstrap = await initSupabaseSync();
   seedData();
+  initVersionTracking();
   await initSupabaseAuth();
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
@@ -555,7 +637,8 @@ async function initSupabaseAuth() {
     if (error) {
       console.warn("Supabase auth session bootstrap failed.", error.message);
     } else if (data?.session?.user) {
-      const localUser = upsertLocalUserFromAuth(data.session.user);
+      let localUser = upsertLocalUserFromAuth(data.session.user);
+      localUser = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
       await ensureRelationalSyncReady().catch((syncError) => {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
@@ -563,6 +646,9 @@ async function initSupabaseAuth() {
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
       } else if (localUser) {
+        if (await enforceRefreshAfterSignIn()) {
+          return;
+        }
         await hydrateRelationalState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
         });
@@ -574,7 +660,8 @@ async function initSupabaseAuth() {
 
     supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
-        const localUser = upsertLocalUserFromAuth(session.user);
+        let localUser = upsertLocalUserFromAuth(session.user);
+        localUser = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         await ensureRelationalSyncReady().catch((syncError) => {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
         });
@@ -591,6 +678,9 @@ async function initSupabaseAuth() {
             return;
           }
           render();
+          return;
+        }
+        if (event === "SIGNED_IN" && (await enforceRefreshAfterSignIn())) {
           return;
         }
         await hydrateRelationalState(localUser).catch((hydrateError) => {
@@ -637,6 +727,51 @@ async function initSupabaseAuth() {
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
   }
+}
+
+async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = null) {
+  if (!authUser?.id) {
+    return fallbackUser;
+  }
+
+  const localUser = fallbackUser || upsertLocalUserFromAuth(authUser);
+  const ready = await ensureRelationalSyncReady().catch(() => false);
+  if (!ready) {
+    return localUser;
+  }
+
+  const client = getRelationalClient();
+  if (!client) {
+    return localUser;
+  }
+
+  const { data: profile, error } = await client
+    .from("profiles")
+    .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+    .eq("id", authUser.id)
+    .maybeSingle();
+  if (error || !profile) {
+    return localUser;
+  }
+
+  const role = String(profile.role || "student") === "admin" ? "admin" : "student";
+  const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || localUser?.academicYear || 1) : null;
+  const semester =
+    role === "student" ? sanitizeAcademicSemester(profile.academic_semester || localUser?.academicSemester || 1) : null;
+  const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
+
+  return upsertLocalUserFromAuth(authUser, {
+    name: String(profile.full_name || "").trim() || localUser?.name || "Student",
+    email: normalizedEmail,
+    phone: String(profile.phone || "").trim(),
+    role,
+    academicYear: year,
+    academicSemester: semester,
+    isApproved: Boolean(profile.approved),
+    approvedAt: profile.approved ? localUser?.approvedAt || profile.created_at || nowISO() : null,
+    approvedBy: profile.approved ? localUser?.approvedBy || "admin" : null,
+    verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
+  });
 }
 
 function getSupabaseAuthClient() {
@@ -2249,8 +2384,8 @@ function syncTopbar() {
   const isAdminHeader = Boolean(user && isAdmin);
 
   topbarEl?.classList.toggle("admin-only-header", isAdminHeader);
-  brandWrapEl?.classList.toggle("hidden", isAdminHeader);
-  authActionsEl.classList.toggle("hidden", isAdminHeader);
+  brandWrapEl?.classList.toggle("hidden", false);
+  authActionsEl.classList.toggle("hidden", false);
 
   publicNavEl.classList.toggle("hidden", Boolean(user));
   privateNavEl.classList.toggle("hidden", !user);
@@ -2270,8 +2405,6 @@ function syncTopbar() {
       <button data-nav="login">Login</button>
       <button class="btn" data-nav="signup">Sign up</button>
     `;
-  } else if (isAdmin) {
-    authActionsEl.innerHTML = "";
   } else {
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
@@ -2550,7 +2683,8 @@ function wireAuth(mode) {
         if (authClient) {
           const { data, error } = await authClient.auth.signInWithPassword({ email, password });
           if (!error && data?.user) {
-            const user = upsertLocalUserFromAuth(data.user);
+            let user = upsertLocalUserFromAuth(data.user);
+            user = await refreshLocalUserFromRelationalProfile(data.user, user);
             if (!user) {
               toast("Could not map account profile after login.");
               return;
@@ -2559,6 +2693,9 @@ function wireAuth(mode) {
               localStorage.removeItem(STORAGE_KEYS.currentUserId);
               await authClient.auth.signOut().catch(() => {});
               toast("Your account is pending admin approval.");
+              return;
+            }
+            if (await enforceRefreshAfterSignIn()) {
               return;
             }
             navigate(user.role === "admin" ? "admin" : "dashboard");
@@ -2572,6 +2709,9 @@ function wireAuth(mode) {
           if (localDemoUser) {
             if (!isUserAccessApproved(localDemoUser)) {
               toast("Your account is pending admin approval.");
+              return;
+            }
+            if (await enforceRefreshAfterSignIn()) {
               return;
             }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
@@ -2591,6 +2731,9 @@ function wireAuth(mode) {
         }
         if (!isUserAccessApproved(user)) {
           toast("Your account is pending admin approval.");
+          return;
+        }
+        if (await enforceRefreshAfterSignIn()) {
           return;
         }
         save(STORAGE_KEYS.currentUserId, user.id);
@@ -5229,7 +5372,7 @@ function wireAdmin() {
   });
 
   appEl.querySelectorAll("[data-action='toggle-user-approval']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       if (!userId) {
@@ -5253,6 +5396,9 @@ function wireAdmin() {
       users[idx].approvedAt = nextApproved ? nowISO() : null;
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
+      await flushRelationalWrites().catch((error) => {
+        console.warn("Immediate profile approval sync failed.", error?.message || error);
+      });
       toast(nextApproved ? "Account approved." : "Account suspended.");
       render();
     });
@@ -7261,7 +7407,7 @@ function save(key, value) {
   scheduleSupabaseWrite(key, value);
 }
 
-function loginAsDemo(email, password) {
+async function loginAsDemo(email, password) {
   const user = getUsers().find((entry) => entry.email === email && entry.password === password);
   if (!user) {
     toast("Demo account unavailable.");
@@ -7269,6 +7415,9 @@ function loginAsDemo(email, password) {
   }
   if (!isUserAccessApproved(user)) {
     toast("This account is pending admin approval.");
+    return;
+  }
+  if (await enforceRefreshAfterSignIn()) {
     return;
   }
 
