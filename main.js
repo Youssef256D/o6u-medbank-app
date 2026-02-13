@@ -72,6 +72,15 @@ const SYNCABLE_STORAGE_KEYS = [
 const USER_SCOPED_SYNC_KEYS = [STORAGE_KEYS.sessions, STORAGE_KEYS.incorrectQueue, STORAGE_KEYS.flashcards];
 const USER_SCOPED_SYNC_KEY_SET = new Set(USER_SCOPED_SYNC_KEYS);
 const GLOBAL_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
+const RELATIONAL_SYNC_KEYS = [
+  STORAGE_KEYS.users,
+  STORAGE_KEYS.questions,
+  STORAGE_KEYS.sessions,
+  STORAGE_KEYS.curriculum,
+  STORAGE_KEYS.courseTopics,
+];
+const RELATIONAL_SYNC_KEY_SET = new Set(RELATIONAL_SYNC_KEYS);
+const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics]);
 
 const supabaseSync = {
   enabled: false,
@@ -85,6 +94,13 @@ const supabaseSync = {
 const supabaseAuth = {
   enabled: false,
   client: null,
+};
+
+const relationalSync = {
+  enabled: false,
+  pendingWrites: new Map(),
+  flushTimer: null,
+  flushing: false,
 };
 
 let timerHandle = null;
@@ -538,19 +554,28 @@ async function initSupabaseAuth() {
       console.warn("Supabase auth session bootstrap failed.", error.message);
     } else if (data?.session?.user) {
       const localUser = upsertLocalUserFromAuth(data.session.user);
+      await ensureRelationalSyncReady().catch((syncError) => {
+        console.warn("Relational sync initialization failed.", syncError?.message || syncError);
+      });
       if (localUser && !isUserAccessApproved(localUser)) {
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
       } else if (localUser) {
+        await hydrateRelationalState(localUser).catch((hydrateError) => {
+          console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
+        });
         await hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
         });
       }
     }
 
-    supabaseAuth.client.auth.onAuthStateChange((event, session) => {
+    supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
         const localUser = upsertLocalUserFromAuth(session.user);
+        await ensureRelationalSyncReady().catch((syncError) => {
+          console.warn("Relational sync initialization failed.", syncError?.message || syncError);
+        });
         if (localUser && !isUserAccessApproved(localUser)) {
           localStorage.removeItem(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
@@ -566,6 +591,9 @@ async function initSupabaseAuth() {
           render();
           return;
         }
+        await hydrateRelationalState(localUser).catch((hydrateError) => {
+          console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
+        });
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
           const current = getCurrentUser();
           if (current) {
@@ -581,6 +609,8 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
+        relationalSync.pendingWrites.clear();
+        clearRelationalFlushTimer();
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         const privateRoutes = new Set([
           "dashboard",
@@ -695,7 +725,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
           : false;
 
   const nextUser = {
-    id: previous?.id || makeId("u"),
+    id: authUser.id,
     name: nextName || fallbackName,
     email,
     password: previous?.password || "",
@@ -716,6 +746,34 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     users[idx] = nextUser;
   } else {
     users.push(nextUser);
+  }
+
+  if (previous?.id && previous.id !== nextUser.id) {
+    const sessions = getSessions();
+    let sessionsChanged = false;
+    sessions.forEach((session) => {
+      if (session.userId === previous.id) {
+        session.userId = nextUser.id;
+        sessionsChanged = true;
+      }
+    });
+    if (sessionsChanged) {
+      saveLocalOnly(STORAGE_KEYS.sessions, sessions);
+    }
+
+    const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
+    if (incorrectQueue[previous.id] && !incorrectQueue[nextUser.id]) {
+      incorrectQueue[nextUser.id] = incorrectQueue[previous.id];
+      delete incorrectQueue[previous.id];
+      saveLocalOnly(STORAGE_KEYS.incorrectQueue, incorrectQueue);
+    }
+
+    const flashcards = load(STORAGE_KEYS.flashcards, {});
+    if (flashcards[previous.id] && !flashcards[nextUser.id]) {
+      flashcards[nextUser.id] = flashcards[previous.id];
+      delete flashcards[previous.id];
+      saveLocalOnly(STORAGE_KEYS.flashcards, flashcards);
+    }
   }
 
   save(STORAGE_KEYS.users, users);
@@ -740,6 +798,430 @@ async function detectSupabaseStorageShape(client) {
   }
 
   return null;
+}
+
+function getRelationalClient() {
+  const authClient = getSupabaseAuthClient();
+  if (!authClient) {
+    return null;
+  }
+  return authClient;
+}
+
+function isUuidValue(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+}
+
+function saveLocalOnly(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function clearRelationalFlushTimer() {
+  if (relationalSync.flushTimer) {
+    window.clearTimeout(relationalSync.flushTimer);
+    relationalSync.flushTimer = null;
+  }
+}
+
+function scheduleRelationalWrite(storageKey, value) {
+  if (!relationalSync.enabled || !RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
+    return false;
+  }
+  const currentUser = getCurrentUser();
+  if (!currentUser?.supabaseAuthId) {
+    return false;
+  }
+  if (ADMIN_ONLY_RELATIONAL_KEYS.has(storageKey) && currentUser.role !== "admin") {
+    return false;
+  }
+
+  const snapshot =
+    value && typeof value === "object"
+      ? deepClone(value)
+      : value;
+  relationalSync.pendingWrites.set(storageKey, snapshot);
+  if (relationalSync.flushTimer || relationalSync.flushing) {
+    return true;
+  }
+
+  relationalSync.flushTimer = window.setTimeout(() => {
+    flushRelationalWrites().catch((error) => {
+      console.warn("Relational sync flush failed.", error);
+    });
+  }, 1400);
+
+  return true;
+}
+
+async function ensureRelationalSyncReady() {
+  const client = getRelationalClient();
+  if (!client) {
+    relationalSync.enabled = false;
+    return false;
+  }
+
+  const checks = [
+    { table: "profiles", select: "id" },
+    { table: "courses", select: "id" },
+    { table: "course_topics", select: "id" },
+    { table: "questions", select: "id" },
+    { table: "question_choices", select: "id" },
+    { table: "test_blocks", select: "id" },
+    { table: "test_block_items", select: "block_id" },
+    { table: "test_responses", select: "block_id" },
+  ];
+
+  for (const check of checks) {
+    const { error } = await client.from(check.table).select(check.select).limit(1);
+    if (error) {
+      relationalSync.enabled = false;
+      return false;
+    }
+  }
+
+  relationalSync.enabled = true;
+  return true;
+}
+
+function toRelationalDifficulty(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "easy") return 1;
+  if (normalized === "hard") return 3;
+  return 2;
+}
+
+function fromRelationalDifficulty(value) {
+  if (Number(value) <= 1) return "Easy";
+  if (Number(value) >= 3) return "Hard";
+  return "Medium";
+}
+
+function toRelationalQuestionStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "published" || normalized === "archived") {
+    return normalized;
+  }
+  return "draft";
+}
+
+function extractCourseCode(courseName) {
+  const match = String(courseName || "").match(/\(([^)]+)\)\s*$/);
+  return match ? match[1].trim() : null;
+}
+
+async function hydrateRelationalState(user) {
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return;
+  }
+  const current = user || getCurrentUser();
+  if (!current?.supabaseAuthId) {
+    return;
+  }
+
+  await hydrateRelationalCoursesAndTopics();
+  await hydrateRelationalProfiles(current);
+  await hydrateRelationalQuestions();
+  await hydrateRelationalSessions(current);
+}
+
+async function hydrateRelationalCoursesAndTopics() {
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled) {
+    return;
+  }
+
+  const { data: courses, error: coursesError } = await client
+    .from("courses")
+    .select("id,course_name,course_code,academic_year,academic_semester,is_active")
+    .order("academic_year", { ascending: true })
+    .order("academic_semester", { ascending: true })
+    .order("course_name", { ascending: true });
+  if (coursesError) {
+    return;
+  }
+
+  const { data: topics, error: topicsError } = await client
+    .from("course_topics")
+    .select("course_id,topic_name,sort_order,is_active")
+    .order("sort_order", { ascending: true })
+    .order("topic_name", { ascending: true });
+  if (topicsError) {
+    return;
+  }
+
+  const curriculum = {};
+  for (let year = 1; year <= 5; year += 1) {
+    curriculum[year] = { 1: [], 2: [] };
+  }
+
+  const topicMapByCourseId = {};
+  (topics || []).forEach((topic) => {
+    if (!topic?.is_active) return;
+    if (!topicMapByCourseId[topic.course_id]) {
+      topicMapByCourseId[topic.course_id] = [];
+    }
+    topicMapByCourseId[topic.course_id].push(String(topic.topic_name || "").trim());
+  });
+
+  const courseTopicOverrides = {};
+  (courses || []).forEach((course) => {
+    if (!course?.is_active) {
+      return;
+    }
+    const year = sanitizeAcademicYear(course.academic_year || 1);
+    const semester = sanitizeAcademicSemester(course.academic_semester || 1);
+    const courseName = String(course.course_name || "").trim();
+    if (!courseName) {
+      return;
+    }
+    if (!curriculum[year][semester].includes(courseName)) {
+      curriculum[year][semester].push(courseName);
+    }
+    const topicsForCourse = (topicMapByCourseId[course.id] || []).filter(Boolean);
+    courseTopicOverrides[courseName] = topicsForCourse.length ? topicsForCourse : ["Clinical Applications"];
+  });
+
+  O6U_CURRICULUM = normalizeCurriculum(curriculum);
+  COURSE_TOPIC_OVERRIDES = normalizeCourseTopicMap(courseTopicOverrides);
+  rebuildCurriculumCatalog();
+  saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+}
+
+async function hydrateRelationalProfiles(currentUser) {
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled) {
+    return;
+  }
+
+  const usersBefore = getUsers();
+  const isAdmin = currentUser.role === "admin";
+  let profileQuery = client
+    .from("profiles")
+    .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at");
+  if (!isAdmin) {
+    profileQuery = profileQuery.eq("id", currentUser.supabaseAuthId);
+  }
+  const { data: profiles, error } = await profileQuery;
+  if (error) {
+    return;
+  }
+
+  const allCourses = [...CURRICULUM_COURSE_LIST];
+  const localByAuthId = new Map(usersBefore.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry]));
+  const mapped = (profiles || []).map((profile) => {
+    const existing = localByAuthId.get(profile.id);
+    const role = String(profile.role || "student") === "admin" ? "admin" : "student";
+    const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || 1) : null;
+    const semester = role === "student" ? sanitizeAcademicSemester(profile.academic_semester || 1) : null;
+    return {
+      id: profile.id,
+      name: String(profile.full_name || "").trim() || existing?.name || "Student",
+      email: String(profile.email || "").trim().toLowerCase(),
+      password: existing?.password || "",
+      phone: String(profile.phone || "").trim(),
+      role,
+      verified: true,
+      isApproved: Boolean(profile.approved),
+      approvedAt: profile.approved ? existing?.approvedAt || profile.created_at || nowISO() : null,
+      approvedBy: existing?.approvedBy || null,
+      assignedCourses: role === "student" ? getCurriculumCourses(year || 1, semester || 1) : [...allCourses],
+      academicYear: year,
+      academicSemester: semester,
+      createdAt: existing?.createdAt || profile.created_at || nowISO(),
+      supabaseAuthId: profile.id,
+    };
+  });
+
+  const preservedLocalOnly = usersBefore.filter((entry) => !entry.supabaseAuthId);
+  const nextUsers = [...preservedLocalOnly, ...mapped];
+  saveLocalOnly(STORAGE_KEYS.users, nextUsers);
+  saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
+}
+
+async function hydrateRelationalQuestions() {
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled) {
+    return;
+  }
+
+  const users = getUsers();
+  const courses = await client.from("courses").select("id,course_name");
+  if (courses.error) {
+    return;
+  }
+  const topics = await client.from("course_topics").select("id,course_id,topic_name");
+  if (topics.error) {
+    return;
+  }
+  const questionsResult = await client
+    .from("questions")
+    .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+    .order("created_at", { ascending: true });
+  if (questionsResult.error) {
+    return;
+  }
+
+  const questionIds = (questionsResult.data || []).map((question) => question.id);
+  const choicesResult = questionIds.length
+    ? await client
+        .from("question_choices")
+        .select("question_id,choice_label,choice_text,is_correct")
+        .in("question_id", questionIds)
+    : { data: [], error: null };
+  if (choicesResult.error) {
+    return;
+  }
+
+  const courseById = Object.fromEntries((courses.data || []).map((course) => [course.id, String(course.course_name || "").trim()]));
+  const topicById = Object.fromEntries((topics.data || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
+  const authorById = Object.fromEntries(users.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.name]));
+  const choicesByQuestionId = {};
+  (choicesResult.data || []).forEach((choice) => {
+    if (!choicesByQuestionId[choice.question_id]) {
+      choicesByQuestionId[choice.question_id] = [];
+    }
+    choicesByQuestionId[choice.question_id].push(choice);
+  });
+
+  const mappedQuestions = (questionsResult.data || []).map((question) => {
+    const courseName = courseById[question.course_id] || CURRICULUM_COURSE_LIST[0] || "Course";
+    const topicName = topicById[question.topic_id] || resolveDefaultTopic(courseName);
+    const rawChoices = (choicesByQuestionId[question.id] || [])
+      .sort((a, b) => String(a.choice_label).localeCompare(String(b.choice_label)));
+    const choices = rawChoices
+      .map((choice) => ({
+        id: String(choice.choice_label || "").toUpperCase(),
+        text: String(choice.choice_text || "").trim(),
+      }))
+      .filter((choice) => choice.id && choice.text);
+    const correct = rawChoices
+      .filter((choice) => Boolean(choice.is_correct))
+      .map((choice) => String(choice.choice_label || "").toUpperCase());
+
+    return {
+      id: String(question.external_id || question.id),
+      dbId: question.id,
+      qbankCourse: courseName,
+      qbankTopic: topicName,
+      course: courseName,
+      system: courseName,
+      topic: topicName,
+      difficulty: fromRelationalDifficulty(question.difficulty),
+      tags: [],
+      author: authorById[question.author_id] || "Admin",
+      dateAdded: String(question.created_at || nowISO()).slice(0, 10),
+      stem: String(question.stem || "").trim(),
+      choices: choices.length ? choices : [{ id: "A", text: "Option A" }, { id: "B", text: "Option B" }],
+      correct: correct.length ? correct : ["A"],
+      explanation: String(question.explanation || "").trim(),
+      objective: String(question.objective || "").trim(),
+      references: "",
+      explanationImage: "",
+      status: toRelationalQuestionStatus(question.status),
+    };
+  });
+
+  saveLocalOnly(STORAGE_KEYS.questions, mappedQuestions);
+}
+
+async function hydrateRelationalSessions(currentUser) {
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled || !currentUser?.supabaseAuthId) {
+    return;
+  }
+
+  const allUsers = getUsers();
+  const localQuestionByDbId = Object.fromEntries(
+    getQuestions()
+      .filter((question) => question.dbId)
+      .map((question) => [question.dbId, question.id]),
+  );
+
+  let blocksQuery = client
+    .from("test_blocks")
+    .select("id,external_id,user_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
+  if (currentUser.role !== "admin") {
+    blocksQuery = blocksQuery.eq("user_id", currentUser.supabaseAuthId);
+  }
+  const { data: blocks, error: blocksError } = await blocksQuery.order("updated_at", { ascending: false }).limit(5000);
+  if (blocksError) {
+    return;
+  }
+
+  const blockIds = (blocks || []).map((block) => block.id);
+  const { data: items, error: itemsError } = blockIds.length
+    ? await client.from("test_block_items").select("block_id,position,question_id").in("block_id", blockIds).order("position")
+    : { data: [], error: null };
+  if (itemsError) {
+    return;
+  }
+  const { data: responses, error: responsesError } = blockIds.length
+    ? await client
+        .from("test_responses")
+        .select("block_id,question_id,selected_choice_labels,flagged,notes,submitted,answered_at")
+        .in("block_id", blockIds)
+    : { data: [], error: null };
+  if (responsesError) {
+    return;
+  }
+
+  const localUserIdByAuth = Object.fromEntries(allUsers.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.id]));
+  const itemsByBlock = {};
+  (items || []).forEach((item) => {
+    if (!itemsByBlock[item.block_id]) {
+      itemsByBlock[item.block_id] = [];
+    }
+    itemsByBlock[item.block_id].push(item);
+  });
+  const responsesByBlockQuestion = {};
+  (responses || []).forEach((response) => {
+    responsesByBlockQuestion[`${response.block_id}::${response.question_id}`] = response;
+  });
+
+  const mappedSessions = (blocks || []).map((block) => {
+    const orderedItems = (itemsByBlock[block.id] || []).sort((a, b) => a.position - b.position);
+    const questionIds = orderedItems.map((item) => localQuestionByDbId[item.question_id] || item.question_id);
+    const responseMap = {};
+    orderedItems.forEach((item) => {
+      const localQuestionId = localQuestionByDbId[item.question_id] || item.question_id;
+      const response = responsesByBlockQuestion[`${block.id}::${item.question_id}`];
+      responseMap[localQuestionId] = {
+        selected: Array.isArray(response?.selected_choice_labels) ? response.selected_choice_labels : [],
+        flagged: Boolean(response?.flagged),
+        struck: [],
+        notes: String(response?.notes || ""),
+        timeSpentSec: 0,
+        highlightedLines: [],
+        submitted: Boolean(response?.submitted),
+      };
+    });
+
+    const sessionId = String(block.external_id || block.id);
+    return {
+      id: sessionId,
+      dbId: block.id,
+      userId: localUserIdByAuth[block.user_id] || block.user_id,
+      mode: String(block.mode || "tutor"),
+      source: String(block.source || "all"),
+      durationMin: Number(block.duration_minutes || 20),
+      timeRemainingSec: block.time_remaining_sec == null ? null : Number(block.time_remaining_sec),
+      paused: false,
+      questionIds,
+      responses: responseMap,
+      currentIndex: Math.min(Math.max(Number(block.current_index || 0), 0), Math.max(0, questionIds.length - 1)),
+      status: String(block.status || "in_progress"),
+      lastQuestionAt: Date.now(),
+      elapsedSec: Number(block.elapsed_seconds || 0),
+      createdAt: block.created_at || nowISO(),
+      updatedAt: block.updated_at || nowISO(),
+      completedAt: block.completed_at || null,
+      originSessionId: null,
+    };
+  });
+
+  saveLocalOnly(STORAGE_KEYS.sessions, mappedSessions);
 }
 
 function getSyncScopeForUser(user = null) {
@@ -968,6 +1450,447 @@ function clearSupabaseFlushTimer() {
     window.clearTimeout(supabaseSync.flushTimer);
     supabaseSync.flushTimer = null;
   }
+}
+
+async function flushRelationalWrites() {
+  if (!relationalSync.enabled || !relationalSync.pendingWrites.size || relationalSync.flushing) {
+    clearRelationalFlushTimer();
+    return;
+  }
+
+  clearRelationalFlushTimer();
+  relationalSync.flushing = true;
+  const entries = Array.from(relationalSync.pendingWrites.entries());
+  relationalSync.pendingWrites.clear();
+
+  for (const [storageKey, payload] of entries) {
+    try {
+      await syncRelationalKey(storageKey, payload);
+    } catch (error) {
+      console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+      relationalSync.pendingWrites.set(storageKey, payload);
+    }
+  }
+
+  relationalSync.flushing = false;
+  if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
+    relationalSync.flushTimer = window.setTimeout(() => {
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational retry flush failed.", error);
+      });
+    }, 2800);
+  }
+}
+
+async function syncRelationalKey(storageKey, payload) {
+  if (!relationalSync.enabled) {
+    return;
+  }
+
+  if (storageKey === STORAGE_KEYS.users) {
+    await syncProfilesToRelational(payload);
+    return;
+  }
+  if (storageKey === STORAGE_KEYS.curriculum || storageKey === STORAGE_KEYS.courseTopics) {
+    const curriculum = storageKey === STORAGE_KEYS.curriculum ? payload : load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    const topics = storageKey === STORAGE_KEYS.courseTopics ? payload : load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    await syncCoursesTopicsToRelational(curriculum, topics);
+    return;
+  }
+  if (storageKey === STORAGE_KEYS.questions) {
+    await syncQuestionsToRelational(payload);
+    return;
+  }
+  if (storageKey === STORAGE_KEYS.sessions) {
+    await syncSessionsToRelational(payload);
+  }
+}
+
+async function syncProfilesToRelational(usersPayload) {
+  const client = getRelationalClient();
+  if (!client) {
+    return;
+  }
+
+  const users = Array.isArray(usersPayload) ? usersPayload : [];
+  const rows = users
+    .filter((user) => isUuidValue(user?.supabaseAuthId))
+    .map((user) => ({
+      id: user.supabaseAuthId,
+      full_name: String(user.name || "").trim() || "Student",
+      email: String(user.email || "").trim().toLowerCase(),
+      phone: String(user.phone || "").trim() || null,
+      role: user.role === "admin" ? "admin" : "student",
+      approved: Boolean(isUserAccessApproved(user)),
+      academic_year: user.role === "student" ? sanitizeAcademicYear(user.academicYear || 1) : null,
+      academic_semester: user.role === "student" ? sanitizeAcademicSemester(user.academicSemester || 1) : null,
+    }));
+  if (!rows.length) {
+    return;
+  }
+
+  const { error } = await client.from("profiles").upsert(rows, { onConflict: "id" });
+  if (error) {
+    throw error;
+  }
+}
+
+async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
+  const client = getRelationalClient();
+  if (!client) {
+    return;
+  }
+
+  const curriculum = normalizeCurriculum(curriculumPayload || O6U_CURRICULUM);
+  const topicsByCourseName = normalizeCourseTopicMap(topicPayload || COURSE_TOPIC_OVERRIDES);
+
+  const desiredCourses = [];
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      const entries = sanitizeCurriculumCourseList(curriculum?.[year]?.[semester] || []);
+      entries.forEach((courseName) => {
+        desiredCourses.push({
+          course_name: courseName,
+          course_code: extractCourseCode(courseName),
+          academic_year: year,
+          academic_semester: semester,
+          is_active: true,
+        });
+      });
+    }
+  }
+
+  if (desiredCourses.length) {
+    const { error: upsertCoursesError } = await client
+      .from("courses")
+      .upsert(desiredCourses, { onConflict: "course_name,academic_year,academic_semester" });
+    if (upsertCoursesError) {
+      throw upsertCoursesError;
+    }
+  }
+
+  const { data: allCourses, error: allCoursesError } = await client
+    .from("courses")
+    .select("id,course_name,academic_year,academic_semester,is_active");
+  if (allCoursesError) {
+    throw allCoursesError;
+  }
+
+  const desiredCourseKeys = new Set(
+    desiredCourses.map((course) => `${course.course_name}::${course.academic_year}::${course.academic_semester}`),
+  );
+
+  const deactivateCourseIds = (allCourses || [])
+    .filter((course) => course.is_active)
+    .filter((course) => !desiredCourseKeys.has(`${course.course_name}::${course.academic_year}::${course.academic_semester}`))
+    .map((course) => course.id);
+  if (deactivateCourseIds.length) {
+    await client.from("courses").update({ is_active: false }).in("id", deactivateCourseIds);
+  }
+
+  const courseRowsByName = {};
+  (allCourses || []).forEach((course) => {
+    if (!courseRowsByName[course.course_name] || course.is_active) {
+      courseRowsByName[course.course_name] = course;
+    }
+  });
+
+  const desiredTopicRows = [];
+  Object.entries(topicsByCourseName || {}).forEach(([courseName, topics]) => {
+    const course = courseRowsByName[courseName];
+    if (!course) {
+      return;
+    }
+    const normalized = normalizeCourseTopicList(topics, courseName);
+    normalized.forEach((topicName, index) => {
+      desiredTopicRows.push({
+        course_id: course.id,
+        topic_name: topicName,
+        sort_order: index + 1,
+        is_active: true,
+      });
+    });
+  });
+
+  if (desiredTopicRows.length) {
+    const { error: upsertTopicsError } = await client
+      .from("course_topics")
+      .upsert(desiredTopicRows, { onConflict: "course_id,topic_name" });
+    if (upsertTopicsError) {
+      throw upsertTopicsError;
+    }
+  }
+
+  const { data: allTopics, error: allTopicsError } = await client
+    .from("course_topics")
+    .select("id,course_id,topic_name,is_active");
+  if (allTopicsError) {
+    throw allTopicsError;
+  }
+  const desiredTopicKeys = new Set(desiredTopicRows.map((topic) => `${topic.course_id}::${topic.topic_name}`));
+  const deactivateTopicIds = (allTopics || [])
+    .filter((topic) => topic.is_active)
+    .filter((topic) => !desiredTopicKeys.has(`${topic.course_id}::${topic.topic_name}`))
+    .map((topic) => topic.id);
+  if (deactivateTopicIds.length) {
+    await client.from("course_topics").update({ is_active: false }).in("id", deactivateTopicIds);
+  }
+}
+
+async function syncQuestionsToRelational(questionsPayload) {
+  const client = getRelationalClient();
+  const currentUser = getCurrentUser();
+  if (!client || !currentUser) {
+    return;
+  }
+
+  const questions = Array.isArray(questionsPayload) ? questionsPayload : [];
+  const { data: courses, error: coursesError } = await client.from("courses").select("id,course_name").eq("is_active", true);
+  if (coursesError) throw coursesError;
+  const { data: topics, error: topicsError } = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
+  if (topicsError) throw topicsError;
+
+  const courseIdByName = Object.fromEntries((courses || []).map((course) => [course.course_name, course.id]));
+  const topicIdByCourseTopic = {};
+  (topics || []).forEach((topic) => {
+    topicIdByCourseTopic[`${topic.course_id}::${topic.topic_name}`] = topic.id;
+  });
+
+  const missingTopics = [];
+  questions.forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    const courseId = courseIdByName[meta.course];
+    if (!courseId) return;
+    const key = `${courseId}::${meta.topic}`;
+    if (!topicIdByCourseTopic[key]) {
+      missingTopics.push({
+        course_id: courseId,
+        topic_name: meta.topic,
+        sort_order: 999,
+        is_active: true,
+      });
+      topicIdByCourseTopic[key] = "__pending__";
+    }
+  });
+  if (missingTopics.length) {
+    const { error: missingTopicsError } = await client
+      .from("course_topics")
+      .upsert(missingTopics, { onConflict: "course_id,topic_name" });
+    if (missingTopicsError) {
+      throw missingTopicsError;
+    }
+    const refreshedTopics = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
+    if (refreshedTopics.error) {
+      throw refreshedTopics.error;
+    }
+    Object.keys(topicIdByCourseTopic).forEach((key) => {
+      delete topicIdByCourseTopic[key];
+    });
+    (refreshedTopics.data || []).forEach((topic) => {
+      topicIdByCourseTopic[`${topic.course_id}::${topic.topic_name}`] = topic.id;
+    });
+  }
+
+  const upsertRows = [];
+  questions.forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    const courseId = courseIdByName[meta.course];
+    if (!courseId) return;
+    let topicId = topicIdByCourseTopic[`${courseId}::${meta.topic}`];
+    if (!topicId) return;
+    upsertRows.push({
+      ...(isUuidValue(question.dbId) ? { id: question.dbId } : {}),
+      external_id: String(question.id || "").trim(),
+      course_id: courseId,
+      topic_id: topicId,
+      author_id: isUuidValue(currentUser.supabaseAuthId) ? currentUser.supabaseAuthId : null,
+      stem: String(question.stem || "").trim(),
+      explanation: String(question.explanation || "").trim() || "No explanation provided.",
+      objective: String(question.objective || "").trim() || null,
+      difficulty: toRelationalDifficulty(question.difficulty),
+      status: toRelationalQuestionStatus(question.status),
+    });
+  });
+
+  if (!upsertRows.length) {
+    return;
+  }
+
+  const { error: questionsUpsertError } = await client.from("questions").upsert(upsertRows, { onConflict: "external_id" });
+  if (questionsUpsertError) {
+    throw questionsUpsertError;
+  }
+
+  if (currentUser.role === "admin") {
+    const externalIdSet = new Set(upsertRows.map((row) => row.external_id));
+    const { data: existingQuestions, error: existingQuestionsError } = await client
+      .from("questions")
+      .select("id,external_id")
+      .not("external_id", "is", null);
+    if (existingQuestionsError) {
+      throw existingQuestionsError;
+    }
+    const deleteIds = (existingQuestions || [])
+      .filter((row) => row.external_id && !externalIdSet.has(row.external_id))
+      .map((row) => row.id);
+    if (deleteIds.length) {
+      await client.from("questions").delete().in("id", deleteIds);
+    }
+  }
+
+  const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
+  const { data: persistedQuestions, error: persistedQuestionsError } = await client
+    .from("questions")
+    .select("id,external_id")
+    .in("external_id", externalIds);
+  if (persistedQuestionsError) {
+    throw persistedQuestionsError;
+  }
+  const dbIdByExternalId = Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id]));
+
+  const updatedLocalQuestions = questions.map((question) => {
+    const nextDbId = dbIdByExternalId[question.id];
+    if (!nextDbId || question.dbId === nextDbId) {
+      return question;
+    }
+    return { ...question, dbId: nextDbId };
+  });
+  saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions);
+
+  const questionDbIds = Object.values(dbIdByExternalId);
+  if (questionDbIds.length) {
+    await client.from("question_choices").delete().in("question_id", questionDbIds);
+  }
+
+  const choiceRows = [];
+  updatedLocalQuestions.forEach((question) => {
+    const dbId = dbIdByExternalId[question.id];
+    if (!dbId) return;
+    const correct = new Set(Array.isArray(question.correct) ? question.correct.map((entry) => String(entry).toUpperCase()) : []);
+    (question.choices || []).forEach((choice) => {
+      const label = String(choice.id || "").toUpperCase();
+      const text = String(choice.text || "").trim();
+      if (!label || !text) return;
+      choiceRows.push({
+        question_id: dbId,
+        choice_label: label,
+        choice_text: text,
+        is_correct: correct.has(label),
+      });
+    });
+  });
+  if (choiceRows.length) {
+    const { error: insertChoicesError } = await client.from("question_choices").insert(choiceRows);
+    if (insertChoicesError) {
+      throw insertChoicesError;
+    }
+  }
+}
+
+async function syncSessionsToRelational(sessionsPayload) {
+  const client = getRelationalClient();
+  const currentUser = getCurrentUser();
+  if (!client || !currentUser) {
+    return;
+  }
+
+  const sessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
+  const users = getUsers();
+  const questions = getQuestions();
+  const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
+  const authIdByLocalUserId = Object.fromEntries(users.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.id, entry.supabaseAuthId]));
+
+  const ownedSessions = sessions.filter((session) => isUuidValue(authIdByLocalUserId[session.userId]));
+  if (!ownedSessions.length) {
+    return;
+  }
+
+  const upsertBlocks = ownedSessions.map((session) => ({
+    ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
+    external_id: String(session.id || "").trim(),
+    user_id: authIdByLocalUserId[session.userId],
+    mode: session.mode === "timed" ? "timed" : "tutor",
+    source: ["all", "unused", "incorrect", "flagged"].includes(String(session.source || "")) ? session.source : "all",
+    status: ["in_progress", "completed", "suspended"].includes(String(session.status || "")) ? session.status : "in_progress",
+    question_count: Math.max(1, Number(session.questionIds?.length || 1)),
+    duration_minutes: Number(session.durationMin || 20),
+    time_remaining_sec: session.timeRemainingSec == null ? null : Number(session.timeRemainingSec),
+    current_index: Math.max(0, Number(session.currentIndex || 0)),
+    elapsed_seconds: Math.max(0, Number(session.elapsedSec || 0)),
+    completed_at: session.completedAt || null,
+  }));
+
+  const { error: blocksUpsertError } = await client.from("test_blocks").upsert(upsertBlocks, { onConflict: "external_id" });
+  if (blocksUpsertError) {
+    throw blocksUpsertError;
+  }
+
+  const externalIds = upsertBlocks.map((entry) => entry.external_id).filter(Boolean);
+  const { data: persistedBlocks, error: persistedBlocksError } = await client
+    .from("test_blocks")
+    .select("id,external_id")
+    .in("external_id", externalIds);
+  if (persistedBlocksError) {
+    throw persistedBlocksError;
+  }
+  const blockIdByExternalId = Object.fromEntries((persistedBlocks || []).map((entry) => [entry.external_id, entry.id]));
+  const blockIds = Object.values(blockIdByExternalId);
+
+  if (blockIds.length) {
+    await client.from("test_responses").delete().in("block_id", blockIds);
+    await client.from("test_block_items").delete().in("block_id", blockIds);
+  }
+
+  const itemRows = [];
+  const responseRows = [];
+
+  ownedSessions.forEach((session) => {
+    const blockDbId = blockIdByExternalId[session.id];
+    if (!blockDbId) return;
+    const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
+    questionIds.forEach((localQuestionId, index) => {
+      const questionDbId = questionDbIdByLocalId[localQuestionId];
+      if (!questionDbId) return;
+      itemRows.push({
+        block_id: blockDbId,
+        position: index + 1,
+        question_id: questionDbId,
+      });
+
+      const response = session.responses?.[localQuestionId] || {};
+      responseRows.push({
+        block_id: blockDbId,
+        question_id: questionDbId,
+        selected_choice_labels: Array.isArray(response.selected) ? response.selected : [],
+        flagged: Boolean(response.flagged),
+        notes: String(response.notes || "") || null,
+        submitted: Boolean(response.submitted),
+        answered_at: response.submitted ? session.updatedAt || nowISO() : null,
+      });
+    });
+  });
+
+  if (itemRows.length) {
+    const { error: itemsInsertError } = await client.from("test_block_items").insert(itemRows);
+    if (itemsInsertError) {
+      throw itemsInsertError;
+    }
+  }
+  if (responseRows.length) {
+    const { error: responsesInsertError } = await client.from("test_responses").insert(responseRows);
+    if (responsesInsertError) {
+      throw responsesInsertError;
+    }
+  }
+
+  const syncedSessions = sessions.map((session) => {
+    const dbId = blockIdByExternalId[session.id];
+    if (!dbId || session.dbId === dbId) {
+      return session;
+    }
+    return { ...session, dbId };
+  });
+  saveLocalOnly(STORAGE_KEYS.sessions, syncedSessions);
 }
 
 function seedData() {
@@ -4337,6 +5260,13 @@ function wireAdmin() {
           supabaseDeleteWarning = deleteResult.message || "Could not delete user from Supabase Auth.";
           console.warn("Supabase auth user delete warning:", supabaseDeleteWarning);
         }
+        const relationalClient = getRelationalClient();
+        if (relationalClient && isUuidValue(target.supabaseAuthId)) {
+          const { error: profileDeleteError } = await relationalClient.from("profiles").delete().eq("id", target.supabaseAuthId);
+          if (profileDeleteError) {
+            console.warn("Supabase profile delete warning:", profileDeleteError.message);
+          }
+        }
       }
 
       save(
@@ -6296,6 +7226,9 @@ function load(key, fallback) {
 
 function save(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+  if (scheduleRelationalWrite(key, value)) {
+    return;
+  }
   scheduleSupabaseWrite(key, value);
 }
 

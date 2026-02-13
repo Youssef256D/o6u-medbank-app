@@ -13,6 +13,7 @@ This folder contains a real relational PostgreSQL database setup for the MCQ pla
 - `migrations/20260213_scale_app_state_keys_and_rls.sql`: introduces global/user-scoped app-state key strategy for scale
 - `migrations/20260213_optimize_app_state_rls_and_indexes.sql`: optimizes app-state RLS policies and removes duplicate index
 - `migrations/20260213_create_core_relational_tables.sql`: creates normalized core tables (`profiles`, `courses`, `topics`, `questions`, `tests`, `responses`) with RLS
+- `migrations/20260213_add_external_ids_and_fk_indexes.sql`: adds stable external IDs for `questions` and `test_blocks` plus supporting indexes
 
 ## Quick start (PostgreSQL)
 
@@ -73,6 +74,7 @@ psql -d o6umedbank -f database/seed.sql
    - `20260213_scale_app_state_keys_and_rls.sql`
    - `20260213_optimize_app_state_rls_and_indexes.sql`
    - `20260213_create_core_relational_tables.sql`
+   - `20260213_add_external_ids_and_fk_indexes.sql`
 3. Enable Supabase Auth leaked-password protection (dashboard warning currently active).
 4. Use authenticated sessions for user-scoped writes (`u:<uid>:...`) and keep anon writes limited to global keys only.
 5. Keep signup and email verification rate limits aligned with your expected bursts.

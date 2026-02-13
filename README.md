@@ -135,9 +135,11 @@ This is still a frontend prototype UI. SQL database files are production-style, 
 - Supabase `app_state` RLS policies were migrated to support global/user-scoped key patterns.
 - Duplicate index and RLS policy performance issues were resolved.
 - Core relational tables were created in Supabase (`profiles`, `courses`, `course_topics`, `questions`, `question_choices`, `test_blocks`, `test_block_items`, `test_responses`) with indexes and RLS.
+- Phase-2 bridge is active: admin users/questions/tests and course/topic changes are persisted directly to relational tables (with local cache as UI state).
 
 Applied Supabase migrations:
 
 - `scale_app_state_keys_and_rls_for_2000_users`
 - `optimize_app_state_rls_and_indexes`
 - `create_core_relational_tables_for_2000_users`
+- `add_external_ids_and_foreign_key_indexes`
