@@ -1926,6 +1926,29 @@ async function syncQuestionsToRelational(questionsPayload) {
   }
 
   const questions = Array.isArray(questionsPayload) ? questionsPayload : [];
+  const payloadExternalIds = [...new Set(
+    questions
+      .map((question) => String(question?.id || "").trim())
+      .filter(Boolean),
+  )];
+  const existingByExternalId = {};
+  if (payloadExternalIds.length) {
+    const { data: existingRows, error: existingRowsError } = await client
+      .from("questions")
+      .select("id,external_id")
+      .in("external_id", payloadExternalIds);
+    if (existingRowsError) {
+      throw existingRowsError;
+    }
+    (existingRows || []).forEach((row) => {
+      const externalId = String(row?.external_id || "").trim();
+      if (!externalId || !isUuidValue(row?.id)) {
+        return;
+      }
+      existingByExternalId[externalId] = row.id;
+    });
+  }
+
   const { data: courses, error: coursesError } = await client.from("courses").select("id,course_name").eq("is_active", true);
   if (coursesError) throw coursesError;
   const { data: topics, error: topicsError } = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
@@ -1975,13 +1998,19 @@ async function syncQuestionsToRelational(questionsPayload) {
   const upsertRows = [];
   questions.forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
+    const externalId = String(question.id || "").trim();
+    if (!externalId) return;
     const courseId = courseIdByName[meta.course];
     if (!courseId) return;
     let topicId = topicIdByCourseTopic[`${courseId}::${meta.topic}`];
     if (!topicId) return;
+    const stableDbId =
+      (isUuidValue(question.dbId) && question.dbId)
+      || existingByExternalId[externalId]
+      || crypto.randomUUID();
     upsertRows.push({
-      ...(isUuidValue(question.dbId) ? { id: question.dbId } : {}),
-      external_id: String(question.id || "").trim(),
+      id: stableDbId,
+      external_id: externalId,
       course_id: courseId,
       topic_id: topicId,
       author_id: isUuidValue(currentUser.supabaseAuthId) ? currentUser.supabaseAuthId : null,
