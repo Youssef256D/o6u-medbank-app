@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.4").trim();
 
 const state = {
   route: "landing",
@@ -570,16 +570,29 @@ async function enforceRefreshAfterSignIn() {
 }
 
 async function init() {
-  const syncBootstrap = await initSupabaseSync();
   seedData();
   initVersionTracking();
-  await initSupabaseAuth();
-  if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
-    scheduleFullSupabaseSync();
-  }
   hydrateSessionUiPreferences();
   bindGlobalEvents();
   document.body.classList.add("is-routing");
+  render();
+
+  let syncBootstrap = { enabled: false, hadRemoteData: false };
+  try {
+    syncBootstrap = await initSupabaseSync();
+  } catch (error) {
+    console.warn("Supabase sync bootstrap failed.", error?.message || error);
+  }
+
+  try {
+    await initSupabaseAuth();
+  } catch (error) {
+    console.warn("Supabase auth bootstrap failed.", error?.message || error);
+  }
+
+  if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
+    scheduleFullSupabaseSync();
+  }
   render();
 }
 
@@ -1018,6 +1031,49 @@ async function ensureRelationalSyncReady() {
 
   relationalSync.enabled = true;
   return true;
+}
+
+async function updateRelationalProfileApproval(profileIds, approved) {
+  const ids = (Array.isArray(profileIds) ? profileIds : []).filter((id) => isUuidValue(id));
+  if (!ids.length) {
+    return { ok: true };
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return { ok: false, message: "Relational database sync is unavailable." };
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return { ok: false, message: "Supabase relational client is not available." };
+  }
+
+  const { error } = await client.from("profiles").update({ approved: Boolean(approved) }).in("id", ids);
+  if (error) {
+    return { ok: false, message: error.message || "Could not update profile approval in database." };
+  }
+  return { ok: true };
+}
+
+async function deleteRelationalProfile(profileId) {
+  if (!isUuidValue(profileId)) {
+    return { ok: true };
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return { ok: false, message: "Relational database sync is unavailable." };
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return { ok: false, message: "Supabase relational client is not available." };
+  }
+
+  const { error } = await client.from("profiles").delete().eq("id", profileId);
+  if (error) {
+    return { ok: false, message: error.message || "Could not remove profile from database." };
+  }
+  return { ok: true };
 }
 
 function toRelationalDifficulty(value) {
@@ -4540,6 +4596,7 @@ function renderAdmin() {
 
   if (activeAdminPage === "users") {
     const users = getUsers().sort((a, b) => a.name.localeCompare(b.name));
+    const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = users
       .map((account) => {
         const year = account.role === "student" ? sanitizeAcademicYear(account.academicYear || 1) : null;
@@ -4610,6 +4667,10 @@ function renderAdmin() {
           <div>
             <h3 style="margin: 0;">Users</h3>
             <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b></p>
+            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Accept all pending</button>
           </div>
         </div>
         <form id="admin-add-user-form" style="margin-top: 0.85rem;">
@@ -5288,6 +5349,41 @@ function wireAdmin() {
     render();
   });
 
+  appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
+    const current = getCurrentUser();
+    const users = getUsers();
+    let approvedCount = 0;
+    const pendingProfileIds = [];
+
+    users.forEach((entry) => {
+      if (entry.role !== "student" || isUserAccessApproved(entry)) {
+        return;
+      }
+      entry.isApproved = true;
+      entry.approvedAt = nowISO();
+      entry.approvedBy = current?.email || "admin";
+      if (isUuidValue(entry.supabaseAuthId)) {
+        pendingProfileIds.push(entry.supabaseAuthId);
+      }
+      approvedCount += 1;
+    });
+
+    if (!approvedCount) {
+      toast("No pending requests found.");
+      return;
+    }
+
+    const dbResult = await updateRelationalProfileApproval(pendingProfileIds, true);
+    if (!dbResult.ok) {
+      toast(`Database update failed. ${dbResult.message}`);
+      return;
+    }
+
+    save(STORAGE_KEYS.users, users);
+    toast(`${approvedCount} pending account(s) approved.`);
+    render();
+  });
+
   appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
     button.addEventListener("click", () => {
       const row = button.closest("tr[data-user-id]");
@@ -5392,13 +5488,16 @@ function wireAdmin() {
       }
 
       const nextApproved = !isUserAccessApproved(users[idx]);
+      const targetProfileId = users[idx].supabaseAuthId;
+      const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
+      if (!dbResult.ok) {
+        toast(`Database update failed. ${dbResult.message}`);
+        return;
+      }
       users[idx].isApproved = nextApproved;
       users[idx].approvedAt = nextApproved ? nowISO() : null;
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
-      await flushRelationalWrites().catch((error) => {
-        console.warn("Immediate profile approval sync failed.", error?.message || error);
-      });
       toast(nextApproved ? "Account approved." : "Account suspended.");
       render();
     });
@@ -5435,12 +5534,10 @@ function wireAdmin() {
           supabaseDeleteWarning = deleteResult.message || "Could not delete user from Supabase Auth.";
           console.warn("Supabase auth user delete warning:", supabaseDeleteWarning);
         }
-        const relationalClient = getRelationalClient();
-        if (relationalClient && isUuidValue(target.supabaseAuthId)) {
-          const { error: profileDeleteError } = await relationalClient.from("profiles").delete().eq("id", target.supabaseAuthId);
-          if (profileDeleteError) {
-            console.warn("Supabase profile delete warning:", profileDeleteError.message);
-          }
+        const relationalDeleteResult = await deleteRelationalProfile(target.supabaseAuthId);
+        if (!relationalDeleteResult.ok) {
+          toast(`Database delete failed. ${relationalDeleteResult.message}`);
+          return;
         }
       }
 
