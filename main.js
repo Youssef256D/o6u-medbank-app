@@ -2441,14 +2441,14 @@ function renderAuth(mode) {
         <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
           <div class="form-row">
             <label>Full name <input name="name" autocomplete="name" required /></label>
-            <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
+            <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required aria-required="true" /></label>
           </div>
           <div class="form-row">
             <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
             <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
           </div>
           <div class="form-row">
-            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required /></label>
+            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
           </div>
           <div class="form-row">
             <label>Invite code (optional) <input name="inviteCode" /></label>
@@ -2657,7 +2657,6 @@ function wireAuth(mode) {
       if (form.dataset.submitting === "1") {
         return;
       }
-      lockAuthForm(form, true, "Creating account...");
       const data = new FormData(form);
       const users = getUsers();
       const name = String(data.get("name") || "").trim();
@@ -2665,14 +2664,24 @@ function wireAuth(mode) {
       const password = String(data.get("password") || "");
       const confirmPassword = String(data.get("confirmPassword") || "");
       const phone = String(data.get("phone") || "").trim();
+      const normalizedPhoneDigits = phone.replace(/\D/g, "");
       const inviteCode = String(data.get("inviteCode") || "").trim();
       const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
       const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
       const selectedCourses = getSelectedSignupCourses().filter((course) => availableCourses.includes(course));
+      const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
       if (!name || !email || !password || !phone) {
         toast("Name, email, password, and phone number are required.");
+        return;
+      }
+      if (!emailIsValid) {
+        toast("Please enter a valid email address.");
+        return;
+      }
+      if (normalizedPhoneDigits.length < 8) {
+        toast("Phone number is required and must be valid.");
         return;
       }
       if (password !== confirmPassword) {
@@ -2694,10 +2703,10 @@ function wireAuth(mode) {
       }
       if (!selectedCourses.length) {
         toast("Select at least one course for your enrollment.");
-        lockAuthForm(form, false);
         return;
       }
 
+      lockAuthForm(form, true, "Creating account...");
       const authClient = getSupabaseAuthClient();
       try {
         if (authClient) {
