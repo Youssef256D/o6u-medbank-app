@@ -22,13 +22,14 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.6").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.7").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
+const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 
 const state = {
   route: "landing",
@@ -629,6 +630,7 @@ async function init() {
   } else if (SUPABASE_CONFIG.enabled && !window.supabase?.createClient) {
     scheduleSupabaseBootstrapRetry();
   }
+  sessionStorage.removeItem(BOOT_RECOVERY_FLAG);
   render();
 }
 
@@ -8497,5 +8499,13 @@ function toast(message) {
 
 init().catch((error) => {
   console.error("Application bootstrap failed:", error);
+  const alreadyAttemptedRecovery = sessionStorage.getItem(BOOT_RECOVERY_FLAG) === "1";
+  if (!alreadyAttemptedRecovery) {
+    sessionStorage.setItem(BOOT_RECOVERY_FLAG, "1");
+    Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
+    window.location.reload();
+    return;
+  }
+  sessionStorage.removeItem(BOOT_RECOVERY_FLAG);
   toast("App failed to initialize. Check console for details.");
 });
