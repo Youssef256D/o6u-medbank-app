@@ -176,6 +176,7 @@ rebuildCurriculumCatalog();
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
 const DEMO_STUDENT_EMAIL = "student@o6umed.local";
+const FORCED_ADMIN_EMAILS = new Set(["code.youssefaayoub@gmail.com"]);
 
 const SAMPLE_QUESTIONS = [
   {
@@ -625,6 +626,10 @@ function isUserAccessApproved(user) {
   return user.isApproved !== false;
 }
 
+function isForcedAdminEmail(email) {
+  return FORCED_ADMIN_EMAILS.has(String(email || "").trim().toLowerCase());
+}
+
 function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   if (!authUser?.id) {
     return null;
@@ -643,7 +648,11 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
 
   const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
   const nextName = String(profileOverrides.name || authUser.user_metadata?.full_name || previous?.name || fallbackName).trim();
-  const nextRole = (previous?.role || profileOverrides.role || "student") === "admin" ? "admin" : "student";
+  const nextRole = isForcedAdminEmail(email)
+    ? "admin"
+    : (previous?.role || profileOverrides.role || "student") === "admin"
+      ? "admin"
+      : "student";
   const nextPhone = String(profileOverrides.phone || authUser.user_metadata?.phone_number || previous?.phone || "").trim();
 
   const nextYear =
@@ -881,6 +890,13 @@ function seedData() {
       const normalizedPhone = String(user.phone || "").trim();
       if (user.phone !== normalizedPhone) {
         user.phone = normalizedPhone;
+        changed = true;
+      }
+      if (isForcedAdminEmail(user.email) && user.role !== "admin") {
+        user.role = "admin";
+        user.academicYear = null;
+        user.academicSemester = null;
+        user.assignedCourses = [...allCourses];
         changed = true;
       }
       const shouldApprove = user.role === "admin" ? true : typeof user.isApproved === "boolean" ? user.isApproved : true;
@@ -3282,6 +3298,7 @@ function renderAdmin() {
       const coursePreview =
         visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
       const isSelf = account.id === user.id;
+      const isLockedAdmin = isForcedAdminEmail(account.email);
       return `
         <tr data-user-id="${escapeHtml(account.id)}">
           <td class="admin-user-account">
@@ -3321,7 +3338,7 @@ function renderAdmin() {
               <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
                 ${isApproved ? "Suspend access" : "Approve access"}
               </button>
-              <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf ? "disabled" : ""}>
+              <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
                 ${account.role === "admin" ? "Make student" : "Make admin"}
               </button>
               <button class="btn danger admin-btn-sm" data-action="remove-user" ${isSelf ? "disabled" : ""}>Remove</button>
@@ -4070,6 +4087,10 @@ function wireAdmin() {
       const idx = users.findIndex((entry) => entry.id === userId);
       if (idx === -1) {
         toast("Account not found.");
+        return;
+      }
+      if (isForcedAdminEmail(users[idx].email)) {
+        toast("This account is locked as admin.");
         return;
       }
 
@@ -4976,6 +4997,13 @@ function syncUsersWithCurriculum() {
     const normalizedPhone = String(user.phone || "").trim();
     if (user.phone !== normalizedPhone) {
       user.phone = normalizedPhone;
+      changed = true;
+    }
+    if (isForcedAdminEmail(user.email) && user.role !== "admin") {
+      user.role = "admin";
+      user.academicYear = null;
+      user.academicSemester = null;
+      user.assignedCourses = [...allCourses];
       changed = true;
     }
     const shouldApprove = user.role === "admin" ? true : typeof user.isApproved === "boolean" ? user.isApproved : true;
