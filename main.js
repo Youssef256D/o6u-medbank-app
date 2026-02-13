@@ -22,11 +22,13 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.6").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
+const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
+const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 
 const state = {
   route: "landing",
@@ -127,6 +129,9 @@ const relationalSync = {
 let timerHandle = null;
 let lastRenderedRoute = null;
 let adminPresencePollHandle = null;
+let supabaseBootstrapRetryHandle = null;
+let supabaseBootstrapRetries = 0;
+let supabaseBootstrapInFlight = false;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -528,7 +533,7 @@ function initVersionTracking() {
   const forced = String(load(STORAGE_KEYS.appVersionForced, "") || "").trim();
   if (forced && forced === APP_VERSION) {
     saveLocalOnly(STORAGE_KEYS.appVersionSeen, APP_VERSION);
-    localStorage.removeItem(STORAGE_KEYS.appVersionForced);
+    removeStorageKey(STORAGE_KEYS.appVersionForced);
   }
 }
 
@@ -570,7 +575,7 @@ async function enforceRefreshAfterSignIn() {
 
     if (seenVersion === publishedVersion) {
       if (publishedVersion === APP_VERSION) {
-        localStorage.removeItem(STORAGE_KEYS.appVersionForced);
+        removeStorageKey(STORAGE_KEYS.appVersionForced);
       }
       return false;
     }
@@ -619,7 +624,71 @@ async function init() {
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
   }
+  if (supabaseAuth.enabled || supabaseSync.enabled) {
+    clearSupabaseBootstrapRetry();
+  } else if (SUPABASE_CONFIG.enabled && !window.supabase?.createClient) {
+    scheduleSupabaseBootstrapRetry();
+  }
   render();
+}
+
+function clearSupabaseBootstrapRetry() {
+  if (supabaseBootstrapRetryHandle) {
+    window.clearInterval(supabaseBootstrapRetryHandle);
+    supabaseBootstrapRetryHandle = null;
+  }
+}
+
+async function tryBootstrapSupabaseInBackground() {
+  if (supabaseBootstrapInFlight || !window.supabase?.createClient) {
+    return false;
+  }
+
+  supabaseBootstrapInFlight = true;
+  try {
+    let syncBootstrap = { enabled: false, hadRemoteData: false };
+    try {
+      syncBootstrap = await initSupabaseSync();
+    } catch (error) {
+      console.warn("Deferred Supabase sync bootstrap failed.", error?.message || error);
+    }
+
+    try {
+      await initSupabaseAuth();
+    } catch (error) {
+      console.warn("Deferred Supabase auth bootstrap failed.", error?.message || error);
+    }
+
+    if (!syncBootstrap.enabled && !supabaseAuth.enabled) {
+      return false;
+    }
+
+    if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
+      scheduleFullSupabaseSync();
+    }
+    clearSupabaseBootstrapRetry();
+    render();
+    return true;
+  } finally {
+    supabaseBootstrapInFlight = false;
+  }
+}
+
+function scheduleSupabaseBootstrapRetry() {
+  if (supabaseBootstrapRetryHandle || !SUPABASE_CONFIG.enabled || supabaseAuth.enabled) {
+    return;
+  }
+
+  supabaseBootstrapRetries = 0;
+  tryBootstrapSupabaseInBackground().catch(() => {});
+  supabaseBootstrapRetryHandle = window.setInterval(() => {
+    if (supabaseBootstrapRetries >= SUPABASE_BOOTSTRAP_RETRY_LIMIT) {
+      clearSupabaseBootstrapRetry();
+      return;
+    }
+    supabaseBootstrapRetries += 1;
+    tryBootstrapSupabaseInBackground().catch(() => {});
+  }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
 
 async function initSupabaseSync() {
@@ -682,7 +751,7 @@ async function initSupabaseAuth() {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
       if (localUser && !isUserAccessApproved(localUser)) {
-        localStorage.removeItem(STORAGE_KEYS.currentUserId);
+        removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
       } else if (localUser) {
         if (await enforceRefreshAfterSignIn()) {
@@ -709,7 +778,7 @@ async function initSupabaseAuth() {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
         });
         if (localUser && !isUserAccessApproved(localUser)) {
-          localStorage.removeItem(STORAGE_KEYS.currentUserId);
+          removeStorageKey(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
             supabaseAuth.client.auth.signOut().catch((signOutError) => {
               console.warn("Supabase sign-out failed for pending account.", signOutError?.message || signOutError);
@@ -758,7 +827,7 @@ async function initSupabaseAuth() {
         state.adminPresenceError = "";
         state.adminPresenceRows = [];
         state.adminPresenceLastSyncAt = 0;
-        localStorage.removeItem(STORAGE_KEYS.currentUserId);
+        removeStorageKey(STORAGE_KEYS.currentUserId);
         const privateRoutes = new Set([
           "dashboard",
           "create-test",
@@ -1011,7 +1080,7 @@ function isUuidValue(value) {
 }
 
 function saveLocalOnly(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  writeStorageKey(key, value);
 }
 
 function clearRelationalFlushTimer() {
@@ -1780,7 +1849,7 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
     hadRemoteData = true;
     try {
       const payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
-      localStorage.setItem(storageKey, JSON.stringify(payload));
+      writeStorageKey(storageKey, payload);
     } catch {
       // Ignore malformed remote payloads and keep local fallback.
     }
@@ -2936,7 +3005,7 @@ function render() {
   }
 
   if (privateRoutes.includes(state.route) && user && !isUserAccessApproved(user)) {
-    localStorage.removeItem(STORAGE_KEYS.currentUserId);
+    removeStorageKey(STORAGE_KEYS.currentUserId);
     state.route = "login";
     toast("Your account is pending admin approval.");
   }
@@ -3362,7 +3431,7 @@ function wireAuth(mode) {
               return;
             }
             if (!isUserAccessApproved(user)) {
-              localStorage.removeItem(STORAGE_KEYS.currentUserId);
+              removeStorageKey(STORAGE_KEYS.currentUserId);
               await authClient.auth.signOut().catch(() => {});
               toast("Your account is pending admin approval.");
               return;
@@ -3577,7 +3646,7 @@ function wireAuth(mode) {
           if (authData.session) {
             await authClient.auth.signOut().catch(() => {});
           }
-          localStorage.removeItem(STORAGE_KEYS.currentUserId);
+          removeStorageKey(STORAGE_KEYS.currentUserId);
           toast("Account created. Await admin approval before first login.");
           navigate("login");
           return;
@@ -3602,7 +3671,7 @@ function wireAuth(mode) {
 
         users.push(user);
         save(STORAGE_KEYS.users, users);
-        localStorage.removeItem(STORAGE_KEYS.currentUserId);
+        removeStorageKey(STORAGE_KEYS.currentUserId);
         toast("Account created. Await admin approval before first login.");
         navigate("login");
       } finally {
@@ -6650,15 +6719,18 @@ function wireAdmin() {
   });
 }
 function getUsers() {
-  return load(STORAGE_KEYS.users, []);
+  const users = load(STORAGE_KEYS.users, []);
+  return Array.isArray(users) ? users : [];
 }
 
 function getQuestions() {
-  return load(STORAGE_KEYS.questions, []);
+  const questions = load(STORAGE_KEYS.questions, []);
+  return Array.isArray(questions) ? questions : [];
 }
 
 function getSessions() {
-  return load(STORAGE_KEYS.sessions, []);
+  const sessions = load(STORAGE_KEYS.sessions, []);
+  return Array.isArray(sessions) ? sessions : [];
 }
 
 function getCurrentUser() {
@@ -8276,18 +8348,33 @@ function load(key, fallback) {
   }
 
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(fallback)) {
+      return Array.isArray(parsed) ? parsed : fallback;
+    }
+    if (fallback && typeof fallback === "object" && !Array.isArray(fallback)) {
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+    }
+    return parsed;
   } catch {
     return fallback;
   }
 }
 
 function save(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  writeStorageKey(key, value);
   if (scheduleRelationalWrite(key, value)) {
     return;
   }
   scheduleSupabaseWrite(key, value);
+}
+
+function writeStorageKey(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function removeStorageKey(key) {
+  localStorage.removeItem(key);
 }
 
 async function loginAsDemo(email, password) {
@@ -8318,7 +8405,7 @@ async function logout() {
       console.warn("Supabase sign-out failed.", error?.message || error);
     });
   }
-  localStorage.removeItem(STORAGE_KEYS.currentUserId);
+  removeStorageKey(STORAGE_KEYS.currentUserId);
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
