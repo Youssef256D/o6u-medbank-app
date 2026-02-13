@@ -22,9 +22,11 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.5").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
+const PRESENCE_HEARTBEAT_MS = 25000;
+const PRESENCE_ONLINE_STALE_MS = 120000;
 
 const state = {
   route: "landing",
@@ -57,6 +59,10 @@ const state = {
   adminDataRefreshing: false,
   adminDataLastSyncAt: 0,
   adminDataSyncError: "",
+  adminPresenceRows: [],
+  adminPresenceLoading: false,
+  adminPresenceError: "",
+  adminPresenceLastSyncAt: 0,
 };
 
 let appVersionCheckPromise = null;
@@ -120,6 +126,18 @@ const relationalSync = {
 
 let timerHandle = null;
 let lastRenderedRoute = null;
+let adminPresencePollHandle = null;
+const presenceRuntime = {
+  timer: null,
+  solvingStartedAt: null,
+  isSolving: false,
+  lastSentAt: 0,
+  lastPayloadKey: "",
+  lastRoute: "",
+  lastSolving: false,
+  pushInFlight: false,
+  nextRetryAt: 0,
+};
 
 const DEFAULT_O6U_CURRICULUM = {
   1: {
@@ -731,9 +749,15 @@ async function initSupabaseAuth() {
 
       if (event === "SIGNED_OUT") {
         resetRelationalSyncState();
+        clearAdminPresencePolling();
+        syncPresenceRuntime(null);
         state.adminDataRefreshing = false;
         state.adminDataLastSyncAt = 0;
         state.adminDataSyncError = "";
+        state.adminPresenceLoading = false;
+        state.adminPresenceError = "";
+        state.adminPresenceRows = [];
+        state.adminPresenceLastSyncAt = 0;
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         const privateRoutes = new Set([
           "dashboard",
@@ -2571,6 +2595,12 @@ function bindGlobalEvents() {
       loginAsDemo(DEMO_STUDENT_EMAIL, "student123");
     }
   });
+
+  window.addEventListener("pagehide", () => {
+    markCurrentUserOffline().catch(() => {});
+    syncPresenceRuntime(null);
+    clearAdminPresencePolling();
+  });
 }
 
 function navigate(route, extras = {}) {
@@ -2582,6 +2612,225 @@ function navigate(route, extras = {}) {
   state.route = route;
   Object.assign(state, extras);
   render();
+}
+
+function clearAdminPresencePolling() {
+  if (adminPresencePollHandle) {
+    window.clearInterval(adminPresencePollHandle);
+    adminPresencePollHandle = null;
+  }
+}
+
+function shouldTreatPresenceAsOnline(row) {
+  const lastSeenMs = new Date(row?.last_seen_at || 0).getTime();
+  return Boolean(row?.is_online) && Number.isFinite(lastSeenMs) && (Date.now() - lastSeenMs) <= PRESENCE_ONLINE_STALE_MS;
+}
+
+function setPresenceRouteState() {
+  const solvingNow = state.route === "session";
+  if (solvingNow && !presenceRuntime.isSolving) {
+    presenceRuntime.solvingStartedAt = nowISO();
+  }
+  if (!solvingNow && presenceRuntime.isSolving) {
+    presenceRuntime.solvingStartedAt = null;
+  }
+  presenceRuntime.isSolving = solvingNow;
+}
+
+async function pushCurrentUserPresence(options = {}) {
+  const currentUser = getCurrentUser();
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId)) {
+    return false;
+  }
+
+  const force = Boolean(options?.force);
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return false;
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return false;
+  }
+
+  setPresenceRouteState();
+  const now = Date.now();
+  const payload = {
+    user_id: currentUser.supabaseAuthId,
+    full_name: String(currentUser.name || "").trim() || "Student",
+    email: String(currentUser.email || "").trim().toLowerCase(),
+    role: currentUser.role === "admin" ? "admin" : "student",
+    current_route: String(state.route || "").trim() || "dashboard",
+    is_online: true,
+    is_solving: presenceRuntime.isSolving,
+    solving_started_at: presenceRuntime.solvingStartedAt,
+    last_seen_at: nowISO(),
+  };
+  const payloadKey = JSON.stringify([
+    payload.user_id,
+    payload.current_route,
+    payload.is_solving,
+    payload.solving_started_at || "",
+  ]);
+  const tooSoon = now - presenceRuntime.lastSentAt < 7000;
+  if (!force && tooSoon && payloadKey === presenceRuntime.lastPayloadKey) {
+    return true;
+  }
+
+  const { error } = await client.from("user_presence").upsert([payload], { onConflict: "user_id" });
+  if (error) {
+    return false;
+  }
+
+  presenceRuntime.lastPayloadKey = payloadKey;
+  presenceRuntime.lastSentAt = now;
+  return true;
+}
+
+async function markCurrentUserOffline() {
+  const currentUser = getCurrentUser();
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId)) {
+    return;
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return;
+  }
+  await client
+    .from("user_presence")
+    .update({
+      is_online: false,
+      is_solving: false,
+      current_route: null,
+      solving_started_at: null,
+      last_seen_at: nowISO(),
+    })
+    .eq("user_id", currentUser.supabaseAuthId);
+}
+
+function syncPresenceRuntime(user) {
+  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+    if (presenceRuntime.timer) {
+      window.clearInterval(presenceRuntime.timer);
+      presenceRuntime.timer = null;
+    }
+    presenceRuntime.isSolving = false;
+    presenceRuntime.solvingStartedAt = null;
+    presenceRuntime.lastPayloadKey = "";
+    presenceRuntime.lastSentAt = 0;
+    presenceRuntime.lastRoute = "";
+    presenceRuntime.lastSolving = false;
+    presenceRuntime.pushInFlight = false;
+    presenceRuntime.nextRetryAt = 0;
+    return;
+  }
+
+  setPresenceRouteState();
+  if (!presenceRuntime.timer) {
+    presenceRuntime.timer = window.setInterval(() => {
+      pushCurrentUserPresence().catch((error) => {
+        console.warn("Presence heartbeat failed.", error?.message || error);
+      });
+    }, PRESENCE_HEARTBEAT_MS);
+  }
+  const routeChanged = presenceRuntime.lastRoute !== state.route;
+  const solvingChanged = presenceRuntime.lastSolving !== presenceRuntime.isSolving;
+  const now = Date.now();
+  const heartbeatDue = (now - presenceRuntime.lastSentAt) >= PRESENCE_HEARTBEAT_MS;
+  if (now < presenceRuntime.nextRetryAt) {
+    return;
+  }
+  if (!routeChanged && !solvingChanged && !heartbeatDue) {
+    return;
+  }
+  if (presenceRuntime.pushInFlight) {
+    return;
+  }
+  presenceRuntime.pushInFlight = true;
+  pushCurrentUserPresence({ force: routeChanged || solvingChanged })
+    .then((ok) => {
+      if (ok) {
+        presenceRuntime.lastRoute = state.route;
+        presenceRuntime.lastSolving = presenceRuntime.isSolving;
+        presenceRuntime.nextRetryAt = 0;
+      } else {
+        presenceRuntime.nextRetryAt = Date.now() + 15000;
+      }
+    })
+    .catch((error) => {
+      console.warn("Presence update failed.", error?.message || error);
+      presenceRuntime.nextRetryAt = Date.now() + 15000;
+    })
+    .finally(() => {
+      presenceRuntime.pushInFlight = false;
+    });
+}
+
+async function refreshAdminPresenceSnapshot(options = {}) {
+  const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return false;
+  }
+  if (state.adminPresenceLoading) {
+    return false;
+  }
+  const force = Boolean(options?.force);
+  const silent = Boolean(options?.silent);
+  if (!force && state.adminPresenceLastSyncAt && (Date.now() - state.adminPresenceLastSyncAt) < ADMIN_DATA_REFRESH_MS) {
+    return true;
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    state.adminPresenceError = "Presence data is unavailable.";
+    return false;
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    state.adminPresenceError = "Supabase relational client is unavailable.";
+    return false;
+  }
+
+  state.adminPresenceLoading = true;
+  try {
+    const { data, error } = await client
+      .from("user_presence")
+      .select("user_id,full_name,email,role,current_route,is_online,is_solving,solving_started_at,last_seen_at,updated_at")
+      .order("last_seen_at", { ascending: false })
+      .limit(200);
+    if (error) {
+      state.adminPresenceError = error.message || "Could not load presence data.";
+      return false;
+    }
+    state.adminPresenceRows = Array.isArray(data) ? data : [];
+    state.adminPresenceError = "";
+    state.adminPresenceLastSyncAt = Date.now();
+    return true;
+  } finally {
+    state.adminPresenceLoading = false;
+  }
+}
+
+function ensureAdminPresencePolling() {
+  if (adminPresencePollHandle) {
+    return;
+  }
+  adminPresencePollHandle = window.setInterval(() => {
+    if (state.route !== "admin" || state.adminPage !== "activity") {
+      clearAdminPresencePolling();
+      return;
+    }
+    refreshAdminPresenceSnapshot()
+      .then((ok) => {
+        if (ok && state.route === "admin" && state.adminPage === "activity") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      })
+      .catch((error) => {
+        console.warn("Admin presence refresh failed.", error?.message || error);
+      });
+  }, ADMIN_DATA_REFRESH_MS);
 }
 
 function shouldRefreshAdminData(user) {
@@ -2618,6 +2867,9 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     await hydrateRelationalCoursesAndTopics();
     await hydrateRelationalProfiles(user);
     await hydrateRelationalQuestions();
+    if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
+      await refreshAdminPresenceSnapshot({ force: true, silent: true });
+    }
     state.adminDataLastSyncAt = Date.now();
     return true;
   } catch (error) {
@@ -2654,7 +2906,13 @@ function render() {
     state.adminDataRefreshing = false;
     state.adminDataLastSyncAt = 0;
     state.adminDataSyncError = "";
+    state.adminPresenceLoading = false;
+    state.adminPresenceError = "";
+    state.adminPresenceRows = [];
+    state.adminPresenceLastSyncAt = 0;
+    clearAdminPresencePolling();
   }
+  syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
   if (skipTransition) {
@@ -2704,6 +2962,9 @@ function render() {
   topbarEl?.classList.toggle("hidden", false);
 
   syncTopbar();
+  if (!(state.route === "admin" && state.adminPage === "activity")) {
+    clearAdminPresencePolling();
+  }
 
   switch (state.route) {
     case "landing":
@@ -4900,7 +5161,9 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions"].includes(state.adminPage) ? state.adminPage : "dashboard";
+  const activeAdminPage = ["dashboard", "users", "courses", "questions", "activity"].includes(state.adminPage)
+    ? state.adminPage
+    : "dashboard";
   if (activeAdminPage === "users" || activeAdminPage === "courses") {
     syncUsersWithCurriculum();
   }
@@ -5257,6 +5520,81 @@ function renderAdmin() {
     `;
   }
 
+  if (activeAdminPage === "activity") {
+    const rows = Array.isArray(state.adminPresenceRows) ? state.adminPresenceRows : [];
+    const onlineRows = rows.filter((row) => shouldTreatPresenceAsOnline(row));
+    const solvingRows = onlineRows.filter((row) => Boolean(row?.is_solving));
+    const activityRows = rows
+      .map((row) => {
+        const online = shouldTreatPresenceAsOnline(row);
+        const solvingNow = online && Boolean(row?.is_solving);
+        const name = String(row?.full_name || "").trim() || String(row?.email || "").trim() || "User";
+        const route = String(row?.current_route || "").trim() || "-";
+        const lastSeen = row?.last_seen_at ? new Date(row.last_seen_at).toLocaleString() : "-";
+        const solvingSince = solvingNow && row?.solving_started_at ? new Date(row.solving_started_at).toLocaleString() : "-";
+        return `
+          <tr>
+            <td><b>${escapeHtml(name)}</b><br /><small>${escapeHtml(String(row?.email || "").trim() || "-")}</small></td>
+            <td>${escapeHtml(String(row?.role || "student"))}</td>
+            <td><span class="badge ${online ? "good" : "neutral"}">${online ? "online" : "offline"}</span></td>
+            <td>${escapeHtml(route)}</td>
+            <td>${solvingNow ? `<span class="badge good">solving</span>` : `<span class="badge neutral">idle</span>`}</td>
+            <td><small>${escapeHtml(solvingSince)}</small></td>
+            <td><small>${escapeHtml(lastSeen)}</small></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    pageContent = `
+      <section class="card admin-section" id="admin-activity-section">
+        <div class="flex-between">
+          <div>
+            <h3 style="margin: 0;">Live User Activity</h3>
+            <p class="subtle">Track who is online and who started solving in real time.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <p class="subtle" style="margin: 0;">Last sync: <b>${state.adminPresenceLastSyncAt ? new Date(state.adminPresenceLastSyncAt).toLocaleTimeString() : "Not yet"}</b></p>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="refresh-admin-activity">Refresh now</button>
+          </div>
+        </div>
+        <div class="stats-grid" style="margin-top: 0.85rem;">
+          <article class="card"><p class="metric">${rows.length}<small>Tracked users</small></p></article>
+          <article class="card"><p class="metric">${onlineRows.length}<small>Currently online</small></p></article>
+          <article class="card"><p class="metric">${solvingRows.length}<small>Currently solving</small></p></article>
+        </div>
+        ${
+          state.adminPresenceLoading
+            ? `<p class="subtle" style="margin-top:0.9rem;">Refreshing activity data...</p>`
+            : ""
+        }
+        ${
+          state.adminPresenceError
+            ? `<p class="subtle" style="margin-top:0.9rem;">${escapeHtml(state.adminPresenceError)}</p>`
+            : ""
+        }
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Route</th>
+                <th>Session</th>
+                <th>Solving Since</th>
+                <th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${activityRows || `<tr><td colspan="7" class="subtle">No activity records yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   const syncNotice = state.adminDataSyncError
     ? `<div class="card admin-section"><p class="subtle" style="margin:0;">${escapeHtml(state.adminDataSyncError)}</p></div>`
     : "";
@@ -5271,6 +5609,7 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
           <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
+          <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
         </div>
       </aside>
 
@@ -5326,17 +5665,54 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions"].includes(page)) {
+      if (!["dashboard", "users", "courses", "questions", "activity"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
         return;
       }
       state.adminPage = page;
+      if (page === "activity") {
+        refreshAdminPresenceSnapshot({ force: true })
+          .then((ok) => {
+            if (ok && state.route === "admin" && state.adminPage === "activity") {
+              state.skipNextRouteAnimation = true;
+              render();
+            }
+          })
+          .catch((error) => {
+            console.warn("Could not refresh admin activity.", error?.message || error);
+          });
+      } else {
+        clearAdminPresencePolling();
+      }
       state.skipNextRouteAnimation = true;
       render();
     });
   });
+
+  if (state.adminPage === "activity") {
+    ensureAdminPresencePolling();
+    if (!state.adminPresenceLoading && (!state.adminPresenceLastSyncAt || (Date.now() - state.adminPresenceLastSyncAt) > ADMIN_DATA_REFRESH_MS)) {
+      refreshAdminPresenceSnapshot()
+        .then((ok) => {
+          if (ok) {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+        })
+        .catch((error) => {
+          console.warn("Could not refresh admin activity.", error?.message || error);
+        });
+    }
+    appEl.querySelector("[data-action='refresh-admin-activity']")?.addEventListener("click", async () => {
+      await refreshAdminPresenceSnapshot({ force: true });
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  } else {
+    clearAdminPresencePolling();
+  }
 
   const curriculumFilterForm = document.getElementById("admin-curriculum-filter-form");
   const curriculumYearSelect = curriculumFilterForm?.querySelector("select[name='curriculumYear']");
@@ -7932,7 +8308,10 @@ async function loginAsDemo(email, password) {
   navigate(user.role === "admin" ? "admin" : "dashboard");
 }
 
-function logout() {
+async function logout() {
+  await markCurrentUserOffline().catch(() => {});
+  syncPresenceRuntime(null);
+  clearAdminPresencePolling();
   const authClient = getSupabaseAuthClient();
   if (authClient) {
     authClient.auth.signOut().catch((error) => {
