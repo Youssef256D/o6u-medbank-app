@@ -1324,9 +1324,9 @@ function renderAuth(mode) {
       <section class="panel" style="max-width: 560px; margin-inline: auto;">
         <h2 class="title">Log In</h2>
         <p class="subtle">Access your O6U course question bank and saved blocks.</p>
-        <form id="login-form" class="auth-form" style="margin-top: 1rem;">
-          <label>Email <input type="email" name="email" required /></label>
-          <label>Password <input type="password" name="password" required /></label>
+        <form id="login-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+          <label>Email <input type="email" id="login-email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
+          <label>Password <input type="password" id="login-password" name="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required /></label>
           <div class="stack">
             <button class="btn" type="submit">Log in</button>
             <button class="btn ghost" type="button" data-nav="forgot">Forgot password</button>
@@ -1348,14 +1348,17 @@ function renderAuth(mode) {
       <section class="panel" style="max-width: 680px; margin-inline: auto;">
         <h2 class="title">Create Account</h2>
         <p class="subtle">Student sign-up with year, semester, and course enrollment.</p>
-        <form id="signup-form" class="auth-form" style="margin-top: 1rem;">
+        <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
           <div class="form-row">
-            <label>Full name <input name="name" required /></label>
-            <label>Email <input type="email" name="email" required /></label>
+            <label>Full name <input name="name" autocomplete="name" required /></label>
+            <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
           </div>
           <div class="form-row">
-            <label>Password <input type="password" name="password" minlength="6" required /></label>
-            <label>Phone number <input type="tel" name="phone" placeholder="+20 10 0000 0000" required /></label>
+            <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
+            <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
+          </div>
+          <div class="form-row">
+            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required /></label>
           </div>
           <div class="form-row">
             <label>Invite code (optional) <input name="inviteCode" /></label>
@@ -1407,8 +1410,8 @@ function renderAuth(mode) {
     <section class="panel" style="max-width: 560px; margin-inline: auto;">
       <h2 class="title">Forgot Password</h2>
       <p class="subtle">Send a password reset email using Supabase Auth.</p>
-      <form id="forgot-form" class="auth-form" style="margin-top: 1rem;">
-        <label>Email <input type="email" name="email" required /></label>
+      <form id="forgot-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+        <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
         <button class="btn" type="submit">Send reset link</button>
       </form>
       <div class="auth-inline">
@@ -1570,6 +1573,7 @@ function wireAuth(mode) {
       const name = String(data.get("name") || "").trim();
       const email = String(data.get("email") || "").trim().toLowerCase();
       const password = String(data.get("password") || "");
+      const confirmPassword = String(data.get("confirmPassword") || "");
       const phone = String(data.get("phone") || "").trim();
       const inviteCode = String(data.get("inviteCode") || "").trim();
       const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
@@ -1579,6 +1583,10 @@ function wireAuth(mode) {
 
       if (!name || !email || !password || !phone) {
         toast("Name, email, password, and phone number are required.");
+        return;
+      }
+      if (password !== confirmPassword) {
+        toast("Password and confirm password must match.");
         return;
       }
 
