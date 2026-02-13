@@ -23,6 +23,8 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.4").trim();
+const RELATIONAL_READY_CACHE_MS = 45000;
+const ADMIN_DATA_REFRESH_MS = 15000;
 
 const state = {
   route: "landing",
@@ -52,6 +54,9 @@ const state = {
   calcExpression: "",
   adminImportReport: null,
   skipNextRouteAnimation: false,
+  adminDataRefreshing: false,
+  adminDataLastSyncAt: 0,
+  adminDataSyncError: "",
 };
 
 let appVersionCheckPromise = null;
@@ -109,6 +114,8 @@ const relationalSync = {
   flushing: false,
   profilesBackfillAttempted: false,
   questionsBackfillAttempted: false,
+  readyCheckedAt: 0,
+  readyPromise: null,
 };
 
 let timerHandle = null;
@@ -666,6 +673,10 @@ async function initSupabaseAuth() {
         await hydrateRelationalState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
         });
+        if (localUser?.role === "admin") {
+          state.adminDataLastSyncAt = Date.now();
+          state.adminDataSyncError = "";
+        }
         await hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
         });
@@ -700,6 +711,10 @@ async function initSupabaseAuth() {
         await hydrateRelationalState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
         });
+        if (localUser?.role === "admin") {
+          state.adminDataLastSyncAt = Date.now();
+          state.adminDataSyncError = "";
+        }
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
           const current = getCurrentUser();
           if (current) {
@@ -715,8 +730,10 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
-        relationalSync.pendingWrites.clear();
-        clearRelationalFlushTimer();
+        resetRelationalSyncState();
+        state.adminDataRefreshing = false;
+        state.adminDataLastSyncAt = 0;
+        state.adminDataSyncError = "";
         localStorage.removeItem(STORAGE_KEYS.currentUserId);
         const privateRoutes = new Set([
           "dashboard",
@@ -980,6 +997,17 @@ function clearRelationalFlushTimer() {
   }
 }
 
+function resetRelationalSyncState() {
+  relationalSync.enabled = false;
+  relationalSync.pendingWrites.clear();
+  relationalSync.flushing = false;
+  relationalSync.profilesBackfillAttempted = false;
+  relationalSync.questionsBackfillAttempted = false;
+  relationalSync.readyCheckedAt = 0;
+  relationalSync.readyPromise = null;
+  clearRelationalFlushTimer();
+}
+
 function scheduleRelationalWrite(storageKey, value) {
   if (!relationalSync.enabled || !RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
     return false;
@@ -1010,34 +1038,53 @@ function scheduleRelationalWrite(storageKey, value) {
   return true;
 }
 
-async function ensureRelationalSyncReady() {
+async function ensureRelationalSyncReady(options = {}) {
+  const force = Boolean(options?.force);
   const client = getRelationalClient();
   if (!client) {
-    relationalSync.enabled = false;
+    resetRelationalSyncState();
     return false;
   }
 
-  const checks = [
-    { table: "profiles", select: "id" },
-    { table: "courses", select: "id" },
-    { table: "course_topics", select: "id" },
-    { table: "questions", select: "id" },
-    { table: "question_choices", select: "id" },
-    { table: "test_blocks", select: "id" },
-    { table: "test_block_items", select: "block_id" },
-    { table: "test_responses", select: "block_id" },
-  ];
-
-  for (const check of checks) {
-    const { error } = await client.from(check.table).select(check.select).limit(1);
-    if (error) {
-      relationalSync.enabled = false;
-      return false;
-    }
+  const now = Date.now();
+  if (!force && relationalSync.readyCheckedAt && (now - relationalSync.readyCheckedAt) < RELATIONAL_READY_CACHE_MS) {
+    return relationalSync.enabled;
+  }
+  if (!force && relationalSync.readyPromise) {
+    return relationalSync.readyPromise;
   }
 
-  relationalSync.enabled = true;
-  return true;
+  relationalSync.readyPromise = (async () => {
+    const checks = [
+      { table: "profiles", select: "id" },
+      { table: "courses", select: "id" },
+      { table: "course_topics", select: "id" },
+      { table: "questions", select: "id" },
+      { table: "question_choices", select: "id" },
+      { table: "test_blocks", select: "id" },
+      { table: "test_block_items", select: "block_id" },
+      { table: "test_responses", select: "block_id" },
+    ];
+
+    for (const check of checks) {
+      const { error } = await client.from(check.table).select(check.select).limit(1);
+      if (error) {
+        relationalSync.enabled = false;
+        relationalSync.readyCheckedAt = Date.now();
+        return false;
+      }
+    }
+
+    relationalSync.enabled = true;
+    relationalSync.readyCheckedAt = Date.now();
+    return true;
+  })();
+
+  try {
+    return await relationalSync.readyPromise;
+  } finally {
+    relationalSync.readyPromise = null;
+  }
 }
 
 async function updateRelationalProfileApproval(profileIds, approved) {
@@ -1693,15 +1740,22 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
   const rows = Array.isArray(data) ? data : [];
   let hadRemoteData = false;
   keySpecs.forEach(({ storageKey, candidates }) => {
-    const matching = rows
+    const primaryKey = buildRemoteSyncKey(storageKey, scope);
+    const primaryRows = primaryKey
+      ? rows
+          .filter((row) => String(row?.[supabaseSync.storageKeyColumn] || "") === primaryKey)
+          .sort((a, b) => new Date(b?.updated_at || 0) - new Date(a?.updated_at || 0))
+      : [];
+    const fallbackRows = rows
       .filter((row) => candidates.includes(String(row?.[supabaseSync.storageKeyColumn] || "")))
       .sort((a, b) => new Date(b?.updated_at || 0) - new Date(a?.updated_at || 0));
-    if (!matching.length) {
+    const selectedRow = primaryRows[0] || fallbackRows[0];
+    if (!selectedRow) {
       return;
     }
     hadRemoteData = true;
     try {
-      const payload = sanitizeUserScopedPayload(storageKey, matching[0].payload);
+      const payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
       localStorage.setItem(storageKey, JSON.stringify(payload));
     } catch {
       // Ignore malformed remote payloads and keep local fallback.
@@ -2530,6 +2584,63 @@ function navigate(route, extras = {}) {
   render();
 }
 
+function shouldRefreshAdminData(user) {
+  if (!user || user.role !== "admin") {
+    return false;
+  }
+  if (state.adminDataRefreshing) {
+    return false;
+  }
+  const last = Number(state.adminDataLastSyncAt || 0);
+  return !last || (Date.now() - last) > ADMIN_DATA_REFRESH_MS;
+}
+
+async function refreshAdminDataSnapshot(user, options = {}) {
+  if (!user || user.role !== "admin") {
+    return false;
+  }
+  const force = Boolean(options?.force);
+  if (!force && !shouldRefreshAdminData(user)) {
+    return true;
+  }
+  if (state.adminDataRefreshing) {
+    return false;
+  }
+
+  state.adminDataRefreshing = true;
+  state.adminDataSyncError = "";
+  try {
+    const ready = await ensureRelationalSyncReady({ force });
+    if (!ready) {
+      state.adminDataSyncError = "Relational sync is unavailable.";
+      return false;
+    }
+    await hydrateRelationalCoursesAndTopics();
+    await hydrateRelationalProfiles(user);
+    await hydrateRelationalQuestions();
+    state.adminDataLastSyncAt = Date.now();
+    return true;
+  } catch (error) {
+    state.adminDataSyncError = String(error?.message || "Failed to refresh admin data.");
+    return false;
+  } finally {
+    state.adminDataRefreshing = false;
+    if (state.route === "admin") {
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+  }
+}
+
+function renderAdminLoading() {
+  return `
+    <section class="panel">
+      <h2 class="title">Admin Dashboard</h2>
+      <p class="subtle">Syncing latest users and admin data...</p>
+    </section>
+  `;
+}
+
 function render() {
   document.body.classList.remove("no-panel-animations");
   clearTimer();
@@ -2539,6 +2650,11 @@ function render() {
   document.removeEventListener("keydown", handleReviewKeydown);
 
   const user = getCurrentUser();
+  if (!user || user.role !== "admin") {
+    state.adminDataRefreshing = false;
+    state.adminDataLastSyncAt = 0;
+    state.adminDataSyncError = "";
+  }
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
   if (skipTransition) {
@@ -2643,6 +2759,15 @@ function render() {
       wireProfile();
       break;
     case "admin":
+      if (user?.role === "admin" && shouldRefreshAdminData(user)) {
+        refreshAdminDataSnapshot(user, { force: !state.adminDataLastSyncAt }).catch((error) => {
+          console.warn("Admin data refresh failed.", error?.message || error);
+        });
+      }
+      if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
+        appEl.innerHTML = renderAdminLoading();
+        break;
+      }
       appEl.innerHTML = renderAdmin();
       wireAdmin();
       break;
@@ -5132,6 +5257,10 @@ function renderAdmin() {
     `;
   }
 
+  const syncNotice = state.adminDataSyncError
+    ? `<div class="card admin-section"><p class="subtle" style="margin:0;">${escapeHtml(state.adminDataSyncError)}</p></div>`
+    : "";
+
   return `
     <section class="panel admin-shell">
       <aside class="admin-sidebar card">
@@ -5145,7 +5274,7 @@ function renderAdmin() {
         </div>
       </aside>
 
-      <div class="admin-main">${pageContent}</div>
+      <div class="admin-main">${syncNotice}${pageContent}</div>
     </section>
   `;
 }
