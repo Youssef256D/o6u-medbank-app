@@ -15,6 +15,7 @@ const STORAGE_KEYS = {
 
 const appEl = document.getElementById("app");
 const topbarEl = document.querySelector(".topbar");
+const brandWrapEl = document.querySelector(".brand-wrap");
 const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
@@ -2245,6 +2246,11 @@ function render() {
 function syncTopbar() {
   const user = getCurrentUser();
   const isAdmin = user?.role === "admin";
+  const isAdminHeader = Boolean(user && isAdmin);
+
+  topbarEl?.classList.toggle("admin-only-header", isAdminHeader);
+  brandWrapEl?.classList.toggle("hidden", isAdminHeader);
+  authActionsEl.classList.toggle("hidden", isAdminHeader);
 
   publicNavEl.classList.toggle("hidden", Boolean(user));
   privateNavEl.classList.toggle("hidden", !user);
@@ -2252,18 +2258,22 @@ function syncTopbar() {
   privateNavEl.querySelectorAll("[data-nav]").forEach((button) => {
     const route = button.getAttribute("data-nav");
     if (isAdmin) {
-      button.classList.toggle("hidden", false);
+      button.classList.toggle("hidden", route !== "admin");
     } else {
       button.classList.toggle("hidden", route === "admin");
     }
   });
 
   if (!user) {
+    authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       <button data-nav="login">Login</button>
       <button class="btn" data-nav="signup">Sign up</button>
     `;
+  } else if (isAdmin) {
+    authActionsEl.innerHTML = "";
   } else {
+    authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       <span class="help">${escapeHtml(user.name)} (${escapeHtml(user.role)})</span>
       <button class="btn ghost" data-action="logout">Log out</button>
@@ -4336,172 +4346,357 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  syncUsersWithCurriculum();
+  const activeAdminPage = ["dashboard", "users", "courses", "questions"].includes(state.adminPage) ? state.adminPage : "dashboard";
+  if (activeAdminPage === "users" || activeAdminPage === "courses") {
+    syncUsersWithCurriculum();
+  }
 
   const allCourses = Object.keys(QBANK_COURSE_TOPICS);
-  const users = getUsers().sort((a, b) => a.name.localeCompare(b.name));
-  const questions = getQuestions();
-  const sessions = getSessions();
-  const editing = questions.find((entry) => entry.id === state.adminEditQuestionId);
-  const completedSessions = sessions.filter((session) => session.status === "completed").length;
-  const inProgressSessions = sessions.filter((session) => session.status === "in_progress").length;
-  const students = users.filter((entry) => entry.role === "student");
-  const admins = users.filter((entry) => entry.role === "admin");
-  const publishedQuestions = questions.filter((entry) => entry.status === "published").length;
+  let pageContent = "";
 
-  const filterCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : "";
-  const filterTopics = filterCourse ? QBANK_COURSE_TOPICS[filterCourse] : [];
-  const filterTopic = filterTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
+  if (activeAdminPage === "dashboard") {
+    const users = getUsers();
+    const questions = getQuestions();
+    const sessions = getSessions();
+    let students = 0;
+    let admins = 0;
+    users.forEach((account) => {
+      if (account.role === "admin") {
+        admins += 1;
+      } else if (account.role === "student") {
+        students += 1;
+      }
+    });
+    const publishedQuestions = questions.filter((entry) => entry.status === "published").length;
+    let completedSessions = 0;
+    let inProgressSessions = 0;
+    sessions.forEach((session) => {
+      if (session.status === "completed") {
+        completedSessions += 1;
+      } else if (session.status === "in_progress") {
+        inProgressSessions += 1;
+      }
+    });
 
-  const questionsWithMeta = questions.map((question) => {
-    const meta = getQbankCourseTopicMeta(question);
-    return { ...question, qbankCourse: meta.course, qbankTopic: meta.topic };
-  });
+    pageContent = `
+      <section class="card admin-section" id="admin-stats-section">
+        <h2 class="title">O6U Admin Dashboard</h2>
+        <p class="subtle">Live statistics for users, questions, and activity across the website.</p>
+        <div class="stats-grid" style="margin-top: 0.85rem;">
+          <article class="card"><p class="metric">${users.length}<small>Total accounts</small></p></article>
+          <article class="card"><p class="metric">${students}<small>Student accounts</small></p></article>
+          <article class="card"><p class="metric">${admins}<small>Admin accounts</small></p></article>
+          <article class="card"><p class="metric">${questions.length}<small>Total questions</small></p></article>
+          <article class="card"><p class="metric">${publishedQuestions}<small>Published questions</small></p></article>
+          <article class="card"><p class="metric">${completedSessions}<small>Completed tests</small></p></article>
+          <article class="card"><p class="metric">${inProgressSessions}<small>Active tests</small></p></article>
+        </div>
+      </section>
+    `;
+  }
 
-  const filteredQuestions = questionsWithMeta.filter((question) => {
-    if (filterCourse && question.qbankCourse !== filterCourse) return false;
-    if (filterTopic && question.qbankTopic !== filterTopic) return false;
-    return true;
-  });
-
-  const editorMeta = editing ? getQbankCourseTopicMeta(editing) : null;
-  const editorCourseBase = state.adminEditorCourse || editorMeta?.course || filterCourse || allCourses[0];
-  const editorCourse = allCourses.includes(editorCourseBase) ? editorCourseBase : allCourses[0];
-  const editorTopics = QBANK_COURSE_TOPICS[editorCourse] || [];
-  const editorTopicBase = state.adminEditorTopic || editorMeta?.topic || editorTopics[0] || "";
-  const editorTopic = editorTopics.includes(editorTopicBase) ? editorTopicBase : editorTopics[0] || "";
-
-  const rows = filteredQuestions
-    .map(
-      (question) => `
-      <tr>
-        <td>${escapeHtml(question.id)}</td>
-        <td>${escapeHtml(question.qbankCourse)}</td>
-        <td>${escapeHtml(question.qbankTopic)}</td>
-        <td>${escapeHtml(question.author)}</td>
-        <td>${escapeHtml(question.difficulty)}</td>
-        <td><span class="badge ${question.status === "published" ? "good" : "neutral"}">${escapeHtml(question.status)}</span></td>
-        <td>
-          <div class="stack">
-            <button class="btn ghost" data-action="admin-edit" data-qid="${question.id}">Edit</button>
-            <button class="btn danger" data-action="admin-delete" data-qid="${question.id}">Delete</button>
-          </div>
-        </td>
-      </tr>
-    `,
-    )
-    .join("");
-
-  const accountRows = users
-    .map((account) => {
-      const year = account.role === "student" ? sanitizeAcademicYear(account.academicYear || 1) : null;
-      const semester = account.role === "student" ? sanitizeAcademicSemester(account.academicSemester || 1) : null;
-      const isApproved = isUserAccessApproved(account);
-      const visibleCourses =
-        account.role === "student"
-          ? getCurriculumCourses(year || 1, semester || 1)
-          : sanitizeCourseAssignments(account.assignedCourses || allCourses);
-      const compactCourses = visibleCourses.slice(0, 2).map((course) => (course.length > 42 ? `${course.slice(0, 39)}...` : course));
-      const coursePreview =
-        visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
-      const isSelf = account.id === user.id;
-      const isLockedAdmin = isForcedAdminEmail(account.email);
-      return `
-        <tr data-user-id="${escapeHtml(account.id)}">
-          <td class="admin-user-account">
-            <b>${escapeHtml(account.name)}</b><br />
-            <small>${escapeHtml(account.email)}</small><br />
-            <small>${escapeHtml(account.phone || "No phone")}</small><br />
-            <small><span class="badge ${isApproved ? "good" : "bad"}">${isApproved ? "approved" : "pending"}</span></small>
-          </td>
-          <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
-          <td>
-            ${
-              account.role === "student"
-                ? `<select class="admin-mini-select" data-field="academicYear">
-                     ${[1, 2, 3, 4, 5]
-                       .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
-                       .join("")}
-                   </select>`
-                : `<span class="admin-na">-</span>`
-            }
-          </td>
-          <td>
-            ${
-              account.role === "student"
-                ? `<select class="admin-mini-select" data-field="academicSemester">
-                     <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
-                     <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
-                   </select>`
-                : `<span class="admin-na">-</span>`
-            }
-          </td>
-          <td class="admin-user-courses">
-            <small class="admin-course-preview" title="${escapeHtml(visibleCourses.join(", "))}">${escapeHtml(coursePreview || "No courses assigned")}</small>
-          </td>
-          <td class="admin-user-actions-cell">
-            <div class="admin-user-actions">
-              <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
-              <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
-                ${isApproved ? "Suspend access" : "Approve access"}
-              </button>
-              <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
-                ${account.role === "admin" ? "Make student" : "Make admin"}
-              </button>
-              <button class="btn danger admin-btn-sm" data-action="remove-user" ${isSelf ? "disabled" : ""}>Remove</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  const choice = (idx) => editing?.choices?.[idx]?.text || "";
-  const importCourse = filterCourse || allCourses[0];
-  const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
-  const importReport = state.adminImportReport;
-  const importErrorPreview = (importReport?.errors || []).slice(0, 15);
-  const activeAdminPage = ["dashboard", "users", "courses", "questions"].includes(state.adminPage) ? state.adminPage : "dashboard";
-  const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
-  const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-  const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
-  const questionCountByCourse = questions.reduce((acc, question) => {
-    const mappedCourse = getQbankCourseTopicMeta(question).course;
-    if (!mappedCourse) {
-      return acc;
-    }
-    acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
-    return acc;
-  }, {});
-  const curriculumRows = selectedSemesterCourses
-    .map(
-      (course, idx) => `
-        <tr data-course-index="${idx}">
-          <td>${idx + 1}</td>
-          <td><input data-field="curriculumCourseName" value="${escapeHtml(course)}" /></td>
-          <td data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</td>
-          <td>
-            <div class="admin-course-qbank">
-              <p class="admin-course-qbank-count">
-                <b>${questionCountByCourse[course] || 0}</b> questions
-              </p>
-              <div class="admin-course-qbank-actions">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-add">Add question</button>
-                <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-remove" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Remove question</button>
-                <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Clear all questions</button>
+  if (activeAdminPage === "users") {
+    const users = getUsers().sort((a, b) => a.name.localeCompare(b.name));
+    const accountRows = users
+      .map((account) => {
+        const year = account.role === "student" ? sanitizeAcademicYear(account.academicYear || 1) : null;
+        const semester = account.role === "student" ? sanitizeAcademicSemester(account.academicSemester || 1) : null;
+        const isApproved = isUserAccessApproved(account);
+        const visibleCourses =
+          account.role === "student"
+            ? getCurriculumCourses(year || 1, semester || 1)
+            : sanitizeCourseAssignments(account.assignedCourses || allCourses);
+        const compactCourses = visibleCourses.slice(0, 2).map((course) => (course.length > 42 ? `${course.slice(0, 39)}...` : course));
+        const coursePreview =
+          visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
+        const isSelf = account.id === user.id;
+        const isLockedAdmin = isForcedAdminEmail(account.email);
+        return `
+          <tr data-user-id="${escapeHtml(account.id)}">
+            <td class="admin-user-account">
+              <b>${escapeHtml(account.name)}</b><br />
+              <small>${escapeHtml(account.email)}</small><br />
+              <small>${escapeHtml(account.phone || "No phone")}</small><br />
+              <small><span class="badge ${isApproved ? "good" : "bad"}">${isApproved ? "approved" : "pending"}</span></small>
+            </td>
+            <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
+            <td>
+              ${
+                account.role === "student"
+                  ? `<select class="admin-mini-select" data-field="academicYear">
+                       ${[1, 2, 3, 4, 5]
+                         .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
+                         .join("")}
+                     </select>`
+                  : `<span class="admin-na">-</span>`
+              }
+            </td>
+            <td>
+              ${
+                account.role === "student"
+                  ? `<select class="admin-mini-select" data-field="academicSemester">
+                       <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
+                       <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
+                     </select>`
+                  : `<span class="admin-na">-</span>`
+              }
+            </td>
+            <td class="admin-user-courses">
+              <small class="admin-course-preview" title="${escapeHtml(visibleCourses.join(", "))}">${escapeHtml(coursePreview || "No courses assigned")}</small>
+            </td>
+            <td class="admin-user-actions-cell">
+              <div class="admin-user-actions">
+                <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
+                <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
+                  ${isApproved ? "Suspend access" : "Approve access"}
+                </button>
+                <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
+                  ${account.role === "admin" ? "Make student" : "Make admin"}
+                </button>
+                <button class="btn danger admin-btn-sm" data-action="remove-user" ${isSelf ? "disabled" : ""}>Remove</button>
               </div>
-            </div>
-          </td>
-          <td>
-            <div class="stack">
-              <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
-              <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete</button>
-            </div>
-          </td>
-        </tr>
-      `,
-    )
-    .join("");
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    pageContent = `
+      <section class="card admin-section" id="admin-users-section">
+        <div class="flex-between">
+          <div>
+            <h3 style="margin: 0;">Users</h3>
+            <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
+          </div>
+        </div>
+        <form id="admin-add-user-form" style="margin-top: 0.85rem;">
+          <div class="form-row">
+            <label>Full name <input name="name" required /></label>
+            <label>Email <input type="email" name="email" required /></label>
+          </div>
+          <div class="form-row">
+            <label>Password <input type="password" name="password" minlength="6" required /></label>
+            <label>Role
+              <select name="role">
+                <option value="student">Student</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Year
+              <select name="academicYear">
+                <option value="1">Year 1</option>
+                <option value="2">Year 2</option>
+                <option value="3">Year 3</option>
+                <option value="4">Year 4</option>
+                <option value="5">Year 5</option>
+              </select>
+            </label>
+            <label>Semester
+              <select name="academicSemester">
+                <option value="1">Semester 1</option>
+                <option value="2">Semester 2</option>
+              </select>
+            </label>
+          </div>
+          <div class="stack">
+            <button class="btn" type="submit">Add user</button>
+          </div>
+        </form>
+
+        <div class="table-wrap admin-users-table-wrap" style="margin-top: 0.9rem;">
+          <table class="admin-users-table">
+            <colgroup>
+              <col class="col-account" />
+              <col class="col-role" />
+              <col class="col-year" />
+              <col class="col-semester" />
+              <col class="col-courses" />
+              <col class="col-actions" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Role</th>
+                <th>Year</th>
+                <th>Semester</th>
+                <th>Courses</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>${accountRows}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  if (activeAdminPage === "courses") {
+    const questions = getQuestions();
+    const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
+    const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
+    const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
+    const questionCountByCourse = questions.reduce((acc, question) => {
+      const mappedCourse = getQbankCourseTopicMeta(question).course;
+      if (!mappedCourse) {
+        return acc;
+      }
+      acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
+      return acc;
+    }, {});
+    const curriculumRows = selectedSemesterCourses
+      .map(
+        (course, idx) => `
+          <tr data-course-index="${idx}">
+            <td>${idx + 1}</td>
+            <td><input data-field="curriculumCourseName" value="${escapeHtml(course)}" /></td>
+            <td data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</td>
+            <td>
+              <div class="admin-course-qbank">
+                <p class="admin-course-qbank-count">
+                  <b>${questionCountByCourse[course] || 0}</b> questions
+                </p>
+                <div class="admin-course-qbank-actions">
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-add">Add question</button>
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-remove" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Remove question</button>
+                  <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Clear all questions</button>
+                </div>
+              </div>
+            </td>
+            <td>
+              <div class="stack">
+                <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
+                <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `,
+      )
+      .join("");
+
+    pageContent = `
+      <section class="card admin-section" id="admin-courses-section">
+        <div class="flex-between">
+          <div>
+            <h3 style="margin: 0;">Courses by Year & Semester</h3>
+            <p class="subtle">Add, rename, or remove courses for each academic year and semester.</p>
+          </div>
+        </div>
+        <form id="admin-curriculum-filter-form" style="margin-top: 0.8rem;">
+          <div class="form-row">
+            <label>Year
+              <select name="curriculumYear">
+                <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
+                <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
+                <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
+                <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
+                <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
+              </select>
+            </label>
+            <label>Semester
+              <select name="curriculumSemester">
+                <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
+                <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
+              </select>
+            </label>
+          </div>
+        </form>
+
+        <form id="admin-curriculum-add-form" style="margin-top: 0.8rem;">
+          <label>New course name
+            <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
+          </label>
+          <div class="stack">
+            <button class="btn" type="submit">Add course</button>
+          </div>
+        </form>
+
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Course Name</th>
+                <th>Topics</th>
+                <th>Question Bank</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${curriculumRows || `<tr><td colspan="5" class="subtle">No courses in this semester yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  if (activeAdminPage === "questions") {
+    const importCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
+    const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
+    const importReport = state.adminImportReport;
+    const importErrorPreview = (importReport?.errors || []).slice(0, 15);
+
+    pageContent = `
+      <section class="card admin-section" id="admin-questions-section">
+        <h3 style="margin: 0;">Bulk Import</h3>
+        <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
+        <form id="admin-import-form" style="margin-top: 0.7rem;">
+          <div class="form-row">
+            <label>
+              Default course
+              <select name="defaultCourse" id="admin-import-course">
+                ${allCourses
+                  .map((course) => `<option value="${course}" ${importCourse === course ? "selected" : ""}>${course}</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <label>
+              Default topic
+              <select name="defaultTopic" id="admin-import-topic">
+                ${importTopics.map((topic) => `<option value="${escapeHtml(topic)}">${escapeHtml(topic)}</option>`).join("")}
+              </select>
+            </label>
+          </div>
+          <label>Upload file
+            <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
+          </label>
+          <label>Paste CSV rows or JSON array
+            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'></textarea>
+          </label>
+          <div class="stack">
+            <button class="btn" type="submit">Run bulk import</button>
+            <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
+          </div>
+        </form>
+        ${
+          importReport
+            ? `
+              <div class="admin-import-report card" style="margin-top: 0.7rem;">
+                <p style="margin: 0;"><b>Last import:</b> ${new Date(importReport.createdAt).toLocaleString()}</p>
+                <p class="subtle">Imported ${importReport.added}/${importReport.total} rows. ${importReport.errors.length} error(s).</p>
+                ${
+                  importErrorPreview.length
+                    ? `
+                      <ol class="admin-import-error-list">
+                        ${importErrorPreview.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
+                      </ol>
+                      <small class="subtle">Showing first ${importErrorPreview.length} errors.</small>
+                    `
+                    : `<p class="subtle">No errors in last import.</p>`
+                }
+                <div class="stack">
+                  <button class="btn ghost admin-btn-sm" type="button" id="admin-download-import-errors" ${importReport.errors.length ? "" : "disabled"}>Download full error report</button>
+                  <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-import-report">Clear report</button>
+                </div>
+              </div>
+            `
+            : ""
+        }
+      </section>
+    `;
+  }
 
   return `
     <section class="panel admin-shell">
@@ -4516,200 +4711,7 @@ function renderAdmin() {
         </div>
       </aside>
 
-      <div class="admin-main">
-        <section class="card admin-section" id="admin-stats-section"${activeAdminPage !== "dashboard" ? ' style="display:none;"' : ""}>
-          <h2 class="title">O6U Admin Dashboard</h2>
-          <p class="subtle">Live statistics for users, questions, and activity across the website.</p>
-          <div class="stats-grid" style="margin-top: 0.85rem;">
-            <article class="card"><p class="metric">${users.length}<small>Total accounts</small></p></article>
-            <article class="card"><p class="metric">${students.length}<small>Student accounts</small></p></article>
-            <article class="card"><p class="metric">${admins.length}<small>Admin accounts</small></p></article>
-            <article class="card"><p class="metric">${questions.length}<small>Total questions</small></p></article>
-            <article class="card"><p class="metric">${publishedQuestions}<small>Published questions</small></p></article>
-            <article class="card"><p class="metric">${completedSessions}<small>Completed tests</small></p></article>
-            <article class="card"><p class="metric">${inProgressSessions}<small>Active tests</small></p></article>
-          </div>
-        </section>
-
-        <section class="card admin-section" id="admin-users-section"${activeAdminPage !== "users" ? ' style="display:none;"' : ""}>
-          <div class="flex-between">
-            <div>
-              <h3 style="margin: 0;">Users</h3>
-              <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
-            </div>
-          </div>
-          <form id="admin-add-user-form" style="margin-top: 0.85rem;">
-            <div class="form-row">
-              <label>Full name <input name="name" required /></label>
-              <label>Email <input type="email" name="email" required /></label>
-            </div>
-            <div class="form-row">
-              <label>Password <input type="password" name="password" minlength="6" required /></label>
-              <label>Role
-                <select name="role">
-                  <option value="student">Student</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </label>
-            </div>
-            <div class="form-row">
-              <label>Year
-                <select name="academicYear">
-                  <option value="1">Year 1</option>
-                  <option value="2">Year 2</option>
-                  <option value="3">Year 3</option>
-                  <option value="4">Year 4</option>
-                  <option value="5">Year 5</option>
-                </select>
-              </label>
-              <label>Semester
-                <select name="academicSemester">
-                  <option value="1">Semester 1</option>
-                  <option value="2">Semester 2</option>
-                </select>
-              </label>
-            </div>
-            <div class="stack">
-              <button class="btn" type="submit">Add user</button>
-            </div>
-          </form>
-
-          <div class="table-wrap admin-users-table-wrap" style="margin-top: 0.9rem;">
-            <table class="admin-users-table">
-              <colgroup>
-                <col class="col-account" />
-                <col class="col-role" />
-                <col class="col-year" />
-                <col class="col-semester" />
-                <col class="col-courses" />
-                <col class="col-actions" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>Account</th>
-                  <th>Role</th>
-                  <th>Year</th>
-                  <th>Semester</th>
-                  <th>Courses</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>${accountRows}</tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="card admin-section" id="admin-courses-section"${activeAdminPage !== "courses" ? ' style="display:none;"' : ""}>
-          <div class="flex-between">
-            <div>
-              <h3 style="margin: 0;">Courses by Year & Semester</h3>
-              <p class="subtle">Add, rename, or remove courses for each academic year and semester.</p>
-            </div>
-          </div>
-          <form id="admin-curriculum-filter-form" style="margin-top: 0.8rem;">
-            <div class="form-row">
-              <label>Year
-                <select name="curriculumYear">
-                  <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
-                  <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
-                  <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
-                  <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
-                  <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
-                </select>
-              </label>
-              <label>Semester
-                <select name="curriculumSemester">
-                  <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
-                  <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
-                </select>
-              </label>
-            </div>
-          </form>
-
-          <form id="admin-curriculum-add-form" style="margin-top: 0.8rem;">
-            <label>New course name
-              <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
-            </label>
-            <div class="stack">
-              <button class="btn" type="submit">Add course</button>
-            </div>
-          </form>
-
-          <div class="table-wrap" style="margin-top: 0.9rem;">
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Course Name</th>
-                  <th>Topics</th>
-                  <th>Question Bank</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${curriculumRows || `<tr><td colspan="5" class="subtle">No courses in this semester yet.</td></tr>`}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="card admin-section" id="admin-questions-section"${activeAdminPage !== "questions" ? ' style="display:none;"' : ""}>
-          <h3 style="margin: 0;">Bulk Import</h3>
-          <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
-          <form id="admin-import-form" style="margin-top: 0.7rem;">
-            <div class="form-row">
-              <label>
-                Default course
-                <select name="defaultCourse" id="admin-import-course">
-                  ${allCourses
-                    .map((course) => `<option value="${course}" ${importCourse === course ? "selected" : ""}>${course}</option>`)
-                    .join("")}
-                </select>
-              </label>
-              <label>
-                Default topic
-                <select name="defaultTopic" id="admin-import-topic">
-                  ${importTopics.map((topic) => `<option value="${escapeHtml(topic)}">${escapeHtml(topic)}</option>`).join("")}
-                </select>
-              </label>
-            </div>
-            <label>Upload file
-              <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
-            </label>
-            <label>Paste CSV rows or JSON array
-              <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'></textarea>
-            </label>
-            <div class="stack">
-              <button class="btn" type="submit">Run bulk import</button>
-              <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
-            </div>
-          </form>
-          ${
-            importReport
-              ? `
-                <div class="admin-import-report card" style="margin-top: 0.7rem;">
-                  <p style="margin: 0;"><b>Last import:</b> ${new Date(importReport.createdAt).toLocaleString()}</p>
-                  <p class="subtle">Imported ${importReport.added}/${importReport.total} rows. ${importReport.errors.length} error(s).</p>
-                  ${
-                    importErrorPreview.length
-                      ? `
-                        <ol class="admin-import-error-list">
-                          ${importErrorPreview.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
-                        </ol>
-                        <small class="subtle">Showing first ${importErrorPreview.length} errors.</small>
-                      `
-                      : `<p class="subtle">No errors in last import.</p>`
-                  }
-                  <div class="stack">
-                    <button class="btn ghost admin-btn-sm" type="button" id="admin-download-import-errors" ${importReport.errors.length ? "" : "disabled"}>Download full error report</button>
-                    <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-import-report">Clear report</button>
-                  </div>
-                </div>
-              `
-              : ""
-          }
-        </section>
-      </div>
+      <div class="admin-main">${pageContent}</div>
     </section>
   `;
 }
@@ -4762,6 +4764,9 @@ function wireAdmin() {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
       if (!["dashboard", "users", "courses", "questions"].includes(page)) {
+        return;
+      }
+      if (state.adminPage === page) {
         return;
       }
       state.adminPage = page;

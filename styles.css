@@ -73,6 +73,10 @@ body {
   backdrop-filter: blur(8px);
 }
 
+.topbar.admin-only-header {
+  justify-content: center;
+}
+
 .topbar::after {
   content: "";
   position: absolute;
@@ -122,6 +126,18 @@ body.is-routing .topbar::after {
   align-items: center;
   gap: 0.3rem;
   flex-wrap: wrap;
+}
+
+.topbar.admin-only-header .top-nav {
+  justify-content: center;
+}
+
+.topbar.admin-only-header .top-nav button {
+  pointer-events: none;
+  cursor: default;
+  font-weight: 700;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
 }
 
 .top-nav button,
@@ -2424,6 +2440,10 @@ hr {
     gap: 0.65rem;
   }
 
+  .topbar.admin-only-header {
+    flex-wrap: nowrap;
+  }
+
   .top-nav {
     order: 3;
     width: 100%;
@@ -2431,6 +2451,14 @@ hr {
     padding-bottom: 0.3rem;
     flex-wrap: nowrap;
     gap: 0.25rem;
+  }
+
+  .topbar.admin-only-header .top-nav {
+    order: 0;
+    width: auto;
+    overflow: visible;
+    padding-bottom: 0;
+    justify-content: center;
   }
 
   .top-nav button {
