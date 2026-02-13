@@ -1041,9 +1041,9 @@ async function ensureRelationalSyncReady() {
 }
 
 async function updateRelationalProfileApproval(profileIds, approved) {
-  const ids = (Array.isArray(profileIds) ? profileIds : []).filter((id) => isUuidValue(id));
+  const ids = [...new Set((Array.isArray(profileIds) ? profileIds : []).filter((id) => isUuidValue(id)))];
   if (!ids.length) {
-    return { ok: true };
+    return { ok: true, updatedIds: [], skippedIds: [], missingIds: [] };
   }
 
   const ready = await ensureRelationalSyncReady();
@@ -1056,17 +1056,34 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   }
 
   const targetApproved = Boolean(approved);
+  const { data: existingRows, error: existingError } = await client.from("profiles").select("id").in("id", ids);
+  if (existingError) {
+    return { ok: false, message: existingError.message || "Could not read profile rows before update." };
+  }
+  const existingIds = new Set((existingRows || []).map((row) => row.id).filter((id) => isUuidValue(id)));
+  const missingIds = ids.filter((id) => !existingIds.has(id));
+  const targetIds = ids.filter((id) => existingIds.has(id));
+  if (!targetIds.length) {
+    return {
+      ok: false,
+      message: "No matching database profiles found for selected users.",
+      updatedIds: [],
+      skippedIds: [...missingIds],
+      missingIds,
+    };
+  }
+
   const { data: updatedRows, error } = await client
     .from("profiles")
     .update({ approved: targetApproved })
-    .in("id", ids)
+    .in("id", targetIds)
     .select("id,approved");
   if (error) {
     return { ok: false, message: error.message || "Could not update profile approval in database." };
   }
 
   const appliedById = new Map((updatedRows || []).map((row) => [row.id, Boolean(row.approved)]));
-  const unresolvedIds = ids.filter((id) => appliedById.get(id) !== targetApproved);
+  const unresolvedIds = targetIds.filter((id) => appliedById.get(id) !== targetApproved);
   if (unresolvedIds.length) {
     const { data: verifyRows, error: verifyError } = await client
       .from("profiles")
@@ -1079,16 +1096,23 @@ async function updateRelationalProfileApproval(profileIds, approved) {
       };
     }
     const verifiedById = new Map((verifyRows || []).map((row) => [row.id, Boolean(row.approved)]));
-    const stillUnresolved = unresolvedIds.filter((id) => verifiedById.get(id) !== targetApproved);
-    if (stillUnresolved.length) {
-      return {
-        ok: false,
-        message: "Some selected users were not updated in database. Check admin permissions and try again.",
-      };
-    }
+    unresolvedIds.splice(0, unresolvedIds.length, ...unresolvedIds.filter((id) => verifiedById.get(id) !== targetApproved));
   }
 
-  return { ok: true };
+  const unresolvedSet = new Set(unresolvedIds);
+  const updatedIds = targetIds.filter((id) => !unresolvedSet.has(id));
+  const skippedIds = [...new Set([...missingIds, ...unresolvedIds])];
+  if (!updatedIds.length) {
+    return {
+      ok: false,
+      message: "Some selected users were not updated in database. Check admin permissions and try again.",
+      updatedIds,
+      skippedIds,
+      missingIds,
+    };
+  }
+
+  return { ok: true, updatedIds, skippedIds, missingIds };
 }
 
 async function syncUsersBackupState(usersPayload) {
@@ -5558,36 +5582,54 @@ function wireAdmin() {
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
     const current = getCurrentUser();
     const users = getUsers();
-    let approvedCount = 0;
-    const pendingProfileIds = [];
+    const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
+    const pendingProfileIds = pendingUsers.map((entry) => entry.supabaseAuthId).filter((id) => isUuidValue(id));
 
-    users.forEach((entry) => {
-      if (entry.role !== "student" || isUserAccessApproved(entry)) {
-        return;
-      }
-      entry.isApproved = true;
-      entry.approvedAt = nowISO();
-      entry.approvedBy = current?.email || "admin";
-      if (isUuidValue(entry.supabaseAuthId)) {
-        pendingProfileIds.push(entry.supabaseAuthId);
-      }
-      approvedCount += 1;
-    });
-
-    if (!approvedCount) {
+    if (!pendingUsers.length) {
       toast("No pending requests found.");
       return;
     }
 
     const dbResult = await updateRelationalProfileApproval(pendingProfileIds, true);
-    if (!dbResult.ok) {
+    if (pendingProfileIds.length && !dbResult.ok) {
       toast(`Database update failed. ${dbResult.message}`);
+      return;
+    }
+
+    const approvedProfileIds = new Set(dbResult.updatedIds || []);
+    const skippedProfileIds = new Set(dbResult.skippedIds || []);
+    let approvedCount = 0;
+    let skippedCount = 0;
+    users.forEach((entry) => {
+      if (entry.role !== "student" || isUserAccessApproved(entry)) {
+        return;
+      }
+      const authId = String(entry.supabaseAuthId || "").trim();
+      if (isUuidValue(authId)) {
+        if (!approvedProfileIds.has(authId)) {
+          if (skippedProfileIds.has(authId)) {
+            skippedCount += 1;
+          }
+          return;
+        }
+      }
+      entry.isApproved = true;
+      entry.approvedAt = nowISO();
+      entry.approvedBy = current?.email || "admin";
+      approvedCount += 1;
+    });
+    if (!approvedCount) {
+      toast("Database update failed. No pending users were updated.");
       return;
     }
 
     save(STORAGE_KEYS.users, users);
     await syncUsersBackupState(users);
-    toast(`${approvedCount} pending account(s) approved.`);
+    toast(
+      skippedCount
+        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).`
+        : `${approvedCount} pending account(s) approved.`,
+    );
     render();
   });
 
@@ -5697,8 +5739,12 @@ function wireAdmin() {
       const nextApproved = !isUserAccessApproved(users[idx]);
       const targetProfileId = users[idx].supabaseAuthId;
       const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
-      if (!dbResult.ok) {
+      if (isUuidValue(targetProfileId) && !dbResult.ok) {
         toast(`Database update failed. ${dbResult.message}`);
+        return;
+      }
+      if (isUuidValue(targetProfileId) && !(dbResult.updatedIds || []).includes(targetProfileId)) {
+        toast("Database update failed. This user profile is missing or inaccessible.");
         return;
       }
       users[idx].isApproved = nextApproved;
