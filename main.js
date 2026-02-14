@@ -3265,12 +3265,7 @@ function ensureAdminPresencePolling() {
       return;
     }
     refreshAdminPresenceSnapshot()
-      .then((ok) => {
-        if (ok && state.route === "admin" && state.adminPage === "activity") {
-          state.skipNextRouteAnimation = true;
-          render();
-        }
-      })
+      .then(() => {})
       .catch((error) => {
         console.warn("Admin presence refresh failed.", error?.message || error);
       });
@@ -3405,13 +3400,6 @@ function render() {
     refreshStudentDataSnapshot(user, { force: !state.studentDataLastSyncAt })
       .catch((error) => {
         console.warn("Student data refresh failed.", error?.message || error);
-      })
-      .finally(() => {
-        const current = getCurrentUser();
-        if (current?.id === user.id && current.role === "student" && !["session", "review"].includes(state.route)) {
-          state.skipNextRouteAnimation = true;
-          render();
-        }
       });
   }
 
@@ -3490,10 +3478,11 @@ function render() {
       break;
     case "admin":
       if (user?.role === "admin" && shouldRefreshAdminData(user)) {
+        const initialAdminHydration = !state.adminDataLastSyncAt;
         refreshAdminDataSnapshot(user, { force: !state.adminDataLastSyncAt }).catch((error) => {
           console.warn("Admin data refresh failed.", error?.message || error);
         }).finally(() => {
-          if (state.route === "admin") {
+          if (initialAdminHydration && state.route === "admin") {
             state.skipNextRouteAnimation = true;
             render();
           }
