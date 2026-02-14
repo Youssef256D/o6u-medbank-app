@@ -3727,6 +3727,7 @@ function render() {
     "profile",
     "admin",
   ];
+  const authEntryRoutes = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
@@ -3741,6 +3742,10 @@ function render() {
     removeStorageKey(STORAGE_KEYS.currentUserId);
     state.route = "login";
     toast("Your account is pending admin approval.");
+  }
+
+  if (user && authEntryRoutes.has(state.route)) {
+    state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
   if (state.route === "admin" && user?.role !== "admin") {
