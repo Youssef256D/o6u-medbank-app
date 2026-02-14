@@ -8556,6 +8556,7 @@ function importQuestionsFromRaw(raw, config) {
   const errors = [];
   let records = [];
   let topicCatalogChanged = false;
+  let usedCsvImport = false;
 
   try {
     const trimmed = String(raw || "").trim();
@@ -8563,6 +8564,7 @@ function importQuestionsFromRaw(raw, config) {
       const parsed = JSON.parse(trimmed);
       records = Array.isArray(parsed) ? parsed : parsed.questions || parsed.data || [];
     } else {
+      usedCsvImport = true;
       records = parseCsvRecords(trimmed);
     }
   } catch (error) {
@@ -8570,12 +8572,17 @@ function importQuestionsFromRaw(raw, config) {
   }
 
   records = records.map((row) => normalizeImportRow(row)).filter((row) => Object.keys(row).length);
+  if (!records.length && usedCsvImport) {
+    records = parseTopicBlockImportRecords(raw)
+      .map((row) => normalizeImportRow(row))
+      .filter((row) => Object.keys(row).length);
+  }
   const total = records.length;
   if (!total) {
     return {
       added: 0,
       total: 0,
-      errors: ["No import rows found. Make sure your file has a header row and at least one data row."],
+      errors: ["No import rows found. Make sure your file has a header row, or use topic/question block format."],
     };
   }
 
@@ -8656,6 +8663,29 @@ function importQuestionsFromRaw(raw, config) {
 }
 
 function parseCsvRecords(csvText) {
+  const rows = parseCsvRows(csvText);
+  const nonEmptyRows = rows.filter((entry) => entry.some((cell) => String(cell || "").trim()));
+  if (nonEmptyRows.length < 2) {
+    return [];
+  }
+
+  const headers = nonEmptyRows[0].map((header) => String(header || "").replace(/^\uFEFF/, "").trim());
+  const records = [];
+  for (let index = 1; index < nonEmptyRows.length; index += 1) {
+    const values = nonEmptyRows[index];
+    const rowData = {};
+    headers.forEach((header, idx) => {
+      if (!header) {
+        return;
+      }
+      rowData[header] = values[idx] != null ? String(values[idx]).trim() : "";
+    });
+    records.push(rowData);
+  }
+  return records;
+}
+
+function parseCsvRows(csvText) {
   const text = String(csvText || "").replace(/^\uFEFF/, "");
   if (!text.trim()) {
     return [];
@@ -8705,25 +8735,145 @@ function parseCsvRecords(csvText) {
   row.push(currentCell);
   rows.push(row);
 
-  const nonEmptyRows = rows.filter((entry) => entry.some((cell) => String(cell || "").trim()));
-  if (nonEmptyRows.length < 2) {
+  return rows;
+}
+
+function stripQuestionPrefix(line) {
+  return String(line || "")
+    .replace(/^["'\s]*/, "")
+    .replace(/^\d+\s*[\.\)-:]\s*/, "")
+    .trim();
+}
+
+function parseChoiceLine(line) {
+  const match = String(line || "").match(/^["'\s]*([A-Ea-e])\s*[\)\.\-:]\s*(.+)?$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    id: match[1].toUpperCase(),
+    text: String(match[2] || "").trim(),
+  };
+}
+
+function isQuestionLine(line) {
+  return /^["'\s]*\d+\s*[\.\)-:]\s+/.test(String(line || ""));
+}
+
+function isSourceLine(line) {
+  return /^source\s*:/i.test(String(line || ""));
+}
+
+function extractSourceText(line) {
+  return String(line || "").replace(/^source\s*:/i, "").trim();
+}
+
+function normalizeLineForBlockImport(line) {
+  return String(line || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+}
+
+function isLikelyTopicHeading(line) {
+  const text = normalizeLineForBlockImport(line);
+  if (!text) return false;
+  if (isQuestionLine(text) || parseChoiceLine(text) || isSourceLine(text)) return false;
+  if (/^welcome to your senior year$/i.test(text)) return false;
+  if (text.length > 90) return false;
+  if (/\?/.test(text)) return false;
+  if (/\d/.test(text)) return false;
+  return text.split(/\s+/).length <= 8;
+}
+
+function parseTopicBlockImportRecords(csvText) {
+  const rows = parseCsvRows(csvText);
+  const lines = rows
+    .map((row) => normalizeLineForBlockImport(Array.isArray(row) ? row[0] : row))
+    .filter(Boolean);
+  if (!lines.length) {
     return [];
   }
 
-  const headers = nonEmptyRows[0].map((header) => String(header || "").replace(/^\uFEFF/, "").trim());
   const records = [];
-  for (let index = 1; index < nonEmptyRows.length; index += 1) {
-    const values = nonEmptyRows[index];
-    const rowData = {};
-    headers.forEach((header, idx) => {
-      if (!header) {
-        return;
-      }
-      rowData[header] = values[idx] != null ? String(values[idx]).trim() : "";
+  let currentTopic = "";
+  let currentQuestion = null;
+  let currentChoiceId = "";
+
+  const flushCurrentQuestion = () => {
+    if (!currentQuestion) {
+      return;
+    }
+    const choicesById = currentQuestion.choicesById || {};
+    records.push({
+      stem: currentQuestion.stem || "",
+      choiceA: choicesById.A || "",
+      choiceB: choicesById.B || "",
+      choiceC: choicesById.C || "",
+      choiceD: choicesById.D || "",
+      choiceE: choicesById.E || "",
+      topic: currentQuestion.topic || "",
+      references: currentQuestion.references || "",
+      system: currentQuestion.source || "",
     });
-    records.push(rowData);
-  }
-  return records;
+    currentQuestion = null;
+    currentChoiceId = "";
+  };
+
+  lines.forEach((rawLine) => {
+    const line = normalizeLineForBlockImport(rawLine);
+    if (!line || /^welcome to your senior year$/i.test(line)) {
+      return;
+    }
+
+    if (isQuestionLine(line)) {
+      flushCurrentQuestion();
+      currentQuestion = {
+        stem: stripQuestionPrefix(line),
+        topic: currentTopic || "",
+        source: "",
+        references: "",
+        choicesById: {},
+      };
+      currentChoiceId = "";
+      return;
+    }
+
+    if (isSourceLine(line)) {
+      if (currentQuestion) {
+        const sourceText = extractSourceText(line);
+        currentQuestion.source = sourceText;
+        currentQuestion.references = sourceText;
+      }
+      return;
+    }
+
+    const parsedChoice = parseChoiceLine(line);
+    if (parsedChoice && currentQuestion) {
+      currentQuestion.choicesById[parsedChoice.id] = parsedChoice.text;
+      currentChoiceId = parsedChoice.id;
+      return;
+    }
+
+    if (!currentQuestion && isLikelyTopicHeading(line)) {
+      currentTopic = line;
+      return;
+    }
+
+    if (!currentQuestion) {
+      return;
+    }
+
+    if (currentChoiceId) {
+      const previous = String(currentQuestion.choicesById[currentChoiceId] || "").trim();
+      currentQuestion.choicesById[currentChoiceId] = `${previous} ${line}`.trim();
+    } else {
+      currentQuestion.stem = `${String(currentQuestion.stem || "").trim()} ${line}`.trim();
+    }
+  });
+
+  flushCurrentQuestion();
+  return records.filter((record) => String(record.stem || "").trim());
 }
 
 function applySourceFilter(questions, source, userId) {
