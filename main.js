@@ -6114,6 +6114,7 @@ function renderAdmin() {
                 </p>
                 <div class="admin-course-qbank-actions">
                   <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Edit questions</button>
+                  <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Delete all questions</button>
                 </div>
               </div>
             </td>
@@ -6777,6 +6778,7 @@ function wireAdmin() {
         "course-topic-rename",
         "course-topic-remove",
         "course-question-edit",
+        "course-question-clear",
       ].includes(action)
     ) {
       return;
@@ -6800,6 +6802,33 @@ function wireAdmin() {
       state.adminEditQuestionId = null;
       state.skipNextRouteAnimation = true;
       render();
+      return;
+    }
+
+    if (action === "course-question-clear") {
+      const questions = getQuestions();
+      const courseQuestions = questions.filter((question) => getQbankCourseTopicMeta(question).course === course);
+      if (!courseQuestions.length) {
+        toast("This course has no questions to clear.");
+        return;
+      }
+      if (!window.confirm(`Delete all ${courseQuestions.length} question(s) from "${course}"?`)) {
+        return;
+      }
+      const removeSet = new Set(courseQuestions.map((question) => question.id));
+      const nextQuestions = questions.filter((question) => !removeSet.has(question.id));
+      if (state.adminEditQuestionId && removeSet.has(state.adminEditQuestionId)) {
+        state.adminEditQuestionId = null;
+      }
+      save(STORAGE_KEYS.questions, nextQuestions);
+      try {
+        await flushPendingSyncNow();
+        toast(`Deleted ${removeSet.size} question(s) from ${course}.`);
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Questions deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -7236,43 +7265,49 @@ function wireAdmin() {
     render();
   });
 
-  appEl.querySelectorAll("[data-action='admin-edit']").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.adminEditQuestionId = button.getAttribute("data-qid");
+  const adminQuestionsSection = document.getElementById("admin-questions-section");
+  adminQuestionsSection?.addEventListener("click", async (event) => {
+    const actionEl = event.target.closest("[data-action]");
+    if (!actionEl) {
+      return;
+    }
+    const action = String(actionEl.getAttribute("data-action") || "").trim();
+    if (!["admin-edit", "admin-delete"].includes(action)) {
+      return;
+    }
+
+    const qid = String(actionEl.getAttribute("data-qid") || "").trim();
+    if (!qid) {
+      return;
+    }
+
+    if (action === "admin-edit") {
+      state.adminEditQuestionId = qid;
       const questions = getQuestions();
-      const editing = questions.find((entry) => entry.id === state.adminEditQuestionId);
+      const editing = questions.find((entry) => String(entry.id || "").trim() === qid);
       const meta = editing ? getQbankCourseTopicMeta(editing) : null;
-      state.adminEditorCourse = meta?.course || allCourses[0];
+      state.adminEditorCourse = meta?.course || allCourses[0] || "";
       state.adminEditorTopic = meta?.topic || (QBANK_COURSE_TOPICS[state.adminEditorCourse] || [])[0] || "";
       render();
-    });
-  });
+      return;
+    }
 
-  appEl.querySelectorAll("[data-action='admin-delete']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const qid = button.getAttribute("data-qid");
-      if (!qid) {
-        return;
-      }
+    if (!window.confirm(`Delete question ${qid}?`)) {
+      return;
+    }
 
-      const confirmDelete = window.confirm(`Delete question ${qid}?`);
-      if (!confirmDelete) {
-        return;
+    const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
+    save(STORAGE_KEYS.questions, questions);
+    try {
+      await flushPendingSyncNow();
+      toast("Question deleted.");
+      if (state.adminEditQuestionId === qid) {
+        state.adminEditQuestionId = null;
       }
-
-      const questions = getQuestions().filter((entry) => entry.id !== qid);
-      save(STORAGE_KEYS.questions, questions);
-      try {
-        await flushPendingSyncNow();
-        toast("Question deleted.");
-        if (state.adminEditQuestionId === qid) {
-          state.adminEditQuestionId = null;
-        }
-        render();
-      } catch (syncError) {
-        toast(`Question deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
-      }
-    });
+      render();
+    } catch (syncError) {
+      toast(`Question deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   appEl.querySelector("[data-action='admin-new']")?.addEventListener("click", () => {
