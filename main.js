@@ -112,6 +112,7 @@ const RELATIONAL_SYNC_KEYS = [
   STORAGE_KEYS.courseTopics,
 ];
 const RELATIONAL_SYNC_KEY_SET = new Set(RELATIONAL_SYNC_KEYS);
+const GLOBAL_SYNC_BOOTSTRAP_KEYS = GLOBAL_SYNC_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
 const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics]);
 
 const supabaseSync = {
@@ -738,7 +739,7 @@ async function initSupabaseSync() {
     supabaseSync.storageKeyColumn = syncShape.storageKeyColumn;
     supabaseSync.enabled = true;
 
-    const syncResult = await hydrateSupabaseSyncKeys(GLOBAL_SYNC_KEYS);
+    const syncResult = await hydrateSupabaseSyncKeys(GLOBAL_SYNC_BOOTSTRAP_KEYS);
     if (syncResult?.error) {
       const error = syncResult.error;
       console.warn("Supabase sync unavailable. Falling back to local storage only.", error.message);
@@ -1496,46 +1497,6 @@ async function hydrateRelationalCoursesAndTopics() {
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
 }
 
-async function loadBackupUsersFromSyncStore() {
-  const client = supabaseSync.client || getRelationalClient();
-  if (!client) {
-    return [];
-  }
-
-  let tableName = supabaseSync.tableName;
-  let keyColumn = supabaseSync.storageKeyColumn;
-  if (!tableName || !keyColumn) {
-    const shape = await detectSupabaseStorageShape(client);
-    if (!shape) {
-      return [];
-    }
-    tableName = shape.tableName;
-    keyColumn = shape.storageKeyColumn;
-  }
-
-  const candidates = getSyncQueryCandidates(STORAGE_KEYS.users, "");
-  if (!candidates.length) {
-    return [];
-  }
-
-  const { data, error } = await client
-    .from(tableName)
-    .select(`${keyColumn},payload,updated_at`)
-    .in(keyColumn, candidates)
-    .order("updated_at", { ascending: false })
-    .limit(5);
-  if (error || !Array.isArray(data)) {
-    return [];
-  }
-
-  for (const row of data) {
-    if (Array.isArray(row?.payload)) {
-      return row.payload;
-    }
-  }
-  return [];
-}
-
 async function fetchEnrollmentCourseMapForUsers(userIds) {
   const client = getRelationalClient();
   const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
@@ -1544,6 +1505,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
   }
 
   try {
+    const enrollmentMap = Object.fromEntries(ids.map((id) => [id, []]));
     const enrollmentRows = [];
     for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
       const { data, error } = await client
@@ -1560,7 +1522,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
 
     const courseIds = [...new Set(enrollmentRows.map((row) => String(row?.course_id || "").trim()).filter(isUuidValue))];
     if (!courseIds.length) {
-      return {};
+      return enrollmentMap;
     }
 
     const courseRows = [];
@@ -1584,16 +1546,12 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
         .filter(([courseId, courseName]) => isUuidValue(courseId) && Boolean(courseName)),
     );
 
-    const enrollmentMap = {};
     enrollmentRows.forEach((row) => {
       const userId = String(row?.user_id || "").trim();
       const courseId = String(row?.course_id || "").trim();
       const courseName = courseNameById[courseId];
       if (!isUuidValue(userId) || !courseName) {
         return;
-      }
-      if (!Array.isArray(enrollmentMap[userId])) {
-        enrollmentMap[userId] = [];
       }
       if (!enrollmentMap[userId].includes(courseName)) {
         enrollmentMap[userId].push(courseName);
@@ -1658,9 +1616,11 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   let enrollmentCourseMap = {};
+  let enrollmentLookupFailed = false;
   try {
     enrollmentCourseMap = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
   } catch (enrollmentError) {
+    enrollmentLookupFailed = true;
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
 
@@ -1671,10 +1631,21 @@ async function hydrateRelationalProfiles(currentUser) {
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || 1) : null;
     const semester = role === "student" ? sanitizeAcademicSemester(profile.academic_semester || 1) : null;
+    const existingAssignedCourses = role === "student"
+      ? sanitizeCourseAssignments(existing?.assignedCourses || [])
+      : [];
+    const hasEnrollmentEntry = Object.prototype.hasOwnProperty.call(enrollmentCourseMap, profile.id);
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
     const defaultCourses = role === "student" ? getCurriculumCourses(year || 1, semester || 1) : [...allCourses];
+    const assignedCourses = role !== "student"
+      ? [...allCourses]
+      : enrolledCourses.length
+        ? enrolledCourses
+        : (existingAssignedCourses.length && (enrollmentLookupFailed || !hasEnrollmentEntry))
+          ? existingAssignedCourses
+          : defaultCourses;
     return {
       id: profile.id,
       name: String(profile.full_name || "").trim() || existing?.name || "Student",
@@ -1686,7 +1657,7 @@ async function hydrateRelationalProfiles(currentUser) {
       isApproved: Boolean(profile.approved),
       approvedAt: profile.approved ? existing?.approvedAt || profile.created_at || nowISO() : null,
       approvedBy: existing?.approvedBy || null,
-      assignedCourses: role === "student" ? (enrolledCourses.length ? enrolledCourses : defaultCourses) : [...allCourses],
+      assignedCourses,
       academicYear: year,
       academicSemester: semester,
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
@@ -1696,9 +1667,8 @@ async function hydrateRelationalProfiles(currentUser) {
 
   const mappedAuthIds = new Set(mapped.map((entry) => String(entry.supabaseAuthId || "").trim()).filter(Boolean));
   const preserveUnmappedRelationalUsers = isAdmin && profileRows.length <= 1;
-  const backupUsers = preserveUnmappedRelationalUsers ? await loadBackupUsersFromSyncStore() : [];
   const preservedRelationalMap = new Map();
-  [...backupUsers, ...usersBefore].forEach((entry) => {
+  usersBefore.forEach((entry) => {
     const authId = String(entry?.supabaseAuthId || "").trim();
     if (!isUuidValue(authId) || mappedAuthIds.has(authId) || preservedRelationalMap.has(authId)) {
       return;
