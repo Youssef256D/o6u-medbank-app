@@ -984,8 +984,20 @@ function isUserAccessApproved(user) {
   return user.isApproved !== false;
 }
 
+function getUserProfileId(user) {
+  const authId = String(user?.supabaseAuthId || "").trim();
+  if (isUuidValue(authId)) {
+    return authId;
+  }
+  const legacyId = String(user?.id || "").trim();
+  if (isUuidValue(legacyId)) {
+    return legacyId;
+  }
+  return "";
+}
+
 function hasSupabaseManagedIdentity(user) {
-  return Boolean(user?.supabaseAuthId && isUuidValue(user.supabaseAuthId));
+  return Boolean(getUserProfileId(user));
 }
 
 function isForcedAdminEmail(email) {
@@ -1010,8 +1022,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   }
 
   const indexByAuthId = users.findIndex((entry) => entry.supabaseAuthId === authUser.id);
+  const indexByLegacyId = users.findIndex((entry) => !entry.supabaseAuthId && entry.id === authUser.id);
   const indexByEmail = users.findIndex((entry) => entry.email.toLowerCase() === email);
-  const idx = indexByAuthId >= 0 ? indexByAuthId : indexByEmail;
+  const idx = indexByAuthId >= 0 ? indexByAuthId : (indexByLegacyId >= 0 ? indexByLegacyId : indexByEmail);
   const previous = idx >= 0 ? users[idx] : null;
 
   const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
@@ -1602,7 +1615,7 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   if (!profileRows.length) {
-    const hasLocalRelationalUsers = usersBefore.some((entry) => isUuidValue(entry?.supabaseAuthId));
+    const hasLocalRelationalUsers = usersBefore.some((entry) => Boolean(getUserProfileId(entry)));
     if (isAdmin && hasLocalRelationalUsers && !relationalSync.profilesBackfillAttempted) {
       relationalSync.profilesBackfillAttempted = true;
       try {
@@ -1625,7 +1638,11 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   const allCourses = [...CURRICULUM_COURSE_LIST];
-  const localByAuthId = new Map(usersBefore.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry]));
+  const localByAuthId = new Map(
+    usersBefore
+      .map((entry) => [getUserProfileId(entry), entry])
+      .filter(([profileId]) => Boolean(profileId)),
+  );
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
@@ -1669,7 +1686,7 @@ async function hydrateRelationalProfiles(currentUser) {
   const preserveUnmappedRelationalUsers = isAdmin && profileRows.length <= 1;
   const preservedRelationalMap = new Map();
   usersBefore.forEach((entry) => {
-    const authId = String(entry?.supabaseAuthId || "").trim();
+    const authId = getUserProfileId(entry);
     if (!isUuidValue(authId) || mappedAuthIds.has(authId) || preservedRelationalMap.has(authId)) {
       return;
     }
@@ -1678,7 +1695,7 @@ async function hydrateRelationalProfiles(currentUser) {
   const preservedRelational = preserveUnmappedRelationalUsers
     ? Array.from(preservedRelationalMap.values())
     : [];
-  const preservedLocalOnly = usersBefore.filter((entry) => !entry.supabaseAuthId && !isLegacyDemoUser(entry));
+  const preservedLocalOnly = usersBefore.filter((entry) => !getUserProfileId(entry) && !isLegacyDemoUser(entry));
   const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
@@ -1771,7 +1788,11 @@ async function hydrateRelationalQuestions() {
 
   const courseById = Object.fromEntries((courseRows || []).map((course) => [course.id, String(course.course_name || "").trim()]));
   const topicById = Object.fromEntries((topicRows || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
-  const authorById = Object.fromEntries(users.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.name]));
+  const authorById = Object.fromEntries(
+    users
+      .map((entry) => [getUserProfileId(entry), entry.name])
+      .filter(([profileId]) => Boolean(profileId)),
+  );
   const choicesByQuestionId = {};
   (choiceRows || []).forEach((choice) => {
     if (!choicesByQuestionId[choice.question_id]) {
@@ -1880,7 +1901,11 @@ async function hydrateRelationalSessions(currentUser) {
     }
   }
 
-  const localUserIdByAuth = Object.fromEntries(allUsers.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.id]));
+  const localUserIdByAuth = Object.fromEntries(
+    allUsers
+      .map((entry) => [getUserProfileId(entry), entry.id])
+      .filter(([profileId]) => Boolean(profileId)),
+  );
   const itemsByBlock = {};
   (items || []).forEach((item) => {
     if (!itemsByBlock[item.block_id]) {
@@ -1939,7 +1964,7 @@ async function hydrateRelationalSessions(currentUser) {
 
 function getSyncScopeForUser(user = null) {
   const current = user || getCurrentUser();
-  const scope = String(current?.supabaseAuthId || "").trim();
+  const scope = getUserProfileId(current);
   return scope || "";
 }
 
@@ -2299,19 +2324,38 @@ async function syncProfilesToRelational(usersPayload) {
     return;
   }
 
-  const users = Array.isArray(usersPayload) ? usersPayload : [];
+  const currentUser = getCurrentUser();
+  const isAdminSync = currentUser?.role === "admin";
+  let users = Array.isArray(usersPayload) ? usersPayload : [];
+  if (!isAdminSync) {
+    const currentProfileId = getUserProfileId(currentUser);
+    if (!currentProfileId) {
+      return;
+    }
+    users = users.filter((user) => getUserProfileId(user) === currentProfileId);
+  }
+
   const rows = users
-    .filter((user) => isUuidValue(user?.supabaseAuthId))
-    .map((user) => ({
-      id: user.supabaseAuthId,
-      full_name: String(user.name || "").trim() || "Student",
-      email: String(user.email || "").trim().toLowerCase(),
-      phone: String(user.phone || "").trim() || null,
-      role: user.role === "admin" ? "admin" : "student",
-      approved: Boolean(isUserAccessApproved(user)),
-      academic_year: user.role === "student" ? sanitizeAcademicYear(user.academicYear || 1) : null,
-      academic_semester: user.role === "student" ? sanitizeAcademicSemester(user.academicSemester || 1) : null,
-    }));
+    .map((user) => {
+      const profileId = getUserProfileId(user);
+      if (!profileId) {
+        return null;
+      }
+      const baseRow = {
+        id: profileId,
+        full_name: String(user.name || "").trim() || "Student",
+        email: String(user.email || "").trim().toLowerCase(),
+        phone: String(user.phone || "").trim() || null,
+        role: isAdminSync ? (user.role === "admin" ? "admin" : "student") : "student",
+        academic_year: user.role === "student" ? sanitizeAcademicYear(user.academicYear || 1) : null,
+        academic_semester: user.role === "student" ? sanitizeAcademicSemester(user.academicSemester || 1) : null,
+      };
+      if (isAdminSync) {
+        baseRow.approved = Boolean(isUserAccessApproved(user));
+      }
+      return baseRow;
+    })
+    .filter(Boolean);
   if (!rows.length) {
     return;
   }
@@ -2323,9 +2367,11 @@ async function syncProfilesToRelational(usersPayload) {
     }
   }
 
-  await syncUserCourseEnrollmentsToRelational(users, {
-    assignedByAuthId: isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
-  });
+  if (isAdminSync) {
+    await syncUserCourseEnrollmentsToRelational(users, {
+      assignedByAuthId: isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
+    });
+  }
 }
 
 async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {}) {
@@ -2335,7 +2381,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : [];
-  const students = users.filter((user) => user?.role === "student" && isUuidValue(user?.supabaseAuthId));
+  const students = users.filter((user) => user?.role === "student" && Boolean(getUserProfileId(user)));
   if (!students.length) {
     return;
   }
@@ -2358,7 +2404,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     const enrollmentRows = [];
     const desiredCourseIdsByUserId = new Map();
     students.forEach((student) => {
-      const userId = String(student.supabaseAuthId || "").trim();
+      const userId = getUserProfileId(student);
       const selectedCourses = sanitizeCourseAssignments(
         (student.assignedCourses || []).length
           ? student.assignedCourses
@@ -2388,7 +2434,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       }
     }
 
-    const userIds = [...new Set(students.map((student) => String(student.supabaseAuthId || "").trim()).filter(isUuidValue))];
+    const userIds = [...new Set(students.map((student) => getUserProfileId(student)).filter(isUuidValue))];
     const existingEnrollmentRows = [];
     for (const userBatch of splitIntoBatches(userIds, RELATIONAL_IN_BATCH_SIZE)) {
       const { data, error } = await client
@@ -2901,7 +2947,11 @@ async function syncSessionsToRelational(sessionsPayload) {
   const users = getUsers();
   const questions = getQuestions();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
-  const authIdByLocalUserId = Object.fromEntries(users.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.id, entry.supabaseAuthId]));
+  const authIdByLocalUserId = Object.fromEntries(
+    users
+      .map((entry) => [entry.id, getUserProfileId(entry)])
+      .filter(([, profileId]) => Boolean(profileId)),
+  );
 
   const ownedSessions = sessions.filter((session) => isUuidValue(authIdByLocalUserId[session.userId]));
   if (!ownedSessions.length) {
@@ -6822,7 +6872,7 @@ function wireAdmin() {
     const current = getCurrentUser();
     const users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
-    const pendingProfileIds = pendingUsers.map((entry) => entry.supabaseAuthId).filter((id) => isUuidValue(id));
+    const pendingProfileIds = pendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
 
     if (!pendingUsers.length) {
       toast("No pending requests found.");
@@ -6843,7 +6893,7 @@ function wireAdmin() {
       if (entry.role !== "student" || isUserAccessApproved(entry)) {
         return;
       }
-      const authId = String(entry.supabaseAuthId || "").trim();
+      const authId = getUserProfileId(entry);
       if (isUuidValue(authId)) {
         if (!approvedProfileIds.has(authId)) {
           if (skippedProfileIds.has(authId)) {
@@ -6991,7 +7041,7 @@ function wireAdmin() {
       }
 
       const nextApproved = !isUserAccessApproved(users[idx]);
-      const targetProfileId = users[idx].supabaseAuthId;
+      const targetProfileId = getUserProfileId(users[idx]);
       const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
       if (isUuidValue(targetProfileId) && !dbResult.ok) {
         toast(`Database update failed. ${dbResult.message}`);
@@ -7041,13 +7091,16 @@ function wireAdmin() {
       }
 
       let supabaseDeleteWarning = "";
+      const targetProfileId = getUserProfileId(target);
       if (target.supabaseAuthId) {
         const deleteResult = await deleteSupabaseAuthUserAsAdmin(target.supabaseAuthId);
         if (!deleteResult.ok) {
           supabaseDeleteWarning = deleteResult.message || "Could not delete user from Supabase Auth.";
           console.warn("Supabase auth user delete warning:", supabaseDeleteWarning);
         }
-        const relationalDeleteResult = await deleteRelationalProfile(target.supabaseAuthId);
+      }
+      if (targetProfileId) {
+        const relationalDeleteResult = await deleteRelationalProfile(targetProfileId);
         if (!relationalDeleteResult.ok) {
           toast(`Database delete failed. ${relationalDeleteResult.message}`);
           return;
