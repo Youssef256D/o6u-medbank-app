@@ -2329,10 +2329,17 @@ async function fetchRowsPaged(fetchPage, options = {}) {
 
 function isMissingRelationError(error) {
   const code = String(error?.code || "").trim();
-  if (code === "42P01") {
+  if (code === "42P01" || code === "PGRST205") {
     return true;
   }
-  return /does not exist/i.test(String(error?.message || ""));
+  const message = String(error?.message || "");
+  if (/does not exist/i.test(message)) {
+    return true;
+  }
+  if (/could not find the table/i.test(message) && /schema cache/i.test(message)) {
+    return true;
+  }
+  return false;
 }
 
 async function syncRelationalKey(storageKey, payload) {
