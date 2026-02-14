@@ -6213,6 +6213,7 @@ function renderAdmin() {
                 <div class="admin-course-qbank-actions">
                   <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Edit questions</button>
                   <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Delete all questions</button>
+                  <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
                 </div>
               </div>
             </td>
@@ -6888,6 +6889,7 @@ function wireAdmin() {
         "course-topic-add",
         "course-topic-rename",
         "course-topic-remove",
+        "course-topic-clear",
         "course-question-edit",
         "course-question-clear",
       ].includes(action)
@@ -6917,6 +6919,12 @@ function wireAdmin() {
       return;
     }
 
+    const refreshRowTopics = () => {
+      const topicsCell = row.querySelector("[data-role='course-topics-cell']");
+      if (!topicsCell) return;
+      topicsCell.innerHTML = renderAdminCourseTopicControls(course);
+    };
+
     if (action === "course-question-clear") {
       const questions = getQuestions();
       const courseQuestions = questions.filter((question) => getQbankCourseTopicMeta(question).course === course);
@@ -6944,11 +6952,25 @@ function wireAdmin() {
       return;
     }
 
-    const refreshRowTopics = () => {
-      const topicsCell = row.querySelector("[data-role='course-topics-cell']");
-      if (!topicsCell) return;
-      topicsCell.innerHTML = renderAdminCourseTopicControls(course);
-    };
+    if (action === "course-topic-clear") {
+      const existingTopics = QBANK_COURSE_TOPICS[course] || [];
+      if (!existingTopics.length) {
+        toast("This course has no topics to clear.");
+        return;
+      }
+      if (!window.confirm(`Delete all topics from "${course}"? Questions will be reassigned to the default topic.`)) {
+        return;
+      }
+      applyCourseTopicsUpdate(course, []);
+      refreshRowTopics();
+      try {
+        await flushPendingSyncNow();
+        toast(`Deleted ${existingTopics.length} topic(s) from ${course}.`);
+      } catch (syncError) {
+        toast(`Topics deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
+      return;
+    }
 
     if (action === "course-topic-add") {
       const input = row.querySelector("input[data-field='newCourseTopic']");
