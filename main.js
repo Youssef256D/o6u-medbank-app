@@ -2847,7 +2847,7 @@ async function syncQuestionsToRelational(questionsPayload) {
     });
   });
 
-  if (!upsertRows.length) {
+  if (!payloadExternalIds.length) {
     if (currentUser.role !== "admin") {
       return;
     }
@@ -2869,6 +2869,12 @@ async function syncQuestionsToRelational(questionsPayload) {
     return;
   }
 
+  if (!upsertRows.length) {
+    throw new Error(
+      "Could not map imported questions to database courses/topics. Questions were kept locally; database sync was skipped to prevent data loss.",
+    );
+  }
+
   for (const upsertBatch of splitIntoBatches(upsertRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
     const { error: questionsUpsertError } = await client.from("questions").upsert(upsertBatch, { onConflict: "external_id" });
     if (questionsUpsertError) {
@@ -2877,7 +2883,7 @@ async function syncQuestionsToRelational(questionsPayload) {
   }
 
   if (currentUser.role === "admin") {
-    const externalIdSet = new Set(upsertRows.map((row) => row.external_id));
+    const externalIdSet = new Set(payloadExternalIds);
     const existingQuestions = [];
     let rangeStart = 0;
     const rangeSize = 1000;
