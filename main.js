@@ -2218,7 +2218,7 @@ async function flushRelationalWrites(options = {}) {
       console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
       relationalSync.pendingWrites.set(storageKey, payload);
       if (!firstError) {
-        firstError = error instanceof Error ? error : new Error(String(error || "Relational sync failed."));
+        firstError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
       }
     }
   }
@@ -2261,6 +2261,46 @@ function splitIntoBatches(items, batchSize) {
     batches.push(source.slice(index, index + size));
   }
   return batches;
+}
+
+function getErrorMessage(error, fallback = "Unexpected error.") {
+  if (!error) {
+    return fallback;
+  }
+  if (typeof error === "string") {
+    const normalized = error.trim();
+    return normalized || fallback;
+  }
+  if (error instanceof Error) {
+    const normalized = String(error.message || "").trim();
+    return normalized || fallback;
+  }
+
+  const message = String(error?.message || "").trim();
+  const details = String(error?.details || "").trim();
+  const hint = String(error?.hint || "").trim();
+  if (message && details) {
+    return `${message} (${details})`;
+  }
+  if (message && hint) {
+    return `${message} (${hint})`;
+  }
+  if (message) {
+    return message;
+  }
+  if (details) {
+    return details;
+  }
+  if (hint) {
+    return hint;
+  }
+
+  try {
+    const serialized = JSON.stringify(error);
+    return serialized && serialized !== "{}" ? serialized : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function fetchRowsPaged(fetchPage, options = {}) {
@@ -2619,6 +2659,53 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   }
 }
 
+async function deleteRelationalQuestionsAndDependents(client, questionIds) {
+  const ids = [...new Set((Array.isArray(questionIds) ? questionIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
+  if (!ids.length) {
+    return;
+  }
+
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deleteChoicesError } = await client
+      .from("question_choices")
+      .delete()
+      .in("question_id", idBatch);
+    if (deleteChoicesError) {
+      throw deleteChoicesError;
+    }
+  }
+
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deleteResponsesError } = await client
+      .from("test_responses")
+      .delete()
+      .in("question_id", idBatch);
+    if (deleteResponsesError) {
+      throw deleteResponsesError;
+    }
+  }
+
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deleteItemsError } = await client
+      .from("test_block_items")
+      .delete()
+      .in("question_id", idBatch);
+    if (deleteItemsError) {
+      throw deleteItemsError;
+    }
+  }
+
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deleteQuestionsError } = await client
+      .from("questions")
+      .delete()
+      .in("id", idBatch);
+    if (deleteQuestionsError) {
+      throw deleteQuestionsError;
+    }
+  }
+}
+
 async function syncQuestionsToRelational(questionsPayload) {
   const client = getRelationalClient();
   const currentUser = getCurrentUser();
@@ -2770,22 +2857,7 @@ async function syncQuestionsToRelational(questionsPayload) {
     const existingQuestionIds = (existingResult.data || [])
       .map((row) => String(row?.id || "").trim())
       .filter(isUuidValue);
-    for (const questionIdBatch of splitIntoBatches(existingQuestionIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-      const { error: deleteChoicesError } = await client
-        .from("question_choices")
-        .delete()
-        .in("question_id", questionIdBatch);
-      if (deleteChoicesError) {
-        throw deleteChoicesError;
-      }
-      const { error: deleteQuestionsError } = await client
-        .from("questions")
-        .delete()
-        .in("id", questionIdBatch);
-      if (deleteQuestionsError) {
-        throw deleteQuestionsError;
-      }
-    }
+    await deleteRelationalQuestionsAndDependents(client, existingQuestionIds);
     saveLocalOnly(STORAGE_KEYS.questions, []);
     return;
   }
@@ -2824,12 +2896,7 @@ async function syncQuestionsToRelational(questionsPayload) {
     const deleteIds = existingQuestions
       .filter((row) => row.external_id && !externalIdSet.has(row.external_id))
       .map((row) => row.id);
-    for (const deleteBatch of splitIntoBatches(deleteIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-      const { error: deleteQuestionsError } = await client.from("questions").delete().in("id", deleteBatch);
-      if (deleteQuestionsError) {
-        throw deleteQuestionsError;
-      }
-    }
+    await deleteRelationalQuestionsAndDependents(client, deleteIds);
   }
 
   const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
@@ -6696,7 +6763,7 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
     } catch (syncError) {
-      toast(`Course added locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`Course added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
@@ -6740,7 +6807,7 @@ function wireAdmin() {
         state.skipNextRouteAnimation = true;
         render();
       } catch (syncError) {
-        toast(`Course updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Course updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -6775,7 +6842,7 @@ function wireAdmin() {
         state.skipNextRouteAnimation = true;
         render();
       } catch (syncError) {
-        toast(`Course deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Course deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -6842,7 +6909,7 @@ function wireAdmin() {
         state.skipNextRouteAnimation = true;
         render();
       } catch (syncError) {
-        toast(`Questions deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Questions deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -6877,7 +6944,7 @@ function wireAdmin() {
         await flushPendingSyncNow();
         toast("Topic added.");
       } catch (syncError) {
-        toast(`Topic added locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Topic added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -6908,7 +6975,7 @@ function wireAdmin() {
         await flushPendingSyncNow();
         toast("Topic renamed.");
       } catch (syncError) {
-        toast(`Topic renamed locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Topic renamed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -6926,7 +6993,7 @@ function wireAdmin() {
       await flushPendingSyncNow();
       toast("Topic removed.");
     } catch (syncError) {
-      toast(`Topic removed locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`Topic removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
@@ -6982,7 +7049,7 @@ function wireAdmin() {
       toast("User added.");
       render();
     } catch (syncError) {
-      toast(`User added locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`User added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
@@ -7041,7 +7108,7 @@ function wireAdmin() {
       );
       render();
     } catch (syncError) {
-      toast(`Approval updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`Approval updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
@@ -7082,7 +7149,7 @@ function wireAdmin() {
         toast("Enrollment saved.");
         render();
       } catch (syncError) {
-        toast(`Enrollment saved locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Enrollment saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -7133,7 +7200,7 @@ function wireAdmin() {
         toast("User role updated.");
         render();
       } catch (syncError) {
-        toast(`Role updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Role updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -7179,7 +7246,7 @@ function wireAdmin() {
         toast(nextApproved ? "Account approved." : "Account suspended.");
         render();
       } catch (syncError) {
-        toast(`Account updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`Account updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -7251,7 +7318,7 @@ function wireAdmin() {
         }
         render();
       } catch (syncError) {
-        toast(`User removed locally, but DB sync failed: ${syncError?.message || syncError}`);
+        toast(`User removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
     });
   });
@@ -7341,7 +7408,7 @@ function wireAdmin() {
       }
       render();
     } catch (syncError) {
-      toast(`Question deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`Question deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
@@ -7569,7 +7636,7 @@ function wireAdmin() {
       state.adminQuestionModalOpen = false;
       render();
     } catch (syncError) {
-      toast(`${successMessage} locally, but DB sync failed: ${syncError?.message || syncError}`);
+      toast(`${successMessage} locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
