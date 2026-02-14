@@ -6451,7 +6451,7 @@ function renderAdmin() {
           ? `
             <div class="admin-question-modal">
               <button class="admin-question-modal-backdrop" type="button" data-action="admin-close-editor" aria-label="Close question editor"></button>
-              <section class="card admin-question-modal-card">
+              <section class="admin-question-modal-card" role="dialog" aria-modal="true" aria-label="Question editor">
                 <div class="flex-between">
                   <h3 style="margin: 0;">${editing ? "Edit Question" : "New Question"}</h3>
                   <div class="stack">
