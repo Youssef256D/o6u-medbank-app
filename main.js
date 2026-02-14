@@ -25,6 +25,7 @@ const adminLinkEl = document.getElementById("admin-link");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-13.9").trim();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
+const STUDENT_DATA_REFRESH_MS = 60000;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
@@ -75,6 +76,8 @@ const state = {
   adminPresenceLoading: false,
   adminPresenceError: "",
   adminPresenceLastSyncAt: 0,
+  studentDataRefreshing: false,
+  studentDataLastSyncAt: 0,
 };
 
 let appVersionCheckPromise = null;
@@ -1497,6 +1500,79 @@ async function loadBackupUsersFromSyncStore() {
   return [];
 }
 
+async function fetchEnrollmentCourseMapForUsers(userIds) {
+  const client = getRelationalClient();
+  const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
+  if (!client || !ids.length) {
+    return {};
+  }
+
+  try {
+    const enrollmentRows = [];
+    for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data, error } = await client
+        .from("user_course_enrollments")
+        .select("user_id,course_id")
+        .in("user_id", idBatch);
+      if (error) {
+        throw error;
+      }
+      if (Array.isArray(data) && data.length) {
+        enrollmentRows.push(...data);
+      }
+    }
+
+    const courseIds = [...new Set(enrollmentRows.map((row) => String(row?.course_id || "").trim()).filter(isUuidValue))];
+    if (!courseIds.length) {
+      return {};
+    }
+
+    const courseRows = [];
+    for (const courseBatch of splitIntoBatches(courseIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data, error } = await client
+        .from("courses")
+        .select("id,course_name,is_active")
+        .in("id", courseBatch);
+      if (error) {
+        throw error;
+      }
+      if (Array.isArray(data) && data.length) {
+        courseRows.push(...data);
+      }
+    }
+
+    const courseNameById = Object.fromEntries(
+      courseRows
+        .filter((course) => course?.is_active !== false)
+        .map((course) => [String(course?.id || "").trim(), String(course?.course_name || "").trim()])
+        .filter(([courseId, courseName]) => isUuidValue(courseId) && Boolean(courseName)),
+    );
+
+    const enrollmentMap = {};
+    enrollmentRows.forEach((row) => {
+      const userId = String(row?.user_id || "").trim();
+      const courseId = String(row?.course_id || "").trim();
+      const courseName = courseNameById[courseId];
+      if (!isUuidValue(userId) || !courseName) {
+        return;
+      }
+      if (!Array.isArray(enrollmentMap[userId])) {
+        enrollmentMap[userId] = [];
+      }
+      if (!enrollmentMap[userId].includes(courseName)) {
+        enrollmentMap[userId].push(courseName);
+      }
+    });
+
+    return enrollmentMap;
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      return {};
+    }
+    throw error;
+  }
+}
+
 async function hydrateRelationalProfiles(currentUser) {
   const client = getRelationalClient();
   if (!client || !relationalSync.enabled) {
@@ -1530,6 +1606,13 @@ async function hydrateRelationalProfiles(currentUser) {
     return;
   }
 
+  let enrollmentCourseMap = {};
+  try {
+    enrollmentCourseMap = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
+  } catch (enrollmentError) {
+    console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
+  }
+
   const allCourses = [...CURRICULUM_COURSE_LIST];
   const localByAuthId = new Map(usersBefore.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry]));
   const mapped = profileRows.map((profile) => {
@@ -1537,6 +1620,10 @@ async function hydrateRelationalProfiles(currentUser) {
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || 1) : null;
     const semester = role === "student" ? sanitizeAcademicSemester(profile.academic_semester || 1) : null;
+    const enrolledCourses = role === "student"
+      ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
+      : [];
+    const defaultCourses = role === "student" ? getCurriculumCourses(year || 1, semester || 1) : [...allCourses];
     return {
       id: profile.id,
       name: String(profile.full_name || "").trim() || existing?.name || "Student",
@@ -1548,7 +1635,7 @@ async function hydrateRelationalProfiles(currentUser) {
       isApproved: Boolean(profile.approved),
       approvedAt: profile.approved ? existing?.approvedAt || profile.created_at || nowISO() : null,
       approvedBy: existing?.approvedBy || null,
-      assignedCourses: role === "student" ? getCurriculumCourses(year || 1, semester || 1) : [...allCourses],
+      assignedCourses: role === "student" ? (enrolledCourses.length ? enrolledCourses : defaultCourses) : [...allCourses],
       academicYear: year,
       academicSemester: semester,
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
@@ -3116,6 +3203,50 @@ async function refreshAdminPresenceSnapshot(options = {}) {
   }
 }
 
+function shouldRefreshStudentData(user) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  if (state.studentDataRefreshing) {
+    return false;
+  }
+  const last = Number(state.studentDataLastSyncAt || 0);
+  return !last || (Date.now() - last) > STUDENT_DATA_REFRESH_MS;
+}
+
+async function refreshStudentDataSnapshot(user, options = {}) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  const force = Boolean(options?.force);
+  if (!force && !shouldRefreshStudentData(user)) {
+    return true;
+  }
+  if (state.studentDataRefreshing) {
+    return false;
+  }
+
+  state.studentDataRefreshing = true;
+  try {
+    const ready = await ensureRelationalSyncReady({ force });
+    if (!ready) {
+      state.studentDataLastSyncAt = Date.now();
+      return false;
+    }
+    await hydrateRelationalCoursesAndTopics();
+    await hydrateRelationalProfiles(user);
+    await hydrateRelationalQuestions();
+    state.studentDataLastSyncAt = Date.now();
+    return true;
+  } catch (error) {
+    state.studentDataLastSyncAt = Date.now();
+    console.warn("Student data refresh failed.", error?.message || error);
+    return false;
+  } finally {
+    state.studentDataRefreshing = false;
+  }
+}
+
 function ensureAdminPresencePolling() {
   if (adminPresencePollHandle) {
     return;
@@ -3215,6 +3346,10 @@ function render() {
     state.adminPresenceLastSyncAt = 0;
     clearAdminPresencePolling();
   }
+  if (!user || user.role !== "student") {
+    state.studentDataRefreshing = false;
+    state.studentDataLastSyncAt = 0;
+  }
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
@@ -3247,6 +3382,24 @@ function render() {
   if (state.route === "admin" && user?.role !== "admin") {
     state.route = "dashboard";
     toast("Admin role required for this page.");
+  }
+
+  if (
+    user?.role === "student"
+    && !["session", "review"].includes(state.route)
+    && shouldRefreshStudentData(user)
+  ) {
+    refreshStudentDataSnapshot(user, { force: !state.studentDataLastSyncAt })
+      .catch((error) => {
+        console.warn("Student data refresh failed.", error?.message || error);
+      })
+      .finally(() => {
+        const current = getCurrentUser();
+        if (current?.id === user.id && current.role === "student" && !["session", "review"].includes(state.route)) {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      });
   }
 
   if (user?.role === "admin" && state.route !== "admin") {
