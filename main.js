@@ -1680,18 +1680,30 @@ async function hydrateRelationalQuestions() {
   const users = getUsers();
   const localQuestionsBefore = getQuestions();
   const currentUser = getCurrentUser();
-  const courses = await client.from("courses").select("id,course_name");
-  if (courses.error) {
+  const coursesResult = await fetchRowsPaged((from, to) => (
+    client.from("courses").select("id,course_name").range(from, to)
+  ));
+  if (coursesResult.error) {
     return;
   }
-  const topics = await client.from("course_topics").select("id,course_id,topic_name");
-  if (topics.error) {
+  const courseRows = Array.isArray(coursesResult.data) ? coursesResult.data : [];
+
+  const topicsResult = await fetchRowsPaged((from, to) => (
+    client.from("course_topics").select("id,course_id,topic_name").range(from, to)
+  ));
+  if (topicsResult.error) {
     return;
   }
-  let questionsResult = await client
-    .from("questions")
-    .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
-    .order("created_at", { ascending: true });
+  const topicRows = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+
+  let questionsResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("questions")
+      .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
   if (questionsResult.error) {
     return;
   }
@@ -1706,10 +1718,14 @@ async function hydrateRelationalQuestions() {
       relationalSync.questionsBackfillAttempted = true;
       try {
         await syncQuestionsToRelational(localQuestionsBefore);
-        const retryResult = await client
-          .from("questions")
-          .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
-          .order("created_at", { ascending: true });
+        const retryResult = await fetchRowsPaged((from, to) => (
+          client
+            .from("questions")
+            .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+            .order("created_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to)
+        ));
         if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
           questionsResult = retryResult;
         } else {
@@ -1724,29 +1740,34 @@ async function hydrateRelationalQuestions() {
     }
   }
 
-  const questionIds = (questionsResult.data || []).map((question) => question.id);
-  const choicesResult = questionIds.length
-    ? await client
-        .from("question_choices")
-        .select("question_id,choice_label,choice_text,is_correct")
-        .in("question_id", questionIds)
-    : { data: [], error: null };
-  if (choicesResult.error) {
-    return;
+  const questionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
+  const questionIds = questionRows.map((question) => question.id).filter(isUuidValue);
+  const choiceRows = [];
+  for (const questionIdBatch of splitIntoBatches(questionIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error } = await client
+      .from("question_choices")
+      .select("question_id,choice_label,choice_text,is_correct")
+      .in("question_id", questionIdBatch);
+    if (error) {
+      return;
+    }
+    if (Array.isArray(data) && data.length) {
+      choiceRows.push(...data);
+    }
   }
 
-  const courseById = Object.fromEntries((courses.data || []).map((course) => [course.id, String(course.course_name || "").trim()]));
-  const topicById = Object.fromEntries((topics.data || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
+  const courseById = Object.fromEntries((courseRows || []).map((course) => [course.id, String(course.course_name || "").trim()]));
+  const topicById = Object.fromEntries((topicRows || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
   const authorById = Object.fromEntries(users.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.name]));
   const choicesByQuestionId = {};
-  (choicesResult.data || []).forEach((choice) => {
+  (choiceRows || []).forEach((choice) => {
     if (!choicesByQuestionId[choice.question_id]) {
       choicesByQuestionId[choice.question_id] = [];
     }
     choicesByQuestionId[choice.question_id].push(choice);
   });
 
-  const mappedQuestions = (questionsResult.data || []).map((question) => {
+  const mappedQuestions = (questionRows || []).map((question) => {
     const courseName = courseById[question.course_id] || CURRICULUM_COURSE_LIST[0] || "Course";
     const topicName = topicById[question.topic_id] || resolveDefaultTopic(courseName);
     const rawChoices = (choicesByQuestionId[question.id] || [])
@@ -2158,6 +2179,30 @@ function splitIntoBatches(items, batchSize) {
     batches.push(source.slice(index, index + size));
   }
   return batches;
+}
+
+async function fetchRowsPaged(fetchPage, options = {}) {
+  const pageSize = Math.max(1, Number(options?.pageSize) || 1000);
+  const rows = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await fetchPage(from, from + pageSize - 1);
+    if (error) {
+      return { data: null, error };
+    }
+    const batch = Array.isArray(data) ? data : [];
+    if (!batch.length) {
+      break;
+    }
+    rows.push(...batch);
+    if (batch.length < pageSize) {
+      break;
+    }
+    from += pageSize;
+  }
+
+  return { data: rows, error: null };
 }
 
 function isMissingRelationError(error) {
