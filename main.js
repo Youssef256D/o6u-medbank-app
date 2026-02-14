@@ -1268,9 +1268,15 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   }
 
   const targetApproved = Boolean(approved);
-  const { data: existingRows, error: existingError } = await client.from("profiles").select("id").in("id", ids);
-  if (existingError) {
-    return { ok: false, message: existingError.message || "Could not read profile rows before update." };
+  const existingRows = [];
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error: existingError } = await client.from("profiles").select("id").in("id", idBatch);
+    if (existingError) {
+      return { ok: false, message: existingError.message || "Could not read profile rows before update." };
+    }
+    if (Array.isArray(data) && data.length) {
+      existingRows.push(...data);
+    }
   }
   const existingIds = new Set((existingRows || []).map((row) => row.id).filter((id) => isUuidValue(id)));
   const missingIds = ids.filter((id) => !existingIds.has(id));
@@ -1285,27 +1291,39 @@ async function updateRelationalProfileApproval(profileIds, approved) {
     };
   }
 
-  const { data: updatedRows, error } = await client
-    .from("profiles")
-    .update({ approved: targetApproved })
-    .in("id", targetIds)
-    .select("id,approved");
-  if (error) {
-    return { ok: false, message: error.message || "Could not update profile approval in database." };
+  const updatedRows = [];
+  for (const targetBatch of splitIntoBatches(targetIds, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    const { data, error } = await client
+      .from("profiles")
+      .update({ approved: targetApproved })
+      .in("id", targetBatch)
+      .select("id,approved");
+    if (error) {
+      return { ok: false, message: error.message || "Could not update profile approval in database." };
+    }
+    if (Array.isArray(data) && data.length) {
+      updatedRows.push(...data);
+    }
   }
 
   const appliedById = new Map((updatedRows || []).map((row) => [row.id, Boolean(row.approved)]));
   const unresolvedIds = targetIds.filter((id) => appliedById.get(id) !== targetApproved);
   if (unresolvedIds.length) {
-    const { data: verifyRows, error: verifyError } = await client
-      .from("profiles")
-      .select("id,approved")
-      .in("id", unresolvedIds);
-    if (verifyError) {
-      return {
-        ok: false,
-        message: verifyError.message || "Could not verify profile approval status after update.",
-      };
+    const verifyRows = [];
+    for (const unresolvedBatch of splitIntoBatches(unresolvedIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data, error: verifyError } = await client
+        .from("profiles")
+        .select("id,approved")
+        .in("id", unresolvedBatch);
+      if (verifyError) {
+        return {
+          ok: false,
+          message: verifyError.message || "Could not verify profile approval status after update.",
+        };
+      }
+      if (Array.isArray(data) && data.length) {
+        verifyRows.push(...data);
+      }
     }
     const verifiedById = new Map((verifyRows || []).map((row) => [row.id, Boolean(row.approved)]));
     unresolvedIds.splice(0, unresolvedIds.length, ...unresolvedIds.filter((id) => verifiedById.get(id) !== targetApproved));
@@ -1410,24 +1428,34 @@ async function hydrateRelationalCoursesAndTopics() {
     return;
   }
 
-  const { data: courses, error: coursesError } = await client
-    .from("courses")
-    .select("id,course_name,course_code,academic_year,academic_semester,is_active")
-    .order("academic_year", { ascending: true })
-    .order("academic_semester", { ascending: true })
-    .order("course_name", { ascending: true });
-  if (coursesError) {
+  const coursesResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("courses")
+      .select("id,course_name,course_code,academic_year,academic_semester,is_active")
+      .order("academic_year", { ascending: true })
+      .order("academic_semester", { ascending: true })
+      .order("course_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (coursesResult.error) {
     return;
   }
+  const courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
 
-  const { data: topics, error: topicsError } = await client
-    .from("course_topics")
-    .select("course_id,topic_name,sort_order,is_active")
-    .order("sort_order", { ascending: true })
-    .order("topic_name", { ascending: true });
-  if (topicsError) {
+  const topicsResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("course_topics")
+      .select("course_id,topic_name,sort_order,is_active,id")
+      .order("sort_order", { ascending: true })
+      .order("topic_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (topicsResult.error) {
     return;
   }
+  const topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
 
   const curriculum = {};
   for (let year = 1; year <= 5; year += 1) {
@@ -1589,17 +1617,32 @@ async function hydrateRelationalProfiles(currentUser) {
 
   const usersBefore = getUsers();
   const isAdmin = currentUser.role === "admin";
-  let profileQuery = client
-    .from("profiles")
-    .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at");
-  if (!isAdmin) {
-    profileQuery = profileQuery.eq("id", currentUser.supabaseAuthId);
+  let profileRows = [];
+  if (isAdmin) {
+    const profilesResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("profiles")
+        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
+    if (profilesResult.error) {
+      return;
+    }
+    profileRows = Array.isArray(profilesResult.data) ? profilesResult.data : [];
+  } else {
+    const { data: profile, error } = await client
+      .from("profiles")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+      .eq("id", currentUser.supabaseAuthId)
+      .maybeSingle();
+    if (error) {
+      return;
+    }
+    profileRows = profile ? [profile] : [];
   }
-  const { data: profiles, error } = await profileQuery;
-  if (error) {
-    return;
-  }
-  const profileRows = Array.isArray(profiles) ? profiles : [];
+
   if (!profileRows.length) {
     const hasLocalRelationalUsers = usersBefore.some((entry) => isUuidValue(entry?.supabaseAuthId));
     if (isAdmin && hasLocalRelationalUsers && !relationalSync.profilesBackfillAttempted) {
@@ -1824,29 +1867,47 @@ async function hydrateRelationalSessions(currentUser) {
   let blocksQuery = client
     .from("test_blocks")
     .select("id,external_id,user_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
-  if (currentUser.role !== "admin") {
-    blocksQuery = blocksQuery.eq("user_id", currentUser.supabaseAuthId);
-  }
-  const { data: blocks, error: blocksError } = await blocksQuery.order("updated_at", { ascending: false }).limit(5000);
-  if (blocksError) {
+  const blocksResult = await fetchRowsPaged((from, to) => {
+    let query = blocksQuery
+      .order("updated_at", { ascending: false })
+      .order("id", { ascending: true });
+    if (currentUser.role !== "admin") {
+      query = query.eq("user_id", currentUser.supabaseAuthId);
+    }
+    return query.range(from, to);
+  });
+  if (blocksResult.error) {
     return;
   }
+  const blocks = Array.isArray(blocksResult.data) ? blocksResult.data : [];
 
   const blockIds = (blocks || []).map((block) => block.id);
-  const { data: items, error: itemsError } = blockIds.length
-    ? await client.from("test_block_items").select("block_id,position,question_id").in("block_id", blockIds).order("position")
-    : { data: [], error: null };
-  if (itemsError) {
-    return;
+  const items = [];
+  for (const blockBatch of splitIntoBatches(blockIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error: itemsError } = await client
+      .from("test_block_items")
+      .select("block_id,position,question_id")
+      .in("block_id", blockBatch)
+      .order("position");
+    if (itemsError) {
+      return;
+    }
+    if (Array.isArray(data) && data.length) {
+      items.push(...data);
+    }
   }
-  const { data: responses, error: responsesError } = blockIds.length
-    ? await client
-        .from("test_responses")
-        .select("block_id,question_id,selected_choice_labels,flagged,notes,submitted,answered_at")
-        .in("block_id", blockIds)
-    : { data: [], error: null };
-  if (responsesError) {
-    return;
+  const responses = [];
+  for (const blockBatch of splitIntoBatches(blockIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error: responsesError } = await client
+      .from("test_responses")
+      .select("block_id,question_id,selected_choice_labels,flagged,notes,submitted,answered_at")
+      .in("block_id", blockBatch);
+    if (responsesError) {
+      return;
+    }
+    if (Array.isArray(data) && data.length) {
+      responses.push(...data);
+    }
   }
 
   const localUserIdByAuth = Object.fromEntries(allUsers.filter((entry) => entry.supabaseAuthId).map((entry) => [entry.supabaseAuthId, entry.id]));
@@ -2260,9 +2321,11 @@ async function syncProfilesToRelational(usersPayload) {
     return;
   }
 
-  const { error } = await client.from("profiles").upsert(rows, { onConflict: "id" });
-  if (error) {
-    throw error;
+  for (const rowBatch of splitIntoBatches(rows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    const { error } = await client.from("profiles").upsert(rowBatch, { onConflict: "id" });
+    if (error) {
+      throw error;
+    }
   }
 
   await syncUserCourseEnrollmentsToRelational(users, {
@@ -2407,20 +2470,30 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   }
 
   if (desiredCourses.length) {
-    const { error: upsertCoursesError } = await client
-      .from("courses")
-      .upsert(desiredCourses, { onConflict: "course_name,academic_year,academic_semester" });
-    if (upsertCoursesError) {
-      throw upsertCoursesError;
+    for (const courseBatch of splitIntoBatches(desiredCourses, RELATIONAL_UPSERT_BATCH_SIZE)) {
+      const { error: upsertCoursesError } = await client
+        .from("courses")
+        .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester" });
+      if (upsertCoursesError) {
+        throw upsertCoursesError;
+      }
     }
   }
 
-  const { data: allCourses, error: allCoursesError } = await client
-    .from("courses")
-    .select("id,course_name,academic_year,academic_semester,is_active");
-  if (allCoursesError) {
-    throw allCoursesError;
+  const allCoursesResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("courses")
+      .select("id,course_name,academic_year,academic_semester,is_active")
+      .order("academic_year", { ascending: true })
+      .order("academic_semester", { ascending: true })
+      .order("course_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (allCoursesResult.error) {
+    throw allCoursesResult.error;
   }
+  const allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
 
   const desiredCourseKeys = new Set(
     desiredCourses.map((course) => `${course.course_name}::${course.academic_year}::${course.academic_semester}`),
@@ -2430,8 +2503,14 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     .filter((course) => course.is_active)
     .filter((course) => !desiredCourseKeys.has(`${course.course_name}::${course.academic_year}::${course.academic_semester}`))
     .map((course) => course.id);
-  if (deactivateCourseIds.length) {
-    await client.from("courses").update({ is_active: false }).in("id", deactivateCourseIds);
+  for (const deactivateBatch of splitIntoBatches(deactivateCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deactivateCoursesError } = await client
+      .from("courses")
+      .update({ is_active: false })
+      .in("id", deactivateBatch);
+    if (deactivateCoursesError) {
+      throw deactivateCoursesError;
+    }
   }
 
   const courseRowsByName = {};
@@ -2459,27 +2538,42 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   });
 
   if (desiredTopicRows.length) {
-    const { error: upsertTopicsError } = await client
-      .from("course_topics")
-      .upsert(desiredTopicRows, { onConflict: "course_id,topic_name" });
-    if (upsertTopicsError) {
-      throw upsertTopicsError;
+    for (const topicBatch of splitIntoBatches(desiredTopicRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+      const { error: upsertTopicsError } = await client
+        .from("course_topics")
+        .upsert(topicBatch, { onConflict: "course_id,topic_name" });
+      if (upsertTopicsError) {
+        throw upsertTopicsError;
+      }
     }
   }
 
-  const { data: allTopics, error: allTopicsError } = await client
-    .from("course_topics")
-    .select("id,course_id,topic_name,is_active");
-  if (allTopicsError) {
-    throw allTopicsError;
+  const allTopicsResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("course_topics")
+      .select("id,course_id,topic_name,is_active")
+      .order("course_id", { ascending: true })
+      .order("topic_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (allTopicsResult.error) {
+    throw allTopicsResult.error;
   }
+  const allTopics = Array.isArray(allTopicsResult.data) ? allTopicsResult.data : [];
   const desiredTopicKeys = new Set(desiredTopicRows.map((topic) => `${topic.course_id}::${topic.topic_name}`));
   const deactivateTopicIds = (allTopics || [])
     .filter((topic) => topic.is_active)
     .filter((topic) => !desiredTopicKeys.has(`${topic.course_id}::${topic.topic_name}`))
     .map((topic) => topic.id);
-  if (deactivateTopicIds.length) {
-    await client.from("course_topics").update({ is_active: false }).in("id", deactivateTopicIds);
+  for (const deactivateBatch of splitIntoBatches(deactivateTopicIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deactivateTopicsError } = await client
+      .from("course_topics")
+      .update({ is_active: false })
+      .in("id", deactivateBatch);
+    if (deactivateTopicsError) {
+      throw deactivateTopicsError;
+    }
   }
 }
 
@@ -2514,10 +2608,29 @@ async function syncQuestionsToRelational(questionsPayload) {
     });
   }
 
-  const { data: courses, error: coursesError } = await client.from("courses").select("id,course_name").eq("is_active", true);
-  if (coursesError) throw coursesError;
-  const { data: topics, error: topicsError } = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
-  if (topicsError) throw topicsError;
+  const coursesResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("courses")
+      .select("id,course_name,is_active")
+      .eq("is_active", true)
+      .order("course_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (coursesResult.error) throw coursesResult.error;
+  const topicsResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("course_topics")
+      .select("id,course_id,topic_name,is_active")
+      .eq("is_active", true)
+      .order("course_id", { ascending: true })
+      .order("topic_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (topicsResult.error) throw topicsResult.error;
+  const courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
+  const topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
 
   const courseIdByName = Object.fromEntries((courses || []).map((course) => [course.course_name, course.id]));
   const topicIdByCourseTopic = {};
@@ -2550,7 +2663,16 @@ async function syncQuestionsToRelational(questionsPayload) {
         throw missingTopicsError;
       }
     }
-    const refreshedTopics = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
+    const refreshedTopics = await fetchRowsPaged((from, to) => (
+      client
+        .from("course_topics")
+        .select("id,course_id,topic_name,is_active")
+        .eq("is_active", true)
+        .order("course_id", { ascending: true })
+        .order("topic_name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
     if (refreshedTopics.error) {
       throw refreshedTopics.error;
     }
@@ -2773,25 +2895,39 @@ async function syncSessionsToRelational(sessionsPayload) {
     completed_at: session.completedAt || null,
   }));
 
-  const { error: blocksUpsertError } = await client.from("test_blocks").upsert(upsertBlocks, { onConflict: "external_id" });
-  if (blocksUpsertError) {
-    throw blocksUpsertError;
+  for (const blockBatch of splitIntoBatches(upsertBlocks, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    const { error: blocksUpsertError } = await client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id" });
+    if (blocksUpsertError) {
+      throw blocksUpsertError;
+    }
   }
 
   const externalIds = upsertBlocks.map((entry) => entry.external_id).filter(Boolean);
-  const { data: persistedBlocks, error: persistedBlocksError } = await client
-    .from("test_blocks")
-    .select("id,external_id")
-    .in("external_id", externalIds);
-  if (persistedBlocksError) {
-    throw persistedBlocksError;
+  const persistedBlocks = [];
+  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error: persistedBlocksError } = await client
+      .from("test_blocks")
+      .select("id,external_id")
+      .in("external_id", externalIdBatch);
+    if (persistedBlocksError) {
+      throw persistedBlocksError;
+    }
+    if (Array.isArray(data) && data.length) {
+      persistedBlocks.push(...data);
+    }
   }
   const blockIdByExternalId = Object.fromEntries((persistedBlocks || []).map((entry) => [entry.external_id, entry.id]));
   const blockIds = Object.values(blockIdByExternalId);
 
-  if (blockIds.length) {
-    await client.from("test_responses").delete().in("block_id", blockIds);
-    await client.from("test_block_items").delete().in("block_id", blockIds);
+  for (const blockIdBatch of splitIntoBatches(blockIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: responsesDeleteError } = await client.from("test_responses").delete().in("block_id", blockIdBatch);
+    if (responsesDeleteError) {
+      throw responsesDeleteError;
+    }
+    const { error: itemsDeleteError } = await client.from("test_block_items").delete().in("block_id", blockIdBatch);
+    if (itemsDeleteError) {
+      throw itemsDeleteError;
+    }
   }
 
   const itemRows = [];
@@ -2824,15 +2960,19 @@ async function syncSessionsToRelational(sessionsPayload) {
   });
 
   if (itemRows.length) {
-    const { error: itemsInsertError } = await client.from("test_block_items").insert(itemRows);
-    if (itemsInsertError) {
-      throw itemsInsertError;
+    for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+      const { error: itemsInsertError } = await client.from("test_block_items").insert(itemBatch);
+      if (itemsInsertError) {
+        throw itemsInsertError;
+      }
     }
   }
   if (responseRows.length) {
-    const { error: responsesInsertError } = await client.from("test_responses").insert(responseRows);
-    if (responsesInsertError) {
-      throw responsesInsertError;
+    for (const responseBatch of splitIntoBatches(responseRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+      const { error: responsesInsertError } = await client.from("test_responses").insert(responseBatch);
+      if (responsesInsertError) {
+        throw responsesInsertError;
+      }
     }
   }
 
