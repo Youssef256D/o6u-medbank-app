@@ -208,19 +208,16 @@ button {
 }
 
 .app-shell.route-enter {
-  opacity: 0;
-  transform: translateY(12px) scale(0.995);
-  filter: blur(1.5px);
+  opacity: 1;
+  transform: none;
+  filter: none;
 }
 
 .app-shell.route-enter.route-enter-active {
   opacity: 1;
-  transform: translateY(0) scale(1);
-  filter: blur(0);
-  transition:
-    opacity 320ms ease,
-    transform 320ms ease,
-    filter 320ms ease;
+  transform: none;
+  filter: none;
+  transition: none;
 }
 
 .panel {
