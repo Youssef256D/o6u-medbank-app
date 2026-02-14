@@ -66,6 +66,7 @@ const state = {
   sessionHighContrast: false,
   calcExpression: "",
   adminImportReport: null,
+  adminImportDraft: "",
   skipNextRouteAnimation: false,
   adminDataRefreshing: false,
   adminDataLastSyncAt: 0,
@@ -5772,6 +5773,7 @@ function renderAdmin() {
     const importCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
     const importReport = state.adminImportReport;
+    const importDraft = String(state.adminImportDraft || "");
     const importErrorPreview = (importReport?.errors || []).slice(0, 15);
 
     pageContent = `
@@ -5799,7 +5801,7 @@ function renderAdmin() {
             <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
           </label>
           <label>Paste CSV rows or JSON array
-            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'></textarea>
+            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'>${escapeHtml(importDraft)}</textarea>
           </label>
           <div class="stack">
             <button class="btn" type="submit">Run bulk import</button>
@@ -6732,6 +6734,15 @@ function wireAdmin() {
   const importErrorDownloadButton = document.getElementById("admin-download-import-errors");
   const importReportClearButton = document.getElementById("admin-clear-import-report");
 
+  if (importTextInput) {
+    if (importTextInput.value !== String(state.adminImportDraft || "")) {
+      importTextInput.value = String(state.adminImportDraft || "");
+    }
+    importTextInput.addEventListener("input", () => {
+      state.adminImportDraft = importTextInput.value;
+    });
+  }
+
   const toCsvCell = (value) => {
     const text = String(value == null ? "" : value);
     if (/["\n\r,]/.test(text)) {
@@ -6817,6 +6828,7 @@ function wireAdmin() {
       return;
     }
     const text = await file.text();
+    state.adminImportDraft = text;
     importTextInput.value = text;
   });
 
@@ -6918,7 +6930,8 @@ function wireAdmin() {
   importForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(importForm);
-    const raw = String(data.get("importText") || "").trim();
+    const rawInput = String(state.adminImportDraft || data.get("importText") || "");
+    const raw = rawInput.trim();
     if (!raw) {
       toast("Paste import content or upload a file first.");
       return;
