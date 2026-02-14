@@ -30,7 +30,8 @@ const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
-const AUTH_SIGNIN_TIMEOUT_MS = 12000;
+const AUTH_SIGNIN_TIMEOUT_MS = 8000;
+const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3500;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
@@ -566,9 +567,20 @@ async function fetchPublishedAppVersion() {
   try {
     const checkUrl = new URL(window.location.href);
     checkUrl.searchParams.set("__app_version_check", String(Date.now()));
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutHandle = controller
+      ? window.setTimeout(() => {
+          controller.abort();
+        }, APP_VERSION_FETCH_TIMEOUT_MS)
+      : null;
     const response = await fetch(checkUrl.toString(), {
       cache: "no-store",
       headers: { "Cache-Control": "no-cache" },
+      ...(controller ? { signal: controller.signal } : {}),
+    }).finally(() => {
+      if (timeoutHandle) {
+        window.clearTimeout(timeoutHandle);
+      }
     });
     if (!response.ok) {
       return null;
