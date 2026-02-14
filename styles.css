@@ -965,6 +965,32 @@ img {
   overflow: auto;
 }
 
+.admin-question-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.admin-question-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(15, 23, 42, 0.42);
+  cursor: pointer;
+}
+
+.admin-question-modal-card {
+  position: relative;
+  width: min(1100px, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  z-index: 1;
+}
+
 .auth-inline {
   display: flex;
   align-items: center;

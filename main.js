@@ -55,6 +55,7 @@ const state = {
   adminCurriculumSemester: 1,
   adminEditorCourse: "",
   adminEditorTopic: "",
+  adminQuestionModalOpen: false,
   qbankFilters: {
     course: "",
     topics: [],
@@ -6250,7 +6251,8 @@ function renderAdmin() {
             <h3 style="margin: 0;">Course Question Editor</h3>
             <p class="subtle">Open each course, see all uploaded questions, and edit stem, answers, and explanation.</p>
           </div>
-          <div class="stack" style="align-items: flex-end;">
+          <div class="stack" style="align-items: flex-end; gap: 0.35rem;">
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-editor-new">New question</button>
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-courses">Back to courses</button>
           </div>
         </div>
@@ -6294,87 +6296,6 @@ function renderAdmin() {
             </tbody>
           </table>
         </div>
-      </section>
-
-      <section class="card admin-section" style="margin-top: 0.7rem;">
-        <div class="flex-between">
-          <h3 style="margin: 0;">${editing ? "Edit Question" : "Create / Edit Question"}</h3>
-          <div class="stack">
-            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new">New</button>
-            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel">Clear</button>
-          </div>
-        </div>
-        <form id="admin-question-form" style="margin-top: 0.75rem;">
-          <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}" />
-          <div class="form-row">
-            <label>Course
-              <select id="admin-question-course" name="questionCourse">
-                ${allCourses
-                  .map((course) => `<option value="${escapeHtml(course)}" ${editorCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                  .join("")}
-              </select>
-            </label>
-            <label>Topic
-              <select id="admin-question-topic" name="questionTopic">
-                ${editorTopics
-                  .map((topic) => `<option value="${escapeHtml(topic)}" ${editorTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
-                  .join("")}
-              </select>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>System
-              <input name="system" value="${escapeHtml(editing?.system || editorCourse)}" />
-            </label>
-            <label>Difficulty
-              <select name="difficulty">
-                <option value="Easy" ${String(editing?.difficulty || "Medium") === "Easy" ? "selected" : ""}>Easy</option>
-                <option value="Medium" ${String(editing?.difficulty || "Medium") === "Medium" ? "selected" : ""}>Medium</option>
-                <option value="Hard" ${String(editing?.difficulty || "Medium") === "Hard" ? "selected" : ""}>Hard</option>
-              </select>
-            </label>
-            <label>Status
-              <select name="status">
-                <option value="draft" ${String(editing?.status || "draft") === "draft" ? "selected" : ""}>Draft</option>
-                <option value="published" ${String(editing?.status || "draft") === "published" ? "selected" : ""}>Published</option>
-              </select>
-            </label>
-          </div>
-          <label>Question stem
-            <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
-          </label>
-          <div class="form-row">
-            <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
-            <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
-          </div>
-          <div class="form-row">
-            <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" required /></label>
-            <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" required /></label>
-          </div>
-          <div class="form-row">
-            <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
-            <label>Correct answer
-              <select name="correct">
-                ${["A", "B", "C", "D", "E"]
-                  .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
-                  .join("")}
-              </select>
-            </label>
-          </div>
-          <label>Explanation
-            <textarea name="explanation" required>${escapeHtml(editing?.explanation || "")}</textarea>
-          </label>
-          <div class="form-row">
-            <label>References <input name="references" value="${escapeHtml(editing?.references || "")}" /></label>
-            <label>Explanation image URL <input name="explanationImage" value="${escapeHtml(editing?.explanationImage || "")}" /></label>
-          </div>
-          <label>Tags (comma-separated)
-            <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
-          </label>
-          <div class="stack">
-            <button class="btn" type="submit">${editing ? "Save question changes" : "Save question"}</button>
-          </div>
-        </form>
       </section>
 
       <section class="card admin-section" style="margin-top: 0.7rem;">
@@ -6433,6 +6354,95 @@ function renderAdmin() {
             : ""
         }
       </section>
+      ${
+        state.adminQuestionModalOpen
+          ? `
+            <div class="admin-question-modal">
+              <button class="admin-question-modal-backdrop" type="button" data-action="admin-close-editor" aria-label="Close question editor"></button>
+              <section class="card admin-question-modal-card">
+                <div class="flex-between">
+                  <h3 style="margin: 0;">${editing ? "Edit Question" : "New Question"}</h3>
+                  <div class="stack">
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new">New</button>
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel">Close</button>
+                  </div>
+                </div>
+                <form id="admin-question-form" style="margin-top: 0.75rem;">
+                  <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}" />
+                  <div class="form-row">
+                    <label>Course
+                      <select id="admin-question-course" name="questionCourse">
+                        ${allCourses
+                          .map((course) => `<option value="${escapeHtml(course)}" ${editorCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+                          .join("")}
+                      </select>
+                    </label>
+                    <label>Topic
+                      <select id="admin-question-topic" name="questionTopic">
+                        ${editorTopics
+                          .map((topic) => `<option value="${escapeHtml(topic)}" ${editorTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+                          .join("")}
+                      </select>
+                    </label>
+                  </div>
+                  <div class="form-row">
+                    <label>System
+                      <input name="system" value="${escapeHtml(editing?.system || editorCourse)}" />
+                    </label>
+                    <label>Difficulty
+                      <select name="difficulty">
+                        <option value="Easy" ${String(editing?.difficulty || "Medium") === "Easy" ? "selected" : ""}>Easy</option>
+                        <option value="Medium" ${String(editing?.difficulty || "Medium") === "Medium" ? "selected" : ""}>Medium</option>
+                        <option value="Hard" ${String(editing?.difficulty || "Medium") === "Hard" ? "selected" : ""}>Hard</option>
+                      </select>
+                    </label>
+                    <label>Status
+                      <select name="status">
+                        <option value="draft" ${String(editing?.status || "draft") === "draft" ? "selected" : ""}>Draft</option>
+                        <option value="published" ${String(editing?.status || "draft") === "published" ? "selected" : ""}>Published</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>Question stem
+                    <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
+                  </label>
+                  <div class="form-row">
+                    <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
+                    <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
+                  </div>
+                  <div class="form-row">
+                    <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" required /></label>
+                    <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" required /></label>
+                  </div>
+                  <div class="form-row">
+                    <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
+                    <label>Correct answer
+                      <select name="correct">
+                        ${["A", "B", "C", "D", "E"]
+                          .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
+                          .join("")}
+                      </select>
+                    </label>
+                  </div>
+                  <label>Explanation
+                    <textarea name="explanation" required>${escapeHtml(editing?.explanation || "")}</textarea>
+                  </label>
+                  <div class="form-row">
+                    <label>References <input name="references" value="${escapeHtml(editing?.references || "")}" /></label>
+                    <label>Explanation image URL <input name="explanationImage" value="${escapeHtml(editing?.explanationImage || "")}" /></label>
+                  </div>
+                  <label>Tags (comma-separated)
+                    <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
+                  </label>
+                  <div class="stack">
+                    <button class="btn" type="submit">${editing ? "Save question changes" : "Save question"}</button>
+                  </div>
+                </form>
+              </section>
+            </div>
+          `
+          : ""
+      }
     `;
   }
 
@@ -6588,6 +6598,9 @@ function wireAdmin() {
         return;
       }
       state.adminPage = page;
+      if (page !== "questions") {
+        state.adminQuestionModalOpen = false;
+      }
       if (page === "activity") {
         refreshAdminPresenceSnapshot({ force: true })
           .then((ok) => {
@@ -6611,6 +6624,7 @@ function wireAdmin() {
     button.addEventListener("click", () => {
       state.adminPage = "courses";
       state.adminEditQuestionId = null;
+      state.adminQuestionModalOpen = false;
       state.skipNextRouteAnimation = true;
       render();
     });
@@ -6800,6 +6814,7 @@ function wireAdmin() {
       state.adminEditorCourse = course;
       state.adminEditorTopic = resolveDefaultTopic(course);
       state.adminEditQuestionId = null;
+      state.adminQuestionModalOpen = false;
       state.skipNextRouteAnimation = true;
       render();
       return;
@@ -7265,6 +7280,24 @@ function wireAdmin() {
     render();
   });
 
+  appEl.querySelector("[data-action='admin-open-editor-new']")?.addEventListener("click", () => {
+    state.adminEditQuestionId = null;
+    state.adminEditorCourse = state.adminFilters.course || allCourses[0] || "";
+    state.adminEditorTopic = resolveDefaultTopic(state.adminEditorCourse);
+    state.adminQuestionModalOpen = true;
+    render();
+  });
+
+  appEl.querySelectorAll("[data-action='admin-close-editor'], [data-action='admin-cancel']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.adminEditQuestionId = null;
+      state.adminEditorCourse = "";
+      state.adminEditorTopic = "";
+      state.adminQuestionModalOpen = false;
+      render();
+    });
+  });
+
   const adminQuestionsSection = document.getElementById("admin-questions-section");
   adminQuestionsSection?.addEventListener("click", async (event) => {
     const actionEl = event.target.closest("[data-action]");
@@ -7288,6 +7321,7 @@ function wireAdmin() {
       const meta = editing ? getQbankCourseTopicMeta(editing) : null;
       state.adminEditorCourse = meta?.course || allCourses[0] || "";
       state.adminEditorTopic = meta?.topic || (QBANK_COURSE_TOPICS[state.adminEditorCourse] || [])[0] || "";
+      state.adminQuestionModalOpen = true;
       render();
       return;
     }
@@ -7303,6 +7337,7 @@ function wireAdmin() {
       toast("Question deleted.");
       if (state.adminEditQuestionId === qid) {
         state.adminEditQuestionId = null;
+        state.adminQuestionModalOpen = false;
       }
       render();
     } catch (syncError) {
@@ -7312,15 +7347,9 @@ function wireAdmin() {
 
   appEl.querySelector("[data-action='admin-new']")?.addEventListener("click", () => {
     state.adminEditQuestionId = null;
-    state.adminEditorCourse = allCourses[0];
+    state.adminEditorCourse = state.adminFilters.course || allCourses[0] || "";
     state.adminEditorTopic = (QBANK_COURSE_TOPICS[state.adminEditorCourse] || [])[0] || "";
-    render();
-  });
-
-  appEl.querySelector("[data-action='admin-cancel']")?.addEventListener("click", () => {
-    state.adminEditQuestionId = null;
-    state.adminEditorCourse = "";
-    state.adminEditorTopic = "";
+    state.adminQuestionModalOpen = true;
     render();
   });
 
@@ -7532,9 +7561,12 @@ function wireAdmin() {
     try {
       await flushPendingSyncNow();
       toast(successMessage);
+      state.adminFilters.course = payload.qbankCourse;
+      state.adminFilters.topic = payload.qbankTopic || "";
       state.adminEditQuestionId = null;
       state.adminEditorCourse = "";
       state.adminEditorTopic = "";
+      state.adminQuestionModalOpen = false;
       render();
     } catch (syncError) {
       toast(`${successMessage} locally, but DB sync failed: ${syncError?.message || syncError}`);
