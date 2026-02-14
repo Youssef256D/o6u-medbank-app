@@ -968,11 +968,13 @@ img {
 .admin-question-modal {
   position: fixed;
   inset: 0;
-  z-index: 1500;
-  display: grid;
-  place-items: center;
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 1rem;
   overflow-y: auto;
+  isolation: isolate;
 }
 
 .admin-question-modal-backdrop {
@@ -983,12 +985,15 @@ img {
   padding: 0;
   background: rgba(15, 23, 42, 0.42);
   cursor: pointer;
+  z-index: 0;
 }
 
 .admin-question-modal-card {
   position: relative;
   z-index: 1;
-  width: min(1100px, 100%);
+  display: block;
+  width: min(1100px, calc(100vw - 2rem));
+  min-height: 120px;
   max-height: calc(100vh - 2rem);
   overflow: auto;
   padding: 0.95rem;
@@ -997,7 +1002,9 @@ img {
   background: var(--surface-strong);
   box-shadow: var(--shadow);
   opacity: 1;
-  transform: none;
+  transform: none !important;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .auth-inline {
