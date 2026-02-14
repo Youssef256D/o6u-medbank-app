@@ -852,6 +852,10 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
+        const sessionCheck = await supabaseAuth.client.auth.getSession().catch(() => ({ data: { session: null } }));
+        if (sessionCheck?.data?.session?.user) {
+          return;
+        }
         resetRelationalSyncState();
         clearAdminPresencePolling();
         syncPresenceRuntime(null);
@@ -977,6 +981,10 @@ function isUserAccessApproved(user) {
     return true;
   }
   return user.isApproved !== false;
+}
+
+function hasSupabaseManagedIdentity(user) {
+  return Boolean(user?.supabaseAuthId && isUuidValue(user.supabaseAuthId));
 }
 
 function isForcedAdminEmail(email) {
@@ -3373,7 +3381,12 @@ function render() {
     state.route = "login";
   }
 
-  if (privateRoutes.includes(state.route) && user && !isUserAccessApproved(user)) {
+  if (
+    privateRoutes.includes(state.route)
+    && user
+    && !isUserAccessApproved(user)
+    && !hasSupabaseManagedIdentity(user)
+  ) {
     removeStorageKey(STORAGE_KEYS.currentUserId);
     state.route = "login";
     toast("Your account is pending admin approval.");
