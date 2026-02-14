@@ -29,6 +29,12 @@ const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
+const AUTH_SIGNIN_TIMEOUT_MS = 12000;
+const PROFILE_LOOKUP_TIMEOUT_MS = 3500;
+const RELATIONAL_IN_BATCH_SIZE = 200;
+const RELATIONAL_UPSERT_BATCH_SIZE = 200;
+const RELATIONAL_INSERT_BATCH_SIZE = 250;
+const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
@@ -760,11 +766,12 @@ async function initSupabaseAuth() {
       console.warn("Supabase auth session bootstrap failed.", error.message);
     } else if (data?.session?.user) {
       let localUser = upsertLocalUserFromAuth(data.session.user);
-      localUser = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
+      const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
+      localUser = profileSync.user;
       await ensureRelationalSyncReady().catch((syncError) => {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
-      if (localUser && !isUserAccessApproved(localUser)) {
+      if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
       } else if (localUser) {
@@ -796,11 +803,12 @@ async function initSupabaseAuth() {
     const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
         let localUser = upsertLocalUserFromAuth(session.user);
-        localUser = await refreshLocalUserFromRelationalProfile(session.user, localUser);
+        const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
+        localUser = profileSync.user;
         await ensureRelationalSyncReady().catch((syncError) => {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
         });
-        if (localUser && !isUserAccessApproved(localUser)) {
+        if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
           removeStorageKey(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
             supabaseAuth.client.auth.signOut().catch((signOutError) => {
@@ -880,29 +888,53 @@ async function initSupabaseAuth() {
   }
 }
 
+function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
+  let timeoutId = null;
+  const fallback = {
+    data: null,
+    error: {
+      code: "TIMEOUT",
+      message: timeoutMessage,
+    },
+  };
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => {
+      timeoutId = window.setTimeout(() => {
+        resolve(fallback);
+      }, Math.max(1, Number(timeoutMs) || 1));
+    }),
+  ]).finally(() => {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+}
+
 async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = null) {
   if (!authUser?.id) {
-    return fallbackUser;
+    return { user: fallbackUser, approvalChecked: false };
   }
 
   const localUser = fallbackUser || upsertLocalUserFromAuth(authUser);
-  const ready = await ensureRelationalSyncReady().catch(() => false);
-  if (!ready) {
-    return localUser;
-  }
-
   const client = getRelationalClient();
   if (!client) {
-    return localUser;
+    return { user: localUser, approvalChecked: false };
   }
 
-  const { data: profile, error } = await client
-    .from("profiles")
-    .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
-    .eq("id", authUser.id)
-    .maybeSingle();
+  const profileResult = await runWithTimeoutResult(
+    client
+      .from("profiles")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+      .eq("id", authUser.id)
+      .maybeSingle(),
+    PROFILE_LOOKUP_TIMEOUT_MS,
+    "Profile lookup timed out.",
+  );
+  const profile = profileResult?.data || null;
+  const error = profileResult?.error || null;
   if (error || !profile) {
-    return localUser;
+    return { user: localUser, approvalChecked: false };
   }
 
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
@@ -911,7 +943,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     role === "student" ? sanitizeAcademicSemester(profile.academic_semester || localUser?.academicSemester || 1) : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
 
-  return upsertLocalUserFromAuth(authUser, {
+  const updatedUser = upsertLocalUserFromAuth(authUser, {
     name: String(profile.full_name || "").trim() || localUser?.name || "Student",
     email: normalizedEmail,
     phone: String(profile.phone || "").trim(),
@@ -923,6 +955,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     approvedBy: profile.approved ? localUser?.approvedBy || "admin" : null,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
   });
+  return { user: updatedUser, approvalChecked: true };
 }
 
 function getSupabaseAuthClient() {
@@ -2021,6 +2054,24 @@ async function flushRelationalWrites() {
   }
 }
 
+function splitIntoBatches(items, batchSize) {
+  const source = Array.isArray(items) ? items : [];
+  const size = Math.max(1, Number(batchSize) || 1);
+  const batches = [];
+  for (let index = 0; index < source.length; index += size) {
+    batches.push(source.slice(index, index + size));
+  }
+  return batches;
+}
+
+function isMissingRelationError(error) {
+  const code = String(error?.code || "").trim();
+  if (code === "42P01") {
+    return true;
+  }
+  return /does not exist/i.test(String(error?.message || ""));
+}
+
 async function syncRelationalKey(storageKey, payload) {
   if (!relationalSync.enabled) {
     return;
@@ -2070,6 +2121,121 @@ async function syncProfilesToRelational(usersPayload) {
 
   const { error } = await client.from("profiles").upsert(rows, { onConflict: "id" });
   if (error) {
+    throw error;
+  }
+
+  await syncUserCourseEnrollmentsToRelational(users, {
+    assignedByAuthId: isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
+  });
+}
+
+async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {}) {
+  const client = getRelationalClient();
+  if (!client) {
+    return;
+  }
+
+  const users = Array.isArray(usersPayload) ? usersPayload : [];
+  const students = users.filter((user) => user?.role === "student" && isUuidValue(user?.supabaseAuthId));
+  if (!students.length) {
+    return;
+  }
+
+  try {
+    const { data: courses, error: coursesError } = await client
+      .from("courses")
+      .select("id,course_name")
+      .eq("is_active", true);
+    if (coursesError) {
+      throw coursesError;
+    }
+
+    const courseIdByName = Object.fromEntries(
+      (courses || [])
+        .map((course) => [String(course?.course_name || "").trim(), String(course?.id || "").trim()])
+        .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
+    );
+
+    const enrollmentRows = [];
+    const desiredCourseIdsByUserId = new Map();
+    students.forEach((student) => {
+      const userId = String(student.supabaseAuthId || "").trim();
+      const selectedCourses = sanitizeCourseAssignments(
+        (student.assignedCourses || []).length
+          ? student.assignedCourses
+          : getCurriculumCourses(student.academicYear || 1, student.academicSemester || 1),
+      );
+      const desiredCourseIds = new Set(
+        selectedCourses
+          .map((courseName) => courseIdByName[String(courseName || "").trim()])
+          .filter((courseId) => isUuidValue(courseId)),
+      );
+      desiredCourseIdsByUserId.set(userId, desiredCourseIds);
+      desiredCourseIds.forEach((courseId) => {
+        enrollmentRows.push({
+          user_id: userId,
+          course_id: courseId,
+          assigned_by: isUuidValue(options.assignedByAuthId) ? options.assignedByAuthId : null,
+        });
+      });
+    });
+
+    for (const batch of splitIntoBatches(enrollmentRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+      const { error: upsertEnrollmentError } = await client
+        .from("user_course_enrollments")
+        .upsert(batch, { onConflict: "user_id,course_id" });
+      if (upsertEnrollmentError) {
+        throw upsertEnrollmentError;
+      }
+    }
+
+    const userIds = [...new Set(students.map((student) => String(student.supabaseAuthId || "").trim()).filter(isUuidValue))];
+    const existingEnrollmentRows = [];
+    for (const userBatch of splitIntoBatches(userIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data, error } = await client
+        .from("user_course_enrollments")
+        .select("user_id,course_id")
+        .in("user_id", userBatch);
+      if (error) {
+        throw error;
+      }
+      if (Array.isArray(data) && data.length) {
+        existingEnrollmentRows.push(...data);
+      }
+    }
+
+    const existingCourseIdsByUserId = new Map();
+    existingEnrollmentRows.forEach((row) => {
+      const userId = String(row?.user_id || "").trim();
+      const courseId = String(row?.course_id || "").trim();
+      if (!isUuidValue(userId) || !isUuidValue(courseId)) {
+        return;
+      }
+      if (!existingCourseIdsByUserId.has(userId)) {
+        existingCourseIdsByUserId.set(userId, new Set());
+      }
+      existingCourseIdsByUserId.get(userId).add(courseId);
+    });
+
+    for (const userId of userIds) {
+      const desired = desiredCourseIdsByUserId.get(userId) || new Set();
+      const existing = existingCourseIdsByUserId.get(userId) || new Set();
+      const removeCourseIds = [...existing].filter((courseId) => !desired.has(courseId));
+      for (const courseBatch of splitIntoBatches(removeCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+        const { error: deleteError } = await client
+          .from("user_course_enrollments")
+          .delete()
+          .eq("user_id", userId)
+          .in("course_id", courseBatch);
+        if (deleteError) {
+          throw deleteError;
+        }
+      }
+    }
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      return;
+    }
     throw error;
   }
 }
@@ -2190,11 +2356,11 @@ async function syncQuestionsToRelational(questionsPayload) {
       .filter(Boolean),
   )];
   const existingByExternalId = {};
-  if (payloadExternalIds.length) {
+  for (const externalIdBatch of splitIntoBatches(payloadExternalIds, RELATIONAL_IN_BATCH_SIZE)) {
     const { data: existingRows, error: existingRowsError } = await client
       .from("questions")
       .select("id,external_id")
-      .in("external_id", payloadExternalIds);
+      .in("external_id", externalIdBatch);
     if (existingRowsError) {
       throw existingRowsError;
     }
@@ -2235,11 +2401,13 @@ async function syncQuestionsToRelational(questionsPayload) {
     }
   });
   if (missingTopics.length) {
-    const { error: missingTopicsError } = await client
-      .from("course_topics")
-      .upsert(missingTopics, { onConflict: "course_id,topic_name" });
-    if (missingTopicsError) {
-      throw missingTopicsError;
+    for (const topicBatch of splitIntoBatches(missingTopics, RELATIONAL_UPSERT_BATCH_SIZE)) {
+      const { error: missingTopicsError } = await client
+        .from("course_topics")
+        .upsert(topicBatch, { onConflict: "course_id,topic_name" });
+      if (missingTopicsError) {
+        throw missingTopicsError;
+      }
     }
     const refreshedTopics = await client.from("course_topics").select("id,course_id,topic_name").eq("is_active", true);
     if (refreshedTopics.error) {
@@ -2284,35 +2452,61 @@ async function syncQuestionsToRelational(questionsPayload) {
     return;
   }
 
-  const { error: questionsUpsertError } = await client.from("questions").upsert(upsertRows, { onConflict: "external_id" });
-  if (questionsUpsertError) {
-    throw questionsUpsertError;
+  for (const upsertBatch of splitIntoBatches(upsertRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    const { error: questionsUpsertError } = await client.from("questions").upsert(upsertBatch, { onConflict: "external_id" });
+    if (questionsUpsertError) {
+      throw questionsUpsertError;
+    }
   }
 
   if (currentUser.role === "admin") {
     const externalIdSet = new Set(upsertRows.map((row) => row.external_id));
-    const { data: existingQuestions, error: existingQuestionsError } = await client
-      .from("questions")
-      .select("id,external_id")
-      .not("external_id", "is", null);
-    if (existingQuestionsError) {
-      throw existingQuestionsError;
+    const existingQuestions = [];
+    let rangeStart = 0;
+    const rangeSize = 1000;
+    while (true) {
+      const { data: existingBatch, error: existingQuestionsError } = await client
+        .from("questions")
+        .select("id,external_id")
+        .not("external_id", "is", null)
+        .range(rangeStart, rangeStart + rangeSize - 1);
+      if (existingQuestionsError) {
+        throw existingQuestionsError;
+      }
+      const normalizedBatch = Array.isArray(existingBatch) ? existingBatch : [];
+      if (!normalizedBatch.length) {
+        break;
+      }
+      existingQuestions.push(...normalizedBatch);
+      if (normalizedBatch.length < rangeSize) {
+        break;
+      }
+      rangeStart += rangeSize;
     }
-    const deleteIds = (existingQuestions || [])
+    const deleteIds = existingQuestions
       .filter((row) => row.external_id && !externalIdSet.has(row.external_id))
       .map((row) => row.id);
-    if (deleteIds.length) {
-      await client.from("questions").delete().in("id", deleteIds);
+    for (const deleteBatch of splitIntoBatches(deleteIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+      const { error: deleteQuestionsError } = await client.from("questions").delete().in("id", deleteBatch);
+      if (deleteQuestionsError) {
+        throw deleteQuestionsError;
+      }
     }
   }
 
   const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
-  const { data: persistedQuestions, error: persistedQuestionsError } = await client
-    .from("questions")
-    .select("id,external_id")
-    .in("external_id", externalIds);
-  if (persistedQuestionsError) {
-    throw persistedQuestionsError;
+  const persistedQuestions = [];
+  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data: persistedBatch, error: persistedQuestionsError } = await client
+      .from("questions")
+      .select("id,external_id")
+      .in("external_id", externalIdBatch);
+    if (persistedQuestionsError) {
+      throw persistedQuestionsError;
+    }
+    if (Array.isArray(persistedBatch) && persistedBatch.length) {
+      persistedQuestions.push(...persistedBatch);
+    }
   }
   const dbIdByExternalId = Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id]));
 
@@ -2326,8 +2520,14 @@ async function syncQuestionsToRelational(questionsPayload) {
   saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions);
 
   const questionDbIds = Object.values(dbIdByExternalId);
-  if (questionDbIds.length) {
-    await client.from("question_choices").delete().in("question_id", questionDbIds);
+  for (const questionIdBatch of splitIntoBatches(questionDbIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+    const { error: deleteChoicesError } = await client
+      .from("question_choices")
+      .delete()
+      .in("question_id", questionIdBatch);
+    if (deleteChoicesError) {
+      throw deleteChoicesError;
+    }
   }
 
   const choiceRows = [];
@@ -2347,8 +2547,8 @@ async function syncQuestionsToRelational(questionsPayload) {
       });
     });
   });
-  if (choiceRows.length) {
-    const { error: insertChoicesError } = await client.from("question_choices").insert(choiceRows);
+  for (const choiceBatch of splitIntoBatches(choiceRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+    const { error: insertChoicesError } = await client.from("question_choices").insert(choiceBatch);
     if (insertChoicesError) {
       throw insertChoicesError;
     }
@@ -2381,6 +2581,9 @@ async function persistImportedQuestionsNow(questionsPayload) {
     const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
     const topics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     await syncCoursesTopicsToRelational(curriculum, topics);
+    await syncUserCourseEnrollmentsToRelational(getUsers(), {
+      assignedByAuthId: currentUser.supabaseAuthId,
+    });
     await syncQuestionsToRelational(questions);
   } catch (error) {
     return { ok: false, message: error?.message || "Could not persist imported questions to database." };
@@ -3457,15 +3660,20 @@ function wireAuth(mode) {
       const authClient = getSupabaseAuthClient();
       try {
         if (authClient) {
-          const { data, error } = await authClient.auth.signInWithPassword({ email, password });
+          const { data, error } = await runWithTimeoutResult(
+            authClient.auth.signInWithPassword({ email, password }),
+            AUTH_SIGNIN_TIMEOUT_MS,
+            "Login request timed out. Check your internet and try again.",
+          );
           if (!error && data?.user) {
             let user = upsertLocalUserFromAuth(data.user);
-            user = await refreshLocalUserFromRelationalProfile(data.user, user);
+            const profileSync = await refreshLocalUserFromRelationalProfile(data.user, user);
+            user = profileSync.user;
             if (!user) {
               toast("Could not map account profile after login.");
               return;
             }
-            if (!isUserAccessApproved(user)) {
+            if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
               await authClient.auth.signOut().catch(() => {});
               toast("Your account is pending admin approval.");
@@ -3515,6 +3723,8 @@ function wireAuth(mode) {
         save(STORAGE_KEYS.currentUserId, user.id);
         navigate(user.role === "admin" ? "admin" : "dashboard");
         toast(`Welcome back, ${user.name}.`);
+      } catch (error) {
+        toast(error?.message || "Login failed. Please try again.");
       } finally {
         lockAuthForm(form, false);
       }
