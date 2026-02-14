@@ -8574,7 +8574,6 @@ function importQuestionsFromRaw(raw, config) {
 
   let added = 0;
   records.forEach((row, index) => {
-    const rowRef = `row ${index + 1}`;
     const course = sanitizeCourseAssignments([row.course || config.defaultCourse])[0] || config.defaultCourse;
     const importedTopic = String(row.topic || "").trim();
     if (course && importedTopic && !QBANK_COURSE_TOPICS[course]?.includes(importedTopic)) {
@@ -8586,14 +8585,20 @@ function importQuestionsFromRaw(raw, config) {
       topicCatalogChanged = true;
     }
     const topic = resolveDefaultTopic(course, importedTopic || config.defaultTopic);
-    const stem = String(row.stem || "").trim();
+    const stem = String(row.stem || "").trim() || `Imported question ${index + 1}`;
     const explanation = String(row.explanation || "").trim();
-    const choiceA = String(row.choiceA || "").trim();
-    const choiceB = String(row.choiceB || "").trim();
-    const choiceC = String(row.choiceC || "").trim();
-    const choiceD = String(row.choiceD || "").trim();
-    const choiceE = String(row.choiceE || "").trim();
-    const correct = normalizeImportCorrect(row.correct);
+    const choiceA = String(row.choiceA || "").trim() || "Option A";
+    const choiceB = String(row.choiceB || "").trim() || "Option B";
+    const choiceC = String(row.choiceC || "").trim() || "Option C";
+    const choiceD = String(row.choiceD || "").trim() || "Option D";
+    let choiceE = String(row.choiceE || "").trim();
+    let correct = normalizeImportCorrect(row.correct);
+    if (!correct.length) {
+      correct = ["A"];
+    }
+    if (correct.includes("E") && !choiceE) {
+      choiceE = "Option E";
+    }
     const availableChoices = [
       { id: "A", text: choiceA },
       { id: "B", text: choiceB },
@@ -8602,26 +8607,9 @@ function importQuestionsFromRaw(raw, config) {
       ...(choiceE ? [{ id: "E", text: choiceE }] : []),
     ];
     const availableChoiceIds = new Set(availableChoices.map((choice) => choice.id));
-
-    const missingFields = [];
-    if (!stem) missingFields.push("stem");
-    if (!choiceA) missingFields.push("choiceA");
-    if (!choiceB) missingFields.push("choiceB");
-    if (!choiceC) missingFields.push("choiceC");
-    if (!choiceD) missingFields.push("choiceD");
-    if (missingFields.length) {
-      errors.push(`${rowRef}: missing required field(s): ${missingFields.join(", ")}.`);
-      return;
-    }
-    if (!correct.length) {
-      errors.push(`${rowRef}: missing valid correct answer (A-D, or E if provided).`);
-      return;
-    }
-
-    const invalidCorrect = correct.filter((choiceId) => !availableChoiceIds.has(choiceId));
-    if (invalidCorrect.length) {
-      errors.push(`${rowRef}: correct includes choice(s) not provided: ${invalidCorrect.join(", ")}.`);
-      return;
+    const validCorrect = correct.filter((choiceId) => availableChoiceIds.has(choiceId));
+    if (!validCorrect.length) {
+      validCorrect.push("A");
     }
 
     questions.push({
@@ -8639,7 +8627,7 @@ function importQuestionsFromRaw(raw, config) {
       dateAdded: new Date().toISOString().slice(0, 10),
       stem,
       choices: availableChoices,
-      correct,
+      correct: validCorrect,
       explanation: explanation || "No explanation provided.",
       objective: String(row.objective || "").trim(),
       references: String(row.references || "").trim(),
