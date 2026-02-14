@@ -6113,9 +6113,7 @@ function renderAdmin() {
                   <b>${questionCountByCourse[course] || 0}</b> questions
                 </p>
                 <div class="admin-course-qbank-actions">
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-add">Add question</button>
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-remove" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Remove question</button>
-                  <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Clear all questions</button>
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Edit questions</button>
                 </div>
               </div>
             </td>
@@ -6193,9 +6191,192 @@ function renderAdmin() {
     const importReport = state.adminImportReport;
     const importDraft = String(state.adminImportDraft || "");
     const importErrorPreview = (importReport?.errors || []).slice(0, 15);
+    const questions = getQuestions();
+    const selectedCourse = importCourse;
+    const selectedTopic = importTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
+    const courseQuestions = questions
+      .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
+      .filter((question) => {
+        if (!selectedTopic) {
+          return true;
+        }
+        return getQbankCourseTopicMeta(question).topic === selectedTopic;
+      });
+    const questionRows = courseQuestions
+      .map((question, idx) => {
+        const meta = getQbankCourseTopicMeta(question);
+        const stem = String(question.stem || "").trim();
+        const stemPreview = stem.length > 160 ? `${stem.slice(0, 157)}...` : stem;
+        return `
+          <tr>
+            <td>${idx + 1}</td>
+            <td>${escapeHtml(meta.topic)}</td>
+            <td>${escapeHtml(stemPreview || "(No stem)")}</td>
+            <td>${escapeHtml(String(question.correct?.[0] || "A").toUpperCase())}</td>
+            <td>${escapeHtml(String(question.status || "draft"))}</td>
+            <td>
+              <div class="stack">
+                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-edit" data-qid="${escapeHtml(question.id)}">Edit</button>
+                <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete" data-qid="${escapeHtml(question.id)}">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const editing = state.adminEditQuestionId
+      ? questions.find((entry) => entry.id === state.adminEditQuestionId)
+      : null;
+    const editingMeta = editing ? getQbankCourseTopicMeta(editing) : null;
+    const editorCourse = allCourses.includes(state.adminEditorCourse)
+      ? state.adminEditorCourse
+      : (editingMeta?.course || selectedCourse || allCourses[0] || "");
+    const editorTopics = QBANK_COURSE_TOPICS[editorCourse] || [];
+    const editorTopic = editorTopics.includes(state.adminEditorTopic)
+      ? state.adminEditorTopic
+      : (editingMeta?.topic || editorTopics[0] || "");
+    const choicesById = {};
+    (editing?.choices || []).forEach((choice) => {
+      choicesById[String(choice?.id || "").toUpperCase()] = String(choice?.text || "");
+    });
+    const answerKey = String(editing?.correct?.[0] || "A").toUpperCase();
 
     pageContent = `
       <section class="card admin-section" id="admin-questions-section">
+        <div class="flex-between">
+          <div>
+            <h3 style="margin: 0;">Course Question Editor</h3>
+            <p class="subtle">Open each course, see all uploaded questions, and edit stem, answers, and explanation.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-courses">Back to courses</button>
+          </div>
+        </div>
+        <form id="admin-question-filter-form" style="margin-top: 0.7rem;">
+          <div class="form-row">
+            <label>Course
+              <select id="admin-filter-course" name="course">
+                ${allCourses
+                  .map((course) => `<option value="${escapeHtml(course)}" ${selectedCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <label>Topic
+              <select id="admin-filter-topic" name="topic">
+                <option value="" ${selectedTopic ? "" : "selected"}>All topics</option>
+                ${importTopics
+                  .map((topic) => `<option value="${escapeHtml(topic)}" ${selectedTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+                  .join("")}
+              </select>
+            </label>
+          </div>
+          <div class="stack">
+            <button class="btn ghost admin-btn-sm" type="submit">Apply filter</button>
+            <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-filters">Reset</button>
+          </div>
+        </form>
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Topic</th>
+                <th>Question</th>
+                <th>Correct</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${questionRows || `<tr><td colspan="6" class="subtle">No questions found for this course/topic.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card admin-section" style="margin-top: 0.7rem;">
+        <div class="flex-between">
+          <h3 style="margin: 0;">${editing ? "Edit Question" : "Create / Edit Question"}</h3>
+          <div class="stack">
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new">New</button>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel">Clear</button>
+          </div>
+        </div>
+        <form id="admin-question-form" style="margin-top: 0.75rem;">
+          <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}" />
+          <div class="form-row">
+            <label>Course
+              <select id="admin-question-course" name="questionCourse">
+                ${allCourses
+                  .map((course) => `<option value="${escapeHtml(course)}" ${editorCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <label>Topic
+              <select id="admin-question-topic" name="questionTopic">
+                ${editorTopics
+                  .map((topic) => `<option value="${escapeHtml(topic)}" ${editorTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+                  .join("")}
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>System
+              <input name="system" value="${escapeHtml(editing?.system || editorCourse)}" />
+            </label>
+            <label>Difficulty
+              <select name="difficulty">
+                <option value="Easy" ${String(editing?.difficulty || "Medium") === "Easy" ? "selected" : ""}>Easy</option>
+                <option value="Medium" ${String(editing?.difficulty || "Medium") === "Medium" ? "selected" : ""}>Medium</option>
+                <option value="Hard" ${String(editing?.difficulty || "Medium") === "Hard" ? "selected" : ""}>Hard</option>
+              </select>
+            </label>
+            <label>Status
+              <select name="status">
+                <option value="draft" ${String(editing?.status || "draft") === "draft" ? "selected" : ""}>Draft</option>
+                <option value="published" ${String(editing?.status || "draft") === "published" ? "selected" : ""}>Published</option>
+              </select>
+            </label>
+          </div>
+          <label>Question stem
+            <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
+          </label>
+          <div class="form-row">
+            <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
+            <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
+          </div>
+          <div class="form-row">
+            <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" required /></label>
+            <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" required /></label>
+          </div>
+          <div class="form-row">
+            <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
+            <label>Correct answer
+              <select name="correct">
+                ${["A", "B", "C", "D", "E"]
+                  .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
+                  .join("")}
+              </select>
+            </label>
+          </div>
+          <label>Explanation
+            <textarea name="explanation" required>${escapeHtml(editing?.explanation || "")}</textarea>
+          </label>
+          <div class="form-row">
+            <label>References <input name="references" value="${escapeHtml(editing?.references || "")}" /></label>
+            <label>Explanation image URL <input name="explanationImage" value="${escapeHtml(editing?.explanationImage || "")}" /></label>
+          </div>
+          <label>Tags (comma-separated)
+            <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
+          </label>
+          <div class="stack">
+            <button class="btn" type="submit">${editing ? "Save question changes" : "Save question"}</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card admin-section" style="margin-top: 0.7rem;">
         <h3 style="margin: 0;">Bulk Import</h3>
         <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
         <form id="admin-import-form" style="margin-top: 0.7rem;">
@@ -6425,6 +6606,15 @@ function wireAdmin() {
     });
   });
 
+  appEl.querySelectorAll("[data-action='admin-open-courses']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.adminPage = "courses";
+      state.adminEditQuestionId = null;
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
   if (state.adminPage === "activity") {
     ensureAdminPresencePolling();
     if (!state.adminPresenceLoading && (!state.adminPresenceLastSyncAt || (Date.now() - state.adminPresenceLastSyncAt) > ADMIN_DATA_REFRESH_MS)) {
@@ -6586,9 +6776,7 @@ function wireAdmin() {
         "course-topic-add",
         "course-topic-rename",
         "course-topic-remove",
-        "course-question-add",
-        "course-question-remove",
-        "course-question-clear",
+        "course-question-edit",
       ].includes(action)
     ) {
       return;
@@ -6603,129 +6791,15 @@ function wireAdmin() {
     const course = currentCourses[index];
     if (!course) return;
 
-    const getCourseQuestions = () =>
-      getQuestions().filter((question) => getQbankCourseTopicMeta(question).course === course);
-
-    if (action === "course-question-add") {
-      const amountRaw = window.prompt("How many questions do you want to add?", "1");
-      if (amountRaw === null) {
-        return;
-      }
-      const amount = Math.floor(Number(amountRaw));
-      if (!Number.isFinite(amount) || amount < 1) {
-        toast("Enter a valid number greater than 0.");
-        return;
-      }
-
-      const topic = resolveDefaultTopic(course);
-      const author = getCurrentUser()?.name || "Admin";
-      const today = new Date().toISOString().slice(0, 10);
-      const questions = getQuestions();
-      const newEntries = Array.from({ length: Math.min(amount, 200) }, (_, idx) => ({
-        id: makeId("q"),
-        qbankCourse: course,
-        qbankTopic: topic,
-        course,
-        topic,
-        system: course,
-        difficulty: "Medium",
-        tags: [],
-        author,
-        dateAdded: today,
-        stem: `New question ${idx + 1} for ${course}`,
-        choices: [
-          { id: "A", text: "Option A" },
-          { id: "B", text: "Option B" },
-          { id: "C", text: "Option C" },
-          { id: "D", text: "Option D" },
-          { id: "E", text: "Option E" },
-        ],
-        correct: ["A"],
-        explanation: "Add explanation for this question.",
-        objective: "",
-        references: "",
-        explanationImage: "",
-        status: "draft",
-      }));
-
-      save(STORAGE_KEYS.questions, [...questions, ...newEntries]);
-      try {
-        await flushPendingSyncNow();
-        toast(`${newEntries.length} draft question(s) added to ${course}.`);
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Questions added locally, but DB sync failed: ${syncError?.message || syncError}`);
-      }
-      return;
-    }
-
-    if (action === "course-question-remove") {
-      const questions = getQuestions();
-      const courseQuestions = getCourseQuestions();
-      if (!courseQuestions.length) {
-        toast("This course has no questions to remove.");
-        return;
-      }
-
-      const amountRaw = window.prompt(
-        `This course has ${courseQuestions.length} questions. How many do you want to remove?`,
-        "1",
-      );
-      if (amountRaw === null) {
-        return;
-      }
-      const amount = Math.floor(Number(amountRaw));
-      if (!Number.isFinite(amount) || amount < 1) {
-        toast("Enter a valid number greater than 0.");
-        return;
-      }
-
-      const toRemove = courseQuestions
-        .slice(-Math.min(amount, courseQuestions.length))
-        .map((question) => question.id);
-      const removeSet = new Set(toRemove);
-      const nextQuestions = questions.filter((question) => !removeSet.has(question.id));
-      if (state.adminEditQuestionId && removeSet.has(state.adminEditQuestionId)) {
-        state.adminEditQuestionId = null;
-      }
-      save(STORAGE_KEYS.questions, nextQuestions);
-      try {
-        await flushPendingSyncNow();
-        toast(`${removeSet.size} question(s) removed from ${course}.`);
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Questions removed locally, but DB sync failed: ${syncError?.message || syncError}`);
-      }
-      return;
-    }
-
-    if (action === "course-question-clear") {
-      const questions = getQuestions();
-      const courseQuestions = getCourseQuestions();
-      if (!courseQuestions.length) {
-        toast("This course has no questions to clear.");
-        return;
-      }
-      if (!window.confirm(`Clear all ${courseQuestions.length} question(s) from "${course}"?`)) {
-        return;
-      }
-
-      const removeSet = new Set(courseQuestions.map((question) => question.id));
-      const nextQuestions = questions.filter((question) => !removeSet.has(question.id));
-      if (state.adminEditQuestionId && removeSet.has(state.adminEditQuestionId)) {
-        state.adminEditQuestionId = null;
-      }
-      save(STORAGE_KEYS.questions, nextQuestions);
-      try {
-        await flushPendingSyncNow();
-        toast(`Cleared ${courseQuestions.length} question(s) from ${course}.`);
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Questions cleared locally, but DB sync failed: ${syncError?.message || syncError}`);
-      }
+    if (action === "course-question-edit") {
+      state.adminPage = "questions";
+      state.adminFilters.course = course;
+      state.adminFilters.topic = "";
+      state.adminEditorCourse = course;
+      state.adminEditorTopic = resolveDefaultTopic(course);
+      state.adminEditQuestionId = null;
+      state.skipNextRouteAnimation = true;
+      render();
       return;
     }
 
