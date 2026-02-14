@@ -8861,21 +8861,23 @@ async function loginAsDemo(email, password) {
 }
 
 async function logout() {
-  await markCurrentUserOffline().catch(() => {});
+  const offlinePromise = markCurrentUserOffline().catch(() => {});
+  const authClient = getSupabaseAuthClient();
+  const signOutPromise = authClient
+    ? authClient.auth.signOut().catch((error) => {
+        console.warn("Supabase sign-out failed.", error?.message || error);
+      })
+    : Promise.resolve();
+
   syncPresenceRuntime(null);
   clearAdminPresencePolling();
-  const authClient = getSupabaseAuthClient();
-  if (authClient) {
-    authClient.auth.signOut().catch((error) => {
-      console.warn("Supabase sign-out failed.", error?.message || error);
-    });
-  }
   removeStorageKey(STORAGE_KEYS.currentUserId);
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
   navigate("landing");
   toast("Logged out.");
+  Promise.allSettled([offlinePromise, signOutPromise]).catch(() => {});
 }
 
 function selectHtml(name, options, selected) {
