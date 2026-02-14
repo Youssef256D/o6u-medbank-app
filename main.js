@@ -2172,7 +2172,8 @@ function clearSupabaseFlushTimer() {
   }
 }
 
-async function flushRelationalWrites() {
+async function flushRelationalWrites(options = {}) {
+  const throwOnFailure = Boolean(options?.throwOnFailure);
   if (!relationalSync.enabled || !relationalSync.pendingWrites.size || relationalSync.flushing) {
     clearRelationalFlushTimer();
     return;
@@ -2182,6 +2183,7 @@ async function flushRelationalWrites() {
   relationalSync.flushing = true;
   const entries = Array.from(relationalSync.pendingWrites.entries());
   relationalSync.pendingWrites.clear();
+  let firstError = null;
 
   for (const [storageKey, payload] of entries) {
     try {
@@ -2189,6 +2191,9 @@ async function flushRelationalWrites() {
     } catch (error) {
       console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
       relationalSync.pendingWrites.set(storageKey, payload);
+      if (!firstError) {
+        firstError = error instanceof Error ? error : new Error(String(error || "Relational sync failed."));
+      }
     }
   }
 
@@ -2199,6 +2204,26 @@ async function flushRelationalWrites() {
         console.warn("Relational retry flush failed.", error);
       });
     }, 2800);
+  }
+
+  if (firstError && throwOnFailure) {
+    throw firstError;
+  }
+}
+
+async function flushPendingSyncNow(options = {}) {
+  const throwOnRelationalFailure = options?.throwOnRelationalFailure !== false;
+  if (relationalSync.flushing) {
+    for (let attempt = 0; attempt < 30 && relationalSync.flushing; attempt += 1) {
+      // Wait briefly for an in-flight flush to finish before forcing another write-through.
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+  }
+  if (relationalSync.pendingWrites.size) {
+    await flushRelationalWrites({ throwOnFailure: throwOnRelationalFailure });
+  }
+  if (supabaseSync.pendingWrites.size) {
+    await flushSupabaseWrites();
   }
 }
 
@@ -2682,6 +2707,39 @@ async function syncQuestionsToRelational(questionsPayload) {
   });
 
   if (!upsertRows.length) {
+    if (currentUser.role !== "admin") {
+      return;
+    }
+    const existingResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("questions")
+        .select("id")
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
+    if (existingResult.error) {
+      throw existingResult.error;
+    }
+    const existingQuestionIds = (existingResult.data || [])
+      .map((row) => String(row?.id || "").trim())
+      .filter(isUuidValue);
+    for (const questionIdBatch of splitIntoBatches(existingQuestionIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+      const { error: deleteChoicesError } = await client
+        .from("question_choices")
+        .delete()
+        .in("question_id", questionIdBatch);
+      if (deleteChoicesError) {
+        throw deleteChoicesError;
+      }
+      const { error: deleteQuestionsError } = await client
+        .from("questions")
+        .delete()
+        .in("id", questionIdBatch);
+      if (deleteQuestionsError) {
+        throw deleteQuestionsError;
+      }
+    }
+    saveLocalOnly(STORAGE_KEYS.questions, []);
     return;
   }
 
@@ -6353,7 +6411,7 @@ function wireAdmin() {
   curriculumSemesterSelect?.addEventListener("change", syncCurriculumSelection);
 
   const curriculumAddForm = document.getElementById("admin-curriculum-add-form");
-  curriculumAddForm?.addEventListener("submit", (event) => {
+  curriculumAddForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(curriculumAddForm);
     const newCourseName = String(data.get("newCourseName") || "").trim();
@@ -6377,13 +6435,18 @@ function wireAdmin() {
     const nextCurriculum = deepClone(O6U_CURRICULUM);
     nextCurriculum[year][semester].push(newCourseName);
     applyCurriculumUpdate(nextCurriculum);
-    toast("Course added.");
-    state.skipNextRouteAnimation = true;
-    render();
+    try {
+      await flushPendingSyncNow();
+      toast("Course added.");
+      state.skipNextRouteAnimation = true;
+      render();
+    } catch (syncError) {
+      toast(`Course added locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   appEl.querySelectorAll("[data-action='curriculum-rename']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-course-index]");
       if (!row) return;
 
@@ -6416,14 +6479,19 @@ function wireAdmin() {
       const nextCurriculum = deepClone(O6U_CURRICULUM);
       nextCurriculum[year][semester][index] = newName;
       applyCurriculumUpdate(nextCurriculum, { renamedFrom: oldName, renamedTo: newName });
-      toast("Course name updated.");
-      state.skipNextRouteAnimation = true;
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast("Course name updated.");
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Course updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
     });
   });
 
   appEl.querySelectorAll("[data-action='curriculum-delete']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-course-index]");
       if (!row) return;
 
@@ -6446,14 +6514,19 @@ function wireAdmin() {
       nextCurriculum[year][semester].splice(index, 1);
       const replacementCourse = nextCurriculum[year][semester][0] || CURRICULUM_COURSE_LIST[0] || removedCourse;
       applyCurriculumUpdate(nextCurriculum, { removedCourse, replacementCourse });
-      toast("Course deleted.");
-      state.skipNextRouteAnimation = true;
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast("Course deleted.");
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Course deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
     });
   });
 
   const adminCoursesSection = document.getElementById("admin-courses-section");
-  adminCoursesSection?.addEventListener("click", (event) => {
+  adminCoursesSection?.addEventListener("click", async (event) => {
     const actionEl = event.target.closest("[data-action]");
     if (!actionEl) return;
 
@@ -6526,9 +6599,14 @@ function wireAdmin() {
       }));
 
       save(STORAGE_KEYS.questions, [...questions, ...newEntries]);
-      toast(`${newEntries.length} draft question(s) added to ${course}.`);
-      state.skipNextRouteAnimation = true;
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast(`${newEntries.length} draft question(s) added to ${course}.`);
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Questions added locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -6562,9 +6640,14 @@ function wireAdmin() {
         state.adminEditQuestionId = null;
       }
       save(STORAGE_KEYS.questions, nextQuestions);
-      toast(`${removeSet.size} question(s) removed from ${course}.`);
-      state.skipNextRouteAnimation = true;
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast(`${removeSet.size} question(s) removed from ${course}.`);
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Questions removed locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -6585,9 +6668,14 @@ function wireAdmin() {
         state.adminEditQuestionId = null;
       }
       save(STORAGE_KEYS.questions, nextQuestions);
-      toast(`Cleared ${courseQuestions.length} question(s) from ${course}.`);
-      state.skipNextRouteAnimation = true;
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast(`Cleared ${courseQuestions.length} question(s) from ${course}.`);
+        state.skipNextRouteAnimation = true;
+        render();
+      } catch (syncError) {
+        toast(`Questions cleared locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -6617,7 +6705,12 @@ function wireAdmin() {
 
       applyCourseTopicsUpdate(course, [...existingTopics, topicName]);
       refreshRowTopics();
-      toast("Topic added.");
+      try {
+        await flushPendingSyncNow();
+        toast("Topic added.");
+      } catch (syncError) {
+        toast(`Topic added locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -6643,7 +6736,12 @@ function wireAdmin() {
       nextTopics[topicIndex] = nextTopic;
       applyCourseTopicsUpdate(course, nextTopics);
       refreshRowTopics();
-      toast("Topic renamed.");
+      try {
+        await flushPendingSyncNow();
+        toast("Topic renamed.");
+      } catch (syncError) {
+        toast(`Topic renamed locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
       return;
     }
 
@@ -6656,11 +6754,16 @@ function wireAdmin() {
       topics.filter((_, idx) => idx !== topicIndex),
     );
     refreshRowTopics();
-    toast("Topic removed.");
+    try {
+      await flushPendingSyncNow();
+      toast("Topic removed.");
+    } catch (syncError) {
+      toast(`Topic removed locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   const addUserForm = document.getElementById("admin-add-user-form");
-  addUserForm?.addEventListener("submit", (event) => {
+  addUserForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(addUserForm);
     const name = String(data.get("name") || "").trim();
@@ -6706,8 +6809,13 @@ function wireAdmin() {
       createdAt: nowISO(),
     });
     save(STORAGE_KEYS.users, users);
-    toast("User added.");
-    render();
+    try {
+      await flushPendingSyncNow();
+      toast("User added.");
+      render();
+    } catch (syncError) {
+      toast(`User added locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
@@ -6756,16 +6864,21 @@ function wireAdmin() {
 
     save(STORAGE_KEYS.users, users);
     await syncUsersBackupState(users);
-    toast(
-      skippedCount
-        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).`
-        : `${approvedCount} pending account(s) approved.`,
-    );
-    render();
+    try {
+      await flushPendingSyncNow();
+      toast(
+        skippedCount
+          ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).`
+          : `${approvedCount} pending account(s) approved.`,
+      );
+      render();
+    } catch (syncError) {
+      toast(`Approval updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       if (!row || !userId) {
@@ -6796,13 +6909,18 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      toast("Enrollment saved.");
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast("Enrollment saved.");
+        render();
+      } catch (syncError) {
+        toast(`Enrollment saved locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
     });
   });
 
   appEl.querySelectorAll("[data-action='toggle-user-role']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       const current = getCurrentUser();
@@ -6842,8 +6960,13 @@ function wireAdmin() {
         users[idx].approvedBy = current?.email || "admin";
       }
       save(STORAGE_KEYS.users, users);
-      toast("User role updated.");
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast("User role updated.");
+        render();
+      } catch (syncError) {
+        toast(`Role updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
     });
   });
 
@@ -6883,8 +7006,13 @@ function wireAdmin() {
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users);
-      toast(nextApproved ? "Account approved." : "Account suspended.");
-      render();
+      try {
+        await flushPendingSyncNow();
+        toast(nextApproved ? "Account approved." : "Account suspended.");
+        render();
+      } catch (syncError) {
+        toast(`Account updated locally, but DB sync failed: ${syncError?.message || syncError}`);
+      }
     });
   });
 
@@ -6943,12 +7071,17 @@ function wireAdmin() {
       delete flashcards[userId];
       save(STORAGE_KEYS.flashcards, flashcards);
 
-      if (supabaseDeleteWarning) {
-        toast(`User removed locally. Supabase auth delete issue: ${supabaseDeleteWarning}`);
-      } else {
-        toast("User removed.");
+      try {
+        await flushPendingSyncNow();
+        if (supabaseDeleteWarning) {
+          toast(`User removed. Supabase auth delete issue: ${supabaseDeleteWarning}`);
+        } else {
+          toast("User removed.");
+        }
+        render();
+      } catch (syncError) {
+        toast(`User removed locally, but DB sync failed: ${syncError?.message || syncError}`);
       }
-      render();
     });
   });
 
@@ -6989,7 +7122,7 @@ function wireAdmin() {
   });
 
   appEl.querySelectorAll("[data-action='admin-delete']").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const qid = button.getAttribute("data-qid");
       if (!qid) {
         return;
@@ -7002,11 +7135,16 @@ function wireAdmin() {
 
       const questions = getQuestions().filter((entry) => entry.id !== qid);
       save(STORAGE_KEYS.questions, questions);
-      toast("Question deleted.");
-      if (state.adminEditQuestionId === qid) {
-        state.adminEditQuestionId = null;
+      try {
+        await flushPendingSyncNow();
+        toast("Question deleted.");
+        if (state.adminEditQuestionId === qid) {
+          state.adminEditQuestionId = null;
+        }
+        render();
+      } catch (syncError) {
+        toast(`Question deleted locally, but DB sync failed: ${syncError?.message || syncError}`);
       }
-      render();
     });
   });
 
@@ -7179,7 +7317,7 @@ function wireAdmin() {
   });
 
   const form = document.getElementById("admin-question-form");
-  form?.addEventListener("submit", (event) => {
+  form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(form);
     const questions = getQuestions();
@@ -7221,19 +7359,24 @@ function wireAdmin() {
     }
 
     const idx = questions.findIndex((entry) => entry.id === payload.id);
+    const successMessage = idx >= 0 ? "Question updated." : "Question created.";
     if (idx >= 0) {
       questions[idx] = { ...questions[idx], ...payload };
-      toast("Question updated.");
     } else {
       questions.push(payload);
-      toast("Question created.");
     }
 
     save(STORAGE_KEYS.questions, questions);
-    state.adminEditQuestionId = null;
-    state.adminEditorCourse = "";
-    state.adminEditorTopic = "";
-    render();
+    try {
+      await flushPendingSyncNow();
+      toast(successMessage);
+      state.adminEditQuestionId = null;
+      state.adminEditorCourse = "";
+      state.adminEditorTopic = "";
+      render();
+    } catch (syncError) {
+      toast(`${successMessage} locally, but DB sync failed: ${syncError?.message || syncError}`);
+    }
   });
 
   const importForm = document.getElementById("admin-import-form");
