@@ -3366,12 +3366,36 @@ function bindGlobalEvents() {
 }
 
 function navigate(route, extras = {}) {
-  if (route !== "session") {
+  const nextRoute = String(route || "").trim().toLowerCase();
+  const targetRoute = nextRoute || "landing";
+  const canUseViewTransition = typeof document.startViewTransition === "function";
+  const shouldUseViewTransition = canUseViewTransition && targetRoute !== state.route;
+
+  const applyNavigation = () => {
+    if (targetRoute !== "session") {
+      state.sessionPanel = null;
+      state.sessionMarkerEnabled = false;
+      state.calcExpression = "";
+    }
+    state.route = targetRoute;
+    Object.assign(state, extras);
+    render();
+  };
+
+  if (shouldUseViewTransition) {
+    state.skipNextRouteAnimation = true;
+    document.startViewTransition(() => {
+      applyNavigation();
+    });
+    return;
+  }
+
+  if (targetRoute !== "session") {
     state.sessionPanel = null;
     state.sessionMarkerEnabled = false;
     state.calcExpression = "";
   }
-  state.route = route;
+  state.route = targetRoute;
   Object.assign(state, extras);
   render();
 }

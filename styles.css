@@ -236,6 +236,22 @@ button {
     filter 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
+@supports (view-transition-name: root) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 380ms;
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  ::view-transition-old(root) {
+    animation-name: route-global-out;
+  }
+
+  ::view-transition-new(root) {
+    animation-name: route-global-in;
+  }
+}
+
 .panel {
   background: linear-gradient(160deg, var(--surface) 0%, var(--surface-soft) 100%);
   border: 1px solid rgba(255, 255, 255, 0.56);
@@ -2463,6 +2479,32 @@ hr {
   }
 }
 
+@keyframes route-global-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+    filter: blur(2px);
+  }
+}
+
+@keyframes route-global-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -2992,6 +3034,11 @@ hr {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 1ms !important;
+  }
+
   *,
   *::before,
   *::after {
