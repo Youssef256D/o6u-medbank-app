@@ -736,6 +736,18 @@ body.is-routing .card {
     border-color 180ms ease;
 }
 
+.btn.is-loading {
+  cursor: wait;
+  opacity: 0.92;
+}
+
+.btn.is-loading .inline-loader {
+  width: 14px;
+  height: 14px;
+  border-color: rgba(255, 255, 255, 0.32);
+  border-top-color: #ffffff;
+}
+
 .btn:hover {
   background: var(--brand-strong);
   transform: translateY(-1px);
@@ -1021,6 +1033,22 @@ body.is-routing .card {
   border-width: 1px;
   border-color: var(--line);
   background: #ffffff;
+}
+
+.import-status {
+  margin-top: 0.58rem;
+}
+
+.import-status.is-success {
+  color: var(--good);
+}
+
+.import-status.is-warning {
+  color: #9c6d00;
+}
+
+.import-status.is-error {
+  color: var(--danger);
 }
 
 .admin-import-error-list {

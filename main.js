@@ -80,6 +80,9 @@ const state = {
   adminPresenceLoading: false,
   adminPresenceError: "",
   adminPresenceLastSyncAt: 0,
+  adminImportRunning: false,
+  adminImportStatus: "",
+  adminImportStatusTone: "neutral",
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
 };
@@ -2263,11 +2266,19 @@ async function flushPendingSyncNow(options = {}) {
       await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
   }
+  let relationalError = null;
   if (relationalSync.pendingWrites.size) {
-    await flushRelationalWrites({ throwOnFailure: throwOnRelationalFailure });
+    try {
+      await flushRelationalWrites({ throwOnFailure: throwOnRelationalFailure });
+    } catch (error) {
+      relationalError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
+    }
   }
   if (supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
+  }
+  if (relationalError && throwOnRelationalFailure) {
+    throw relationalError;
   }
 }
 
@@ -2848,8 +2859,7 @@ async function syncQuestionsToRelational(questionsPayload) {
     let topicId = topicIdByCourseTopic[`${courseId}::${meta.topic}`];
     if (!topicId) return;
     const stableDbId =
-      (isUuidValue(question.dbId) && question.dbId)
-      || existingByExternalId[externalId]
+      existingByExternalId[externalId]
       || crypto.randomUUID();
     upsertRows.push({
       id: stableDbId,
@@ -2900,36 +2910,6 @@ async function syncQuestionsToRelational(questionsPayload) {
     }
   }
 
-  if (currentUser.role === "admin") {
-    const externalIdSet = new Set(payloadExternalIds);
-    const existingQuestions = [];
-    let rangeStart = 0;
-    const rangeSize = 1000;
-    while (true) {
-      const { data: existingBatch, error: existingQuestionsError } = await client
-        .from("questions")
-        .select("id,external_id")
-        .not("external_id", "is", null)
-        .range(rangeStart, rangeStart + rangeSize - 1);
-      if (existingQuestionsError) {
-        throw existingQuestionsError;
-      }
-      const normalizedBatch = Array.isArray(existingBatch) ? existingBatch : [];
-      if (!normalizedBatch.length) {
-        break;
-      }
-      existingQuestions.push(...normalizedBatch);
-      if (normalizedBatch.length < rangeSize) {
-        break;
-      }
-      rangeStart += rangeSize;
-    }
-    const deleteIds = existingQuestions
-      .filter((row) => row.external_id && !externalIdSet.has(row.external_id))
-      .map((row) => row.id);
-    await deleteRelationalQuestionsAndDependents(client, deleteIds);
-  }
-
   const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
   const persistedQuestions = [];
   for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
@@ -2943,6 +2923,42 @@ async function syncQuestionsToRelational(questionsPayload) {
     if (Array.isArray(persistedBatch) && persistedBatch.length) {
       persistedQuestions.push(...persistedBatch);
     }
+  }
+  if (currentUser.role === "admin") {
+    const externalIdSet = new Set(payloadExternalIds);
+    const persistedQuestionIdSet = new Set(
+      (persistedQuestions || [])
+        .map((entry) => String(entry?.id || "").trim())
+        .filter(isUuidValue),
+    );
+    const existingQuestionsResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("questions")
+        .select("id,external_id")
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
+    if (existingQuestionsResult.error) {
+      throw existingQuestionsResult.error;
+    }
+    const existingQuestions = Array.isArray(existingQuestionsResult.data) ? existingQuestionsResult.data : [];
+    const deleteIds = existingQuestions
+      .filter((row) => {
+        const rowId = String(row?.id || "").trim();
+        const rowExternalId = String(row?.external_id || "").trim();
+        if (!isUuidValue(rowId)) {
+          return false;
+        }
+        if (persistedQuestionIdSet.has(rowId)) {
+          return false;
+        }
+        if (rowExternalId && externalIdSet.has(rowExternalId)) {
+          return false;
+        }
+        return true;
+      })
+      .map((row) => row.id);
+    await deleteRelationalQuestionsAndDependents(client, deleteIds);
   }
   const dbIdByExternalId = Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id]));
 
@@ -6319,6 +6335,11 @@ function renderAdmin() {
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
     const importReport = state.adminImportReport;
     const importDraft = String(state.adminImportDraft || "");
+    const importRunning = Boolean(state.adminImportRunning);
+    const importStatus = String(state.adminImportStatus || "").trim();
+    const importStatusTone = ["success", "error", "warning"].includes(state.adminImportStatusTone)
+      ? state.adminImportStatusTone
+      : "neutral";
     const importErrorPreview = (importReport?.errors || []).slice(0, 15);
     const questions = getQuestions();
     const selectedCourse = importCourse;
@@ -6434,7 +6455,7 @@ function renderAdmin() {
               Default course
               <select name="defaultCourse" id="admin-import-course">
                 ${allCourses
-                  .map((course) => `<option value="${course}" ${importCourse === course ? "selected" : ""}>${course}</option>`)
+                  .map((course) => `<option value="${escapeHtml(course)}" ${importCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
                   .join("")}
               </select>
             </label>
@@ -6452,10 +6473,17 @@ function renderAdmin() {
             <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'>${escapeHtml(importDraft)}</textarea>
           </label>
           <div class="stack">
-            <button class="btn" type="submit">Run bulk import</button>
+            <button class="btn ${importRunning ? "is-loading" : ""}" type="submit" ${importRunning ? "disabled" : ""}>
+              ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Importing questions...</span>` : "Run bulk import"}
+            </button>
             <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
           </div>
         </form>
+        ${
+          importStatus
+            ? `<p class="subtle import-status is-${importStatusTone}" aria-live="polite">${escapeHtml(importStatus)}</p>`
+            : ""
+        }
         ${
           importReport
             ? `
@@ -7724,51 +7752,82 @@ function wireAdmin() {
   const importForm = document.getElementById("admin-import-form");
   importForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.adminImportRunning) {
+      return;
+    }
     const data = new FormData(importForm);
-    const rawInput = String(state.adminImportDraft || data.get("importText") || "");
+    const rawInput = String(data.get("importText") || state.adminImportDraft || "");
+    state.adminImportDraft = rawInput;
     const raw = rawInput.trim();
     if (!raw) {
+      state.adminImportStatus = "Paste import content or upload a file first.";
+      state.adminImportStatusTone = "error";
+      state.skipNextRouteAnimation = true;
+      render();
       toast("Paste import content or upload a file first.");
       return;
     }
 
     const defaultCourse = String(data.get("defaultCourse") || allCourses[0]);
     const defaultTopic = String(data.get("defaultTopic") || (QBANK_COURSE_TOPICS[defaultCourse] || [])[0] || "");
-    const result = importQuestionsFromRaw(raw, {
-      defaultCourse,
-      defaultTopic,
-      author: getCurrentUser().name,
-    });
-    state.adminImportReport = {
-      createdAt: nowISO(),
-      total: result.total,
-      added: result.added,
-      errors: [...result.errors],
-    };
-
-    let syncMessage = "";
-    if (result.added) {
-      const syncResult = await persistImportedQuestionsNow(getQuestions());
-      if (!syncResult.ok) {
-        syncMessage = syncResult.message || "Database sync failed.";
-      }
-    }
-
-    if (syncMessage) {
-      toast(`Imported ${result.added}/${result.total} rows locally, but DB sync failed: ${syncMessage}`);
-    } else if (result.errors.length) {
-      toast(`Imported ${result.added}/${result.total} rows with ${result.errors.length} error(s).`);
-    } else {
-      toast(`Imported ${result.added}/${result.total} rows successfully.`);
-    }
-    if (result.added) {
-      state.adminEditQuestionId = null;
-    }
-    if (result.errors.length) {
-      console.warn("Bulk import errors:", result.errors);
-    }
+    state.adminImportRunning = true;
+    state.adminImportStatus = "Importing questions...";
+    state.adminImportStatusTone = "neutral";
     state.skipNextRouteAnimation = true;
     render();
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+
+    try {
+      const result = importQuestionsFromRaw(raw, {
+        defaultCourse,
+        defaultTopic,
+        author: getCurrentUser().name,
+      });
+      state.adminImportReport = {
+        createdAt: nowISO(),
+        total: result.total,
+        added: result.added,
+        errors: [...result.errors],
+      };
+
+      let syncMessage = "";
+      if (result.added) {
+        const syncResult = await persistImportedQuestionsNow(getQuestions());
+        if (!syncResult.ok) {
+          syncMessage = syncResult.message || "Database sync failed.";
+        }
+      }
+
+      if (syncMessage) {
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows. Saved locally with sync warning: ${syncMessage}`;
+        state.adminImportStatusTone = "warning";
+        toast(`Imported ${result.added}/${result.total} rows locally, but DB sync failed: ${syncMessage}`);
+      } else if (result.errors.length) {
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows with ${result.errors.length} error(s).`;
+        state.adminImportStatusTone = result.added ? "warning" : "error";
+        toast(`Imported ${result.added}/${result.total} rows with ${result.errors.length} error(s).`);
+      } else {
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows.`;
+        state.adminImportStatusTone = "success";
+        toast(`Imported ${result.added}/${result.total} rows successfully.`);
+      }
+
+      if (result.added) {
+        state.adminEditQuestionId = null;
+      }
+      if (result.errors.length) {
+        console.warn("Bulk import errors:", result.errors);
+      }
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, "Bulk import failed.");
+      state.adminImportStatus = `Import failed: ${errorMessage}`;
+      state.adminImportStatusTone = "error";
+      toast(`Import failed: ${errorMessage}`);
+    } finally {
+      state.adminImportRunning = false;
+      state.skipNextRouteAnimation = true;
+      render();
+    }
   });
 }
 function getUsers() {
@@ -9554,9 +9613,7 @@ function load(key, fallback) {
 
 function save(key, value) {
   writeStorageKey(key, value);
-  if (scheduleRelationalWrite(key, value)) {
-    return;
-  }
+  scheduleRelationalWrite(key, value);
   scheduleSupabaseWrite(key, value);
 }
 
