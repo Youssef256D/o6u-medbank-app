@@ -670,6 +670,25 @@ async function enforceRefreshAfterSignIn() {
   }
 }
 
+async function shouldForceRefreshAfterSignIn() {
+  const timeoutMs = APP_VERSION_FETCH_TIMEOUT_MS + 1800;
+  const outcome = await runWithTimeoutResult(
+    Promise.resolve(enforceRefreshAfterSignIn())
+      .then((shouldRefresh) => ({ shouldRefresh: Boolean(shouldRefresh) }))
+      .catch((error) => {
+        console.warn("Post sign-in version check failed.", error?.message || error);
+        return { shouldRefresh: false };
+      }),
+    timeoutMs,
+    "Version check timed out.",
+  );
+
+  if (outcome?.error) {
+    return false;
+  }
+  return Boolean(outcome?.shouldRefresh);
+}
+
 function resolveInitialRoute() {
   const persisted = String(readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
   if (KNOWN_ROUTES.has(persisted)) {
@@ -874,7 +893,7 @@ async function initSupabaseAuth() {
         removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
       } else if (localUser) {
-        if (await enforceRefreshAfterSignIn()) {
+        if (await shouldForceRefreshAfterSignIn()) {
           return;
         }
         await hydrateRelationalState(localUser).catch((hydrateError) => {
@@ -907,9 +926,6 @@ async function initSupabaseAuth() {
         let localUser = upsertLocalUserFromAuth(session.user);
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
-        await ensureRelationalSyncReady().catch((syncError) => {
-          console.warn("Relational sync initialization failed.", syncError?.message || syncError);
-        });
         if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
           removeStorageKey(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
@@ -925,9 +941,15 @@ async function initSupabaseAuth() {
           render();
           return;
         }
-        if (event === "SIGNED_IN" && (await enforceRefreshAfterSignIn())) {
+        if (event === "SIGNED_IN" && (await shouldForceRefreshAfterSignIn())) {
           return;
         }
+        if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
+          navigate(localUser.role === "admin" ? "admin" : "dashboard");
+        }
+        await ensureRelationalSyncReady().catch((syncError) => {
+          console.warn("Relational sync initialization failed.", syncError?.message || syncError);
+        });
         await hydrateRelationalState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
         });
@@ -4429,8 +4451,13 @@ function wireAuth(mode) {
             const profileSync = await refreshLocalUserFromRelationalProfile(data.user, user);
             user = profileSync.user;
             if (!user) {
-              toast("Could not map account profile after login.");
-              return;
+              const fallbackUser = getUsers().find((candidate) => candidate.email.toLowerCase() === email);
+              if (fallbackUser) {
+                user = fallbackUser;
+              } else {
+                toast("Could not map account profile after login.");
+                return;
+              }
             }
             if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
@@ -4438,7 +4465,7 @@ function wireAuth(mode) {
               toast("Your account is pending admin approval.");
               return;
             }
-            if (await enforceRefreshAfterSignIn()) {
+            if (await shouldForceRefreshAfterSignIn()) {
               return;
             }
             navigate(user.role === "admin" ? "admin" : "dashboard");
@@ -4454,7 +4481,7 @@ function wireAuth(mode) {
               toast("Your account is pending admin approval.");
               return;
             }
-            if (await enforceRefreshAfterSignIn()) {
+            if (await shouldForceRefreshAfterSignIn()) {
               return;
             }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
@@ -4476,7 +4503,7 @@ function wireAuth(mode) {
           toast("Your account is pending admin approval.");
           return;
         }
-        if (await enforceRefreshAfterSignIn()) {
+        if (await shouldForceRefreshAfterSignIn()) {
           return;
         }
         save(STORAGE_KEYS.currentUserId, user.id);
@@ -4930,6 +4957,7 @@ function renderCreateTest() {
     flagged: "Flagged only",
   };
   const sourceFiltered = applySourceFilter(filtered, state.createTestSource, user.id);
+  const defaultQuestionCount = Math.max(1, Math.min(500, sourceFiltered.length || 0));
 
   return `
     <section class="panel">
@@ -4979,7 +5007,7 @@ function renderCreateTest() {
       <form id="create-test-block-form" class="create-test-setup-form">
         <div class="create-test-setup-grid">
           <label class="create-test-setup-field">Number of questions
-            <input name="count" type="number" min="1" max="500" step="1" value="20" />
+            <input name="count" type="number" min="1" max="500" step="1" value="${defaultQuestionCount}" />
           </label>
           <label class="create-test-setup-field">Mode
             <select name="mode">
@@ -5025,6 +5053,7 @@ function wireCreateTest() {
   const allTopicsInput = document.querySelector("input[data-role='create-test-all-topics']");
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
+  const countInput = blockForm?.querySelector("input[name='count']");
 
   const updateCreateTestSummary = () => {
     const user = getCurrentUser();
@@ -5051,6 +5080,10 @@ function wireCreateTest() {
     const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
     if (summaryEl) {
       summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+    }
+    if (countInput) {
+      const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
+      countInput.value = String(suggestedCount);
     }
   };
 
@@ -5095,8 +5128,6 @@ function wireCreateTest() {
     const user = getCurrentUser();
     const data = new FormData(blockForm);
 
-    const requestedCount = Math.floor(Number(data.get("count") || 20));
-    const count = Math.min(500, Math.max(1, Number.isFinite(requestedCount) ? requestedCount : 20));
     const mode = String(data.get("mode") || "tutor");
     const source = String(data.get("source") || state.createTestSource || "all");
     state.createTestSource = source;
@@ -5110,6 +5141,12 @@ function wireCreateTest() {
     }
     let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters);
     pool = applySourceFilter(pool, source, user.id);
+    const fallbackCount = Math.max(1, Math.min(500, pool.length || 0));
+    const requestedCount = Math.floor(Number(data.get("count")));
+    const count = Math.min(
+      500,
+      Math.max(1, Number.isFinite(requestedCount) ? requestedCount : fallbackCount),
+    );
 
     if (randomize) {
       pool = shuffle(pool);
@@ -5264,19 +5301,28 @@ function renderSession() {
                     .join("")}
                 </div>
 
-                <div class="stack exam-copy-actions">
-                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-text">Copy question</button>
-                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-with-answers">Copy question + answers</button>
-                </div>
-
                 <div class="exam-answers">
                   ${choicesHtml}
                 </div>
 
-                <div class="stack exam-answer-actions">
-                  <button class="btn ghost" data-action="prev-question" ${isFirstQuestion ? "disabled" : ""}>Back</button>
-                  ${isSubmitted ? "" : `<button class="btn" data-action="submit-answer">Submit answer</button>`}
-                  <button class="btn ghost" data-action="next-question" ${isLastQuestion ? "disabled" : ""}>Next question</button>
+                <div class="exam-answer-actions">
+                  <div class="exam-nav-icons">
+                    <button
+                      class="btn ghost exam-icon-btn"
+                      data-action="prev-question"
+                      ${isFirstQuestion ? "disabled" : ""}
+                      aria-label="Previous question"
+                      title="Previous question"
+                    ><span aria-hidden="true">←</span></button>
+                    <button
+                      class="btn ghost exam-icon-btn"
+                      data-action="next-question"
+                      ${isLastQuestion ? "disabled" : ""}
+                      aria-label="Next question"
+                      title="Next question"
+                    ><span aria-hidden="true">→</span></button>
+                  </div>
+                  ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Submit answer</button>`}
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
@@ -5395,24 +5441,6 @@ function handleSessionClick(event) {
   normalizeSession(session);
 
   const maxIndex = session.questionIds.length - 1;
-  if (action === "copy-question-text" || action === "copy-question-with-answers") {
-    const qid = session.questionIds[session.currentIndex];
-    const currentQuestion = getQuestions().find((entry) => entry.id === qid);
-    if (!currentQuestion) {
-      toast("Question data unavailable.");
-      return;
-    }
-    const includeAnswers = action === "copy-question-with-answers";
-    void copyQuestionToClipboard(currentQuestion, { includeAnswers, includeCorrect: includeAnswers })
-      .then((copied) => {
-        if (copied) {
-          toast(includeAnswers ? "Question and answers copied." : "Question copied.");
-        } else {
-          toast("Could not copy text in this browser.");
-        }
-      });
-    return;
-  }
   const trackedActions = new Set(["prev-question", "next-question", "jump-question", "jump-unanswered", "save-exit", "submit-session"]);
   const shouldTrackElapsed = trackedActions.has(action);
   if (shouldTrackElapsed) {
@@ -5965,18 +5993,27 @@ function renderReview() {
                   ${stemLines.map((line) => `<p class="exam-line">${escapeHtml(line)}</p>`).join("")}
                 </div>
 
-                <div class="stack exam-copy-actions">
-                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-text">Copy question</button>
-                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-with-answers">Copy question + answers</button>
-                </div>
-
                 <div class="exam-answers">
                   ${choicesHtml}
                 </div>
 
-                <div class="stack exam-answer-actions">
-                  <button class="btn ghost" data-action="review-prev-question" ${isFirstReviewQuestion ? "disabled" : ""}>Back</button>
-                  <button class="btn ghost" data-action="review-next-question" ${isLastReviewQuestion ? "disabled" : ""}>Next question</button>
+                <div class="exam-answer-actions">
+                  <div class="exam-nav-icons">
+                    <button
+                      class="btn ghost exam-icon-btn"
+                      data-action="review-prev-question"
+                      ${isFirstReviewQuestion ? "disabled" : ""}
+                      aria-label="Previous question"
+                      title="Previous question"
+                    ><span aria-hidden="true">←</span></button>
+                    <button
+                      class="btn ghost exam-icon-btn"
+                      data-action="review-next-question"
+                      ${isLastReviewQuestion ? "disabled" : ""}
+                      aria-label="Next question"
+                      title="Next question"
+                    ><span aria-hidden="true">→</span></button>
+                  </div>
                 </div>
               </article>
               ${renderReviewFeedbackPane(question, response, isCorrect)}
@@ -6024,25 +6061,6 @@ function handleReviewClick(event) {
 
   const maxIndex = Math.max(0, selected.questionIds.length - 1);
   const action = target.getAttribute("data-action");
-
-  if (action === "copy-question-text" || action === "copy-question-with-answers") {
-    const qid = selected.questionIds[state.reviewIndex];
-    const currentQuestion = getQuestions().find((entry) => entry.id === qid);
-    if (!currentQuestion) {
-      toast("Question data unavailable.");
-      return;
-    }
-    const includeAnswers = action === "copy-question-with-answers";
-    void copyQuestionToClipboard(currentQuestion, { includeAnswers, includeCorrect: includeAnswers })
-      .then((copied) => {
-        if (copied) {
-          toast(includeAnswers ? "Question and answers copied." : "Question copied.");
-        } else {
-          toast("Could not copy text in this browser.");
-        }
-      });
-    return;
-  }
 
   if (action === "review-jump-question") {
     const index = Number(target.getAttribute("data-index") || 0);
@@ -10007,7 +10025,7 @@ async function loginAsDemo(email, password) {
     toast("This account is pending admin approval.");
     return;
   }
-  if (await enforceRefreshAfterSignIn()) {
+  if (await shouldForceRefreshAfterSignIn()) {
     return;
   }
 
@@ -10105,96 +10123,6 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}
-
-function buildQuestionClipboardText(question, options = {}) {
-  if (!question || typeof question !== "object") {
-    return "";
-  }
-
-  const includeAnswers = options.includeAnswers !== false;
-  const includeCorrect = options.includeCorrect !== false;
-  const lines = [];
-  const stem = splitStemLines(String(question.stem || ""))
-    .map((line) => String(line || "").trim())
-    .filter(Boolean);
-  if (stem.length) {
-    lines.push(...stem);
-  }
-
-  const choices = Array.isArray(question.choices) ? question.choices : [];
-  if (includeAnswers && choices.length) {
-    if (lines.length) {
-      lines.push("");
-    }
-    choices.forEach((choice) => {
-      const label = String(choice?.id || "").toUpperCase();
-      const text = String(choice?.text || "").trim();
-      if (!label || !text) {
-        return;
-      }
-      lines.push(`${label}. ${text}`);
-    });
-  }
-
-  const correctIds = Array.isArray(question.correct)
-    ? question.correct
-      .map((entry) => String(entry || "").toUpperCase())
-      .filter(Boolean)
-    : [];
-  if (includeCorrect && correctIds.length) {
-    if (lines.length) {
-      lines.push("");
-    }
-    lines.push(`Correct answer: ${correctIds.join(", ")}`);
-  }
-
-  return lines.join("\n").trim();
-}
-
-async function copyTextToClipboard(text) {
-  const value = String(text || "").trim();
-  if (!value) {
-    return false;
-  }
-
-  if (window.isSecureContext && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return true;
-    } catch {
-      // Fall back to execCommand copy.
-    }
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.top = "-1000px";
-  textarea.style.left = "-1000px";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-
-  let copied = false;
-  try {
-    copied = document.execCommand("copy");
-  } catch {
-    copied = false;
-  } finally {
-    textarea.remove();
-  }
-  return copied;
-}
-
-async function copyQuestionToClipboard(question, options = {}) {
-  const payload = buildQuestionClipboardText(question, options);
-  if (!payload) {
-    return false;
-  }
-  return copyTextToClipboard(payload);
 }
 
 function toast(message) {

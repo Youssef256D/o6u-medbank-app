@@ -2074,18 +2074,41 @@ th {
 }
 
 .exam-answer-actions {
-  margin-top: 0.48rem;
+  margin-top: 0.68rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.62rem;
 }
 
-.exam-copy-actions {
-  margin-top: 0.35rem;
-  margin-bottom: 0.2rem;
+.exam-nav-icons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.45rem;
 }
 
-.exam-copy-actions .exam-copy-btn {
-  min-height: 34px;
-  padding: 0.32rem 0.66rem;
-  font-size: 0.82rem;
+.exam-icon-btn {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  border-radius: 12px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.exam-icon-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.exam-submit-btn {
+  align-self: center;
 }
 
 .exam-review-pane {
@@ -3099,4 +3122,15 @@ hr {
 html body,
 html body :where(*, *::before, *::after) {
   font-weight: 400 !important;
+}
+
+/* Restore brand + primary headings typography. */
+html body .brand {
+  font-family: var(--font-display) !important;
+  font-weight: 600 !important;
+}
+
+html body :is(.title, .hero h1, .home-copy h1, .admin-shell .title, .admin-shell h2, .admin-shell h3) {
+  font-family: var(--font-display) !important;
+  font-weight: 600 !important;
 }
