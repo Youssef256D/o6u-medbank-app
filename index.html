@@ -19,7 +19,7 @@
         <span class="pill">Faculty of Medicine</span>
       </div>
       <nav id="public-nav" class="top-nav">
-        <button data-nav="landing">Home</button>
+        <button class="is-active" data-nav="landing">Home</button>
         <button data-nav="features">Features</button>
         <button data-nav="pricing">Pricing</button>
         <button data-nav="about">About</button>
@@ -32,7 +32,10 @@
         <button data-nav="profile">Profile</button>
         <button id="admin-link" class="hidden" data-nav="admin">Admin Dashboard</button>
       </nav>
-      <div class="auth-actions" id="auth-actions"></div>
+      <div class="auth-actions" id="auth-actions">
+        <button data-nav="login">Login</button>
+        <button class="btn" data-nav="signup">Sign up</button>
+      </div>
     </header>
 
     <main id="app" class="app-shell">
