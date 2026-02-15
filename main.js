@@ -23,7 +23,32 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-15.1").trim();
-const INITIAL_ROUTE = String(window.__APP_INITIAL_ROUTE__ || "landing").trim().toLowerCase() || "landing";
+const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
+const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
+const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
+const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
+const KNOWN_ROUTES = new Set([
+  "landing",
+  "features",
+  "pricing",
+  "about",
+  "contact",
+  "login",
+  "signup",
+  "forgot",
+  "dashboard",
+  "create-test",
+  "qbank",
+  "builder",
+  "session",
+  "review",
+  "analytics",
+  "profile",
+  "admin",
+]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "activity"]);
+const INITIAL_ROUTE = resolveInitialRoute();
+const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const STUDENT_DATA_REFRESH_MS = 60000;
@@ -53,7 +78,7 @@ const state = {
     course: "",
     topic: "",
   },
-  adminPage: "dashboard",
+  adminPage: INITIAL_ADMIN_PAGE,
   adminCurriculumYear: 1,
   adminCurriculumSemester: 1,
   adminEditorCourse: "",
@@ -640,6 +665,54 @@ async function enforceRefreshAfterSignIn() {
     return await appVersionCheckPromise;
   } finally {
     appVersionCheckPromise = null;
+  }
+}
+
+function resolveInitialRoute() {
+  const persisted = String(readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
+  if (KNOWN_ROUTES.has(persisted)) {
+    return persisted;
+  }
+  const persistedLocal = String(load(ROUTE_STATE_ROUTE_LOCAL_KEY, "") || "").trim().toLowerCase();
+  if (KNOWN_ROUTES.has(persistedLocal)) {
+    return persistedLocal;
+  }
+  const hinted = String(window.__APP_INITIAL_ROUTE__ || "").trim().toLowerCase();
+  if (KNOWN_ROUTES.has(hinted)) {
+    return hinted;
+  }
+  return "landing";
+}
+
+function resolveInitialAdminPage() {
+  const persisted = String(readSessionStorageKey(ROUTE_STATE_ADMIN_PAGE_KEY) || "").trim().toLowerCase();
+  if (KNOWN_ADMIN_PAGES.has(persisted)) {
+    return persisted;
+  }
+  const persistedLocal = String(load(ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY, "") || "").trim().toLowerCase();
+  if (KNOWN_ADMIN_PAGES.has(persistedLocal)) {
+    return persistedLocal;
+  }
+  return "dashboard";
+}
+
+function persistRouteState() {
+  const route = String(state.route || "").trim().toLowerCase();
+  if (KNOWN_ROUTES.has(route)) {
+    writeSessionStorageKey(ROUTE_STATE_ROUTE_KEY, route);
+    saveLocalOnly(ROUTE_STATE_ROUTE_LOCAL_KEY, route);
+  } else {
+    removeSessionStorageKey(ROUTE_STATE_ROUTE_KEY);
+    removeStorageKey(ROUTE_STATE_ROUTE_LOCAL_KEY);
+  }
+
+  const adminPage = String(state.adminPage || "").trim().toLowerCase();
+  if (KNOWN_ADMIN_PAGES.has(adminPage)) {
+    writeSessionStorageKey(ROUTE_STATE_ADMIN_PAGE_KEY, adminPage);
+    saveLocalOnly(ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY, adminPage);
+  } else {
+    removeSessionStorageKey(ROUTE_STATE_ADMIN_PAGE_KEY);
+    removeStorageKey(ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY);
   }
 }
 
@@ -3902,6 +3975,8 @@ function render() {
     default:
       appEl.innerHTML = renderLanding();
   }
+
+  persistRouteState();
 
   if (skipTransition) {
     lastRenderedRoute = state.route;
