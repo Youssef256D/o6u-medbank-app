@@ -1942,6 +1942,13 @@ th {
   line-height: 1.52;
 }
 
+.exam-stem,
+.exam-line,
+.exam-choice-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .exam-shell.font-compact .exam-stem {
   font-size: 0.95rem;
 }
@@ -2068,6 +2075,17 @@ th {
 
 .exam-answer-actions {
   margin-top: 0.48rem;
+}
+
+.exam-copy-actions {
+  margin-top: 0.35rem;
+  margin-bottom: 0.2rem;
+}
+
+.exam-copy-actions .exam-copy-btn {
+  min-height: 34px;
+  padding: 0.32rem 0.66rem;
+  font-size: 0.82rem;
 }
 
 .exam-review-pane {
@@ -3075,4 +3093,10 @@ hr {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Global typography tone-down: keep text at normal weight across the app. */
+html body,
+html body :where(*, *::before, *::after) {
+  font-weight: 400 !important;
 }

@@ -5203,6 +5203,8 @@ function renderSession() {
       `;
     })
     .join("");
+  const isFirstQuestion = session.currentIndex <= 0;
+  const isLastQuestion = session.currentIndex >= total - 1;
 
   const choicesHtml = question.choices
     .map((choice) => {
@@ -5262,11 +5264,20 @@ function renderSession() {
                     .join("")}
                 </div>
 
+                <div class="stack exam-copy-actions">
+                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-text">Copy question</button>
+                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-with-answers">Copy question + answers</button>
+                </div>
+
                 <div class="exam-answers">
                   ${choicesHtml}
                 </div>
 
-                ${isSubmitted ? "" : `<div class="stack exam-answer-actions"><button class="btn" data-action="submit-answer">Submit answer</button></div>`}
+                <div class="stack exam-answer-actions">
+                  <button class="btn ghost" data-action="prev-question" ${isFirstQuestion ? "disabled" : ""}>Back</button>
+                  ${isSubmitted ? "" : `<button class="btn" data-action="submit-answer">Submit answer</button>`}
+                  <button class="btn ghost" data-action="next-question" ${isLastQuestion ? "disabled" : ""}>Next question</button>
+                </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
             </section>
@@ -5274,7 +5285,7 @@ function renderSession() {
             <aside class="exam-nav-panel">
               <h3>Quiz navigation</h3>
               <div class="exam-nav-grid">${sideRows}</div>
-              <button class="exam-nav-link" data-action="submit-session">Finish review</button>
+              <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
             </aside>
           </div>
@@ -5384,6 +5395,24 @@ function handleSessionClick(event) {
   normalizeSession(session);
 
   const maxIndex = session.questionIds.length - 1;
+  if (action === "copy-question-text" || action === "copy-question-with-answers") {
+    const qid = session.questionIds[session.currentIndex];
+    const currentQuestion = getQuestions().find((entry) => entry.id === qid);
+    if (!currentQuestion) {
+      toast("Question data unavailable.");
+      return;
+    }
+    const includeAnswers = action === "copy-question-with-answers";
+    void copyQuestionToClipboard(currentQuestion, { includeAnswers, includeCorrect: includeAnswers })
+      .then((copied) => {
+        if (copied) {
+          toast(includeAnswers ? "Question and answers copied." : "Question copied.");
+        } else {
+          toast("Could not copy text in this browser.");
+        }
+      });
+    return;
+  }
   const trackedActions = new Set(["prev-question", "next-question", "jump-question", "jump-unanswered", "save-exit", "submit-session"]);
   const shouldTrackElapsed = trackedActions.has(action);
   if (shouldTrackElapsed) {
@@ -5599,6 +5628,28 @@ function handleSessionClick(event) {
   }
 
   if (action === "submit-session") {
+    const unansweredQuestionNumbers = session.questionIds
+      .map((qid, index) => ({ index, response: session.responses[qid] }))
+      .filter(({ response }) => !Array.isArray(response?.selected) || response.selected.length === 0)
+      .map(({ index }) => index + 1);
+    if (unansweredQuestionNumbers.length) {
+      const preview = unansweredQuestionNumbers.slice(0, 15).join(", ");
+      const moreCount = unansweredQuestionNumbers.length - Math.min(unansweredQuestionNumbers.length, 15);
+      const suffix = moreCount > 0 ? ` (+${moreCount} more)` : "";
+      const confirmed = window.confirm(
+        `Questions ${preview}${suffix} are not submitted (no answer selected). Submit all and finish anyway?`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    session.questionIds.forEach((qid) => {
+      const response = session.responses[qid];
+      if (response?.selected?.length) {
+        response.submitted = true;
+      }
+    });
     finalizeSession(session.id);
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
@@ -5622,6 +5673,9 @@ function handleSessionKeydown(event) {
 
   const activeTag = document.activeElement?.tagName;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag) && event.key !== "Escape") {
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) {
     return;
   }
 
@@ -5887,6 +5941,8 @@ function renderReview() {
         })
         .join("")
     : `<p class="subtle">This question was removed from the bank and cannot be rendered.</p>`;
+  const isFirstReviewQuestion = state.reviewIndex <= 0;
+  const isLastReviewQuestion = state.reviewIndex >= total - 1;
 
   return `
     <section class="exam-shell-wrap">
@@ -5909,8 +5965,18 @@ function renderReview() {
                   ${stemLines.map((line) => `<p class="exam-line">${escapeHtml(line)}</p>`).join("")}
                 </div>
 
+                <div class="stack exam-copy-actions">
+                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-text">Copy question</button>
+                  <button class="btn ghost exam-copy-btn" type="button" data-action="copy-question-with-answers">Copy question + answers</button>
+                </div>
+
                 <div class="exam-answers">
                   ${choicesHtml}
+                </div>
+
+                <div class="stack exam-answer-actions">
+                  <button class="btn ghost" data-action="review-prev-question" ${isFirstReviewQuestion ? "disabled" : ""}>Back</button>
+                  <button class="btn ghost" data-action="review-next-question" ${isLastReviewQuestion ? "disabled" : ""}>Next question</button>
                 </div>
               </article>
               ${renderReviewFeedbackPane(question, response, isCorrect)}
@@ -5959,6 +6025,25 @@ function handleReviewClick(event) {
   const maxIndex = Math.max(0, selected.questionIds.length - 1);
   const action = target.getAttribute("data-action");
 
+  if (action === "copy-question-text" || action === "copy-question-with-answers") {
+    const qid = selected.questionIds[state.reviewIndex];
+    const currentQuestion = getQuestions().find((entry) => entry.id === qid);
+    if (!currentQuestion) {
+      toast("Question data unavailable.");
+      return;
+    }
+    const includeAnswers = action === "copy-question-with-answers";
+    void copyQuestionToClipboard(currentQuestion, { includeAnswers, includeCorrect: includeAnswers })
+      .then((copied) => {
+        if (copied) {
+          toast(includeAnswers ? "Question and answers copied." : "Question copied.");
+        } else {
+          toast("Could not copy text in this browser.");
+        }
+      });
+    return;
+  }
+
   if (action === "review-jump-question") {
     const index = Number(target.getAttribute("data-index") || 0);
     state.reviewIndex = Math.min(maxIndex, Math.max(0, index));
@@ -5991,6 +6076,9 @@ function handleReviewKeydown(event) {
 
   const activeTag = document.activeElement?.tagName;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag) && event.key !== "Escape") {
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) {
     return;
   }
 
@@ -10017,6 +10105,96 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function buildQuestionClipboardText(question, options = {}) {
+  if (!question || typeof question !== "object") {
+    return "";
+  }
+
+  const includeAnswers = options.includeAnswers !== false;
+  const includeCorrect = options.includeCorrect !== false;
+  const lines = [];
+  const stem = splitStemLines(String(question.stem || ""))
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  if (stem.length) {
+    lines.push(...stem);
+  }
+
+  const choices = Array.isArray(question.choices) ? question.choices : [];
+  if (includeAnswers && choices.length) {
+    if (lines.length) {
+      lines.push("");
+    }
+    choices.forEach((choice) => {
+      const label = String(choice?.id || "").toUpperCase();
+      const text = String(choice?.text || "").trim();
+      if (!label || !text) {
+        return;
+      }
+      lines.push(`${label}. ${text}`);
+    });
+  }
+
+  const correctIds = Array.isArray(question.correct)
+    ? question.correct
+      .map((entry) => String(entry || "").toUpperCase())
+      .filter(Boolean)
+    : [];
+  if (includeCorrect && correctIds.length) {
+    if (lines.length) {
+      lines.push("");
+    }
+    lines.push(`Correct answer: ${correctIds.join(", ")}`);
+  }
+
+  return lines.join("\n").trim();
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "").trim();
+  if (!value) {
+    return false;
+  }
+
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // Fall back to execCommand copy.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.left = "-1000px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  } finally {
+    textarea.remove();
+  }
+  return copied;
+}
+
+async function copyQuestionToClipboard(question, options = {}) {
+  const payload = buildQuestionClipboardText(question, options);
+  if (!payload) {
+    return false;
+  }
+  return copyTextToClipboard(payload);
 }
 
 function toast(message) {
