@@ -181,6 +181,8 @@ let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
 let supabaseAuthStateUnsubscribe = null;
 let globalEventsBound = false;
+let questionSyncInFlightPromise = null;
+let queuedQuestionSyncPayload = null;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -2444,6 +2446,24 @@ function isMissingRelationError(error) {
   return false;
 }
 
+function isQuestionChoiceForeignKeyError(error) {
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || "");
+  if (code === "23503" && /question_id/i.test(message)) {
+    return true;
+  }
+  return /question_choices_question_id_fkey/i.test(message);
+}
+
+function cloneQuestionsPayloadForSync(payload) {
+  const questions = Array.isArray(payload) ? payload : [];
+  try {
+    return deepClone(questions);
+  } catch {
+    return questions.map((question) => ({ ...question }));
+  }
+}
+
 async function syncRelationalKey(storageKey, payload) {
   if (!relationalSync.enabled) {
     return;
@@ -2816,6 +2836,36 @@ async function deleteRelationalQuestionsAndDependents(client, questionIds) {
 }
 
 async function syncQuestionsToRelational(questionsPayload) {
+  queuedQuestionSyncPayload = cloneQuestionsPayloadForSync(questionsPayload);
+  if (questionSyncInFlightPromise) {
+    return questionSyncInFlightPromise;
+  }
+
+  questionSyncInFlightPromise = (async () => {
+    let lastError = null;
+    while (queuedQuestionSyncPayload) {
+      const nextPayload = queuedQuestionSyncPayload;
+      queuedQuestionSyncPayload = null;
+      try {
+        await syncQuestionsToRelationalUnsafe(nextPayload);
+        lastError = null;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError) {
+      throw lastError;
+    }
+  })();
+
+  try {
+    await questionSyncInFlightPromise;
+  } finally {
+    questionSyncInFlightPromise = null;
+  }
+}
+
+async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   const client = getRelationalClient();
   const currentUser = getCurrentUser();
   if (!client || !currentUser) {
@@ -3044,7 +3094,9 @@ async function syncQuestionsToRelational(questionsPayload) {
   });
   saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions);
 
-  const questionDbIds = Object.values(dbIdByExternalId);
+  const questionDbIds = Object.values(dbIdByExternalId)
+    .map((entry) => String(entry || "").trim())
+    .filter(isUuidValue);
   for (const questionIdBatch of splitIntoBatches(questionDbIds, RELATIONAL_DELETE_BATCH_SIZE)) {
     const { error: deleteChoicesError } = await client
       .from("question_choices")
@@ -3055,28 +3107,88 @@ async function syncQuestionsToRelational(questionsPayload) {
     }
   }
 
-  const choiceRows = [];
-  updatedLocalQuestions.forEach((question) => {
-    const dbId = dbIdByExternalId[question.id];
-    if (!dbId) return;
-    const correct = new Set(Array.isArray(question.correct) ? question.correct.map((entry) => String(entry).toUpperCase()) : []);
-    (question.choices || []).forEach((choice) => {
-      const label = String(choice.id || "").toUpperCase();
-      const text = String(choice.text || "").trim();
-      if (!label || !text) return;
-      choiceRows.push({
-        question_id: dbId,
-        choice_label: label,
-        choice_text: text,
-        is_correct: correct.has(label),
+  const buildChoiceRows = (sourceQuestions, idMap) => {
+    const rows = [];
+    sourceQuestions.forEach((question) => {
+      const dbId = String(idMap[question.id] || "").trim();
+      if (!isUuidValue(dbId)) {
+        return;
+      }
+      const correct = new Set(Array.isArray(question.correct) ? question.correct.map((entry) => String(entry).toUpperCase()) : []);
+      (question.choices || []).forEach((choice) => {
+        const label = String(choice.id || "").toUpperCase();
+        const text = String(choice.text || "").trim();
+        if (!label || !text) {
+          return;
+        }
+        rows.push({
+          question_id: dbId,
+          choice_label: label,
+          choice_text: text,
+          is_correct: correct.has(label),
+        });
       });
     });
-  });
-  for (const choiceBatch of splitIntoBatches(choiceRows, RELATIONAL_INSERT_BATCH_SIZE)) {
-    const { error: insertChoicesError } = await client.from("question_choices").insert(choiceBatch);
-    if (insertChoicesError) {
-      throw insertChoicesError;
+    return rows;
+  };
+
+  const insertChoiceRows = async (rows) => {
+    for (const choiceBatch of splitIntoBatches(rows, RELATIONAL_INSERT_BATCH_SIZE)) {
+      const { error: insertChoicesError } = await client.from("question_choices").insert(choiceBatch);
+      if (insertChoicesError) {
+        throw insertChoicesError;
+      }
     }
+  };
+
+  let choiceRows = buildChoiceRows(updatedLocalQuestions, dbIdByExternalId);
+  try {
+    await insertChoiceRows(choiceRows);
+  } catch (error) {
+    if (!isQuestionChoiceForeignKeyError(error)) {
+      throw error;
+    }
+
+    const refreshedPersistedQuestions = [];
+    for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data: persistedBatch, error: persistedQuestionsError } = await client
+        .from("questions")
+        .select("id,external_id")
+        .in("external_id", externalIdBatch);
+      if (persistedQuestionsError) {
+        throw persistedQuestionsError;
+      }
+      if (Array.isArray(persistedBatch) && persistedBatch.length) {
+        refreshedPersistedQuestions.push(...persistedBatch);
+      }
+    }
+    const refreshedDbIdByExternalId = Object.fromEntries(
+      (refreshedPersistedQuestions || []).map((entry) => [entry.external_id, entry.id]),
+    );
+    const refreshedLocalQuestions = questions.map((question) => {
+      const nextDbId = refreshedDbIdByExternalId[question.id];
+      if (!nextDbId || question.dbId === nextDbId) {
+        return question;
+      }
+      return { ...question, dbId: nextDbId };
+    });
+    saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions);
+
+    const refreshedQuestionDbIds = Object.values(refreshedDbIdByExternalId)
+      .map((entry) => String(entry || "").trim())
+      .filter(isUuidValue);
+    for (const questionIdBatch of splitIntoBatches(refreshedQuestionDbIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+      const { error: deleteChoicesError } = await client
+        .from("question_choices")
+        .delete()
+        .in("question_id", questionIdBatch);
+      if (deleteChoicesError) {
+        throw deleteChoicesError;
+      }
+    }
+
+    choiceRows = buildChoiceRows(refreshedLocalQuestions, refreshedDbIdByExternalId);
+    await insertChoiceRows(choiceRows);
   }
 }
 
@@ -3102,6 +3214,8 @@ async function persistImportedQuestionsNow(questionsPayload) {
     return { ok: false, message: "Relational database sync is unavailable." };
   }
 
+  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+
   try {
     const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
     const topics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
@@ -3109,7 +3223,15 @@ async function persistImportedQuestionsNow(questionsPayload) {
     await syncUserCourseEnrollmentsToRelational(getUsers(), {
       assignedByAuthId: currentUser.supabaseAuthId,
     });
-    await syncQuestionsToRelational(questions);
+    try {
+      await syncQuestionsToRelational(questions);
+    } catch (error) {
+      if (!isQuestionChoiceForeignKeyError(error)) {
+        throw error;
+      }
+      // Retry once against the latest local snapshot if choices were inserted before questions settled.
+      await syncQuestionsToRelational(getQuestions());
+    }
   } catch (error) {
     return { ok: false, message: error?.message || "Could not persist imported questions to database." };
   }
@@ -6551,6 +6673,9 @@ function renderAdmin() {
             <button class="btn ${importRunning ? "is-loading" : ""}" type="submit" ${importRunning ? "disabled" : ""}>
               ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Importing questions...</span>` : "Run bulk import"}
             </button>
+            <button class="btn ghost ${importRunning ? "is-loading" : ""}" type="button" id="admin-sync-questions-now" ${importRunning ? "disabled" : ""}>
+              ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing cloud data...</span>` : "Sync existing questions to cloud"}
+            </button>
             <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
           </div>
         </form>
@@ -7621,6 +7746,7 @@ function wireAdmin() {
   const importFileInput = document.getElementById("admin-import-file");
   const importTextInput = document.getElementById("admin-import-text");
   const importTemplateButton = document.getElementById("admin-download-template");
+  const importSyncNowButton = document.getElementById("admin-sync-questions-now");
   const importErrorDownloadButton = document.getElementById("admin-download-import-errors");
   const importReportClearButton = document.getElementById("admin-clear-import-report");
 
@@ -7640,6 +7766,37 @@ function wireAdmin() {
     }
     return text;
   };
+
+  importSyncNowButton?.addEventListener("click", async () => {
+    if (state.adminImportRunning) {
+      return;
+    }
+
+    state.adminImportRunning = true;
+    state.adminImportStatus = "Syncing existing questions to cloud...";
+    state.adminImportStatusTone = "neutral";
+    state.skipNextRouteAnimation = true;
+    render();
+
+    try {
+      const syncResult = await persistImportedQuestionsNow(getQuestions());
+      if (!syncResult.ok) {
+        throw new Error(syncResult.message || "Cloud sync failed.");
+      }
+      state.adminImportStatus = "Cloud sync complete. Questions are now available to all users.";
+      state.adminImportStatusTone = "success";
+      toast("Cloud sync complete.");
+    } catch (error) {
+      const message = getErrorMessage(error, "Cloud sync failed.");
+      state.adminImportStatus = `Cloud sync failed: ${message}`;
+      state.adminImportStatusTone = "error";
+      toast(`Cloud sync failed: ${message}`);
+    } finally {
+      state.adminImportRunning = false;
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+  });
 
   importTemplateButton?.addEventListener("click", () => {
     const selectedCourse = importCourseSelect?.value || allCourses[0] || "";
