@@ -22,7 +22,8 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-14.11").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-15.1").trim();
+const INITIAL_ROUTE = String(window.__APP_INITIAL_ROUTE__ || "landing").trim().toLowerCase() || "landing";
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const STUDENT_DATA_REFRESH_MS = 60000;
@@ -42,7 +43,7 @@ const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
 
 const state = {
-  route: "landing",
+  route: INITIAL_ROUTE,
   sessionId: null,
   reviewSessionId: null,
   reviewIndex: 0,

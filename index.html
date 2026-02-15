@@ -3,15 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="app-version" content="2026-02-14.11" />
-    <title>O6U MedBank</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800&display=swap"
-      rel="stylesheet"
+    <meta
+      name="description"
+      content="O6U MedBank helps October 6 University medical students build focused MCQ tests, solve in exam mode, and review detailed explanations."
     />
-    <link rel="stylesheet" href="styles.css?v=2026-02-14.11" />
+    <meta name="app-version" content="2026-02-15.1" />
+    <title>O6U MedBank</title>
+    <link rel="stylesheet" href="styles.css?v=2026-02-15.1" />
   </head>
   <body>
     <div class="background-glow"></div>
@@ -37,14 +35,31 @@
       <div class="auth-actions" id="auth-actions"></div>
     </header>
 
-    <main id="app" class="app-shell"></main>
+    <main id="app" class="app-shell">
+      <section class="panel simple-home-wrap">
+        <div class="simple-home-inner">
+          <p class="kicker simple-home-kicker">O6U MedBank</p>
+          <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
+          <p class="simple-home-sub">
+            Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after every question.
+          </p>
+          <div class="simple-home-chips">
+            <span>O6U course tracks</span>
+            <span>Exam-style testing</span>
+            <span>Progress tracking</span>
+          </div>
+          <div class="stack simple-home-actions">
+            <button class="btn" data-nav="login">Log in</button>
+            <button class="btn ghost" data-nav="signup">Sign up</button>
+          </div>
+        </div>
+      </section>
+    </main>
 
     <template id="toast-template">
       <div class="toast"></div>
     </template>
 
-    <script async src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script defer src="supabase.config.js"></script>
-    <script defer src="main.js?v=2026-02-14.11"></script>
+    <script defer src="bootstrap.js?v=2026-02-15.1"></script>
   </body>
 </html>
