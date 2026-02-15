@@ -3685,13 +3685,13 @@ function renderAdminLoading() {
   return `
     <section class="panel">
       <h2 class="title">Admin Dashboard</h2>
-      <p class="subtle">Syncing latest users and admin data...</p>
+      <p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Syncing latest users and admin data...</span></p>
     </section>
   `;
 }
 
 function render() {
-  document.body.classList.remove("no-panel-animations");
+  document.body.classList.add("no-panel-animations");
   clearTimer();
   appEl.removeEventListener("click", handleSessionClick);
   appEl.removeEventListener("click", handleReviewClick);
@@ -3716,9 +3716,6 @@ function render() {
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
-  if (skipTransition) {
-    document.body.classList.add("no-panel-animations");
-  }
 
   const privateRoutes = [
     "dashboard",
@@ -3867,9 +3864,6 @@ function render() {
   if (skipTransition) {
     lastRenderedRoute = state.route;
     state.skipNextRouteAnimation = false;
-    window.requestAnimationFrame(() => {
-      document.body.classList.remove("no-panel-animations");
-    });
     return;
   }
   if (routeChanged) {
@@ -6593,7 +6587,7 @@ function renderAdmin() {
         </div>
         ${
           state.adminPresenceLoading
-            ? `<p class="subtle" style="margin-top:0.9rem;">Refreshing activity data...</p>`
+            ? `<p class="subtle loading-inline" style="margin-top:0.9rem;"><span class="inline-loader" aria-hidden="true"></span><span>Refreshing activity data...</span></p>`
             : ""
         }
         ${
