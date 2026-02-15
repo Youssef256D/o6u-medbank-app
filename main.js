@@ -34,6 +34,7 @@ const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const AUTH_SIGNIN_TIMEOUT_MS = 8000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3500;
+const ROUTE_TRANSITION_MS = 420;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
@@ -145,6 +146,7 @@ const relationalSync = {
 
 let timerHandle = null;
 let lastRenderedRoute = null;
+let routeTransitionHandle = null;
 let adminPresencePollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
@@ -3691,7 +3693,7 @@ function renderAdminLoading() {
 }
 
 function render() {
-  document.body.classList.add("no-panel-animations");
+  document.body.classList.remove("no-panel-animations");
   clearTimer();
   appEl.removeEventListener("click", handleSessionClick);
   appEl.removeEventListener("click", handleReviewClick);
@@ -3918,6 +3920,10 @@ function markActiveNav() {
 }
 
 function animateRouteTransition() {
+  if (routeTransitionHandle) {
+    window.clearTimeout(routeTransitionHandle);
+    routeTransitionHandle = null;
+  }
   document.body.classList.add("is-routing");
   applyStaggerIndices();
 
@@ -3929,10 +3935,11 @@ function animateRouteTransition() {
     appEl.classList.add("route-enter-active");
   });
 
-  window.setTimeout(() => {
+  routeTransitionHandle = window.setTimeout(() => {
     appEl.classList.remove("route-enter", "route-enter-active");
     document.body.classList.remove("is-routing");
-  }, 380);
+    routeTransitionHandle = null;
+  }, ROUTE_TRANSITION_MS);
 }
 
 function applyStaggerIndices() {
