@@ -602,7 +602,7 @@ img {
 
 .simple-home-logo {
   display: block;
-  width: clamp(165px, 24vw, 235px);
+  width: clamp(180px, 26vw, 260px);
   height: auto;
   transform-origin: center;
   filter: drop-shadow(0 12px 18px rgba(16, 42, 67, 0.14));
@@ -2924,7 +2924,7 @@ hr {
   }
 
   .simple-home-logo {
-    width: clamp(145px, 44vw, 200px);
+    width: clamp(160px, 46vw, 220px);
   }
 
   .simple-home-actions {
