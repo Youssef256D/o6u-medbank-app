@@ -593,15 +593,20 @@ img {
 }
 
 .simple-home-logo-wrap {
-  margin: 0.62rem auto 0.54rem;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0.58rem auto 0.52rem;
 }
 
 .simple-home-logo {
   display: block;
-  width: clamp(190px, 34vw, 320px);
+  width: clamp(165px, 24vw, 235px);
   height: auto;
-  filter: drop-shadow(0 14px 22px rgba(16, 42, 67, 0.16));
-  animation: hero-logo-float 5s ease-in-out infinite;
+  transform-origin: center;
+  filter: drop-shadow(0 12px 18px rgba(16, 42, 67, 0.14));
+  animation: hero-logo-breathe 3.8s ease-in-out infinite;
 }
 
 .simple-home-kicker {
@@ -2654,13 +2659,15 @@ hr {
   }
 }
 
-@keyframes hero-logo-float {
+@keyframes hero-logo-breathe {
   0%,
   100% {
-    transform: translateY(0);
+    transform: scale(0.97);
+    opacity: 0.92;
   }
   50% {
-    transform: translateY(-8px);
+    transform: scale(1.02);
+    opacity: 1;
   }
 }
 
@@ -2917,7 +2924,7 @@ hr {
   }
 
   .simple-home-logo {
-    width: clamp(170px, 56vw, 250px);
+    width: clamp(145px, 44vw, 200px);
   }
 
   .simple-home-actions {
