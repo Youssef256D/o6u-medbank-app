@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8258,13 +8258,57 @@ function getUsers() {
   return Array.isArray(users) ? users : [];
 }
 
+function normalizeQuestionDedupText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function buildQuestionDedupFingerprint(question) {
+  if (!question || typeof question !== "object") {
+    return "";
+  }
+
+  const stem = normalizeQuestionDedupText(question.stem);
+  if (!stem) {
+    return "";
+  }
+
+  const choiceSignature = Array.isArray(question.choices)
+    ? question.choices
+      .map((choice) => {
+        const label = String(choice?.id || "").trim().toUpperCase();
+        const text = normalizeQuestionDedupText(choice?.text);
+        if (!label && !text) {
+          return "";
+        }
+        return `${label}:${text}`;
+      })
+      .filter(Boolean)
+      .sort()
+      .join("|")
+    : "";
+
+  const correctSignature = Array.isArray(question.correct)
+    ? question.correct
+      .map((entry) => String(entry || "").trim().toUpperCase())
+      .filter(Boolean)
+      .sort()
+      .join("|")
+    : "";
+
+  return `${stem}||${choiceSignature}||${correctSignature}`;
+}
+
 function dedupeQuestions(questions) {
   if (!Array.isArray(questions) || !questions.length) {
     return [];
   }
 
   const dedupedReversed = [];
-  const seenKeys = new Set();
+  const seenIdKeys = new Set();
+  const seenFingerprints = new Set();
   for (let index = questions.length - 1; index >= 0; index -= 1) {
     const question = questions[index];
     if (!question || typeof question !== "object") {
@@ -8272,11 +8316,25 @@ function dedupeQuestions(questions) {
     }
     const dbId = String(question.dbId || "").trim();
     const questionId = String(question.id || "").trim();
-    const identity = dbId ? `db:${dbId}` : questionId ? `id:${questionId}` : "";
-    if (!identity || seenKeys.has(identity)) {
+    const identityKeys = [];
+    if (dbId) {
+      identityKeys.push(`db:${dbId}`);
+    }
+    if (questionId) {
+      identityKeys.push(`id:${questionId}`);
+    }
+    const fingerprint = buildQuestionDedupFingerprint(question);
+
+    const hasSeenId = identityKeys.some((key) => seenIdKeys.has(key));
+    const hasSeenFingerprint = Boolean(fingerprint) && seenFingerprints.has(fingerprint);
+    if (hasSeenId || hasSeenFingerprint) {
       continue;
     }
-    seenKeys.add(identity);
+
+    identityKeys.forEach((key) => seenIdKeys.add(key));
+    if (fingerprint) {
+      seenFingerprints.add(fingerprint);
+    }
     dedupedReversed.push(question);
   }
 
