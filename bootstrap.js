@@ -75,20 +75,17 @@
   document.addEventListener(
     "click",
     (event) => {
-      const navTarget = event.target instanceof Element ? event.target.closest("[data-nav]") : null;
-      if (navTarget) {
-        rememberInitialRoute(navTarget.getAttribute("data-nav"));
+      if (!(event.target instanceof Element)) {
+        return;
       }
+      const navTarget = event.target.closest("[data-nav]");
+      if (!navTarget) {
+        return;
+      }
+      rememberInitialRoute(navTarget.getAttribute("data-nav"));
       ensureAppLoaded().catch(() => {});
     },
     { capture: true },
-  );
-
-  window.addEventListener(
-    "keydown",
-    () => {
-      ensureAppLoaded().catch(() => {});
-    },
   );
 
   registerServiceWorker();

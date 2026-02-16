@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-15.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.2").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -4286,6 +4286,9 @@ function renderLanding() {
       <div class="simple-home-inner">
         <p class="kicker simple-home-kicker">O6U MedBank</p>
         <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
+        <div class="simple-home-logo-wrap" aria-hidden="true">
+          <img class="simple-home-logo" src="Assets/web%20Logo.png" alt="" />
+        </div>
         <p class="simple-home-sub">Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after every question.</p>
         <div class="simple-home-chips">
           <span>O6U course tracks</span>
