@@ -4284,9 +4284,6 @@ function renderLanding() {
   return `
     <section class="panel simple-home-wrap">
       <div class="simple-home-inner">
-        <div class="simple-home-logo-frame">
-          <img class="simple-home-logo" src="Assets/branding/web-logo-hero.png" alt="O6U MedBank logo" loading="eager" decoding="async" />
-        </div>
         <p class="kicker simple-home-kicker">O6U MedBank</p>
         <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
         <p class="simple-home-sub">Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after every question.</p>
