@@ -130,7 +130,7 @@ body.is-routing .topbar::after {
 
 .brand-logo {
   display: block;
-  height: 44px;
+  height: 74px;
   width: auto;
 }
 
@@ -2868,7 +2868,7 @@ hr {
   }
 
   .brand-logo {
-    height: 36px;
+    height: 56px;
   }
 
   .pill {
@@ -3103,7 +3103,7 @@ hr {
   }
 
   .brand-logo {
-    height: 32px;
+    height: 48px;
   }
 
   .title {
