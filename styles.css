@@ -3118,19 +3118,54 @@ hr {
   }
 }
 
-/* Global typography tone-down: keep text at normal weight across the app. */
-html body,
+/* Global typography normalization across the app. */
+html body {
+  font-family: var(--font-ui) !important;
+}
+
 html body :where(*, *::before, *::after) {
   font-weight: 400 !important;
 }
 
-/* Restore brand + primary headings typography. */
+/* Medium emphasis for interactive and metric text. */
+html body :is(
+  .btn,
+  .top-nav button,
+  .auth-actions button,
+  .pill,
+  .badge,
+  .metric,
+  .metric small,
+  .exam-nav-link,
+  .exam-nav-item .num,
+  .admin-user-account b
+) {
+  font-weight: 500 !important;
+}
+
+/* Keep brand/logo and major headings in display style. */
 html body .brand {
   font-family: var(--font-display) !important;
   font-weight: 600 !important;
 }
 
-html body :is(.title, .hero h1, .home-copy h1, .admin-shell .title, .admin-shell h2, .admin-shell h3) {
+html body :is(
+  .title,
+  .hero h1,
+  .home-copy h1,
+  .card h3,
+  .card h4,
+  .panel h2,
+  .panel h3,
+  .admin-shell .title,
+  .admin-shell h2,
+  .admin-shell h3,
+  .exam-question-meta h3,
+  .exam-nav-panel h3,
+  .exam-feedback-head h4,
+  .exam-review-head h4,
+  .exam-panel-head h4
+) {
   font-family: var(--font-display) !important;
   font-weight: 600 !important;
 }
