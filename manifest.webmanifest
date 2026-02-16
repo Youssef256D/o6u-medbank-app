@@ -1,0 +1,25 @@
+{
+  "name": "O6U MedBank",
+  "short_name": "O6U MedBank",
+  "description": "MCQ practice platform for October 6 University Faculty of Medicine students.",
+  "id": "/o6u-medbank-app/",
+  "start_url": "/o6u-medbank-app/",
+  "scope": "/o6u-medbank-app/",
+  "display": "standalone",
+  "background_color": "#f2f7f5",
+  "theme_color": "#177e89",
+  "icons": [
+    {
+      "src": "Assets/branding/favicon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "Assets/branding/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
