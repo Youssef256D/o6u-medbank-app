@@ -123,6 +123,15 @@ body.is-routing .topbar::after {
   letter-spacing: 0.01em;
   color: var(--ink);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+}
+
+.brand-logo {
+  display: block;
+  height: 44px;
+  width: auto;
 }
 
 .pill {
@@ -2858,6 +2867,10 @@ hr {
     font-size: 1.24rem;
   }
 
+  .brand-logo {
+    height: 36px;
+  }
+
   .pill {
     display: none;
   }
@@ -3087,6 +3100,10 @@ hr {
 
   .brand {
     font-size: 1.12rem;
+  }
+
+  .brand-logo {
+    height: 32px;
   }
 
   .title {
