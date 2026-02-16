@@ -577,15 +577,31 @@ img {
 }
 
 .simple-home-inner > :nth-child(3) {
-  animation-delay: 240ms;
+  animation-delay: 220ms;
 }
 
 .simple-home-inner > :nth-child(4) {
-  animation-delay: 310ms;
+  animation-delay: 300ms;
 }
 
 .simple-home-inner > :nth-child(5) {
-  animation-delay: 380ms;
+  animation-delay: 370ms;
+}
+
+.simple-home-inner > :nth-child(6) {
+  animation-delay: 450ms;
+}
+
+.simple-home-logo-wrap {
+  margin: 0.62rem auto 0.54rem;
+}
+
+.simple-home-logo {
+  display: block;
+  width: clamp(190px, 34vw, 320px);
+  height: auto;
+  filter: drop-shadow(0 14px 22px rgba(16, 42, 67, 0.16));
+  animation: hero-logo-float 5s ease-in-out infinite;
 }
 
 .simple-home-kicker {
@@ -2638,6 +2654,16 @@ hr {
   }
 }
 
+@keyframes hero-logo-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
 @media (max-width: 960px) {
   .app-shell {
     width: min(100vw - 0.8rem, 1200px);
@@ -2888,6 +2914,10 @@ hr {
 
   .simple-home-sub {
     font-size: 0.92rem;
+  }
+
+  .simple-home-logo {
+    width: clamp(170px, 56vw, 250px);
   }
 
   .simple-home-actions {
