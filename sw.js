@@ -1,12 +1,12 @@
-const CACHE_NAME = "o6u-medbank-static-v2026-02-16-3";
+const CACHE_NAME = "o6u-medbank-static-v2026-02-16-4";
 
 const PRECACHE_URLS = [
   "./",
   "./index.html",
-  "./styles.css?v=2026-02-16.3",
-  "./bootstrap.js?v=2026-02-16.3",
-  "./main.js?v=2026-02-16.3",
-  "./supabase.config.js?v=2026-02-16.3",
+  "./styles.css?v=2026-02-16.4",
+  "./bootstrap.js?v=2026-02-16.4",
+  "./main.js?v=2026-02-16.4",
+  "./supabase.config.js?v=2026-02-16.4",
   "./manifest.webmanifest",
   "./robots.txt",
   "./sitemap.xml",

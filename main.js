@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.3").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -177,6 +177,7 @@ let lastRenderedRoute = null;
 let routeTransitionHandle = null;
 let sessionQuestionTransitionHandle = null;
 let lastRenderedSessionPointer = null;
+let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
@@ -4121,6 +4122,25 @@ function render() {
     default:
       appEl.innerHTML = renderLanding();
   }
+
+  const isAdminQuestionModalOpen = state.route === "admin" && state.adminPage === "questions" && state.adminQuestionModalOpen;
+  document.body.classList.toggle("is-admin-question-modal-open", isAdminQuestionModalOpen);
+  if (isAdminQuestionModalOpen && !wasAdminQuestionModalOpen) {
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      const modal = appEl.querySelector(".admin-question-modal");
+      const modalCard = modal?.querySelector(".admin-question-modal-card");
+      if (modal) {
+        modal.scrollTop = 0;
+      }
+      if (modalCard) {
+        modalCard.scrollTop = 0;
+      }
+      const focusTarget = appEl.querySelector("#admin-question-form textarea[name='stem']");
+      focusTarget?.focus({ preventScroll: true });
+    });
+  }
+  wasAdminQuestionModalOpen = isAdminQuestionModalOpen;
 
   persistRouteState();
   const currentSessionPointer = getSessionRenderPointer(user);

@@ -48,6 +48,10 @@ body {
   overflow-x: hidden;
 }
 
+body.is-admin-question-modal-open {
+  overflow: hidden;
+}
+
 .background-glow {
   position: fixed;
   inset: 0;
@@ -1086,9 +1090,9 @@ body.is-routing .card {
   inset: 0;
   z-index: 20000;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding: 0.85rem 1rem 1rem;
   overflow-y: auto;
   isolation: isolate;
 }
@@ -1110,7 +1114,7 @@ body.is-routing .card {
   display: block;
   width: min(1100px, calc(100vw - 2rem));
   min-height: 120px;
-  max-height: calc(100vh - 2rem);
+  max-height: calc(100vh - 1.6rem);
   overflow: auto;
   padding: 0.95rem;
   border: 1px solid var(--line);
