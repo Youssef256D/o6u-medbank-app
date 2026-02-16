@@ -5407,7 +5407,7 @@ function renderSession() {
                 </div>
 
                 <div class="exam-answer-actions">
-                  ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Submit answer</button>`}
+                  ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Check</button>`}
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
