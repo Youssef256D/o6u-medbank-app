@@ -2,6 +2,27 @@
   const versionTag = document.querySelector('meta[name="app-version"]');
   const appVersion = String(versionTag?.getAttribute("content") || "").trim();
   const versionSuffix = appVersion ? `?v=${encodeURIComponent(appVersion)}` : "";
+  const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
+  const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
+  const KNOWN_ROUTES = new Set([
+    "landing",
+    "features",
+    "pricing",
+    "about",
+    "contact",
+    "login",
+    "signup",
+    "forgot",
+    "dashboard",
+    "create-test",
+    "qbank",
+    "builder",
+    "session",
+    "review",
+    "analytics",
+    "profile",
+    "admin",
+  ]);
   let appLoadPromise = null;
 
   function loadScript(src, options = {}) {
@@ -72,6 +93,24 @@
     });
   }
 
+  function readPersistedRoute() {
+    let persistedRoute = "";
+    try {
+      persistedRoute = String(sessionStorage.getItem(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
+    } catch {
+      persistedRoute = "";
+    }
+    if (KNOWN_ROUTES.has(persistedRoute)) {
+      return persistedRoute;
+    }
+    try {
+      persistedRoute = String(localStorage.getItem(ROUTE_STATE_ROUTE_LOCAL_KEY) || "").trim().toLowerCase();
+    } catch {
+      persistedRoute = "";
+    }
+    return KNOWN_ROUTES.has(persistedRoute) ? persistedRoute : "";
+  }
+
   document.addEventListener(
     "click",
     (event) => {
@@ -87,6 +126,11 @@
     },
     { capture: true },
   );
+
+  const persistedRoute = readPersistedRoute();
+  if (persistedRoute && persistedRoute !== "landing") {
+    ensureAppLoaded().catch(() => {});
+  }
 
   registerServiceWorker();
 })();

@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.2").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.3").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8238,9 +8238,34 @@ function getUsers() {
   return Array.isArray(users) ? users : [];
 }
 
+function dedupeQuestions(questions) {
+  if (!Array.isArray(questions) || !questions.length) {
+    return [];
+  }
+
+  const dedupedReversed = [];
+  const seenKeys = new Set();
+  for (let index = questions.length - 1; index >= 0; index -= 1) {
+    const question = questions[index];
+    if (!question || typeof question !== "object") {
+      continue;
+    }
+    const dbId = String(question.dbId || "").trim();
+    const questionId = String(question.id || "").trim();
+    const identity = dbId ? `db:${dbId}` : questionId ? `id:${questionId}` : "";
+    if (!identity || seenKeys.has(identity)) {
+      continue;
+    }
+    seenKeys.add(identity);
+    dedupedReversed.push(question);
+  }
+
+  return dedupedReversed.reverse();
+}
+
 function getQuestions() {
   const questions = load(STORAGE_KEYS.questions, []);
-  return Array.isArray(questions) ? questions : [];
+  return dedupeQuestions(questions);
 }
 
 function getSessions() {
