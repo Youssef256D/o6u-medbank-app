@@ -1734,6 +1734,19 @@ th {
   min-width: 0;
   display: grid;
   gap: 0.9rem;
+  --question-shift-x: 14px;
+}
+
+.exam-question-stage.question-transition-enter {
+  animation: question-shift-in 220ms cubic-bezier(0.22, 0.7, 0.2, 1) both;
+}
+
+.exam-question-stage.question-transition-forward {
+  --question-shift-x: 14px;
+}
+
+.exam-question-stage.question-transition-backward {
+  --question-shift-x: -14px;
 }
 
 .exam-question-card {
@@ -2545,6 +2558,19 @@ hr {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes question-shift-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--question-shift-x, 14px)) scale(0.995);
+    filter: saturate(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    filter: saturate(1);
   }
 }
 

@@ -175,6 +175,8 @@ const relationalSync = {
 let timerHandle = null;
 let lastRenderedRoute = null;
 let routeTransitionHandle = null;
+let sessionQuestionTransitionHandle = null;
+let lastRenderedSessionPointer = null;
 let adminPresencePollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
@@ -4121,6 +4123,21 @@ function render() {
   }
 
   persistRouteState();
+  const currentSessionPointer = getSessionRenderPointer(user);
+  const stayedOnSameRoute = lastRenderedRoute === state.route;
+  const shouldAnimateSessionQuestionChange = !skipTransition
+    && stayedOnSameRoute
+    && state.route === "session"
+    && lastRenderedSessionPointer
+    && currentSessionPointer
+    && lastRenderedSessionPointer.sessionId === currentSessionPointer.sessionId
+    && lastRenderedSessionPointer.index !== currentSessionPointer.index;
+
+  if (shouldAnimateSessionQuestionChange) {
+    const direction = currentSessionPointer.index > lastRenderedSessionPointer.index ? "forward" : "backward";
+    animateSessionQuestionTransition(direction);
+  }
+  lastRenderedSessionPointer = currentSessionPointer;
 
   if (skipTransition) {
     lastRenderedRoute = state.route;
@@ -4199,6 +4216,61 @@ function animateRouteTransition() {
     document.body.classList.remove("is-routing");
     routeTransitionHandle = null;
   }, ROUTE_TRANSITION_MS);
+}
+
+function getSessionRenderPointer(user) {
+  if (state.route !== "session" || !user) {
+    return null;
+  }
+
+  const session = getActiveSession(user.id, state.sessionId);
+  if (!session || session.status !== "in_progress") {
+    return null;
+  }
+
+  const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
+  if (!questionIds.length) {
+    return null;
+  }
+
+  const maxIndex = Math.max(0, questionIds.length - 1);
+  const index = Math.max(0, Math.min(maxIndex, Math.floor(Number(session.currentIndex) || 0)));
+
+  return {
+    sessionId: session.id,
+    index,
+  };
+}
+
+function animateSessionQuestionTransition(direction = "forward") {
+  if (!appEl || state.route !== "session") {
+    return;
+  }
+
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (reduceMotion) {
+    return;
+  }
+
+  if (sessionQuestionTransitionHandle) {
+    window.clearTimeout(sessionQuestionTransitionHandle);
+    sessionQuestionTransitionHandle = null;
+  }
+
+  const stage = appEl.querySelector(".exam-question-stage");
+  if (!stage) {
+    return;
+  }
+
+  stage.classList.remove("question-transition-enter", "question-transition-forward", "question-transition-backward");
+  void stage.offsetWidth;
+  stage.classList.add("question-transition-enter");
+  stage.classList.add(direction === "backward" ? "question-transition-backward" : "question-transition-forward");
+
+  sessionQuestionTransitionHandle = window.setTimeout(() => {
+    stage.classList.remove("question-transition-enter", "question-transition-forward", "question-transition-backward");
+    sessionQuestionTransitionHandle = null;
+  }, 260);
 }
 
 function applyStaggerIndices() {
@@ -5190,17 +5262,25 @@ function renderSession() {
   state.sessionId = session.id;
   normalizeSession(session);
 
-  const questions = getQuestions();
+  const questionsById = new Map(getQuestions().map((entry) => [entry.id, entry]));
   const total = session.questionIds.length;
+  if (!total) {
+    return `
+      <section class="panel">
+        <h2 class="title">Session unavailable</h2>
+        <p class="subtle">This session no longer has available questions. Create a new test.</p>
+        <button class="btn" data-nav="create-test">Create a test</button>
+      </section>
+    `;
+  }
   const currentQid = session.questionIds[session.currentIndex];
-  const question = questions.find((entry) => entry.id === currentQid);
+  const question = questionsById.get(currentQid);
   const response = session.responses[currentQid];
-
   if (!question || !response) {
     return `
       <section class="panel">
-        <h2 class="title">Session data error</h2>
-        <p class="subtle">This session has missing question records. Create a new test.</p>
+        <h2 class="title">Session unavailable</h2>
+        <p class="subtle">This session could not be recovered. Create a new test.</p>
         <button class="btn" data-nav="create-test">Create a test</button>
       </section>
     `;
@@ -5240,8 +5320,6 @@ function renderSession() {
       `;
     })
     .join("");
-  const isFirstQuestion = session.currentIndex <= 0;
-  const isLastQuestion = session.currentIndex >= total - 1;
 
   const choicesHtml = question.choices
     .map((choice) => {
@@ -5307,22 +5385,6 @@ function renderSession() {
 
                 <div class="exam-answer-actions">
                   ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Submit answer</button>`}
-                  <div class="exam-nav-icons">
-                    <button
-                      class="btn ghost exam-icon-btn"
-                      data-action="prev-question"
-                      ${isFirstQuestion ? "disabled" : ""}
-                      aria-label="Previous question"
-                      title="Previous question"
-                    ><span aria-hidden="true">←</span></button>
-                    <button
-                      class="btn ghost exam-icon-btn"
-                      data-action="next-question"
-                      ${isLastQuestion ? "disabled" : ""}
-                      aria-label="Next question"
-                      title="Next question"
-                    ><span aria-hidden="true">→</span></button>
-                  </div>
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
@@ -9576,6 +9638,47 @@ function persistSessionUiPreferences() {
 
 function normalizeSession(session) {
   let changed = false;
+
+  if (!Array.isArray(session.questionIds)) {
+    session.questionIds = [];
+    changed = true;
+  }
+
+  if (!session.responses || typeof session.responses !== "object" || Array.isArray(session.responses)) {
+    session.responses = {};
+    changed = true;
+  }
+
+  if (session.status === "in_progress") {
+    const availableQuestionIds = new Set(getQuestions().map((question) => question.id));
+    const sanitizedQuestionIds = session.questionIds.filter((qid) => availableQuestionIds.has(qid));
+    if (sanitizedQuestionIds.length !== session.questionIds.length) {
+      session.questionIds = sanitizedQuestionIds;
+      changed = true;
+    }
+
+    const allowedQuestionIds = new Set(session.questionIds);
+    Object.keys(session.responses).forEach((qid) => {
+      if (!allowedQuestionIds.has(qid)) {
+        delete session.responses[qid];
+        changed = true;
+      }
+    });
+  }
+
+  if (!session.questionIds.length && session.status === "in_progress") {
+    session.status = "completed";
+    session.completedAt = session.completedAt || nowISO();
+    session.currentIndex = 0;
+    changed = true;
+  }
+
+  const maxIndex = Math.max(0, session.questionIds.length - 1);
+  const normalizedIndex = Math.max(0, Math.min(maxIndex, Math.floor(Number(session.currentIndex) || 0)));
+  if (session.currentIndex !== normalizedIndex) {
+    session.currentIndex = normalizedIndex;
+    changed = true;
+  }
 
   if (session.elapsedSec == null) {
     session.elapsedSec = 0;
