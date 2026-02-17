@@ -970,6 +970,7 @@ async function initSupabaseAuth() {
         hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
           console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
         });
+        state.skipNextRouteAnimation = true;
         render();
         return;
       }
@@ -4026,6 +4027,14 @@ function render() {
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
+  if (skipTransition) {
+    if (routeTransitionHandle) {
+      window.clearTimeout(routeTransitionHandle);
+      routeTransitionHandle = null;
+    }
+    appEl.classList.remove("route-enter", "route-enter-active");
+    document.body.classList.remove("is-routing");
+  }
 
   const privateRoutes = [
     "dashboard",
