@@ -51,7 +51,9 @@ const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const ADMIN_DATA_REFRESH_MS = 15000;
-const STUDENT_DATA_REFRESH_MS = 60000;
+const STUDENT_DATA_REFRESH_MS = 20000;
+const STUDENT_FULL_DATA_REFRESH_MS = 180000;
+const ANALYTICS_RECENT_SESSION_WINDOW = 3;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
@@ -110,6 +112,7 @@ const state = {
   adminImportStatusTone: "neutral",
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
+  studentDataLastFullSyncAt: 0,
 };
 
 let appVersionCheckPromise = null;
@@ -196,6 +199,11 @@ const presenceRuntime = {
   lastSolving: false,
   pushInFlight: false,
   nextRetryAt: 0,
+};
+
+const analyticsRuntime = {
+  cache: new Map(),
+  questionMetaById: new Map(),
 };
 
 const DEFAULT_O6U_CURRICULUM = {
@@ -1288,8 +1296,30 @@ function isUuidValue(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
 }
 
+function invalidateAnalyticsCache(options = {}) {
+  analyticsRuntime.cache.clear();
+  if (options?.resetQuestionMeta) {
+    analyticsRuntime.questionMetaById.clear();
+  }
+}
+
+function invalidateAnalyticsCacheForStorageKey(storageKey) {
+  if (
+    storageKey !== STORAGE_KEYS.sessions
+    && storageKey !== STORAGE_KEYS.questions
+    && storageKey !== STORAGE_KEYS.curriculum
+    && storageKey !== STORAGE_KEYS.courseTopics
+  ) {
+    return;
+  }
+  invalidateAnalyticsCache({
+    resetQuestionMeta: storageKey !== STORAGE_KEYS.sessions,
+  });
+}
+
 function saveLocalOnly(key, value) {
   writeStorageKey(key, value);
+  invalidateAnalyticsCacheForStorageKey(key);
 }
 
 function clearRelationalFlushTimer() {
@@ -3898,6 +3928,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   }
   const force = Boolean(options?.force);
+  const rerender = options?.rerender !== false;
   if (!force && !shouldRefreshStudentData(user)) {
     return true;
   }
@@ -3905,6 +3936,8 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   }
 
+  let shouldRerenderRoute = "";
+  const routeBefore = state.route;
   state.studentDataRefreshing = true;
   try {
     const ready = await ensureRelationalSyncReady({ force });
@@ -3912,10 +3945,25 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       state.studentDataLastSyncAt = Date.now();
       return false;
     }
-    await hydrateRelationalCoursesAndTopics();
-    await hydrateRelationalProfiles(user);
-    await hydrateRelationalQuestions();
+    const now = Date.now();
+    const needsFullSync = force
+      || !state.studentDataLastFullSyncAt
+      || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
+    if (needsFullSync) {
+      await hydrateRelationalCoursesAndTopics();
+      await hydrateRelationalProfiles(user);
+      await hydrateRelationalQuestions();
+      state.studentDataLastFullSyncAt = now;
+    }
+    await hydrateRelationalSessions(user);
     state.studentDataLastSyncAt = Date.now();
+    if (
+      rerender
+      && (routeBefore === "dashboard" || routeBefore === "analytics")
+      && state.route === routeBefore
+    ) {
+      shouldRerenderRoute = routeBefore;
+    }
     return true;
   } catch (error) {
     state.studentDataLastSyncAt = Date.now();
@@ -3923,6 +3971,10 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   } finally {
     state.studentDataRefreshing = false;
+    if (shouldRerenderRoute && state.route === shouldRerenderRoute) {
+      state.skipNextRouteAnimation = true;
+      render();
+    }
   }
 }
 
@@ -4023,6 +4075,7 @@ function render() {
   if (!user || user.role !== "student") {
     state.studentDataRefreshing = false;
     state.studentDataLastSyncAt = 0;
+    state.studentDataLastFullSyncAt = 0;
   }
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
@@ -4899,7 +4952,9 @@ function renderDashboard() {
   const questions = getPublishedQuestionsForUser(user);
   const sessions = getSessionsForUser(user.id);
   const completed = sessions.filter((session) => session.status === "completed");
-  const stats = getUserStats(user.id);
+  const analytics = getStudentAnalyticsSnapshot(user.id);
+  const stats = analytics.stats;
+  const syncStatusText = getStudentDataSyncStatusText();
 
   return `
     <section class="panel">
@@ -4908,8 +4963,12 @@ function renderDashboard() {
         <h2 class="title">${escapeHtml(user.name)}'s Dashboard</h2>
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
+          <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+            ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
+          </button>
         </div>
       </div>
+      <p class="subtle">${escapeHtml(syncStatusText)}</p>
       <div class="stats-grid" style="margin-top: 0.9rem;">
         <article class="card"><p class="metric">${stats.accuracy}%<small>Overall accuracy</small></p></article>
         <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Avg time / question</small></p></article>
@@ -4925,7 +4984,9 @@ function renderDashboard() {
       </article>
       <article class="card">
         <h3>Weak Areas</h3>
-        ${renderWeakAreas(user.id)}
+        ${renderWeakAreas(analytics)}
+        <hr />
+        ${renderDashboardCoach(analytics)}
       </article>
     </section>
 
@@ -4947,8 +5008,25 @@ function renderResumeCard(userId) {
   `;
 }
 
-function renderWeakAreas(userId) {
-  const weak = getWeakAreas(userId);
+function getStudentDataSyncStatusText() {
+  if (state.studentDataRefreshing) {
+    return "Syncing latest results...";
+  }
+  if (!state.studentDataLastSyncAt) {
+    return "Cloud sync is idle. Local analytics are shown.";
+  }
+  const syncedAt = new Date(state.studentDataLastSyncAt).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `Last synced at ${syncedAt}.`;
+}
+
+function renderWeakAreas(snapshotOrUserId, courseFilter = "") {
+  const snapshot = typeof snapshotOrUserId === "string"
+    ? getStudentAnalyticsSnapshot(snapshotOrUserId, courseFilter)
+    : snapshotOrUserId;
+  const weak = Array.isArray(snapshot?.weakAreas) ? snapshot.weakAreas : [];
   if (!weak.length) {
     return `<p class="subtle">No weak areas yet. Complete a block first.</p>`;
   }
@@ -4958,6 +5036,20 @@ function renderWeakAreas(userId) {
     .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% accuracy (${entry.total} q)</p>`)
     .join("");
   return items;
+}
+
+function renderDashboardCoach(snapshot) {
+  const insights = snapshot?.insights;
+  if (!insights) {
+    return `<p class="subtle">Complete more blocks to get personalized recommendations.</p>`;
+  }
+
+  return `
+    <p><b>${escapeHtml(insights.summary)}</b></p>
+    <p class="subtle">${escapeHtml(insights.trendMessage)}</p>
+    <p class="subtle">${escapeHtml(insights.paceMessage)}</p>
+    <p class="subtle"><b>Next step:</b> ${escapeHtml(insights.nextBlockRecommendation)}</p>
+  `;
 }
 
 function renderPreviousTestsSection(userId) {
@@ -5021,6 +5113,10 @@ function renderPreviousTestsSection(userId) {
 }
 
 function wireDashboard() {
+  appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
+    await refreshStudentAnalyticsNow();
+  });
+
   appEl.querySelectorAll("[data-action='open-previous-review']").forEach((button) => {
     button.addEventListener("click", () => {
       const sessionId = button.getAttribute("data-session-id");
@@ -5066,6 +5162,35 @@ function wireDashboard() {
       toast(`Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved.`);
     });
   });
+}
+
+async function refreshStudentAnalyticsNow(options = {}) {
+  const user = getCurrentUser();
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  if (state.studentDataRefreshing) {
+    if (!options?.silent) {
+      toast("Analytics sync already in progress.");
+    }
+    return false;
+  }
+
+  const ok = await refreshStudentDataSnapshot(user, { force: true, rerender: true });
+  if (!options?.silent) {
+    toast(ok ? "Analytics refreshed." : "Could not refresh cloud data. Showing local analytics.");
+  }
+  return ok;
+}
+
+function getCreateTestSourceLabel(source) {
+  const labels = {
+    all: "All matching",
+    unused: "Unused only",
+    incorrect: "Wrong only",
+    flagged: "Flagged only",
+  };
+  return labels[source] || labels.all;
 }
 
 function renderCreateTest() {
@@ -6340,9 +6465,12 @@ function renderAnalytics() {
   }
 
   const selectedCourse = state.analyticsCourse;
-  const stats = getUserStats(user.id, selectedCourse);
-  const topicStats = getTopicStats(user.id, selectedCourse);
-  const weak = getWeakAreas(user.id, selectedCourse);
+  const analytics = getStudentAnalyticsSnapshot(user.id, selectedCourse);
+  const stats = analytics.stats;
+  const topicStats = analytics.topicStats;
+  const weak = analytics.weakAreas;
+  const insights = analytics.insights;
+  const syncStatusText = getStudentDataSyncStatusText();
 
   const rows = topicStats
     .map(
@@ -6360,16 +6488,21 @@ function renderAnalytics() {
     <section class="panel">
       <h2 class="title">Performance Analytics</h2>
       <p class="subtle">Course trends and weak-area detection.</p>
-      <form id="analytics-course-form" style="margin-top: 0.8rem; max-width: 520px;">
-        <label>Course
-          <select id="analytics-course-select" name="analyticsCourse">
-            ${availableCourses
-              .map((course) => `<option value="${escapeHtml(course)}" ${course === selectedCourse ? "selected" : ""}>${escapeHtml(course)}</option>`)
-              .join("")}
-          </select>
-        </label>
-      </form>
-      <small class="subtle">Showing analytics for <b>${escapeHtml(selectedCourse)}</b>.</small>
+      <div class="flex-between" style="gap: 0.8rem; align-items: flex-end; flex-wrap: wrap;">
+        <form id="analytics-course-form" style="margin-top: 0.8rem; max-width: 520px;">
+          <label>Course
+            <select id="analytics-course-select" name="analyticsCourse">
+              ${availableCourses
+                .map((course) => `<option value="${escapeHtml(course)}" ${course === selectedCourse ? "selected" : ""}>${escapeHtml(course)}</option>`)
+                .join("")}
+            </select>
+          </label>
+        </form>
+        <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+          ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
+        </button>
+      </div>
+      <small class="subtle">Showing analytics for <b>${escapeHtml(selectedCourse)}</b>. ${escapeHtml(syncStatusText)}</small>
       <div class="stats-grid" style="margin-top: 0.85rem;">
         <article class="card"><p class="metric">${stats.accuracy}%<small>Accuracy</small></p></article>
         <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Time / question</small></p></article>
@@ -6394,10 +6527,37 @@ function renderAnalytics() {
           weak.length
             ? weak
                 .slice(0, 6)
-                .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% (${entry.total} q)</p>`)
+                .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% (${entry.total} q) • ${entry.timePerQuestion || 0}s/q</p>`)
                 .join("")
             : `<p class="subtle">No weak areas until you complete a block.</p>`
         }
+      </article>
+    </section>
+
+    <section class="panel grid-2">
+      <article class="card">
+        <h4>Smart Study Coach</h4>
+        <p><b>${escapeHtml(insights.summary)}</b></p>
+        <p class="subtle">${escapeHtml(insights.focusMessage)}</p>
+        <p class="subtle">${escapeHtml(insights.trendMessage)}</p>
+        <p class="subtle">${escapeHtml(insights.paceMessage)}</p>
+      </article>
+      <article class="card">
+        <h4>Recommended Next Block</h4>
+        <p><b>Source:</b> ${escapeHtml(getCreateTestSourceLabel(insights.nextSource))}</p>
+        <p><b>Target:</b> ${escapeHtml(insights.nextTargetText)}</p>
+        <p><b>Suggested size:</b> ${insights.suggestedCount} questions</p>
+        <p class="subtle">${escapeHtml(insights.nextReason)}</p>
+        <button
+          class="btn ghost admin-btn-sm"
+          type="button"
+          data-action="apply-analytics-plan"
+          data-source="${escapeHtml(insights.nextSource)}"
+          data-course="${escapeHtml(selectedCourse)}"
+          data-topic="${escapeHtml(insights.focusTopic || "")}"
+        >
+          Apply Plan In Create Test
+        </button>
       </article>
     </section>
   `;
@@ -6409,6 +6569,28 @@ function wireAnalytics() {
     const data = new FormData(form);
     state.analyticsCourse = String(data.get("analyticsCourse") || "").trim();
     render();
+  });
+
+  appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
+    await refreshStudentAnalyticsNow();
+  });
+
+  appEl.querySelector("[data-action='apply-analytics-plan']")?.addEventListener("click", () => {
+    const user = getCurrentUser();
+    const availableCourses = getAvailableCoursesForUser(user);
+    const button = appEl.querySelector("[data-action='apply-analytics-plan']");
+    const source = String(button?.getAttribute("data-source") || "").trim();
+    const course = String(button?.getAttribute("data-course") || "").trim();
+    const topic = String(button?.getAttribute("data-topic") || "").trim();
+    if (["all", "unused", "incorrect", "flagged"].includes(source)) {
+      state.createTestSource = source;
+    }
+    if (course && availableCourses.includes(course)) {
+      state.qbankFilters.course = course;
+    }
+    state.qbankFilters.topics = topic ? [topic] : [];
+    state.skipNextRouteAnimation = true;
+    navigate("create-test");
   });
 }
 
@@ -9711,92 +9893,277 @@ function matchesCourseFilterForAnalytics(question, courseFilter = "") {
   return meta.course === courseFilter;
 }
 
-function getUserStats(userId, courseFilter = "") {
-  const sessions = getSessionsForUser(userId).filter((session) => session.status === "completed");
+function getAnalyticsQuestionMetaById() {
+  if (analyticsRuntime.questionMetaById.size) {
+    return analyticsRuntime.questionMetaById;
+  }
+
+  const map = new Map();
+  getQuestions().forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    const topic = String(meta.topic || question.topic || "Uncategorized").trim() || "Uncategorized";
+    map.set(question.id, {
+      question,
+      course: String(meta.course || "").trim(),
+      topic,
+    });
+  });
+  analyticsRuntime.questionMetaById = map;
+  return analyticsRuntime.questionMetaById;
+}
+
+function summarizeSessionRollups(rollups = []) {
+  const summary = (Array.isArray(rollups) ? rollups : []).reduce((acc, entry) => {
+    acc.total += Number(entry?.total || 0);
+    acc.correct += Number(entry?.correct || 0);
+    acc.totalTime += Number(entry?.totalTime || 0);
+    return acc;
+  }, { total: 0, correct: 0, totalTime: 0 });
+
+  return {
+    answered: summary.total,
+    correct: summary.correct,
+    accuracy: summary.total ? Math.round((summary.correct / summary.total) * 100) : 0,
+    timePerQuestion: summary.total ? Math.round(summary.totalTime / summary.total) : 0,
+  };
+}
+
+function buildStudentAnalyticsInsights(snapshot, courseFilter = "") {
+  const stats = snapshot?.stats || { accuracy: 0, timePerQuestion: 0, totalAnswered: 0 };
+  const topicStats = Array.isArray(snapshot?.topicStats) ? snapshot.topicStats : [];
+  const weakAreas = Array.isArray(snapshot?.weakAreas) ? snapshot.weakAreas : [];
+  const sessionRollups = Array.isArray(snapshot?.sessionRollups) ? snapshot.sessionRollups : [];
+  const flaggedCount = Number(snapshot?.flaggedCount || 0);
+
+  if (!stats.totalAnswered) {
+    const label = courseFilter ? ` for ${courseFilter}` : "";
+    return {
+      summary: `No completed-question data${label} yet.`,
+      focusMessage: "Complete one full block to unlock weak-topic detection.",
+      trendMessage: "Trend appears after at least one completed block.",
+      paceMessage: "Pace guidance appears after your first completed block.",
+      nextSource: "unused",
+      nextReason: "Start with unused questions to establish a baseline.",
+      nextTargetText: courseFilter ? `Mixed topics in ${courseFilter}` : "Mixed topics",
+      suggestedCount: 15,
+      focusTopic: "",
+      nextBlockRecommendation: "Create an unused-only block (15 questions).",
+    };
+  }
+
+  const recent = sessionRollups.slice(-ANALYTICS_RECENT_SESSION_WINDOW);
+  const previous = sessionRollups.slice(-ANALYTICS_RECENT_SESSION_WINDOW * 2, -ANALYTICS_RECENT_SESSION_WINDOW);
+  const recentSummary = summarizeSessionRollups(recent);
+  const previousSummary = summarizeSessionRollups(previous);
+
+  let trendMessage = `Recent accuracy: ${recentSummary.accuracy}% across ${recentSummary.answered} questions.`;
+  if (recentSummary.answered && previousSummary.answered) {
+    const delta = recentSummary.accuracy - previousSummary.accuracy;
+    if (delta >= 3) {
+      trendMessage = `Improving trend: +${delta}% versus your previous ${ANALYTICS_RECENT_SESSION_WINDOW} blocks.`;
+    } else if (delta <= -3) {
+      trendMessage = `Downward trend: ${delta}% versus your previous ${ANALYTICS_RECENT_SESSION_WINDOW} blocks.`;
+    } else {
+      trendMessage = `Stable trend: ${recentSummary.accuracy}% (about the same as recent history).`;
+    }
+  }
+
+  let paceMessage = `Average pace is ${stats.timePerQuestion}s per question.`;
+  if (recentSummary.answered && previousSummary.answered) {
+    const paceDelta = recentSummary.timePerQuestion - previousSummary.timePerQuestion;
+    if (paceDelta >= 8) {
+      paceMessage = `Pace slowed by ${paceDelta}s/question recently. Try a shorter, focused block to rebuild speed.`;
+    } else if (paceDelta <= -8) {
+      paceMessage = `Pace improved by ${Math.abs(paceDelta)}s/question recently. Keep this rhythm.`;
+    }
+  } else if (stats.timePerQuestion >= 90) {
+    paceMessage = "You are spending over 90s/question; consider shorter timed blocks to improve speed.";
+  } else if (stats.timePerQuestion > 0 && stats.timePerQuestion <= 45) {
+    paceMessage = "Good pacing speed. Focus now on reducing repeat mistakes.";
+  }
+
+  const focusEntry = weakAreas.find((entry) => entry.total >= 3) || weakAreas[0] || null;
+  const strongestEntry = [...topicStats]
+    .filter((entry) => entry.total >= 3)
+    .sort((a, b) => b.accuracy - a.accuracy || b.total - a.total)[0] || null;
+
+  let nextSource = "all";
+  let nextReason = "Build a mixed block to maintain broad coverage.";
+  if (focusEntry && focusEntry.accuracy <= 65 && focusEntry.total >= 4) {
+    nextSource = "incorrect";
+    nextReason = `Your weakest area is ${focusEntry.topic}. Retrying wrong questions will fix that fastest.`;
+  } else if (flaggedCount >= 5) {
+    nextSource = "flagged";
+    nextReason = "You have many flagged questions; revisit them to clear uncertainty.";
+  } else if (stats.totalAnswered < 40) {
+    nextSource = "unused";
+    nextReason = "You still need more baseline exposure. Prioritize fresh questions.";
+  } else if (stats.accuracy >= 85) {
+    nextSource = "unused";
+    nextReason = "Strong accuracy detected. Add new questions to avoid overfitting repeated items.";
+  }
+
+  const suggestedCount = Math.max(10, Math.min(35, focusEntry ? Math.round(focusEntry.total * 1.2) : 20));
+  const summary = focusEntry
+    ? `Focus on ${focusEntry.topic}: ${focusEntry.accuracy}% accuracy with ${focusEntry.timePerQuestion || 0}s/question.`
+    : `Current accuracy is ${stats.accuracy}% with average pace ${stats.timePerQuestion}s/question.`;
+  const focusMessage = focusEntry
+    ? `Primary weak topic: ${focusEntry.topic} (${focusEntry.accuracy}% across ${focusEntry.total} questions).`
+    : "No dominant weak topic yet. Keep practicing mixed blocks.";
+  const nextTargetText = focusEntry
+    ? strongestEntry
+      ? `${focusEntry.topic} first, then reinforce ${strongestEntry.topic}.`
+      : focusEntry.topic
+    : (courseFilter ? `Mixed topics in ${courseFilter}` : "Mixed topics");
+
+  return {
+    summary,
+    focusMessage,
+    trendMessage,
+    paceMessage,
+    nextSource,
+    nextReason,
+    nextTargetText,
+    suggestedCount,
+    focusTopic: focusEntry?.topic || "",
+    nextBlockRecommendation: `Create a ${getCreateTestSourceLabel(nextSource).toLowerCase()} block (${suggestedCount} questions).`,
+  };
+}
+
+function buildStudentAnalyticsSnapshot(userId, courseFilter = "") {
+  const normalizedFilter = String(courseFilter || "").trim();
+  const sessions = getSessionsForUser(userId)
+    .filter((session) => session.status === "completed")
+    .slice()
+    .sort((a, b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt));
+  const questionMetaById = getAnalyticsQuestionMetaById();
+  const byTopic = new Map();
+
   let totalAnswered = 0;
   let totalCorrect = 0;
   let totalTime = 0;
   let streak = 0;
+  let flaggedCount = 0;
+  const sessionRollups = [];
 
-  sessions
-    .sort((a, b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt))
-    .forEach((session) => {
-      let sessionAllCorrect = true;
-      let sessionEligibleCount = 0;
-      session.questionIds.forEach((qid) => {
-        const response = session.responses[qid];
-        const question = getQuestions().find((entry) => entry.id === qid);
-        if (!question || !response) {
-          return;
-        }
-        if (!matchesCourseFilterForAnalytics(question, courseFilter)) {
-          return;
-        }
+  sessions.forEach((session) => {
+    let sessionEligibleCount = 0;
+    let sessionCorrectCount = 0;
+    let sessionTotalTime = 0;
 
-        sessionEligibleCount += 1;
-
-        const correct = isSubmittedResponseCorrect(question, response);
-        totalAnswered += 1;
-        if (correct) {
-          totalCorrect += 1;
-        } else {
-          sessionAllCorrect = false;
-        }
-
-        totalTime += response.timeSpentSec || 0;
-      });
-
-      if (!sessionEligibleCount) {
+    (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
+      const response = session.responses?.[qid];
+      const questionMeta = questionMetaById.get(qid);
+      if (!questionMeta || !response) {
+        return;
+      }
+      if (normalizedFilter && questionMeta.course !== normalizedFilter) {
         return;
       }
 
-      if (sessionAllCorrect) {
-        streak += 1;
-      } else {
-        streak = 0;
+      const isCorrect = isSubmittedResponseCorrect(questionMeta.question, response);
+      const timeSpent = Math.max(0, Number(response.timeSpentSec || 0));
+      const topic = questionMeta.topic;
+
+      sessionEligibleCount += 1;
+      totalAnswered += 1;
+      totalTime += timeSpent;
+      sessionTotalTime += timeSpent;
+      if (response.flagged) {
+        flaggedCount += 1;
+      }
+
+      if (!byTopic.has(topic)) {
+        byTopic.set(topic, {
+          topic,
+          total: 0,
+          correct: 0,
+          totalTime: 0,
+        });
+      }
+      const bucket = byTopic.get(topic);
+      bucket.total += 1;
+      bucket.totalTime += timeSpent;
+
+      if (isCorrect) {
+        sessionCorrectCount += 1;
+        totalCorrect += 1;
+        bucket.correct += 1;
       }
     });
 
-  const accuracy = totalAnswered ? Math.round((totalCorrect / totalAnswered) * 100) : 0;
-  const timePerQuestion = totalAnswered ? Math.round(totalTime / totalAnswered) : 0;
+    if (!sessionEligibleCount) {
+      return;
+    }
+    if (sessionCorrectCount === sessionEligibleCount) {
+      streak += 1;
+    } else {
+      streak = 0;
+    }
 
-  return { accuracy, timePerQuestion, streak, totalAnswered };
-}
-
-function getTopicStats(userId, courseFilter = "") {
-  const sessions = getSessionsForUser(userId).filter((session) => session.status === "completed");
-  const byTopic = {};
-
-  sessions.forEach((session) => {
-    session.questionIds.forEach((qid) => {
-      const question = getQuestions().find((entry) => entry.id === qid);
-      const response = session.responses[qid];
-      if (!question || !response) return;
-      if (!matchesCourseFilterForAnalytics(question, courseFilter)) {
-        return;
-      }
-
-      const topic = getQbankCourseTopicMeta(question).topic || question.topic;
-      if (!byTopic[topic]) {
-        byTopic[topic] = { topic, total: 0, correct: 0 };
-      }
-
-      byTopic[topic].total += 1;
-      if (isSubmittedResponseCorrect(question, response)) {
-        byTopic[topic].correct += 1;
-      }
+    sessionRollups.push({
+      id: session.id,
+      total: sessionEligibleCount,
+      correct: sessionCorrectCount,
+      totalTime: sessionTotalTime,
+      accuracy: Math.round((sessionCorrectCount / sessionEligibleCount) * 100),
+      completedAt: session.completedAt || session.createdAt || nowISO(),
     });
   });
 
-  return Object.values(byTopic)
-    .map((entry) => ({ ...entry, accuracy: Math.round((entry.correct / entry.total) * 100) }))
-    .sort((a, b) => a.accuracy - b.accuracy);
+  const stats = {
+    accuracy: totalAnswered ? Math.round((totalCorrect / totalAnswered) * 100) : 0,
+    timePerQuestion: totalAnswered ? Math.round(totalTime / totalAnswered) : 0,
+    streak,
+    totalAnswered,
+  };
+  const topicStats = [...byTopic.values()]
+    .map((entry) => ({
+      topic: entry.topic,
+      total: entry.total,
+      correct: entry.correct,
+      accuracy: entry.total ? Math.round((entry.correct / entry.total) * 100) : 0,
+      timePerQuestion: entry.total ? Math.round(entry.totalTime / entry.total) : 0,
+    }))
+    .sort((a, b) => a.accuracy - b.accuracy || b.total - a.total || a.topic.localeCompare(b.topic));
+  const weakAreas = topicStats.filter((entry) => entry.total >= 1);
+
+  const snapshot = {
+    stats,
+    topicStats,
+    weakAreas,
+    sessionRollups,
+    flaggedCount,
+    insights: null,
+  };
+  snapshot.insights = buildStudentAnalyticsInsights(snapshot, normalizedFilter);
+  return snapshot;
+}
+
+function getStudentAnalyticsSnapshot(userId, courseFilter = "") {
+  if (!userId) {
+    return buildStudentAnalyticsSnapshot("", courseFilter);
+  }
+  const normalizedFilter = String(courseFilter || "").trim();
+  const key = `${userId}::${normalizedFilter || "__all__"}`;
+  if (analyticsRuntime.cache.has(key)) {
+    return analyticsRuntime.cache.get(key);
+  }
+  const snapshot = buildStudentAnalyticsSnapshot(userId, normalizedFilter);
+  analyticsRuntime.cache.set(key, snapshot);
+  return snapshot;
+}
+
+function getUserStats(userId, courseFilter = "") {
+  return getStudentAnalyticsSnapshot(userId, courseFilter).stats;
+}
+
+function getTopicStats(userId, courseFilter = "") {
+  return getStudentAnalyticsSnapshot(userId, courseFilter).topicStats;
 }
 
 function getWeakAreas(userId, courseFilter = "") {
-  return getTopicStats(userId, courseFilter)
-    .filter((entry) => entry.total >= 1)
-    .sort((a, b) => a.accuracy - b.accuracy);
+  return getStudentAnalyticsSnapshot(userId, courseFilter).weakAreas;
 }
 
 function hydrateSessionUiPreferences() {
@@ -10232,6 +10599,7 @@ function load(key, fallback) {
 
 function save(key, value) {
   writeStorageKey(key, value);
+  invalidateAnalyticsCacheForStorageKey(key);
   scheduleRelationalWrite(key, value);
   scheduleSupabaseWrite(key, value);
 }
