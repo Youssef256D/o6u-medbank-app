@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-16.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.2").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -2080,8 +2080,56 @@ async function hydrateRelationalSessions(currentUser) {
       originSessionId: null,
     };
   });
+  const localSessions = getSessions();
+  const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
+  const mergedSessionById = new Map();
+  const parseUpdatedAtMs = (value) => {
+    const ms = new Date(value || 0).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
 
-  saveLocalOnly(STORAGE_KEYS.sessions, mappedSessions);
+  mappedSessions.forEach((remoteSession) => {
+    const sessionId = String(remoteSession?.id || "");
+    if (!sessionId) {
+      return;
+    }
+
+    const localSession = localSessionById.get(sessionId);
+    if (!localSession) {
+      mergedSessionById.set(sessionId, remoteSession);
+      return;
+    }
+
+    const localUpdatedAtMs = parseUpdatedAtMs(localSession.updatedAt);
+    const remoteUpdatedAtMs = parseUpdatedAtMs(remoteSession.updatedAt);
+    const localIsActiveSession = (
+      state.route === "session"
+      && String(state.sessionId || "") === sessionId
+      && String(localSession.status || "") === "in_progress"
+    );
+    const preferLocal = localIsActiveSession
+      || localUpdatedAtMs > remoteUpdatedAtMs
+      || (
+        localUpdatedAtMs === remoteUpdatedAtMs
+        && String(localSession.status || "") === "in_progress"
+        && String(remoteSession.status || "") === "in_progress"
+      );
+
+    mergedSessionById.set(
+      sessionId,
+      preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession },
+    );
+  });
+
+  localSessions.forEach((localSession) => {
+    const sessionId = String(localSession?.id || "");
+    if (!sessionId || mergedSessionById.has(sessionId)) {
+      return;
+    }
+    mergedSessionById.set(sessionId, localSession);
+  });
+
+  saveLocalOnly(STORAGE_KEYS.sessions, [...mergedSessionById.values()]);
 }
 
 function getSyncScopeForUser(user = null) {
@@ -5426,6 +5474,21 @@ function renderSession() {
   `;
 }
 
+function syncActiveResponseSelectionFromDom(activeSession) {
+  const currentQid = activeSession.questionIds[activeSession.currentIndex];
+  const response = activeSession.responses[currentQid];
+  if (!response) {
+    return [];
+  }
+  const selected = [...new Set(
+    Array.from(appEl.querySelectorAll("input[name='answer']:checked"))
+      .map((entry) => String(entry.value || "").trim().toUpperCase())
+      .filter(Boolean),
+  )];
+  response.selected = selected;
+  return selected;
+}
+
 function wireSession() {
   const user = getCurrentUser();
   const session = getActiveSession(user.id, state.sessionId);
@@ -5452,8 +5515,7 @@ function wireSession() {
 
       const currentQid = latest.questionIds[latest.currentIndex];
       const response = latest.responses[currentQid];
-      const selected = Array.from(appEl.querySelectorAll("input[name='answer']:checked")).map((entry) => entry.value);
-      response.selected = selected;
+      syncActiveResponseSelectionFromDom(latest);
       response.submitted = false;
       latest.updatedAt = nowISO();
       upsertSession(latest);
@@ -5524,6 +5586,7 @@ function handleSessionClick(event) {
   }
 
   normalizeSession(session);
+  syncActiveResponseSelectionFromDom(session);
 
   const maxIndex = session.questionIds.length - 1;
   const trackedActions = new Set(["prev-question", "next-question", "jump-question", "jump-unanswered", "save-exit", "submit-session"]);
