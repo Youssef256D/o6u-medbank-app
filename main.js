@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.2").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.3").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -4516,6 +4516,38 @@ function wireContact() {
   });
 }
 
+function getAuthRedirectToUrl() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+async function startGoogleOAuthSignIn(authClient) {
+  if (!authClient) {
+    return { ok: false, message: "Supabase auth is not configured. Google sign-in is unavailable." };
+  }
+
+  const { data, error } = await authClient.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: getAuthRedirectToUrl(),
+      skipBrowserRedirect: true,
+      queryParams: {
+        prompt: "select_account",
+      },
+    },
+  });
+
+  if (error) {
+    return { ok: false, message: error.message || "Could not start Google sign-in." };
+  }
+
+  if (!data?.url) {
+    return { ok: false, message: "Could not start Google sign-in." };
+  }
+
+  window.location.assign(data.url);
+  return { ok: true };
+}
+
 function renderAuth(mode) {
   if (mode === "login") {
     return `
@@ -4529,6 +4561,8 @@ function renderAuth(mode) {
             <button class="btn" type="submit">Log in</button>
             <button class="btn ghost" type="button" data-nav="forgot">Forgot password</button>
           </div>
+          <div class="auth-divider"><span>or</span></div>
+          <button class="btn ghost auth-google-btn" id="login-google-btn" type="button">Continue with Google</button>
         </form>
         <div class="auth-inline">
           <span class="text">Need an account?</span>
@@ -4547,6 +4581,8 @@ function renderAuth(mode) {
         <h2 class="title">Create Account</h2>
         <p class="subtle">Student sign-up with year, semester, and course enrollment.</p>
         <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+          <button class="btn ghost auth-google-btn" id="signup-google-btn" type="button">Continue with Google</button>
+          <div class="auth-divider"><span>or sign up with email</span></div>
           <div class="form-row">
             <label>Full name <input name="name" autocomplete="name" required /></label>
             <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required aria-required="true" /></label>
@@ -4631,9 +4667,42 @@ function wireAuth(mode) {
     submitButton.disabled = submitting;
     submitButton.textContent = submitting ? busyLabel : submitButton.dataset.baseLabel;
   };
+  const lockAuthActionButton = (button, busy, busyLabel = "Please wait...") => {
+    if (!button) return;
+    if (!button.dataset.baseLabel) {
+      button.dataset.baseLabel = button.textContent || "";
+    }
+    button.disabled = busy;
+    button.textContent = busy ? busyLabel : button.dataset.baseLabel;
+  };
 
   if (mode === "login") {
     const form = document.getElementById("login-form");
+    const googleButton = document.getElementById("login-google-btn");
+    googleButton?.addEventListener("click", async () => {
+      if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
+        return;
+      }
+      const authClient = getSupabaseAuthClient();
+      if (!authClient) {
+        toast("Supabase auth is not configured. Google login is unavailable.");
+        return;
+      }
+      googleButton.dataset.submitting = "1";
+      lockAuthActionButton(googleButton, true, "Redirecting...");
+      try {
+        const outcome = await startGoogleOAuthSignIn(authClient);
+        if (!outcome.ok) {
+          toast(outcome.message || "Google login failed. Please try again.");
+        }
+      } catch (error) {
+        toast(error?.message || "Google login failed. Please try again.");
+      } finally {
+        googleButton.dataset.submitting = "0";
+        lockAuthActionButton(googleButton, false);
+      }
+    });
+
     form?.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (form.dataset.submitting === "1") {
@@ -4725,12 +4794,36 @@ function wireAuth(mode) {
 
   if (mode === "signup") {
     const form = document.getElementById("signup-form");
+    const googleButton = document.getElementById("signup-google-btn");
     const yearSelect = document.getElementById("signup-academic-year");
     const semesterSelect = document.getElementById("signup-academic-semester");
     const courseOptionsEl = document.getElementById("signup-course-options");
     const courseHelpEl = document.getElementById("signup-course-help");
     const selectAllCoursesBtn = document.getElementById("signup-select-all-courses");
     const clearCoursesBtn = document.getElementById("signup-clear-courses");
+    googleButton?.addEventListener("click", async () => {
+      if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
+        return;
+      }
+      const authClient = getSupabaseAuthClient();
+      if (!authClient) {
+        toast("Supabase auth is not configured. Google signup is unavailable.");
+        return;
+      }
+      googleButton.dataset.submitting = "1";
+      lockAuthActionButton(googleButton, true, "Redirecting...");
+      try {
+        const outcome = await startGoogleOAuthSignIn(authClient);
+        if (!outcome.ok) {
+          toast(outcome.message || "Google signup failed. Please try again.");
+        }
+      } catch (error) {
+        toast(error?.message || "Google signup failed. Please try again.");
+      } finally {
+        googleButton.dataset.submitting = "0";
+        lockAuthActionButton(googleButton, false);
+      }
+    });
 
     const getSelectedSignupCourses = () =>
       Array.from(form?.querySelectorAll("input[name='signupCourses']:checked") || []).map((input) => input.value);
@@ -4929,7 +5022,7 @@ function wireAuth(mode) {
     const authClient = getSupabaseAuthClient();
     try {
       if (authClient) {
-        const redirectTo = `${window.location.origin}${window.location.pathname}`;
+        const redirectTo = getAuthRedirectToUrl();
         const { error } = await authClient.auth.resetPasswordForEmail(email, { redirectTo });
         if (error) {
           toast(error.message || "Could not send reset email.");

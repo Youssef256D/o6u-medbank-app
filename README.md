@@ -57,7 +57,9 @@ Notes:
 
 In Supabase Dashboard:
 
-1. Authentication -> Providers -> Email: enable Email provider.
+1. Authentication -> Providers:
+   - Email: enable Email provider.
+   - Google: enable Google provider and set authorized redirect/client settings in Supabase.
 2. Authentication -> URL Configuration:
    - Site URL: your deployed URL
    - Redirect URLs: add your deployed URL and `http://localhost:5500` (or your local dev URL)
