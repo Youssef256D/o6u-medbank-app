@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.8").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.9").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -74,7 +74,20 @@ const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const AUTO_APPROVE_STUDENT_ACCESS = true;
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
-const OAUTH_CALLBACK_QUERY_KEYS = new Set(["code", "state", "error", "error_code", "error_description"]);
+const OAUTH_CALLBACK_QUERY_KEYS = new Set([
+  "code",
+  "state",
+  "error",
+  "error_code",
+  "error_description",
+  "access_token",
+  "refresh_token",
+  "provider_token",
+  "provider_refresh_token",
+  "token_type",
+  "expires_in",
+  "expires_at",
+]);
 const PHONE_COUNTRY_RULES = [
   { country: "Egypt", code: "20", pattern: /^(10|11|12|15)\d{8}$/ },
   { country: "United States/Canada", code: "1", pattern: /^[2-9]\d{9}$/ },
@@ -1079,34 +1092,40 @@ async function resolveSupabaseAuthCallback(authClient) {
   }
 
   const code = String(callbackParams.get("code") || "").trim();
-  const oauthState = String(callbackParams.get("state") || "").trim();
-  const hasCode = Boolean(code);
-  if (!hasCode) {
-    setGoogleOAuthPendingState(false);
-    clearAuthCallbackParams();
-    return "error";
-  }
+  const accessToken = String(callbackParams.get("access_token") || "").trim();
+  const refreshToken = String(callbackParams.get("refresh_token") || "").trim();
 
-  let exchangeFailed = false;
-  if (typeof authClient.auth.exchangeCodeForSession === "function") {
-    const exchangeUrl = new URL(callbackUrl.toString());
-    exchangeUrl.search = "";
-    exchangeUrl.hash = "";
-    exchangeUrl.searchParams.set("code", code);
-    if (oauthState) {
-      exchangeUrl.searchParams.set("state", oauthState);
+  let callbackFailed = false;
+  if (code) {
+    if (typeof authClient.auth.exchangeCodeForSession === "function") {
+      const { error } = await authClient.auth.exchangeCodeForSession(code);
+      if (error) {
+        console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
+        setGoogleOAuthPendingState(false);
+        toast(error.message || "Google sign-in callback failed. Please try again.");
+        callbackFailed = true;
+      }
     }
-    const { error } = await authClient.auth.exchangeCodeForSession(exchangeUrl.toString());
-    if (error) {
-      console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
-      setGoogleOAuthPendingState(false);
-      toast(error.message || "Google sign-in callback failed. Please try again.");
-      exchangeFailed = true;
+  } else if (accessToken && refreshToken) {
+    if (typeof authClient.auth.setSession === "function") {
+      const { error } = await authClient.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+      if (error) {
+        console.warn("Supabase OAuth token callback failed.", error?.message || error);
+        setGoogleOAuthPendingState(false);
+        toast(error.message || "Google sign-in callback failed. Please try again.");
+        callbackFailed = true;
+      }
     }
+  } else {
+    setGoogleOAuthPendingState(false);
+    callbackFailed = true;
   }
 
   clearAuthCallbackParams();
-  return exchangeFailed ? "error" : "processed";
+  return callbackFailed ? "error" : "processed";
 }
 
 function getKnownAuthProviderByEmail(email) {
@@ -1370,7 +1389,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileResult = await runWithTimeoutResult(
     client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
       .eq("id", authUser.id)
       .maybeSingle(),
     PROFILE_LOOKUP_TIMEOUT_MS,
@@ -1383,9 +1402,13 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   }
 
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
-  const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || localUser?.academicYear || 1) : null;
-  const semester =
-    role === "student" ? sanitizeAcademicSemester(profile.academic_semester || localUser?.academicSemester || 1) : null;
+  const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
+  const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
+  const fallbackYear = normalizeAcademicYearOrNull(localUser?.academicYear);
+  const fallbackSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
+  const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
+  const year = role === "student" ? (profileYear ?? fallbackYear ?? 1) : null;
+  const semester = role === "student" ? (profileSemester ?? fallbackSemester ?? 1) : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const profilePhone = String(profile.phone || "").trim();
   const autoApprovedFromProfile = shouldAutoApproveStudentAccess({
@@ -1397,7 +1420,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileHasStudentCompletion = role !== "student"
     ? true
     : profilePhone.replace(/\D/g, "").length >= 8 && Number(profile.academic_year) >= 1 && Number(profile.academic_semester) >= 1;
-  const authProvider = String(localUser?.authProvider || getAuthProviderFromAuthUser(authUser) || "").trim().toLowerCase();
+  const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let nextProfileCompleted = role !== "student";
   if (role === "student") {
     if (typeof localUser?.profileCompleted === "boolean") {
@@ -1423,6 +1446,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       : profile.approved
         ? localUser?.approvedBy || "admin"
         : null,
+    authProvider,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
   });
@@ -1474,8 +1498,12 @@ function getAuthProviderFromAuthUser(authUser) {
   return "";
 }
 
+function normalizeAuthProvider(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function getAuthProviderFromUser(user) {
-  return String(user?.authProvider || "").trim().toLowerCase();
+  return normalizeAuthProvider(user?.authProvider);
 }
 
 function normalizePhoneInput(rawPhone) {
@@ -1681,11 +1709,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
       ? "admin"
       : "student";
   const nextPhone = String(profileOverrides.phone || authUser.user_metadata?.phone_number || previous?.phone || "").trim();
-  const nextAuthProvider = String(
+  const nextAuthProvider = normalizeAuthProvider(
     profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
-  )
-    .trim()
-    .toLowerCase();
+  );
 
   const nextYear =
     nextRole === "student"
@@ -2304,7 +2330,7 @@ async function hydrateRelationalProfiles(currentUser) {
     const profilesResult = await fetchRowsPaged((from, to) => (
       client
         .from("profiles")
-        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
         .order("created_at", { ascending: true })
         .order("id", { ascending: true })
         .range(from, to)
@@ -2316,7 +2342,7 @@ async function hydrateRelationalProfiles(currentUser) {
   } else {
     const { data: profile, error } = await client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,created_at")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
       .eq("id", currentUser.supabaseAuthId)
       .maybeSingle();
     if (error) {
@@ -2357,8 +2383,12 @@ async function hydrateRelationalProfiles(currentUser) {
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
-    const year = role === "student" ? sanitizeAcademicYear(profile.academic_year || 1) : null;
-    const semester = role === "student" ? sanitizeAcademicSemester(profile.academic_semester || 1) : null;
+    const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
+    const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
+    const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
+    const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
+    const year = role === "student" ? (profileYear ?? existingYear) : null;
+    const semester = role === "student" ? (profileSemester ?? existingSemester) : null;
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
@@ -2388,6 +2418,8 @@ async function hydrateRelationalProfiles(currentUser) {
       assignedCourses,
       academicYear: year,
       academicSemester: semester,
+      authProvider: normalizeAuthProvider(profile.auth_provider || existing?.authProvider),
+      profileCompleted: typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : role !== "student",
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
       supabaseAuthId: profile.id,
     };
@@ -3173,14 +3205,18 @@ async function syncProfilesToRelational(usersPayload) {
       if (!profileId) {
         return null;
       }
+      const normalizedYear = normalizeAcademicYearOrNull(user.academicYear);
+      const normalizedSemester = normalizeAcademicSemesterOrNull(user.academicSemester);
+      const normalizedAuthProvider = normalizeAuthProvider(user.authProvider);
       const baseRow = {
         id: profileId,
         full_name: String(user.name || "").trim() || "Student",
         email: String(user.email || "").trim().toLowerCase(),
         phone: String(user.phone || "").trim() || null,
         role: isAdminSync ? (user.role === "admin" ? "admin" : "student") : "student",
-        academic_year: user.role === "student" ? sanitizeAcademicYear(user.academicYear || 1) : null,
-        academic_semester: user.role === "student" ? sanitizeAcademicSemester(user.academicSemester || 1) : null,
+        academic_year: user.role === "student" ? normalizedYear : null,
+        academic_semester: user.role === "student" ? normalizedSemester : null,
+        auth_provider: normalizedAuthProvider || null,
       };
       if (isAdminSync) {
         baseRow.approved = Boolean(isUserAccessApproved(user));
@@ -4141,9 +4177,8 @@ function seedData() {
       }
 
       if (user.role === "student") {
-        const normalizedYear = sanitizeAcademicYear(user.academicYear || 1);
-        const normalizedSemester = sanitizeAcademicSemester(user.academicSemester || 1);
-        const semesterCourses = getCurriculumCourses(normalizedYear, normalizedSemester);
+        const normalizedYear = normalizeAcademicYearOrNull(user.academicYear);
+        const normalizedSemester = normalizeAcademicSemesterOrNull(user.academicSemester);
 
         if (user.academicYear !== normalizedYear) {
           user.academicYear = normalizedYear;
@@ -4153,9 +4188,18 @@ function seedData() {
           user.academicSemester = normalizedSemester;
           changed = true;
         }
-        if ((user.assignedCourses || []).join("|") !== semesterCourses.join("|")) {
-          user.assignedCourses = semesterCourses;
-          changed = true;
+        if (normalizedYear !== null && normalizedSemester !== null) {
+          const semesterCourses = getCurriculumCourses(normalizedYear, normalizedSemester);
+          if ((user.assignedCourses || []).join("|") !== semesterCourses.join("|")) {
+            user.assignedCourses = semesterCourses;
+            changed = true;
+          }
+        } else {
+          const normalizedCourses = sanitizeCourseAssignments(user.assignedCourses || []);
+          if ((user.assignedCourses || []).join("|") !== normalizedCourses.join("|")) {
+            user.assignedCourses = normalizedCourses;
+            changed = true;
+          }
         }
       } else {
         if (user.academicYear !== null || user.academicSemester !== null) {
@@ -5238,9 +5282,10 @@ function renderAuth(mode) {
   if (mode === "signup") {
     const currentUser = getCurrentUser();
     const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(currentUser);
-    const defaultYear = sanitizeAcademicYear(currentUser?.academicYear || 1);
-    const defaultSemester = sanitizeAcademicSemester(currentUser?.academicSemester || 1);
-    const defaultCourses = getCurriculumCourses(defaultYear, defaultSemester);
+    const defaultYear = normalizeAcademicYearOrNull(currentUser?.academicYear);
+    const defaultSemester = normalizeAcademicSemesterOrNull(currentUser?.academicSemester);
+    const hasEnrollmentDefaults = defaultYear !== null && defaultSemester !== null;
+    const defaultCourses = hasEnrollmentDefaults ? getCurriculumCourses(defaultYear, defaultSemester) : [];
     const preferredCourses = Array.isArray(currentUser?.assignedCourses)
       ? currentUser.assignedCourses.filter((course) => defaultCourses.includes(course))
       : [];
@@ -5262,6 +5307,7 @@ function renderAuth(mode) {
             <div class="form-row">
               <label>Year
                 <select name="academicYear" id="signup-academic-year">
+                  <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
                   <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
                   <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
                   <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
@@ -5271,6 +5317,7 @@ function renderAuth(mode) {
               </label>
               <label>Semester
                 <select name="academicSemester" id="signup-academic-semester">
+                  <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
                   <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
                   <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
                 </select>
@@ -5329,6 +5376,7 @@ function renderAuth(mode) {
           <div class="form-row">
             <label>Year
               <select name="academicYear" id="signup-academic-year">
+                <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
                 <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
                 <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
                 <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
@@ -5338,6 +5386,7 @@ function renderAuth(mode) {
             </label>
             <label>Semester
               <select name="academicSemester" id="signup-academic-semester">
+                <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
                 <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
                 <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
               </select>
@@ -5584,8 +5633,15 @@ function wireAuth(mode) {
 
     const renderSignupCourseOptions = (preferred = []) => {
       if (!courseOptionsEl) return;
-      const year = sanitizeAcademicYear(yearSelect?.value || 1);
-      const semester = sanitizeAcademicSemester(semesterSelect?.value || 1);
+      const year = normalizeAcademicYearOrNull(yearSelect?.value);
+      const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
+      if (year === null || semester === null) {
+        courseOptionsEl.innerHTML = "";
+        if (courseHelpEl) {
+          courseHelpEl.textContent = "Choose year and semester first.";
+        }
+        return;
+      }
       const courses = getCurriculumCourses(year, semester);
       const selectedSet = new Set(preferred.filter((course) => courses.includes(course)));
       const selectAllByDefault = selectedSet.size === 0;
@@ -5644,8 +5700,12 @@ function wireAuth(mode) {
       const phone = String(data.get("phone") || "").trim();
       const phoneValidation = validateAndNormalizePhoneNumber(phone);
       const normalizedPhone = phoneValidation.number;
-      const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
-      const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
+      const academicYear = normalizeAcademicYearOrNull(data.get("academicYear"));
+      const academicSemester = normalizeAcademicSemesterOrNull(data.get("academicSemester"));
+      if (academicYear === null || academicSemester === null) {
+        toast("You need to choose the year and semester.");
+        return;
+      }
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
       const selectedCourses = getSelectedSignupCourses().filter((course) => availableCourses.includes(course));
       const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -5813,6 +5873,11 @@ function wireAuth(mode) {
             toast("Account created but profile mapping failed.");
             return;
           }
+
+          await ensureRelationalSyncReady().catch(() => {});
+          await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
+            console.warn("Signup profile sync failed.", error?.message || error);
+          });
 
           if (authData.session && !autoApproved) {
             await authClient.auth.signOut().catch(() => {});
@@ -7861,16 +7926,21 @@ function renderAdmin() {
       }
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
-    const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
+    const autoApprovalEnabled = AUTO_APPROVE_STUDENT_ACCESS;
+    const pendingCount = autoApprovalEnabled
+      ? 0
+      : users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = users
       .map((account) => {
-        const year = account.role === "student" ? sanitizeAcademicYear(account.academicYear || 1) : null;
-        const semester = account.role === "student" ? sanitizeAcademicSemester(account.academicSemester || 1) : null;
-        const isApproved = isUserAccessApproved(account);
+        const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
+        const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+        const isApproved = account.role === "student" && autoApprovalEnabled ? true : isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
         const visibleCourses =
           account.role === "student"
-            ? getCurriculumCourses(year || 1, semester || 1)
+            ? year && semester
+              ? getCurriculumCourses(year, semester)
+              : sanitizeCourseAssignments(account.assignedCourses || [])
             : sanitizeCourseAssignments(account.assignedCourses || allCourses);
         const compactCourses = visibleCourses.slice(0, 2).map((course) => (course.length > 42 ? `${course.slice(0, 39)}...` : course));
         const coursePreview =
@@ -7896,6 +7966,7 @@ function renderAdmin() {
               ${
                 account.role === "student"
                   ? `<select class="admin-mini-select" data-field="academicYear">
+                       <option value="" ${year === null ? "selected" : ""}>Select year</option>
                        ${[1, 2, 3, 4, 5]
                          .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
                          .join("")}
@@ -7907,6 +7978,7 @@ function renderAdmin() {
               ${
                 account.role === "student"
                   ? `<select class="admin-mini-select" data-field="academicSemester">
+                       <option value="" ${semester === null ? "selected" : ""}>Select semester</option>
                        <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
                        <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
                      </select>`
@@ -7919,8 +7991,8 @@ function renderAdmin() {
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
                 <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
-                <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
-                  ${isApproved ? "Suspend access" : "Approve access"}
+                <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" || autoApprovalEnabled ? "disabled" : ""}>
+                  ${autoApprovalEnabled ? "Auto-approval on" : (isApproved ? "Suspend access" : "Approve access")}
                 </button>
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
                   ${account.role === "admin" ? "Make student" : "Make admin"}
@@ -7941,8 +8013,8 @@ function renderAdmin() {
             <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
           </div>
           <div class="stack" style="align-items: flex-end;">
-            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b></p>
-            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Accept all pending</button>
+            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b>${autoApprovalEnabled ? " (auto-approval enabled)" : ""}</p>
+            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount && !autoApprovalEnabled ? "" : "disabled"}>Accept all pending</button>
           </div>
         </div>
         <form id="admin-add-user-form" style="margin-top: 0.85rem;">
@@ -8992,6 +9064,10 @@ function wireAdmin() {
   });
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
+    if (AUTO_APPROVE_STUDENT_ACCESS) {
+      toast("Auto-approval mode is enabled. Student access is already treated as approved.");
+      return;
+    }
     const current = getCurrentUser();
     const users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
@@ -9090,8 +9166,14 @@ function wireAdmin() {
       if (role === "student") {
         const yearSelect = row.querySelector("select[data-field='academicYear']");
         const semesterSelect = row.querySelector("select[data-field='academicSemester']");
-        const year = sanitizeAcademicYear(yearSelect?.value || 1);
-        const semester = sanitizeAcademicSemester(semesterSelect?.value || 1);
+        const year = normalizeAcademicYearOrNull(yearSelect?.value);
+        const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
+        if (year === null || semester === null) {
+          if (mode === "manual") {
+            toast("Select both year and semester before saving.");
+          }
+          return false;
+        }
 
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
@@ -9194,6 +9276,10 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='toggle-user-approval']").forEach((button) => {
     button.addEventListener("click", async () => {
+      if (AUTO_APPROVE_STUDENT_ACCESS) {
+        toast("Auto-approval mode is enabled. Disable it first to manage manual approvals.");
+        return;
+      }
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       if (!userId) {
@@ -10382,12 +10468,8 @@ function syncUsersWithCurriculum() {
     }
 
     if (user.role === "student") {
-      const year = sanitizeAcademicYear(user.academicYear || 1);
-      const semester = sanitizeAcademicSemester(user.academicSemester || 1);
-      const semesterCourses = getCurriculumCourses(year, semester);
-      const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
-      const scoped = assigned.filter((course) => semesterCourses.includes(course));
-      const courses = scoped.length ? scoped : semesterCourses;
+      const year = normalizeAcademicYearOrNull(user.academicYear);
+      const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
       if (user.academicYear !== year) {
         user.academicYear = year;
         changed = true;
@@ -10396,9 +10478,21 @@ function syncUsersWithCurriculum() {
         user.academicSemester = semester;
         changed = true;
       }
-      if ((user.assignedCourses || []).join("|") !== courses.join("|")) {
-        user.assignedCourses = courses;
-        changed = true;
+      if (year !== null && semester !== null) {
+        const semesterCourses = getCurriculumCourses(year, semester);
+        const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
+        const scoped = assigned.filter((course) => semesterCourses.includes(course));
+        const courses = scoped.length ? scoped : semesterCourses;
+        if ((user.assignedCourses || []).join("|") !== courses.join("|")) {
+          user.assignedCourses = courses;
+          changed = true;
+        }
+      } else {
+        const normalizedAssigned = sanitizeCourseAssignments(user.assignedCourses || []);
+        if ((user.assignedCourses || []).join("|") !== normalizedAssigned.join("|")) {
+          user.assignedCourses = normalizedAssigned;
+          changed = true;
+        }
       }
     } else {
       const normalized = sanitizeCourseAssignments(user.assignedCourses || allCourses);
@@ -10505,14 +10599,22 @@ function applyCourseTopicsUpdate(course, nextTopics) {
   }
 }
 
-function sanitizeAcademicYear(value) {
+function normalizeAcademicYearOrNull(value) {
   const year = Number(value);
-  return [1, 2, 3, 4, 5].includes(year) ? year : 1;
+  return [1, 2, 3, 4, 5].includes(year) ? year : null;
+}
+
+function normalizeAcademicSemesterOrNull(value) {
+  const semester = Number(value);
+  return semester === 1 || semester === 2 ? semester : null;
+}
+
+function sanitizeAcademicYear(value) {
+  return normalizeAcademicYearOrNull(value) ?? 1;
 }
 
 function sanitizeAcademicSemester(value) {
-  const semester = Number(value);
-  return semester === 2 ? 2 : 1;
+  return normalizeAcademicSemesterOrNull(value) ?? 1;
 }
 
 function getCurriculumCourses(year, semester) {

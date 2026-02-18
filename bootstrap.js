@@ -4,6 +4,7 @@
   const versionSuffix = appVersion ? `?v=${encodeURIComponent(appVersion)}` : "";
   const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
   const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
+  const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
   const KNOWN_ROUTES = new Set([
     "landing",
     "features",
@@ -24,7 +25,55 @@
     "profile",
     "admin",
   ]);
+  const OAUTH_CALLBACK_QUERY_KEYS = new Set([
+    "code",
+    "state",
+    "error",
+    "error_code",
+    "error_description",
+    "access_token",
+    "refresh_token",
+    "provider_token",
+    "provider_refresh_token",
+    "token_type",
+    "expires_in",
+    "expires_at",
+  ]);
   let appLoadPromise = null;
+
+  function parseOAuthHashParams(hashValue) {
+    const rawHash = String(hashValue || "").replace(/^#/, "").trim();
+    if (!rawHash || !rawHash.includes("=")) {
+      return new URLSearchParams();
+    }
+    return new URLSearchParams(rawHash);
+  }
+
+  function hasOAuthCallbackParams() {
+    let currentUrl;
+    try {
+      currentUrl = new URL(window.location.href);
+    } catch {
+      return false;
+    }
+
+    const params = new URLSearchParams(currentUrl.search || "");
+    const hashParams = parseOAuthHashParams(currentUrl.hash);
+    hashParams.forEach((value, key) => {
+      if (!params.has(key)) {
+        params.set(key, value);
+      }
+    });
+    return [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => params.has(key));
+  }
+
+  function isGoogleOAuthPendingState() {
+    try {
+      return sessionStorage.getItem(GOOGLE_OAUTH_PENDING_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
 
   function loadScript(src, options = {}) {
     const existing = document.querySelector(`script[data-src="${src}"]`);
@@ -130,6 +179,8 @@
 
   const persistedRoute = readPersistedRoute();
   if (persistedRoute && persistedRoute !== "landing") {
+    ensureAppLoaded().catch(() => {});
+  } else if (hasOAuthCallbackParams() || isGoogleOAuthPendingState()) {
     ensureAppLoaded().catch(() => {});
   }
 
