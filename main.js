@@ -71,6 +71,19 @@ const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set(["code", "state", "error", "error_code", "error_description"]);
+const PHONE_COUNTRY_RULES = [
+  { country: "Egypt", code: "20", pattern: /^(10|11|12|15)\d{8}$/ },
+  { country: "United States/Canada", code: "1", pattern: /^[2-9]\d{9}$/ },
+  { country: "United Kingdom", code: "44", pattern: /^\d{9,10}$/ },
+  { country: "Saudi Arabia", code: "966", pattern: /^\d{9}$/ },
+  { country: "United Arab Emirates", code: "971", pattern: /^\d{8,9}$/ },
+  { country: "India", code: "91", pattern: /^[6-9]\d{9}$/ },
+  { country: "France", code: "33", pattern: /^\d{9}$/ },
+  { country: "Germany", code: "49", pattern: /^\d{7,13}$/ },
+];
+const PHONE_COUNTRY_CODES_DESC = PHONE_COUNTRY_RULES
+  .map((rule) => rule.code)
+  .sort((a, b) => b.length - a.length);
 const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
 
@@ -1418,6 +1431,97 @@ function getAuthProviderFromAuthUser(authUser) {
 
 function getAuthProviderFromUser(user) {
   return String(user?.authProvider || "").trim().toLowerCase();
+}
+
+function normalizePhoneInput(rawPhone) {
+  const trimmed = String(rawPhone || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const compact = trimmed.replace(/[^\d+]/g, "");
+  if (!compact) {
+    return "";
+  }
+  if (compact.startsWith("+")) {
+    return `+${compact.slice(1).replace(/\D/g, "")}`;
+  }
+  return compact.replace(/\D/g, "");
+}
+
+function getPhoneCountryRuleByDigits(digitsWithCountryCode) {
+  const digits = String(digitsWithCountryCode || "");
+  const matchedCode = PHONE_COUNTRY_CODES_DESC.find((code) => digits.startsWith(code));
+  if (!matchedCode) {
+    return null;
+  }
+  const rule = PHONE_COUNTRY_RULES.find((entry) => entry.code === matchedCode);
+  if (!rule) {
+    return null;
+  }
+  return {
+    ...rule,
+    nationalNumber: digits.slice(matchedCode.length),
+  };
+}
+
+function validateAndNormalizePhoneNumber(rawPhone) {
+  const normalized = normalizePhoneInput(rawPhone);
+  if (!normalized) {
+    return { ok: false, message: "Phone number is required.", number: "" };
+  }
+
+  if (normalized.startsWith("01")) {
+    if (!/^01(0|1|2|5)\d{8}$/.test(normalized)) {
+      return {
+        ok: false,
+        message: "Egypt phone format is invalid. Use 01XXXXXXXXX, +20XXXXXXXXXX, or 0020XXXXXXXXXX.",
+        number: "",
+      };
+    }
+    return {
+      ok: true,
+      message: "",
+      number: `+20${normalized.slice(1)}`,
+      country: "Egypt",
+    };
+  }
+
+  let international = normalized;
+  if (international.startsWith("00")) {
+    international = `+${international.slice(2)}`;
+  }
+  if (!international.startsWith("+")) {
+    return {
+      ok: false,
+      message: "Use an international format (+countrycode...) or Egypt mobile format starting with 01.",
+      number: "",
+    };
+  }
+
+  const digits = international.slice(1);
+  if (!/^\d{8,15}$/.test(digits)) {
+    return {
+      ok: false,
+      message: "Phone number must be in a valid international format with 8 to 15 digits.",
+      number: "",
+    };
+  }
+
+  const countryRule = getPhoneCountryRuleByDigits(digits);
+  if (countryRule && !countryRule.pattern.test(countryRule.nationalNumber)) {
+    return {
+      ok: false,
+      message: `Phone number format is invalid for ${countryRule.country}.`,
+      number: "",
+    };
+  }
+
+  return {
+    ok: true,
+    message: "",
+    number: `+${digits}`,
+    country: countryRule?.country || "International",
+  };
 }
 
 function hasCompleteStudentProfile(user) {
@@ -5050,7 +5154,7 @@ function renderAuth(mode) {
       return `
         <section class="panel" style="max-width: 680px; margin-inline: auto;">
           <h2 class="title">Create Account</h2>
-          <p class="subtle">Complete your Google sign-up details. Name and email are locked to your Google account.</p>
+          <p class="subtle">Complete your Google sign-up details. Name and email are locked to your Google account. Phone format examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
           <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
             <div class="form-row">
               <label>Full name <input name="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
@@ -5108,7 +5212,7 @@ function renderAuth(mode) {
     return `
       <section class="panel" style="max-width: 680px; margin-inline: auto;">
         <h2 class="title">Create Account</h2>
-        <p class="subtle">Student sign-up with year, semester, and course enrollment.</p>
+        <p class="subtle">Student sign-up with year, semester, and course enrollment. Phone format examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
         <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
           <button class="btn ghost auth-google-btn" id="signup-google-btn" type="button">Continue with Google</button>
           <div class="auth-divider"><span>or sign up with email</span></div>
@@ -5432,7 +5536,8 @@ function wireAuth(mode) {
       const name = String(data.get("name") || "").trim();
       const email = String(data.get("email") || "").trim().toLowerCase();
       const phone = String(data.get("phone") || "").trim();
-      const normalizedPhoneDigits = phone.replace(/\D/g, "");
+      const phoneValidation = validateAndNormalizePhoneNumber(phone);
+      const normalizedPhone = phoneValidation.number;
       const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
       const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
@@ -5448,8 +5553,8 @@ function wireAuth(mode) {
           toast("Please enter a valid email address.");
           return;
         }
-        if (normalizedPhoneDigits.length < 8) {
-          toast("Phone number is required and must be valid.");
+        if (!phoneValidation.ok) {
+          toast(phoneValidation.message || "Phone number is invalid.");
           return;
         }
         if (!selectedCourses.length) {
@@ -5473,7 +5578,7 @@ function wireAuth(mode) {
         try {
           users[idx].name = onboardingUser?.name || name;
           users[idx].email = onboardingUser?.email || email;
-          users[idx].phone = phone;
+          users[idx].phone = normalizedPhone;
           users[idx].role = "student";
           users[idx].academicYear = academicYear;
           users[idx].academicSemester = academicSemester;
@@ -5516,8 +5621,8 @@ function wireAuth(mode) {
         toast("Please enter a valid email address.");
         return;
       }
-      if (normalizedPhoneDigits.length < 8) {
-        toast("Phone number is required and must be valid.");
+      if (!phoneValidation.ok) {
+        toast(phoneValidation.message || "Phone number is invalid.");
         return;
       }
       if (password !== confirmPassword) {
@@ -5554,7 +5659,7 @@ function wireAuth(mode) {
                 full_name: name,
                 academic_year: academicYear,
                 academic_semester: academicSemester,
-                phone_number: phone,
+                phone_number: normalizedPhone,
               },
             },
           });
@@ -5574,7 +5679,7 @@ function wireAuth(mode) {
             academicYear,
             academicSemester,
             assignedCourses: selectedCourses,
-            phone,
+            phone: normalizedPhone,
             verified: Boolean(authData.session),
             isApproved: false,
             approvedAt: null,
@@ -5599,7 +5704,7 @@ function wireAuth(mode) {
           name,
           email,
           password,
-          phone,
+          phone: normalizedPhone,
           role: "student",
           verified: true,
           isApproved: false,
@@ -5662,7 +5767,7 @@ function renderCompleteProfile() {
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Before admin review, add your phone number and enrollment details for Google sign-in.</p>
+      <p class="subtle">Before admin review, add your phone number and enrollment details for Google sign-in. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
         <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
         <div class="form-row">
@@ -5742,13 +5847,14 @@ function wireCompleteProfile() {
 
     const data = new FormData(form);
     const phone = String(data.get("phone") || "").trim();
-    const phoneDigits = phone.replace(/\D/g, "");
+    const phoneValidation = validateAndNormalizePhoneNumber(phone);
+    const normalizedPhone = phoneValidation.number;
     const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
     const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
     const assignedCourses = getCurriculumCourses(academicYear, academicSemester);
 
-    if (phoneDigits.length < 8) {
-      toast("Please enter a valid phone number.");
+    if (!phoneValidation.ok) {
+      toast(phoneValidation.message || "Please enter a valid phone number.");
       return;
     }
     if (!assignedCourses.length) {
@@ -5766,7 +5872,7 @@ function wireCompleteProfile() {
 
     setSubmitting(true);
     try {
-      users[idx].phone = phone;
+      users[idx].phone = normalizedPhone;
       users[idx].role = "student";
       users[idx].academicYear = academicYear;
       users[idx].academicSemester = academicSemester;
@@ -8763,19 +8869,40 @@ function wireAdmin() {
     }
   });
 
-  appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const row = button.closest("tr[data-user-id]");
-      const userId = row?.getAttribute("data-user-id");
-      if (!row || !userId) {
-        return;
-      }
+  const setEnrollmentSaveButtonBusy = (button, busy, busyLabel = "Saving...") => {
+    if (!button) {
+      return;
+    }
+    if (!button.dataset.baseLabel) {
+      button.dataset.baseLabel = button.textContent || "Save enrollment";
+    }
+    button.disabled = busy;
+    button.classList.toggle("is-loading", busy);
+    button.innerHTML = busy
+      ? `<span class="inline-loader" aria-hidden="true"></span><span>${escapeHtml(busyLabel)}</span>`
+      : button.dataset.baseLabel;
+  };
 
+  const saveUserEnrollmentFromRow = async (row, options = {}) => {
+    const mode = options?.mode === "auto" ? "auto" : "manual";
+    const userId = row?.getAttribute("data-user-id");
+    if (!row || !userId) {
+      return false;
+    }
+    if (row.dataset.enrollmentSaving === "1") {
+      return false;
+    }
+
+    const saveButton = row.querySelector("[data-action='save-user-enrollment']");
+    row.dataset.enrollmentSaving = "1";
+    setEnrollmentSaveButtonBusy(saveButton, true, mode === "auto" ? "Auto-saving..." : "Saving...");
+
+    try {
       const users = getUsers();
       const idx = users.findIndex((entry) => entry.id === userId);
       if (idx === -1) {
         toast("Account not found.");
-        return;
+        return false;
       }
 
       const role = users[idx].role;
@@ -8795,13 +8922,41 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      try {
-        await flushPendingSyncNow();
+      await flushPendingSyncNow();
+      if (mode === "manual") {
         toast("Enrollment saved.");
-        render();
-      } catch (syncError) {
-        toast(`Enrollment saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
+      state.skipNextRouteAnimation = true;
+      render();
+      return true;
+    } catch (syncError) {
+      toast(`Enrollment saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      return false;
+    } finally {
+      row.dataset.enrollmentSaving = "0";
+      setEnrollmentSaveButtonBusy(saveButton, false);
+    }
+  };
+
+  appEl.querySelectorAll("tr[data-user-id]").forEach((row) => {
+    const yearSelect = row.querySelector("select[data-field='academicYear']");
+    const semesterSelect = row.querySelector("select[data-field='academicSemester']");
+    if (!yearSelect && !semesterSelect) {
+      return;
+    }
+    const autoSaveEnrollment = () => {
+      saveUserEnrollmentFromRow(row, { mode: "auto" }).catch((error) => {
+        console.warn("Auto enrollment save failed.", error?.message || error);
+      });
+    };
+    yearSelect?.addEventListener("change", autoSaveEnrollment);
+    semesterSelect?.addEventListener("change", autoSaveEnrollment);
+  });
+
+  appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("tr[data-user-id]");
+      await saveUserEnrollmentFromRow(row, { mode: "manual" });
     });
   });
 
