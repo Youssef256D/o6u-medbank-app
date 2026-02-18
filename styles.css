@@ -968,6 +968,26 @@ body.is-routing .card {
   font-size: 1rem;
 }
 
+.admin-account-email {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.admin-auth-provider-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.admin-auth-provider-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .admin-mini-select {
   min-width: 112px;
   max-width: 140px;
