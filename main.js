@@ -885,18 +885,60 @@ async function initSupabaseSync() {
 }
 
 function decodeOAuthErrorMessage(rawMessage) {
-  const message = String(rawMessage || "").trim();
+  let message = String(rawMessage || "").trim();
   if (!message) {
     return "";
   }
-  try {
-    return decodeURIComponent(message.replace(/\+/g, " "));
-  } catch {
-    return message;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const decoded = decodeURIComponent(message.replace(/\+/g, " "));
+      if (decoded === message) {
+        break;
+      }
+      message = decoded;
+    } catch {
+      break;
+    }
   }
+  return message;
 }
 
-function clearAuthCallbackQueryParams() {
+function getFriendlyOAuthCallbackErrorMessage(rawMessage) {
+  const decoded = decodeOAuthErrorMessage(rawMessage);
+  const normalized = decoded.toLowerCase();
+  if (!decoded) {
+    return "";
+  }
+  if (
+    normalized.includes("unable to exchange external code")
+    || normalized.includes("invalid_client")
+    || normalized.includes("unauthorized")
+  ) {
+    return "Google sign-in is not configured correctly in Supabase (invalid Google OAuth client credentials).";
+  }
+  return decoded;
+}
+
+function parseOAuthHashParams(hashValue) {
+  const rawHash = String(hashValue || "").replace(/^#/, "").trim();
+  if (!rawHash || !rawHash.includes("=")) {
+    return new URLSearchParams();
+  }
+  return new URLSearchParams(rawHash);
+}
+
+function getOAuthCallbackParams(url) {
+  const params = new URLSearchParams(url.search || "");
+  const hashParams = parseOAuthHashParams(url.hash);
+  hashParams.forEach((value, key) => {
+    if (!params.has(key)) {
+      params.set(key, value);
+    }
+  });
+  return params;
+}
+
+function clearAuthCallbackParams() {
   let currentUrl;
   try {
     currentUrl = new URL(window.location.href);
@@ -904,14 +946,28 @@ function clearAuthCallbackQueryParams() {
     return;
   }
 
-  let changed = false;
+  let searchChanged = false;
   OAUTH_CALLBACK_QUERY_KEYS.forEach((key) => {
     if (currentUrl.searchParams.has(key)) {
       currentUrl.searchParams.delete(key);
-      changed = true;
+      searchChanged = true;
     }
   });
-  if (!changed) {
+
+  const hashParams = parseOAuthHashParams(currentUrl.hash);
+  let hashChanged = false;
+  OAUTH_CALLBACK_QUERY_KEYS.forEach((key) => {
+    if (hashParams.has(key)) {
+      hashParams.delete(key);
+      hashChanged = true;
+    }
+  });
+  if (hashChanged) {
+    const nextHash = hashParams.toString();
+    currentUrl.hash = nextHash ? `#${nextHash}` : "";
+  }
+
+  if (!searchChanged && !hashChanged) {
     return;
   }
 
@@ -932,23 +988,26 @@ async function resolveSupabaseAuthCallback(authClient) {
     return;
   }
 
-  const hasCallbackParams = [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackUrl.searchParams.has(key));
+  const callbackParams = getOAuthCallbackParams(callbackUrl);
+  const hasCallbackParams = [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackParams.has(key));
   if (!hasCallbackParams) {
     return;
   }
 
-  const callbackError = decodeOAuthErrorMessage(
-    callbackUrl.searchParams.get("error_description") || callbackUrl.searchParams.get("error"),
+  const callbackError = getFriendlyOAuthCallbackErrorMessage(
+    callbackParams.get("error_description") || callbackParams.get("error"),
   );
   if (callbackError) {
-    clearAuthCallbackQueryParams();
+    clearAuthCallbackParams();
     toast(callbackError);
     return;
   }
 
-  const hasCode = Boolean(callbackUrl.searchParams.get("code"));
+  const code = String(callbackParams.get("code") || "").trim();
+  const oauthState = String(callbackParams.get("state") || "").trim();
+  const hasCode = Boolean(code);
   if (!hasCode) {
-    clearAuthCallbackQueryParams();
+    clearAuthCallbackParams();
     return;
   }
 
@@ -958,14 +1017,21 @@ async function resolveSupabaseAuthCallback(authClient) {
     .catch(() => false);
 
   if (!hasActiveSession && typeof authClient.auth.exchangeCodeForSession === "function") {
-    const { error } = await authClient.auth.exchangeCodeForSession(callbackUrl.toString());
+    const exchangeUrl = new URL(callbackUrl.toString());
+    exchangeUrl.search = "";
+    exchangeUrl.hash = "";
+    exchangeUrl.searchParams.set("code", code);
+    if (oauthState) {
+      exchangeUrl.searchParams.set("state", oauthState);
+    }
+    const { error } = await authClient.auth.exchangeCodeForSession(exchangeUrl.toString());
     if (error) {
       console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
       toast(error.message || "Google sign-in callback failed. Please try again.");
     }
   }
 
-  clearAuthCallbackQueryParams();
+  clearAuthCallbackParams();
 }
 
 async function initSupabaseAuth() {
@@ -978,7 +1044,7 @@ async function initSupabaseAuth() {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
       },
     });
     supabaseAuth.enabled = true;
@@ -1001,8 +1067,8 @@ async function initSupabaseAuth() {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
       if (localUser && isGoogleOnboardingRequired(localUser)) {
-        if (state.route !== "complete-profile") {
-          navigate("complete-profile");
+        if (state.route !== "signup") {
+          navigate("signup");
         } else {
           state.skipNextRouteAnimation = true;
           render();
@@ -1055,8 +1121,8 @@ async function initSupabaseAuth() {
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
         if (localUser && isGoogleOnboardingRequired(localUser)) {
-          if (state.route !== "complete-profile") {
-            navigate("complete-profile");
+          if (state.route !== "signup") {
+            navigate("signup");
           } else {
             state.skipNextRouteAnimation = true;
             render();
@@ -1082,7 +1148,7 @@ async function initSupabaseAuth() {
           return;
         }
         if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
-          navigate(isGoogleOnboardingRequired(localUser) ? "complete-profile" : localUser.role === "admin" ? "admin" : "dashboard");
+          navigate(isGoogleOnboardingRequired(localUser) ? "signup" : localUser.role === "admin" ? "admin" : "dashboard");
         }
         await ensureRelationalSyncReady().catch((syncError) => {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
@@ -1097,7 +1163,7 @@ async function initSupabaseAuth() {
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
           const current = getCurrentUser();
           if (current) {
-            navigate(isGoogleOnboardingRequired(current) ? "complete-profile" : current.role === "admin" ? "admin" : "dashboard");
+            navigate(isGoogleOnboardingRequired(current) ? "signup" : current.role === "admin" ? "admin" : "dashboard");
             return;
           }
         }
@@ -1317,6 +1383,19 @@ function isGoogleOnboardingRequired(user) {
     return true;
   }
   return !hasCompleteStudentProfile(user);
+}
+
+function isGoogleSignupCompletionFlow(user) {
+  if (!user) {
+    return false;
+  }
+  if (getAuthProviderFromUser(user) !== "google") {
+    return false;
+  }
+  if (!hasSupabaseManagedIdentity(user)) {
+    return false;
+  }
+  return isGoogleOnboardingRequired(user);
 }
 
 function getUserProfileId(user) {
@@ -4334,13 +4413,14 @@ function render() {
     "admin",
   ];
   const authEntryRoutes = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
+  const googleSignupOnboarding = isGoogleSignupCompletionFlow(user);
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
   }
 
-  if (user && isGoogleOnboardingRequired(user) && state.route !== "complete-profile") {
-    state.route = "complete-profile";
+  if (googleSignupOnboarding && state.route !== "signup") {
+    state.route = "signup";
   }
 
   if (user && state.route === "complete-profile" && !isGoogleOnboardingRequired(user)) {
@@ -4358,7 +4438,7 @@ function render() {
     toast("Your account is pending admin approval.");
   }
 
-  if (user && authEntryRoutes.has(state.route)) {
+  if (user && authEntryRoutes.has(state.route) && !(state.route === "signup" && googleSignupOnboarding)) {
     state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
@@ -4370,6 +4450,7 @@ function render() {
   if (
     user?.role === "student"
     && state.route !== "complete-profile"
+    && state.route !== "signup"
     && !["session", "review"].includes(state.route)
     && shouldRefreshStudentData(user)
   ) {
@@ -4842,9 +4923,75 @@ function renderAuth(mode) {
   }
 
   if (mode === "signup") {
-    const defaultYear = 1;
-    const defaultSemester = 1;
+    const currentUser = getCurrentUser();
+    const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(currentUser);
+    const defaultYear = sanitizeAcademicYear(currentUser?.academicYear || 1);
+    const defaultSemester = sanitizeAcademicSemester(currentUser?.academicSemester || 1);
     const defaultCourses = getCurriculumCourses(defaultYear, defaultSemester);
+    const preferredCourses = Array.isArray(currentUser?.assignedCourses)
+      ? currentUser.assignedCourses.filter((course) => defaultCourses.includes(course))
+      : [];
+    const initiallyCheckedCourses = preferredCourses.length ? preferredCourses : defaultCourses;
+
+    if (isGoogleOnboardingFlow) {
+      return `
+        <section class="panel" style="max-width: 680px; margin-inline: auto;">
+          <h2 class="title">Create Account</h2>
+          <p class="subtle">Complete your Google sign-up details. Name and email are locked to your Google account.</p>
+          <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+            <div class="form-row">
+              <label>Full name <input name="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
+              <label>Email <input type="email" name="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
+            </div>
+            <div class="form-row">
+              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(currentUser?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+            </div>
+            <div class="form-row">
+              <label>Year
+                <select name="academicYear" id="signup-academic-year">
+                  <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
+                  <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
+                  <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
+                  <option value="4" ${defaultYear === 4 ? "selected" : ""}>Year 4</option>
+                  <option value="5" ${defaultYear === 5 ? "selected" : ""}>Year 5</option>
+                </select>
+              </label>
+              <label>Semester
+                <select name="academicSemester" id="signup-academic-semester">
+                  <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
+                  <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
+                </select>
+              </label>
+            </div>
+            <div class="signup-course-field">
+              <p class="signup-course-label">Courses (from selected year and semester)</p>
+              <div id="signup-course-options" class="signup-course-grid">
+                ${defaultCourses
+                  .map(
+                    (course) => `
+                      <label class="admin-course-check">
+                        <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" ${initiallyCheckedCourses.includes(course) ? "checked" : ""} />
+                        <span>${escapeHtml(course)}</span>
+                      </label>
+                    `,
+                  )
+                  .join("")}
+              </div>
+              <small id="signup-course-help" class="subtle">Choose one or more courses.</small>
+            </div>
+            <div class="stack">
+              <button class="btn ghost" type="button" id="signup-select-all-courses">Select all</button>
+              <button class="btn ghost" type="button" id="signup-clear-courses">Clear</button>
+            </div>
+            <div class="stack">
+              <button class="btn" type="submit">Create account</button>
+              <button class="btn ghost" type="button" data-action="logout">Cancel</button>
+            </div>
+          </form>
+        </section>
+      `;
+    }
+
     return `
       <section class="panel" style="max-width: 680px; margin-inline: auto;">
         <h2 class="title">Create Account</h2>
@@ -4869,17 +5016,17 @@ function renderAuth(mode) {
           <div class="form-row">
             <label>Year
               <select name="academicYear" id="signup-academic-year">
-                <option value="1">Year 1</option>
-                <option value="2">Year 2</option>
-                <option value="3">Year 3</option>
-                <option value="4">Year 4</option>
-                <option value="5">Year 5</option>
+                <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
+                <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
+                <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
+                <option value="4" ${defaultYear === 4 ? "selected" : ""}>Year 4</option>
+                <option value="5" ${defaultYear === 5 ? "selected" : ""}>Year 5</option>
               </select>
             </label>
             <label>Semester
               <select name="academicSemester" id="signup-academic-semester">
-                <option value="1">Semester 1</option>
-                <option value="2">Semester 2</option>
+                <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
+                <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
               </select>
             </label>
           </div>
@@ -5063,6 +5210,11 @@ function wireAuth(mode) {
 
   if (mode === "signup") {
     const form = document.getElementById("signup-form");
+    if (!form) {
+      return;
+    }
+    const onboardingUser = getCurrentUser();
+    const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(onboardingUser);
     const googleButton = document.getElementById("signup-google-btn");
     const yearSelect = document.getElementById("signup-academic-year");
     const semesterSelect = document.getElementById("signup-academic-semester");
@@ -5070,29 +5222,31 @@ function wireAuth(mode) {
     const courseHelpEl = document.getElementById("signup-course-help");
     const selectAllCoursesBtn = document.getElementById("signup-select-all-courses");
     const clearCoursesBtn = document.getElementById("signup-clear-courses");
-    googleButton?.addEventListener("click", async () => {
-      if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
-        return;
-      }
-      const authClient = getSupabaseAuthClient();
-      if (!authClient) {
-        toast("Supabase auth is not configured. Google signup is unavailable.");
-        return;
-      }
-      googleButton.dataset.submitting = "1";
-      lockAuthActionButton(googleButton, true, "Redirecting...");
-      try {
-        const outcome = await startGoogleOAuthSignIn(authClient);
-        if (!outcome.ok) {
-          toast(outcome.message || "Google signup failed. Please try again.");
+    if (!isGoogleOnboardingFlow) {
+      googleButton?.addEventListener("click", async () => {
+        if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
+          return;
         }
-      } catch (error) {
-        toast(error?.message || "Google signup failed. Please try again.");
-      } finally {
-        googleButton.dataset.submitting = "0";
-        lockAuthActionButton(googleButton, false);
-      }
-    });
+        const authClient = getSupabaseAuthClient();
+        if (!authClient) {
+          toast("Supabase auth is not configured. Google signup is unavailable.");
+          return;
+        }
+        googleButton.dataset.submitting = "1";
+        lockAuthActionButton(googleButton, true, "Redirecting...");
+        try {
+          const outcome = await startGoogleOAuthSignIn(authClient);
+          if (!outcome.ok) {
+            toast(outcome.message || "Google signup failed. Please try again.");
+          }
+        } catch (error) {
+          toast(error?.message || "Google signup failed. Please try again.");
+        } finally {
+          googleButton.dataset.submitting = "0";
+          lockAuthActionButton(googleButton, false);
+        }
+      });
+    }
 
     const getSelectedSignupCourses = () =>
       Array.from(form?.querySelectorAll("input[name='signupCourses']:checked") || []).map((input) => input.value);
@@ -5142,7 +5296,10 @@ function wireAuth(mode) {
       });
     });
 
-    renderSignupCourseOptions();
+    const preferredCourses = isGoogleOnboardingFlow && Array.isArray(onboardingUser?.assignedCourses)
+      ? onboardingUser.assignedCourses
+      : [];
+    renderSignupCourseOptions(preferredCourses);
 
     form?.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -5153,16 +5310,82 @@ function wireAuth(mode) {
       const users = getUsers();
       const name = String(data.get("name") || "").trim();
       const email = String(data.get("email") || "").trim().toLowerCase();
-      const password = String(data.get("password") || "");
-      const confirmPassword = String(data.get("confirmPassword") || "");
       const phone = String(data.get("phone") || "").trim();
       const normalizedPhoneDigits = phone.replace(/\D/g, "");
-      const inviteCode = String(data.get("inviteCode") || "").trim();
       const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
       const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
       const selectedCourses = getSelectedSignupCourses().filter((course) => availableCourses.includes(course));
       const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+      if (isGoogleOnboardingFlow) {
+        if (!name || !email || !phone) {
+          toast("Name, email, and phone number are required.");
+          return;
+        }
+        if (!emailIsValid) {
+          toast("Please enter a valid email address.");
+          return;
+        }
+        if (normalizedPhoneDigits.length < 8) {
+          toast("Phone number is required and must be valid.");
+          return;
+        }
+        if (!selectedCourses.length) {
+          toast("Select at least one course for your enrollment.");
+          return;
+        }
+
+        const idx = users.findIndex(
+          (entry) =>
+            entry.id === onboardingUser?.id
+            || (onboardingUser?.supabaseAuthId && entry.supabaseAuthId === onboardingUser.supabaseAuthId)
+            || entry.email.toLowerCase() === email,
+        );
+        if (idx === -1) {
+          toast("Google account profile was not found. Please sign in again.");
+          navigate("login");
+          return;
+        }
+
+        lockAuthForm(form, true, "Creating account...");
+        try {
+          users[idx].name = onboardingUser?.name || name;
+          users[idx].email = onboardingUser?.email || email;
+          users[idx].phone = phone;
+          users[idx].role = "student";
+          users[idx].academicYear = academicYear;
+          users[idx].academicSemester = academicSemester;
+          users[idx].assignedCourses = selectedCourses;
+          users[idx].isApproved = false;
+          users[idx].approvedAt = null;
+          users[idx].approvedBy = null;
+          users[idx].profileCompleted = true;
+          users[idx].authProvider = "google";
+
+          save(STORAGE_KEYS.users, users);
+          await syncUsersBackupState(users).catch(() => {});
+          await ensureRelationalSyncReady().catch(() => {});
+          await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
+            console.warn("Google signup profile sync failed.", error?.message || error);
+          });
+
+          const authClient = getSupabaseAuthClient();
+          if (authClient) {
+            await authClient.auth.signOut().catch(() => {});
+          }
+          removeStorageKey(STORAGE_KEYS.currentUserId);
+          toast("Account created. Await admin approval before first login.");
+          navigate("login");
+        } finally {
+          lockAuthForm(form, false);
+        }
+        return;
+      }
+
+      const password = String(data.get("password") || "");
+      const confirmPassword = String(data.get("confirmPassword") || "");
+      const inviteCode = String(data.get("inviteCode") || "").trim();
 
       if (!name || !email || !password || !phone) {
         toast("Name, email, password, and phone number are required.");
