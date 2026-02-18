@@ -13,6 +13,7 @@
     "login",
     "signup",
     "forgot",
+    "complete-profile",
     "dashboard",
     "create-test",
     "qbank",

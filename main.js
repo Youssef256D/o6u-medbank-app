@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.3").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -36,6 +36,7 @@ const KNOWN_ROUTES = new Set([
   "login",
   "signup",
   "forgot",
+  "complete-profile",
   "dashboard",
   "create-test",
   "qbank",
@@ -304,7 +305,10 @@ function warnStorageFallback(error) {
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
 const DEMO_STUDENT_EMAIL = "student@o6umed.local";
-const FORCED_ADMIN_EMAILS = new Set(["code.youssefaayoub@gmail.com"]);
+const FORCED_ADMIN_EMAILS = new Set([
+  "code.youssefaayoub@gmail.com",
+  "code.youssefayoub@gmail.com",
+]);
 
 const SAMPLE_QUESTIONS = [
   {
@@ -900,6 +904,15 @@ async function initSupabaseAuth() {
       await ensureRelationalSyncReady().catch((syncError) => {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
+      if (localUser && isGoogleOnboardingRequired(localUser)) {
+        if (state.route !== "complete-profile") {
+          navigate("complete-profile");
+        } else {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
+      }
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
@@ -937,6 +950,15 @@ async function initSupabaseAuth() {
         let localUser = upsertLocalUserFromAuth(session.user);
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
+        if (localUser && isGoogleOnboardingRequired(localUser)) {
+          if (state.route !== "complete-profile") {
+            navigate("complete-profile");
+          } else {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+          return;
+        }
         if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
           removeStorageKey(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
@@ -956,7 +978,7 @@ async function initSupabaseAuth() {
           return;
         }
         if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
-          navigate(localUser.role === "admin" ? "admin" : "dashboard");
+          navigate(isGoogleOnboardingRequired(localUser) ? "complete-profile" : localUser.role === "admin" ? "admin" : "dashboard");
         }
         await ensureRelationalSyncReady().catch((syncError) => {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
@@ -971,7 +993,7 @@ async function initSupabaseAuth() {
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
           const current = getCurrentUser();
           if (current) {
-            navigate(current.role === "admin" ? "admin" : "dashboard");
+            navigate(isGoogleOnboardingRequired(current) ? "complete-profile" : current.role === "admin" ? "admin" : "dashboard");
             return;
           }
         }
@@ -1000,6 +1022,7 @@ async function initSupabaseAuth() {
         state.adminPresenceLastSyncAt = 0;
         removeStorageKey(STORAGE_KEYS.currentUserId);
         const privateRoutes = new Set([
+          "complete-profile",
           "dashboard",
           "create-test",
           "qbank",
@@ -1082,11 +1105,15 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const semester =
     role === "student" ? sanitizeAcademicSemester(profile.academic_semester || localUser?.academicSemester || 1) : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
+  const profilePhone = String(profile.phone || "").trim();
+  const profileHasStudentCompletion = role !== "student"
+    ? true
+    : profilePhone.replace(/\D/g, "").length >= 8 && Number(profile.academic_year) >= 1 && Number(profile.academic_semester) >= 1;
 
   const updatedUser = upsertLocalUserFromAuth(authUser, {
     name: String(profile.full_name || "").trim() || localUser?.name || "Student",
     email: normalizedEmail,
-    phone: String(profile.phone || "").trim(),
+    phone: profilePhone,
     role,
     academicYear: year,
     academicSemester: semester,
@@ -1094,6 +1121,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     approvedAt: profile.approved ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: profile.approved ? localUser?.approvedBy || "admin" : null,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
+    profileCompleted: profileHasStudentCompletion,
   });
   return { user: updatedUser, approvalChecked: true };
 }
@@ -1113,6 +1141,48 @@ function isUserAccessApproved(user) {
     return true;
   }
   return user.isApproved !== false;
+}
+
+function getAuthProviderFromAuthUser(authUser) {
+  const appProvider = String(authUser?.app_metadata?.provider || "").trim().toLowerCase();
+  if (appProvider) {
+    return appProvider;
+  }
+  const identityProvider = String(authUser?.identities?.[0]?.provider || "").trim().toLowerCase();
+  if (identityProvider) {
+    return identityProvider;
+  }
+  return "";
+}
+
+function getAuthProviderFromUser(user) {
+  return String(user?.authProvider || "").trim().toLowerCase();
+}
+
+function hasCompleteStudentProfile(user) {
+  if (!user || user.role !== "student") {
+    return true;
+  }
+  const phoneDigits = String(user.phone || "").replace(/\D/g, "");
+  const year = Number(user.academicYear);
+  const semester = Number(user.academicSemester);
+  return phoneDigits.length >= 8 && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
+}
+
+function isGoogleOnboardingRequired(user) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  if (getAuthProviderFromUser(user) !== "google") {
+    return false;
+  }
+  if (user.profileCompleted === true) {
+    return false;
+  }
+  if (user.profileCompleted === false) {
+    return true;
+  }
+  return !hasCompleteStudentProfile(user);
 }
 
 function getUserProfileId(user) {
@@ -1166,6 +1236,11 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
       ? "admin"
       : "student";
   const nextPhone = String(profileOverrides.phone || authUser.user_metadata?.phone_number || previous?.phone || "").trim();
+  const nextAuthProvider = String(
+    profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
+  )
+    .trim()
+    .toLowerCase();
 
   const nextYear =
     nextRole === "student"
@@ -1208,6 +1283,27 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
           ? previous.isApproved
           : false;
 
+  const hasExplicitProfileCompletionFlag = typeof profileOverrides.profileCompleted === "boolean";
+  const hasLegacyProfileCompletionFlag = typeof previous?.profileCompleted === "boolean";
+  const metadataYear = profileOverrides.academicYear ?? authUser.user_metadata?.academic_year ?? previous?.academicYear ?? null;
+  const metadataSemester = profileOverrides.academicSemester
+    ?? authUser.user_metadata?.academic_semester
+    ?? previous?.academicSemester
+    ?? null;
+  const metadataHasEnrollment = metadataYear !== null && metadataYear !== undefined && metadataSemester !== null && metadataSemester !== undefined;
+  let nextProfileCompleted = nextRole === "admin";
+  if (nextRole === "student") {
+    if (hasExplicitProfileCompletionFlag) {
+      nextProfileCompleted = Boolean(profileOverrides.profileCompleted);
+    } else if (hasLegacyProfileCompletionFlag) {
+      nextProfileCompleted = Boolean(previous.profileCompleted);
+    } else if (nextAuthProvider !== "google") {
+      nextProfileCompleted = true;
+    } else {
+      nextProfileCompleted = nextPhone.replace(/\D/g, "").length >= 8 && metadataHasEnrollment;
+    }
+  }
+
   const nextUser = {
     id: authUser.id,
     name: nextName || fallbackName,
@@ -1224,6 +1320,8 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     academicSemester: nextRole === "student" ? nextSemester : null,
     createdAt: previous?.createdAt || nowISO(),
     supabaseAuthId: authUser.id,
+    authProvider: nextAuthProvider,
+    profileCompleted: nextProfileCompleted,
   };
 
   if (idx >= 0) {
@@ -4090,6 +4188,7 @@ function render() {
   }
 
   const privateRoutes = [
+    "complete-profile",
     "dashboard",
     "create-test",
     "qbank",
@@ -4104,6 +4203,14 @@ function render() {
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
+  }
+
+  if (user && isGoogleOnboardingRequired(user) && state.route !== "complete-profile") {
+    state.route = "complete-profile";
+  }
+
+  if (user && state.route === "complete-profile" && !isGoogleOnboardingRequired(user)) {
+    state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
   if (
@@ -4128,6 +4235,7 @@ function render() {
 
   if (
     user?.role === "student"
+    && state.route !== "complete-profile"
     && !["session", "review"].includes(state.route)
     && shouldRefreshStudentData(user)
   ) {
@@ -4185,6 +4293,10 @@ function render() {
     case "forgot":
       appEl.innerHTML = renderAuth("forgot");
       wireAuth("forgot");
+      break;
+    case "complete-profile":
+      appEl.innerHTML = renderCompleteProfile();
+      wireCompleteProfile();
       break;
     case "dashboard":
       appEl.innerHTML = renderDashboard();
@@ -5036,6 +5148,150 @@ function wireAuth(mode) {
       toast("Supabase auth is not configured. Password reset email is unavailable.");
     } finally {
       lockAuthForm(form, false);
+    }
+  });
+}
+
+function renderCompleteProfile() {
+  const user = getCurrentUser();
+  const year = sanitizeAcademicYear(user?.academicYear || 1);
+  const semester = sanitizeAcademicSemester(user?.academicSemester || 1);
+  const courses = getCurriculumCourses(year, semester);
+
+  return `
+    <section class="panel" style="max-width: 680px; margin-inline: auto;">
+      <h2 class="title">Complete Your Account</h2>
+      <p class="subtle">Before admin review, add your phone number and enrollment details for Google sign-in.</p>
+      <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+        <div class="form-row">
+          <label>Year
+            <select name="academicYear" id="complete-profile-year">
+              ${[1, 2, 3, 4, 5]
+                .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
+                .join("")}
+            </select>
+          </label>
+          <label>Semester
+            <select name="academicSemester" id="complete-profile-semester">
+              <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
+              <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
+            </select>
+          </label>
+        </div>
+        <div class="signup-course-field">
+          <p class="signup-course-label">Courses for selected year/semester</p>
+          <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.join(", "))}</small>
+        </div>
+        <div class="stack">
+          <button class="btn" type="submit">Submit For Approval</button>
+          <button class="btn ghost" type="button" data-action="logout">Cancel</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function wireCompleteProfile() {
+  const form = document.getElementById("complete-profile-form");
+  if (!form) {
+    return;
+  }
+
+  const yearSelect = document.getElementById("complete-profile-year");
+  const semesterSelect = document.getElementById("complete-profile-semester");
+  const coursesEl = document.getElementById("complete-profile-courses");
+  const submitButton = form.querySelector('button[type="submit"]');
+  const setSubmitting = (submitting) => {
+    form.dataset.submitting = submitting ? "1" : "0";
+    if (!submitButton) {
+      return;
+    }
+    if (!submitButton.dataset.baseLabel) {
+      submitButton.dataset.baseLabel = submitButton.textContent || "";
+    }
+    submitButton.disabled = submitting;
+    submitButton.textContent = submitting ? "Submitting..." : submitButton.dataset.baseLabel;
+  };
+
+  const updateCoursesPreview = () => {
+    const year = sanitizeAcademicYear(yearSelect?.value || 1);
+    const semester = sanitizeAcademicSemester(semesterSelect?.value || 1);
+    const courses = getCurriculumCourses(year, semester);
+    if (coursesEl) {
+      coursesEl.textContent = courses.length ? courses.join(", ") : "No courses available for this selection.";
+    }
+  };
+
+  yearSelect?.addEventListener("change", updateCoursesPreview);
+  semesterSelect?.addEventListener("change", updateCoursesPreview);
+  updateCoursesPreview();
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (form.dataset.submitting === "1") {
+      return;
+    }
+
+    const current = getCurrentUser();
+    if (!current) {
+      navigate("login");
+      return;
+    }
+
+    const data = new FormData(form);
+    const phone = String(data.get("phone") || "").trim();
+    const phoneDigits = phone.replace(/\D/g, "");
+    const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
+    const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
+    const assignedCourses = getCurriculumCourses(academicYear, academicSemester);
+
+    if (phoneDigits.length < 8) {
+      toast("Please enter a valid phone number.");
+      return;
+    }
+    if (!assignedCourses.length) {
+      toast("No courses are available for this year and semester.");
+      return;
+    }
+
+    const users = getUsers();
+    const idx = users.findIndex((entry) => entry.id === current.id);
+    if (idx === -1) {
+      toast("Account not found. Please log in again.");
+      navigate("login");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      users[idx].phone = phone;
+      users[idx].role = "student";
+      users[idx].academicYear = academicYear;
+      users[idx].academicSemester = academicSemester;
+      users[idx].assignedCourses = assignedCourses;
+      users[idx].isApproved = false;
+      users[idx].approvedAt = null;
+      users[idx].approvedBy = null;
+      users[idx].profileCompleted = true;
+      users[idx].authProvider = users[idx].authProvider || "google";
+
+      save(STORAGE_KEYS.users, users);
+      await syncUsersBackupState(users).catch(() => {});
+      await ensureRelationalSyncReady().catch(() => {});
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
+        console.warn("Profile completion sync failed.", error?.message || error);
+      });
+
+      const authClient = getSupabaseAuthClient();
+      if (authClient) {
+        await authClient.auth.signOut().catch(() => {});
+      }
+      removeStorageKey(STORAGE_KEYS.currentUserId);
+      toast("Profile submitted. Your account is waiting admin approval.");
+      navigate("login");
+    } finally {
+      setSubmitting(false);
     }
   });
 }
