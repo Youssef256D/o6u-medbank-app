@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.6").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -916,6 +916,14 @@ async function initSupabaseAuth() {
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
+        toast("Your account is pending admin approval.");
+        if (state.route !== "login") {
+          navigate("login");
+        } else {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
       } else if (localUser) {
         if (await shouldForceRefreshAfterSignIn()) {
           return;
@@ -1109,6 +1117,17 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileHasStudentCompletion = role !== "student"
     ? true
     : profilePhone.replace(/\D/g, "").length >= 8 && Number(profile.academic_year) >= 1 && Number(profile.academic_semester) >= 1;
+  const authProvider = String(localUser?.authProvider || getAuthProviderFromAuthUser(authUser) || "").trim().toLowerCase();
+  let nextProfileCompleted = role !== "student";
+  if (role === "student") {
+    if (typeof localUser?.profileCompleted === "boolean") {
+      nextProfileCompleted = localUser.profileCompleted;
+    } else if (authProvider !== "google") {
+      nextProfileCompleted = profileHasStudentCompletion;
+    } else {
+      nextProfileCompleted = false;
+    }
+  }
 
   const updatedUser = upsertLocalUserFromAuth(authUser, {
     name: String(profile.full_name || "").trim() || localUser?.name || "Student",
@@ -1121,7 +1140,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     approvedAt: profile.approved ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: profile.approved ? localUser?.approvedBy || "admin" : null,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
-    profileCompleted: profileHasStudentCompletion,
+    profileCompleted: nextProfileCompleted,
   });
   return { user: updatedUser, approvalChecked: true };
 }
@@ -1184,6 +1203,9 @@ function hasCompleteStudentProfile(user) {
 
 function isGoogleOnboardingRequired(user) {
   if (!user || user.role !== "student") {
+    return false;
+  }
+  if (isUserAccessApproved(user)) {
     return false;
   }
   const provider = getAuthProviderFromUser(user);
@@ -1316,7 +1338,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     } else if (nextAuthProvider !== "google") {
       nextProfileCompleted = true;
     } else {
-      nextProfileCompleted = nextPhone.replace(/\D/g, "").length >= 8 && metadataHasEnrollment;
+      nextProfileCompleted = false;
     }
   }
 
