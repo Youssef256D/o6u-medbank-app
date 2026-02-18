@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.9").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.11").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -5282,8 +5282,8 @@ function renderAuth(mode) {
   if (mode === "signup") {
     const currentUser = getCurrentUser();
     const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(currentUser);
-    const defaultYear = normalizeAcademicYearOrNull(currentUser?.academicYear);
-    const defaultSemester = normalizeAcademicSemesterOrNull(currentUser?.academicSemester);
+    const defaultYear = isGoogleOnboardingFlow ? null : normalizeAcademicYearOrNull(currentUser?.academicYear);
+    const defaultSemester = isGoogleOnboardingFlow ? null : normalizeAcademicSemesterOrNull(currentUser?.academicSemester);
     const hasEnrollmentDefaults = defaultYear !== null && defaultSemester !== null;
     const defaultCourses = hasEnrollmentDefaults ? getCurriculumCourses(defaultYear, defaultSemester) : [];
     const preferredCourses = Array.isArray(currentUser?.assignedCourses)
@@ -5961,9 +5961,10 @@ function wireAuth(mode) {
 
 function renderCompleteProfile() {
   const user = getCurrentUser();
-  const year = sanitizeAcademicYear(user?.academicYear || 1);
-  const semester = sanitizeAcademicSemester(user?.academicSemester || 1);
-  const courses = getCurriculumCourses(year, semester);
+  const shouldForceEmptyEnrollment = isGoogleOnboardingRequired(user);
+  const year = shouldForceEmptyEnrollment ? null : normalizeAcademicYearOrNull(user?.academicYear);
+  const semester = shouldForceEmptyEnrollment ? null : normalizeAcademicSemesterOrNull(user?.academicSemester);
+  const courses = year !== null && semester !== null ? getCurriculumCourses(year, semester) : [];
 
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
@@ -5974,6 +5975,7 @@ function renderCompleteProfile() {
         <div class="form-row">
           <label>Year
             <select name="academicYear" id="complete-profile-year">
+              <option value="" ${year === null ? "selected" : ""}>Select year</option>
               ${[1, 2, 3, 4, 5]
                 .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
                 .join("")}
@@ -5981,6 +5983,7 @@ function renderCompleteProfile() {
           </label>
           <label>Semester
             <select name="academicSemester" id="complete-profile-semester">
+              <option value="" ${semester === null ? "selected" : ""}>Select semester</option>
               <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
               <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
             </select>
@@ -5988,7 +5991,7 @@ function renderCompleteProfile() {
         </div>
         <div class="signup-course-field">
           <p class="signup-course-label">Courses for selected year/semester</p>
-          <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.join(", "))}</small>
+          <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.length ? courses.join(", ") : "Choose year and semester first.")}</small>
         </div>
         <div class="stack">
           <button class="btn" type="submit">Submit For Approval</button>
@@ -6022,11 +6025,13 @@ function wireCompleteProfile() {
   };
 
   const updateCoursesPreview = () => {
-    const year = sanitizeAcademicYear(yearSelect?.value || 1);
-    const semester = sanitizeAcademicSemester(semesterSelect?.value || 1);
-    const courses = getCurriculumCourses(year, semester);
+    const year = normalizeAcademicYearOrNull(yearSelect?.value);
+    const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
+    const courses = year !== null && semester !== null ? getCurriculumCourses(year, semester) : [];
     if (coursesEl) {
-      coursesEl.textContent = courses.length ? courses.join(", ") : "No courses available for this selection.";
+      coursesEl.textContent = year !== null && semester !== null
+        ? (courses.length ? courses.join(", ") : "No courses available for this selection.")
+        : "Choose year and semester first.";
     }
   };
 
@@ -6050,8 +6055,12 @@ function wireCompleteProfile() {
     const phone = String(data.get("phone") || "").trim();
     const phoneValidation = validateAndNormalizePhoneNumber(phone);
     const normalizedPhone = phoneValidation.number;
-    const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
-    const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
+    const academicYear = normalizeAcademicYearOrNull(data.get("academicYear"));
+    const academicSemester = normalizeAcademicSemesterOrNull(data.get("academicSemester"));
+    if (academicYear === null || academicSemester === null) {
+      toast("You need to choose the year and semester.");
+      return;
+    }
     const assignedCourses = getCurriculumCourses(academicYear, academicSemester);
 
     if (!phoneValidation.ok) {
@@ -9348,13 +9357,12 @@ function wireAdmin() {
         return;
       }
 
-      let supabaseDeleteWarning = "";
       const targetProfileId = getUserProfileId(target);
       if (target.supabaseAuthId) {
         const deleteResult = await deleteSupabaseAuthUserAsAdmin(target.supabaseAuthId);
         if (!deleteResult.ok) {
-          supabaseDeleteWarning = deleteResult.message || "Could not delete user from Supabase Auth.";
-          console.warn("Supabase auth user delete warning:", supabaseDeleteWarning);
+          toast(`Could not delete user from Supabase Auth. ${deleteResult.message || "Unauthorized."}`);
+          return;
         }
       }
       if (targetProfileId) {
@@ -9384,11 +9392,7 @@ function wireAdmin() {
 
       try {
         await flushPendingSyncNow();
-        if (supabaseDeleteWarning) {
-          toast(`User removed. Supabase auth delete issue: ${supabaseDeleteWarning}`);
-        } else {
-          toast("User removed.");
-        }
+        toast("User removed.");
         render();
       } catch (syncError) {
         toast(`User removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
@@ -9933,6 +9937,61 @@ function getCurrentUser() {
   return getUsers().find((user) => user.id === userId) || null;
 }
 
+async function getValidSupabaseAccessToken(authClient) {
+  if (!authClient?.auth) {
+    return { ok: false, token: "", message: "Supabase auth client is not available." };
+  }
+
+  const readToken = async () => {
+    const { data: sessionData, error: sessionError } = await authClient.auth.getSession();
+    if (sessionError) {
+      return { ok: false, token: "", message: sessionError.message || "Could not verify Supabase session." };
+    }
+    const accessToken = String(sessionData?.session?.access_token || "").trim();
+    if (!accessToken) {
+      return {
+        ok: false,
+        token: "",
+        message: "No active Supabase session for admin delete. Log in with your Supabase admin account.",
+      };
+    }
+    return { ok: true, token: accessToken, message: "" };
+  };
+
+  let tokenResult = await readToken();
+  if (!tokenResult.ok) {
+    return tokenResult;
+  }
+
+  const validateToken = async (token) => {
+    try {
+      const { data, error } = await authClient.auth.getUser(token);
+      return !error && Boolean(data?.user?.id);
+    } catch {
+      return false;
+    }
+  };
+
+  if (await validateToken(tokenResult.token)) {
+    return tokenResult;
+  }
+
+  await authClient.auth.refreshSession().catch(() => {});
+  tokenResult = await readToken();
+  if (!tokenResult.ok) {
+    return tokenResult;
+  }
+  if (await validateToken(tokenResult.token)) {
+    return tokenResult;
+  }
+
+  return {
+    ok: false,
+    token: "",
+    message: "Supabase session expired. Log out and log in again, then retry.",
+  };
+}
+
 async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
   if (!targetAuthId) {
     return { ok: true };
@@ -9943,17 +10002,6 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
     return { ok: false, message: "Supabase auth client is not available." };
   }
 
-  const { data: sessionData, error: sessionError } = await authClient.auth.getSession();
-  if (sessionError) {
-    return { ok: false, message: sessionError.message || "Could not verify Supabase session." };
-  }
-  if (!sessionData?.session?.access_token) {
-    return {
-      ok: false,
-      message: "No active Supabase session for admin delete. Log in with a Supabase admin account.",
-    };
-  }
-
   try {
     if (!SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
       return {
@@ -9962,36 +10010,54 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
       };
     }
 
-    const response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${sessionData.session.access_token}`,
-        apikey: SUPABASE_CONFIG.anonKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ targetAuthId }),
-    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tokenResult = await getValidSupabaseAccessToken(authClient);
+      if (!tokenResult.ok) {
+        return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
+      }
 
-    let payload = null;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
+      const response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenResult.token}`,
+          apikey: SUPABASE_CONFIG.anonKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ targetAuthId }),
+      });
 
-    if (!response.ok) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+
+      if (response.ok && payload?.ok) {
+        return { ok: true };
+      }
+
       const details = String(payload?.error || payload?.message || "").trim();
+      if (response.status === 401 || response.status === 403) {
+        if (attempt === 0) {
+          await authClient.auth.refreshSession().catch(() => {});
+          continue;
+        }
+        return {
+          ok: false,
+          message: details || "Unauthorized. Log out and log in again with your Supabase admin account.",
+        };
+      }
+      if (/user not found/i.test(details)) {
+        return { ok: true };
+      }
       return {
         ok: false,
         message: details || `Admin delete request failed (${response.status}).`,
       };
     }
 
-    if (!payload?.ok) {
-      return { ok: false, message: payload?.error || "Supabase user delete failed." };
-    }
-
-    return { ok: true };
+    return { ok: false, message: "Could not delete Supabase user." };
   } catch (error) {
     return { ok: false, message: error?.message || "Unexpected error during Supabase auth delete." };
   }
