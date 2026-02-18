@@ -931,6 +931,16 @@ function getFriendlyOAuthCallbackErrorMessage(rawMessage) {
   if (!decoded) {
     return "";
   }
+  if (normalized.includes("access_denied")) {
+    return "Google sign-in was canceled or denied. Please try again.";
+  }
+  if (
+    normalized.includes("code verifier")
+    || normalized.includes("invalid_grant")
+    || normalized.includes("invalid request")
+  ) {
+    return "Google sign-in session expired. Please start again using Continue with Google.";
+  }
   if (
     normalized.includes("unable to exchange external code")
     || normalized.includes("invalid_client")
@@ -1077,13 +1087,8 @@ async function resolveSupabaseAuthCallback(authClient) {
     return "error";
   }
 
-  const hasActiveSession = await authClient.auth
-    .getSession()
-    .then(({ data }) => Boolean(data?.session?.user))
-    .catch(() => false);
-
   let exchangeFailed = false;
-  if (!hasActiveSession && typeof authClient.auth.exchangeCodeForSession === "function") {
+  if (typeof authClient.auth.exchangeCodeForSession === "function") {
     const exchangeUrl = new URL(callbackUrl.toString());
     exchangeUrl.search = "";
     exchangeUrl.hash = "";
@@ -1102,6 +1107,15 @@ async function resolveSupabaseAuthCallback(authClient) {
 
   clearAuthCallbackParams();
   return exchangeFailed ? "error" : "processed";
+}
+
+function getKnownAuthProviderByEmail(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const knownUser = getUsers().find((entry) => String(entry?.email || "").trim().toLowerCase() === normalized);
+  return getAuthProviderFromUser(knownUser);
 }
 
 async function initSupabaseAuth() {
@@ -5470,12 +5484,22 @@ function wireAuth(mode) {
             return;
           }
 
+          const knownProvider = getKnownAuthProviderByEmail(email);
+          if (knownProvider === "google") {
+            toast("This account uses Google sign-in. Use Continue with Google.");
+            return;
+          }
           toast(error?.message || "Invalid credentials.");
           return;
         }
 
         const user = getUsers().find((candidate) => candidate.email.toLowerCase() === email && candidate.password === password);
         if (!user) {
+          const knownProvider = getKnownAuthProviderByEmail(email);
+          if (knownProvider === "google") {
+            toast("This account uses Google sign-in. Use Continue with Google.");
+            return;
+          }
           toast("Invalid credentials.");
           return;
         }
@@ -8427,6 +8451,7 @@ function renderAdmin() {
     ? new Date(state.adminDataLastSyncAt).toLocaleTimeString()
     : "Not yet";
   const adminSyncBusy = Boolean(state.adminDataRefreshing);
+  const canManualSupabaseSync = Boolean(getSupabaseAuthClient()) && isUuidValue(user?.supabaseAuthId);
 
   return `
     <section class="panel admin-shell">
@@ -8442,9 +8467,10 @@ function renderAdmin() {
         </div>
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
-          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy ? "disabled" : ""}>
+          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy || !canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
             ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing...</span>` : "Sync from Supabase"}
           </button>
+          ${!canManualSupabaseSync ? '<small class="subtle">Supabase sync requires an active Supabase admin session.</small>' : ""}
         </div>
       </aside>
 
@@ -8542,6 +8568,24 @@ function wireAdmin() {
   appEl.querySelector("[data-action='refresh-admin-data']")?.addEventListener("click", async () => {
     const currentUser = getCurrentUser();
     if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    const authClient = getSupabaseAuthClient();
+    if (!authClient || !isUuidValue(currentUser.supabaseAuthId)) {
+      const message = "No active Supabase admin session. Log out and sign in with your Supabase admin account.";
+      state.adminDataSyncError = message;
+      toast(message);
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentUser.supabaseAuthId) {
+      const message = "Supabase session expired. Please log out and sign in again.";
+      state.adminDataSyncError = message;
+      toast(message);
+      state.skipNextRouteAnimation = true;
+      render();
       return;
     }
     const synced = await refreshAdminDataSnapshot(currentUser, { force: true });
