@@ -68,6 +68,7 @@ const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
+const OAUTH_CALLBACK_QUERY_KEYS = new Set(["code", "state", "error", "error_code", "error_description"]);
 const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
 
@@ -122,6 +123,7 @@ const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
   anonKey: window.__SUPABASE_CONFIG?.anonKey || "",
   enabled: window.__SUPABASE_CONFIG?.enabled !== false,
+  authRedirectUrl: window.__SUPABASE_CONFIG?.authRedirectUrl || "",
 };
 
 const SYNCABLE_STORAGE_KEYS = [
@@ -882,17 +884,111 @@ async function initSupabaseSync() {
   }
 }
 
+function decodeOAuthErrorMessage(rawMessage) {
+  const message = String(rawMessage || "").trim();
+  if (!message) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(message.replace(/\+/g, " "));
+  } catch {
+    return message;
+  }
+}
+
+function clearAuthCallbackQueryParams() {
+  let currentUrl;
+  try {
+    currentUrl = new URL(window.location.href);
+  } catch {
+    return;
+  }
+
+  let changed = false;
+  OAUTH_CALLBACK_QUERY_KEYS.forEach((key) => {
+    if (currentUrl.searchParams.has(key)) {
+      currentUrl.searchParams.delete(key);
+      changed = true;
+    }
+  });
+  if (!changed) {
+    return;
+  }
+
+  const query = currentUrl.searchParams.toString();
+  const nextUrl = `${currentUrl.pathname}${query ? `?${query}` : ""}${currentUrl.hash || ""}`;
+  window.history.replaceState(window.history.state, document.title, nextUrl);
+}
+
+async function resolveSupabaseAuthCallback(authClient) {
+  if (!authClient?.auth) {
+    return;
+  }
+
+  let callbackUrl;
+  try {
+    callbackUrl = new URL(window.location.href);
+  } catch {
+    return;
+  }
+
+  const hasCallbackParams = [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackUrl.searchParams.has(key));
+  if (!hasCallbackParams) {
+    return;
+  }
+
+  const callbackError = decodeOAuthErrorMessage(
+    callbackUrl.searchParams.get("error_description") || callbackUrl.searchParams.get("error"),
+  );
+  if (callbackError) {
+    clearAuthCallbackQueryParams();
+    toast(callbackError);
+    return;
+  }
+
+  const hasCode = Boolean(callbackUrl.searchParams.get("code"));
+  if (!hasCode) {
+    clearAuthCallbackQueryParams();
+    return;
+  }
+
+  const hasActiveSession = await authClient.auth
+    .getSession()
+    .then(({ data }) => Boolean(data?.session?.user))
+    .catch(() => false);
+
+  if (!hasActiveSession && typeof authClient.auth.exchangeCodeForSession === "function") {
+    const { error } = await authClient.auth.exchangeCodeForSession(callbackUrl.toString());
+    if (error) {
+      console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
+      toast(error.message || "Google sign-in callback failed. Please try again.");
+    }
+  }
+
+  clearAuthCallbackQueryParams();
+}
+
 async function initSupabaseAuth() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     return;
   }
 
   try {
-    supabaseAuth.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey);
+    supabaseAuth.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
     supabaseAuth.enabled = true;
     if (supabaseSync.enabled) {
       supabaseSync.client = supabaseAuth.client;
     }
+
+    await resolveSupabaseAuthCallback(supabaseAuth.client).catch((callbackError) => {
+      console.warn("Supabase auth callback handling failed.", callbackError?.message || callbackError);
+    });
 
     const { data, error } = await supabaseAuth.client.auth.getSession();
     if (error) {
@@ -4667,7 +4763,28 @@ function wireContact() {
 }
 
 function getAuthRedirectToUrl() {
-  return `${window.location.origin}${window.location.pathname}`;
+  const configured = String(SUPABASE_CONFIG.authRedirectUrl || "").trim();
+  if (configured) {
+    try {
+      const configuredUrl = new URL(configured, window.location.origin);
+      configuredUrl.search = "";
+      configuredUrl.hash = "";
+      configuredUrl.pathname = configuredUrl.pathname.replace(/\/index\.html$/i, "/");
+      return configuredUrl.toString();
+    } catch (error) {
+      console.warn("Invalid Supabase auth redirect URL override.", error?.message || error);
+    }
+  }
+
+  if (!/^https?:$/i.test(window.location.protocol)) {
+    return "";
+  }
+
+  const currentUrl = new URL(window.location.href);
+  currentUrl.search = "";
+  currentUrl.hash = "";
+  currentUrl.pathname = currentUrl.pathname.replace(/\/index\.html$/i, "/");
+  return currentUrl.toString();
 }
 
 async function startGoogleOAuthSignIn(authClient) {
@@ -4675,11 +4792,18 @@ async function startGoogleOAuthSignIn(authClient) {
     return { ok: false, message: "Supabase auth is not configured. Google sign-in is unavailable." };
   }
 
-  const { data, error } = await authClient.auth.signInWithOAuth({
+  const redirectTo = getAuthRedirectToUrl();
+  if (!redirectTo) {
+    return {
+      ok: false,
+      message: "Google sign-in requires an http(s) app URL. Open the deployed site URL and try again.",
+    };
+  }
+
+  const { error } = await authClient.auth.signInWithOAuth({
     provider: "google",
     options: {
-      redirectTo: getAuthRedirectToUrl(),
-      skipBrowserRedirect: true,
+      redirectTo,
       queryParams: {
         prompt: "select_account",
       },
@@ -4690,11 +4814,6 @@ async function startGoogleOAuthSignIn(authClient) {
     return { ok: false, message: error.message || "Could not start Google sign-in." };
   }
 
-  if (!data?.url) {
-    return { ok: false, message: "Could not start Google sign-in." };
-  }
-
-  window.location.assign(data.url);
   return { ok: true };
 }
 
