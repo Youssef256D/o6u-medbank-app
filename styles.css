@@ -62,6 +62,41 @@ body.is-admin-question-modal-open {
   z-index: -1;
 }
 
+body.is-google-auth-loading {
+  overflow: hidden;
+}
+
+.google-auth-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(16, 42, 67, 0.28);
+  backdrop-filter: blur(3px);
+}
+
+.google-auth-loading-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.58rem;
+  padding: 0.85rem 1.05rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow-soft);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.google-auth-loading-card .inline-loader {
+  width: 18px;
+  height: 18px;
+}
+
 .hidden {
   display: none !important;
 }

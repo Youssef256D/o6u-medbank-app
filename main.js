@@ -22,11 +22,13 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
+const googleAuthLoadingEl = document.getElementById("google-auth-loading");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
 const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
+const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
 const KNOWN_ROUTES = new Set([
   "landing",
   "features",
@@ -185,6 +187,7 @@ let sessionQuestionTransitionHandle = null;
 let lastRenderedSessionPointer = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
+let adminDashboardPollHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
@@ -759,6 +762,7 @@ async function init() {
   initVersionTracking();
   hydrateSessionUiPreferences();
   bindGlobalEvents();
+  syncGoogleOAuthLoadingUi();
   document.body.classList.add("is-routing");
   render();
 
@@ -919,6 +923,48 @@ function getFriendlyOAuthCallbackErrorMessage(rawMessage) {
   return decoded;
 }
 
+function isGoogleOAuthPendingState() {
+  return readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) === "1";
+}
+
+function syncGoogleOAuthLoadingUi() {
+  if (!googleAuthLoadingEl) {
+    return;
+  }
+  const pending = isGoogleOAuthPendingState();
+  googleAuthLoadingEl.classList.toggle("hidden", !pending);
+  googleAuthLoadingEl.setAttribute("aria-hidden", pending ? "false" : "true");
+  document.body.classList.toggle("is-google-auth-loading", pending);
+}
+
+function setGoogleOAuthPendingState(isPending) {
+  if (isPending) {
+    writeSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY, "1");
+  } else {
+    removeSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY);
+  }
+  syncGoogleOAuthLoadingUi();
+}
+
+function resolveGoogleOAuthPendingState(user, privateRoutes = []) {
+  const pending = isGoogleOAuthPendingState();
+  if (!pending) {
+    syncGoogleOAuthLoadingUi();
+    return;
+  }
+
+  const route = String(state.route || "").trim().toLowerCase();
+  const isPrivateRoute = Array.isArray(privateRoutes) && privateRoutes.includes(route);
+  const shouldClearForOnboarding = Boolean(user) && route === "signup" && isGoogleSignupCompletionFlow(user);
+  const shouldClearForSignedInRoute = Boolean(user) && isPrivateRoute;
+
+  if (shouldClearForOnboarding || shouldClearForSignedInRoute) {
+    setGoogleOAuthPendingState(false);
+    return;
+  }
+  syncGoogleOAuthLoadingUi();
+}
+
 function parseOAuthHashParams(hashValue) {
   const rawHash = String(hashValue || "").replace(/^#/, "").trim();
   if (!rawHash || !rawHash.includes("=")) {
@@ -978,37 +1024,39 @@ function clearAuthCallbackParams() {
 
 async function resolveSupabaseAuthCallback(authClient) {
   if (!authClient?.auth) {
-    return;
+    return "none";
   }
 
   let callbackUrl;
   try {
     callbackUrl = new URL(window.location.href);
   } catch {
-    return;
+    return "none";
   }
 
   const callbackParams = getOAuthCallbackParams(callbackUrl);
   const hasCallbackParams = [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackParams.has(key));
   if (!hasCallbackParams) {
-    return;
+    return "none";
   }
 
   const callbackError = getFriendlyOAuthCallbackErrorMessage(
     callbackParams.get("error_description") || callbackParams.get("error"),
   );
   if (callbackError) {
+    setGoogleOAuthPendingState(false);
     clearAuthCallbackParams();
     toast(callbackError);
-    return;
+    return "error";
   }
 
   const code = String(callbackParams.get("code") || "").trim();
   const oauthState = String(callbackParams.get("state") || "").trim();
   const hasCode = Boolean(code);
   if (!hasCode) {
+    setGoogleOAuthPendingState(false);
     clearAuthCallbackParams();
-    return;
+    return "error";
   }
 
   const hasActiveSession = await authClient.auth
@@ -1016,6 +1064,7 @@ async function resolveSupabaseAuthCallback(authClient) {
     .then(({ data }) => Boolean(data?.session?.user))
     .catch(() => false);
 
+  let exchangeFailed = false;
   if (!hasActiveSession && typeof authClient.auth.exchangeCodeForSession === "function") {
     const exchangeUrl = new URL(callbackUrl.toString());
     exchangeUrl.search = "";
@@ -1027,15 +1076,21 @@ async function resolveSupabaseAuthCallback(authClient) {
     const { error } = await authClient.auth.exchangeCodeForSession(exchangeUrl.toString());
     if (error) {
       console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
+      setGoogleOAuthPendingState(false);
       toast(error.message || "Google sign-in callback failed. Please try again.");
+      exchangeFailed = true;
     }
   }
 
   clearAuthCallbackParams();
+  return exchangeFailed ? "error" : "processed";
 }
 
 async function initSupabaseAuth() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
+    if (isGoogleOAuthPendingState()) {
+      setGoogleOAuthPendingState(false);
+    }
     return;
   }
 
@@ -1052,13 +1107,16 @@ async function initSupabaseAuth() {
       supabaseSync.client = supabaseAuth.client;
     }
 
-    await resolveSupabaseAuthCallback(supabaseAuth.client).catch((callbackError) => {
+    const callbackStatus = await resolveSupabaseAuthCallback(supabaseAuth.client).catch((callbackError) => {
       console.warn("Supabase auth callback handling failed.", callbackError?.message || callbackError);
+      setGoogleOAuthPendingState(false);
+      return "error";
     });
 
     const { data, error } = await supabaseAuth.client.auth.getSession();
     if (error) {
       console.warn("Supabase auth session bootstrap failed.", error.message);
+      setGoogleOAuthPendingState(false);
     } else if (data?.session?.user) {
       let localUser = upsertLocalUserFromAuth(data.session.user);
       const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
@@ -1067,6 +1125,7 @@ async function initSupabaseAuth() {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
       if (localUser && isGoogleOnboardingRequired(localUser)) {
+        setGoogleOAuthPendingState(false);
         if (state.route !== "signup") {
           navigate("signup");
         } else {
@@ -1076,6 +1135,7 @@ async function initSupabaseAuth() {
         return;
       }
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
+        setGoogleOAuthPendingState(false);
         removeStorageKey(STORAGE_KEYS.currentUserId);
         await supabaseAuth.client.auth.signOut().catch(() => {});
         toast("Your account is pending admin approval.");
@@ -1101,6 +1161,8 @@ async function initSupabaseAuth() {
           console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
         });
       }
+    } else if (isGoogleOAuthPendingState() && callbackStatus !== "processed") {
+      setGoogleOAuthPendingState(false);
     }
 
     if (supabaseAuthStateUnsubscribe) {
@@ -1121,6 +1183,7 @@ async function initSupabaseAuth() {
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
         if (localUser && isGoogleOnboardingRequired(localUser)) {
+          setGoogleOAuthPendingState(false);
           if (state.route !== "signup") {
             navigate("signup");
           } else {
@@ -1130,6 +1193,7 @@ async function initSupabaseAuth() {
           return;
         }
         if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
+          setGoogleOAuthPendingState(false);
           removeStorageKey(STORAGE_KEYS.currentUserId);
           if (event !== "SIGNED_OUT") {
             supabaseAuth.client.auth.signOut().catch((signOutError) => {
@@ -1176,12 +1240,14 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
+        setGoogleOAuthPendingState(false);
         const sessionCheck = await supabaseAuth.client.auth.getSession().catch(() => ({ data: { session: null } }));
         if (sessionCheck?.data?.session?.user) {
           return;
         }
         resetRelationalSyncState();
         clearAdminPresencePolling();
+        clearAdminDashboardPolling();
         syncPresenceRuntime(null);
         state.adminDataRefreshing = false;
         state.adminDataLastSyncAt = 0;
@@ -1216,6 +1282,7 @@ async function initSupabaseAuth() {
     }
   } catch (error) {
     console.warn("Supabase auth unavailable. Falling back to local auth only.", error);
+    setGoogleOAuthPendingState(false);
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
   }
@@ -3988,6 +4055,7 @@ function bindGlobalEvents() {
     markCurrentUserOffline().catch(() => {});
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
+    clearAdminDashboardPolling();
   });
 }
 
@@ -4031,6 +4099,43 @@ function clearAdminPresencePolling() {
     window.clearInterval(adminPresencePollHandle);
     adminPresencePollHandle = null;
   }
+}
+
+function clearAdminDashboardPolling() {
+  if (adminDashboardPollHandle) {
+    window.clearInterval(adminDashboardPollHandle);
+    adminDashboardPollHandle = null;
+  }
+}
+
+function ensureAdminDashboardPolling() {
+  if (adminDashboardPollHandle) {
+    return;
+  }
+  adminDashboardPollHandle = window.setInterval(() => {
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin" || state.route !== "admin" || state.adminPage !== "dashboard") {
+      clearAdminDashboardPolling();
+      return;
+    }
+    if (state.adminDataRefreshing) {
+      return;
+    }
+    refreshAdminDataSnapshot(currentUser, { force: true })
+      .then((ok) => {
+        if (!ok) {
+          return;
+        }
+        if (state.route !== "admin" || state.adminPage !== "dashboard") {
+          return;
+        }
+        state.skipNextRouteAnimation = true;
+        render();
+      })
+      .catch((error) => {
+        console.warn("Admin dashboard auto-refresh failed.", error?.message || error);
+      });
+  }, ADMIN_DATA_REFRESH_MS);
 }
 
 function shouldTreatPresenceAsOnline(row) {
@@ -4382,6 +4487,7 @@ function render() {
     state.adminPresenceRows = [];
     state.adminPresenceLastSyncAt = 0;
     clearAdminPresencePolling();
+    clearAdminDashboardPolling();
   }
   if (!user || user.role !== "student") {
     state.studentDataRefreshing = false;
@@ -4468,6 +4574,8 @@ function render() {
     state.route = "create-test";
   }
 
+  resolveGoogleOAuthPendingState(user, privateRoutes);
+
   const isExamWideRoute = state.route === "session" || state.route === "review";
   const isAdminRoute = state.route === "admin";
   document.body.classList.toggle("is-session-route", isExamWideRoute);
@@ -4476,6 +4584,11 @@ function render() {
   topbarEl?.classList.toggle("hidden", false);
 
   syncTopbar();
+  if (state.route === "admin" && user?.role === "admin" && state.adminPage === "dashboard") {
+    ensureAdminDashboardPolling();
+  } else {
+    clearAdminDashboardPolling();
+  }
   if (!(state.route === "admin" && state.adminPage === "activity")) {
     clearAdminPresencePolling();
   }
@@ -5106,16 +5219,20 @@ function wireAuth(mode) {
       }
       googleButton.dataset.submitting = "1";
       lockAuthActionButton(googleButton, true, "Redirecting...");
+      setGoogleOAuthPendingState(true);
       try {
         const outcome = await startGoogleOAuthSignIn(authClient);
         if (!outcome.ok) {
+          setGoogleOAuthPendingState(false);
+          googleButton.dataset.submitting = "0";
+          lockAuthActionButton(googleButton, false);
           toast(outcome.message || "Google login failed. Please try again.");
         }
       } catch (error) {
-        toast(error?.message || "Google login failed. Please try again.");
-      } finally {
+        setGoogleOAuthPendingState(false);
         googleButton.dataset.submitting = "0";
         lockAuthActionButton(googleButton, false);
+        toast(error?.message || "Google login failed. Please try again.");
       }
     });
 
@@ -5234,16 +5351,20 @@ function wireAuth(mode) {
         }
         googleButton.dataset.submitting = "1";
         lockAuthActionButton(googleButton, true, "Redirecting...");
+        setGoogleOAuthPendingState(true);
         try {
           const outcome = await startGoogleOAuthSignIn(authClient);
           if (!outcome.ok) {
+            setGoogleOAuthPendingState(false);
+            googleButton.dataset.submitting = "0";
+            lockAuthActionButton(googleButton, false);
             toast(outcome.message || "Google signup failed. Please try again.");
           }
         } catch (error) {
-          toast(error?.message || "Google signup failed. Please try again.");
-        } finally {
+          setGoogleOAuthPendingState(false);
           googleButton.dataset.submitting = "0";
           lockAuthActionButton(googleButton, false);
+          toast(error?.message || "Google signup failed. Please try again.");
         }
       });
     }
@@ -7326,6 +7447,7 @@ function wireAnalytics() {
 function renderProfile() {
   const user = getCurrentUser();
   const queue = load(STORAGE_KEYS.incorrectQueue, {})[user.id] || [];
+  const isGoogleAuthUser = getAuthProviderFromUser(user) === "google";
 
   return `
     <section class="panel">
@@ -7335,7 +7457,21 @@ function renderProfile() {
         <form id="profile-form" class="card">
           <h4>Account</h4>
           <label>Name <input name="name" value="${escapeHtml(user.name)}" required /></label>
-          <label>Email <input name="email" type="email" value="${escapeHtml(user.email)}" required /></label>
+          <label>
+            Email
+            <input
+              name="email"
+              type="email"
+              value="${escapeHtml(user.email)}"
+              ${isGoogleAuthUser ? "readonly aria-readonly=\"true\"" : ""}
+              required
+            />
+          </label>
+          ${
+            isGoogleAuthUser
+              ? `<p class="subtle" style="margin: -0.35rem 0 0;">Email is locked for Google sign-in accounts.</p>`
+              : ""
+          }
           <label>New password <input name="password" type="password" minlength="6" /></label>
           <button class="btn" type="submit">Save changes</button>
         </form>
@@ -7363,21 +7499,25 @@ function wireProfile() {
     const user = getCurrentUser();
     const users = getUsers();
     const data = new FormData(form);
+    const isGoogleAuthUser = getAuthProviderFromUser(user) === "google";
 
     const name = String(data.get("name") || "").trim();
-    const email = String(data.get("email") || "").trim().toLowerCase();
+    const requestedEmail = String(data.get("email") || "").trim().toLowerCase();
+    const email = isGoogleAuthUser ? String(user.email || "").trim().toLowerCase() : requestedEmail;
     const password = String(data.get("password") || "");
 
-    const emailConflict = users.some((entry) => entry.email.toLowerCase() === email && entry.id !== user.id);
-    if (emailConflict) {
-      toast("Email already used by another account.");
-      return;
+    if (!isGoogleAuthUser) {
+      const emailConflict = users.some((entry) => entry.email.toLowerCase() === email && entry.id !== user.id);
+      if (emailConflict) {
+        toast("Email already used by another account.");
+        return;
+      }
     }
 
     const authClient = getSupabaseAuthClient();
     if (authClient && user.supabaseAuthId) {
       const updates = { data: { full_name: name } };
-      if (email && email !== user.email) {
+      if (!isGoogleAuthUser && email && email !== user.email) {
         updates.email = email;
       }
       if (password) {
@@ -8053,6 +8193,10 @@ function renderAdmin() {
   const syncNotice = state.adminDataSyncError
     ? `<div class="card admin-section"><p class="subtle" style="margin:0;">${escapeHtml(state.adminDataSyncError)}</p></div>`
     : "";
+  const adminLastSyncLabel = state.adminDataLastSyncAt
+    ? new Date(state.adminDataLastSyncAt).toLocaleTimeString()
+    : "Not yet";
+  const adminSyncBusy = Boolean(state.adminDataRefreshing);
 
   return `
     <section class="panel admin-shell">
@@ -8065,6 +8209,12 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
           <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
+        </div>
+        <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
+          <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
+          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy ? "disabled" : ""}>
+            ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing...</span>` : "Sync from Supabase"}
+          </button>
         </div>
       </aside>
 
@@ -8157,6 +8307,24 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
     });
+  });
+
+  appEl.querySelector("[data-action='refresh-admin-data']")?.addEventListener("click", async () => {
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    const synced = await refreshAdminDataSnapshot(currentUser, { force: true });
+    if (state.adminPage === "activity") {
+      await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => {});
+    }
+    if (synced) {
+      toast("Admin data synced from Supabase.");
+    } else {
+      toast(state.adminDataSyncError || "Could not sync admin data from Supabase.");
+    }
+    state.skipNextRouteAnimation = true;
+    render();
   });
 
   if (state.adminPage === "activity") {
@@ -11422,7 +11590,9 @@ async function logout() {
 
   syncPresenceRuntime(null);
   clearAdminPresencePolling();
+  clearAdminDashboardPolling();
   removeStorageKey(STORAGE_KEYS.currentUserId);
+  setGoogleOAuthPendingState(false);
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
@@ -11515,6 +11685,8 @@ function toast(message) {
 
 function renderBootstrapFallback() {
   try {
+    setGoogleOAuthPendingState(false);
+    clearAdminDashboardPolling();
     document.body.classList.remove("is-routing");
     appEl.classList.remove("route-enter", "route-enter-active", "is-session", "is-admin");
     topbarEl?.classList.remove("hidden", "admin-only-header");
