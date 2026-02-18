@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.8").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -1145,7 +1145,17 @@ async function initSupabaseAuth() {
       return "error";
     });
 
-    const { data, error } = await supabaseAuth.client.auth.getSession();
+    let sessionResult = await supabaseAuth.client.auth.getSession();
+    if (!sessionResult?.error && callbackStatus === "processed" && !sessionResult?.data?.session?.user) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        sessionResult = await supabaseAuth.client.auth.getSession();
+        if (sessionResult?.data?.session?.user || sessionResult?.error) {
+          break;
+        }
+      }
+    }
+    const { data, error } = sessionResult;
     if (error) {
       console.warn("Supabase auth session bootstrap failed.", error.message);
       setGoogleOAuthPendingState(false);
@@ -1193,8 +1203,11 @@ async function initSupabaseAuth() {
           console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
         });
       }
-    } else if (isGoogleOAuthPendingState() && callbackStatus !== "processed") {
+    } else if (isGoogleOAuthPendingState()) {
       setGoogleOAuthPendingState(false);
+      if (callbackStatus === "processed") {
+        toast("Google sign-in did not complete. Please tap Continue with Google again.");
+      }
     }
 
     if (supabaseAuthStateUnsubscribe) {
