@@ -22,7 +22,7 @@ const publicNavEl = document.getElementById("public-nav");
 const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-17.6").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -1144,13 +1144,26 @@ function isUserAccessApproved(user) {
 }
 
 function getAuthProviderFromAuthUser(authUser) {
+  const appProviders = Array.isArray(authUser?.app_metadata?.providers)
+    ? authUser.app_metadata.providers.map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (appProviders.includes("google")) {
+    return "google";
+  }
+
+  const identityProviders = Array.isArray(authUser?.identities)
+    ? authUser.identities.map((identity) => String(identity?.provider || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (identityProviders.includes("google")) {
+    return "google";
+  }
+
   const appProvider = String(authUser?.app_metadata?.provider || "").trim().toLowerCase();
   if (appProvider) {
     return appProvider;
   }
-  const identityProvider = String(authUser?.identities?.[0]?.provider || "").trim().toLowerCase();
-  if (identityProvider) {
-    return identityProvider;
+  if (identityProviders.length) {
+    return identityProviders[0];
   }
   return "";
 }
@@ -1173,10 +1186,13 @@ function isGoogleOnboardingRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (getAuthProviderFromUser(user) !== "google") {
+  const provider = getAuthProviderFromUser(user);
+  const supabaseManaged = hasSupabaseManagedIdentity(user);
+  const enforceOnboarding = provider === "google" || (supabaseManaged && !provider);
+  if (!enforceOnboarding) {
     return false;
   }
-  if (user.profileCompleted === true) {
+  if (user.profileCompleted === true && hasCompleteStudentProfile(user)) {
     return false;
   }
   if (user.profileCompleted === false) {
