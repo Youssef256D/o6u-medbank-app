@@ -1534,6 +1534,15 @@ function hasCompleteStudentProfile(user) {
   return phoneDigits.length >= 8 && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
 }
 
+function getUserCreatedAtMs(user) {
+  const rawCreatedAt = String(user?.createdAt || "").trim();
+  if (!rawCreatedAt) {
+    return 0;
+  }
+  const parsed = Date.parse(rawCreatedAt);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function isGoogleOnboardingRequired(user) {
   if (!user || user.role !== "student") {
     return false;
@@ -7706,7 +7715,13 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "users") {
-    const users = getUsers().sort((a, b) => a.name.localeCompare(b.name));
+    const users = getUsers().sort((a, b) => {
+      const createdDiff = getUserCreatedAtMs(b) - getUserCreatedAtMs(a);
+      if (createdDiff !== 0) {
+        return createdDiff;
+      }
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = users
       .map((account) => {
