@@ -1408,9 +1408,12 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
   const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
   const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
+  const localHasCompleteProfile = hasCompleteStudentProfile(localUser);
+  const fallbackYear = localHasCompleteProfile ? normalizeAcademicYearOrNull(localUser?.academicYear) : null;
+  const fallbackSemester = localHasCompleteProfile ? normalizeAcademicSemesterOrNull(localUser?.academicSemester) : null;
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
-  const year = role === "student" ? profileYear : null;
-  const semester = role === "student" ? profileSemester : null;
+  const year = role === "student" ? (profileYear ?? fallbackYear) : null;
+  const semester = role === "student" ? (profileSemester ?? fallbackSemester) : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const profilePhone = String(profile.phone || "").trim();
   const autoApprovedFromProfile = shouldAutoApproveStudentAccess({
@@ -1600,7 +1603,10 @@ function validateAndNormalizePhoneNumber(rawPhone) {
 }
 
 function hasCompleteStudentProfile(user) {
-  if (!user || user.role !== "student") {
+  if (!user) {
+    return false;
+  }
+  if (user.role !== "student") {
     return true;
   }
   const phoneValidation = validateAndNormalizePhoneNumber(String(user.phone || ""));
@@ -2256,11 +2262,22 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
   const client = getRelationalClient();
   const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
   if (!client || !ids.length) {
-    return {};
+    return { coursesByUser: {}, termByUser: {} };
   }
 
   try {
     const enrollmentMap = Object.fromEntries(ids.map((id) => [id, []]));
+    const termStateByUser = Object.fromEntries(
+      ids.map((id) => [
+        id,
+        {
+          year: null,
+          semester: null,
+          hasTerm: false,
+          mixedTerms: false,
+        },
+      ]),
+    );
     const enrollmentRows = [];
     for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
       const { data, error } = await client
@@ -2284,7 +2301,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
     for (const courseBatch of splitIntoBatches(courseIds, RELATIONAL_IN_BATCH_SIZE)) {
       const { data, error } = await client
         .from("courses")
-        .select("id,course_name,is_active")
+        .select("id,course_name,is_active,academic_year,academic_semester")
         .in("id", courseBatch);
       if (error) {
         throw error;
@@ -2294,29 +2311,65 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       }
     }
 
-    const courseNameById = Object.fromEntries(
+    const courseMetaById = Object.fromEntries(
       courseRows
         .filter((course) => course?.is_active !== false)
-        .map((course) => [String(course?.id || "").trim(), String(course?.course_name || "").trim()])
-        .filter(([courseId, courseName]) => isUuidValue(courseId) && Boolean(courseName)),
+        .map((course) => [
+          String(course?.id || "").trim(),
+          {
+            courseName: String(course?.course_name || "").trim(),
+            year: normalizeAcademicYearOrNull(course?.academic_year),
+            semester: normalizeAcademicSemesterOrNull(course?.academic_semester),
+          },
+        ])
+        .filter(([courseId, meta]) => isUuidValue(courseId) && Boolean(meta?.courseName)),
     );
 
     enrollmentRows.forEach((row) => {
       const userId = String(row?.user_id || "").trim();
       const courseId = String(row?.course_id || "").trim();
-      const courseName = courseNameById[courseId];
-      if (!isUuidValue(userId) || !courseName) {
+      const courseMeta = courseMetaById[courseId];
+      if (!isUuidValue(userId) || !courseMeta?.courseName) {
         return;
       }
-      if (!enrollmentMap[userId].includes(courseName)) {
-        enrollmentMap[userId].push(courseName);
+      if (!enrollmentMap[userId].includes(courseMeta.courseName)) {
+        enrollmentMap[userId].push(courseMeta.courseName);
+      }
+      if (courseMeta.year !== null && courseMeta.semester !== null) {
+        const termState = termStateByUser[userId];
+        if (!termState) {
+          return;
+        }
+        if (!termState.hasTerm) {
+          termState.year = courseMeta.year;
+          termState.semester = courseMeta.semester;
+          termState.hasTerm = true;
+          return;
+        }
+        if (termState.year !== courseMeta.year || termState.semester !== courseMeta.semester) {
+          termState.mixedTerms = true;
+        }
       }
     });
 
-    return enrollmentMap;
+    const termByUser = {};
+    Object.entries(termStateByUser).forEach(([userId, termState]) => {
+      if (!termState?.hasTerm || termState.mixedTerms) {
+        return;
+      }
+      termByUser[userId] = {
+        year: termState.year,
+        semester: termState.semester,
+      };
+    });
+
+    return {
+      coursesByUser: enrollmentMap,
+      termByUser,
+    };
   } catch (error) {
     if (isMissingRelationError(error)) {
-      return {};
+      return { coursesByUser: {}, termByUser: {} };
     }
     throw error;
   }
@@ -2371,9 +2424,12 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   let enrollmentCourseMap = {};
+  let enrollmentTermMap = {};
   let enrollmentLookupFailed = false;
   try {
-    enrollmentCourseMap = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
+    const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
+    enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
+    enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
   } catch (enrollmentError) {
     enrollmentLookupFailed = true;
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
@@ -2388,10 +2444,14 @@ async function hydrateRelationalProfiles(currentUser) {
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
+    const existingHasCompleteProfile = hasCompleteStudentProfile(existing);
+    const existingYear = existingHasCompleteProfile ? normalizeAcademicYearOrNull(existing?.academicYear) : null;
+    const existingSemester = existingHasCompleteProfile ? normalizeAcademicSemesterOrNull(existing?.academicSemester) : null;
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
-    const year = role === "student" ? profileYear : null;
-    const semester = role === "student" ? profileSemester : null;
+    const profilePhone = String(profile.phone || "").trim();
+    const existingPhone = String(existing?.phone || "").trim();
+    const resolvedPhone = profilePhone || existingPhone;
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
@@ -2399,6 +2459,19 @@ async function hydrateRelationalProfiles(currentUser) {
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
+    const inferredEnrollmentYear = normalizeAcademicYearOrNull(enrollmentTermMap[profile.id]?.year);
+    const inferredEnrollmentSemester = normalizeAcademicSemesterOrNull(enrollmentTermMap[profile.id]?.semester);
+    const inferredFromCourses = role === "student"
+      ? inferAcademicTermFromCourses(enrolledCourses.length ? enrolledCourses : existingAssignedCourses)
+      : { year: null, semester: null };
+    const inferredCourseYear = normalizeAcademicYearOrNull(inferredFromCourses.year);
+    const inferredCourseSemester = normalizeAcademicSemesterOrNull(inferredFromCourses.semester);
+    const year = role === "student"
+      ? (profileYear ?? inferredEnrollmentYear ?? inferredCourseYear ?? existingYear)
+      : null;
+    const semester = role === "student"
+      ? (profileSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester ?? existingSemester)
+      : null;
     const defaultCourses = role === "student" && year !== null && semester !== null
       ? getCurriculumCourses(year, semester)
       : [];
@@ -2414,7 +2487,7 @@ async function hydrateRelationalProfiles(currentUser) {
       name: String(profile.full_name || "").trim() || existing?.name || "Student",
       email: String(profile.email || "").trim().toLowerCase(),
       password: existing?.password || "",
-      phone: String(profile.phone || "").trim(),
+      phone: resolvedPhone,
       role,
       verified: true,
       isApproved: Boolean(profile.approved),
@@ -2429,6 +2502,54 @@ async function hydrateRelationalProfiles(currentUser) {
       supabaseAuthId: profile.id,
     };
   });
+  const mappedByAuthId = new Map(
+    mapped
+      .map((entry) => [String(entry?.supabaseAuthId || "").trim(), entry])
+      .filter(([profileId]) => isUuidValue(profileId)),
+  );
+
+  if (isAdmin) {
+    const backfillCandidates = profileRows
+      .map((profile) => {
+        const role = String(profile?.role || "student") === "admin" ? "admin" : "student";
+        if (role !== "student") {
+          return null;
+        }
+        const profileYear = normalizeAcademicYearOrNull(profile?.academic_year);
+        const profileSemester = normalizeAcademicSemesterOrNull(profile?.academic_semester);
+        const profilePhone = String(profile?.phone || "").trim();
+        const missingYearSemester = profileYear === null || profileSemester === null;
+        const missingPhone = !validateAndNormalizePhoneNumber(profilePhone).ok;
+        if (!missingYearSemester && !missingPhone) {
+          return null;
+        }
+        const mappedEntry = mappedByAuthId.get(String(profile.id || "").trim());
+        if (!mappedEntry) {
+          return null;
+        }
+        const mappedYear = normalizeAcademicYearOrNull(mappedEntry.academicYear);
+        const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
+        const mappedPhone = String(mappedEntry.phone || "").trim();
+        const mappedPhoneValid = validateAndNormalizePhoneNumber(mappedPhone).ok;
+        const canBackfillYearSemester = mappedYear !== null && mappedSemester !== null;
+        const canBackfillPhone = mappedPhoneValid;
+        if (!((missingYearSemester && canBackfillYearSemester) || (missingPhone && canBackfillPhone))) {
+          return null;
+        }
+        return {
+          ...mappedEntry,
+          academicYear: canBackfillYearSemester ? mappedYear : profileYear,
+          academicSemester: canBackfillYearSemester ? mappedSemester : profileSemester,
+          phone: canBackfillPhone ? mappedPhone : profilePhone,
+        };
+      })
+      .filter(Boolean);
+    if (backfillCandidates.length) {
+      await syncProfilesToRelational(backfillCandidates).catch((error) => {
+        console.warn("Could not backfill missing student profile fields.", error?.message || error);
+      });
+    }
+  }
 
   const mappedAuthIds = new Set(mapped.map((entry) => String(entry.supabaseAuthId || "").trim()).filter(Boolean));
   const preserveUnmappedRelationalUsers = isAdmin && profileRows.length <= 1;
@@ -10698,6 +10819,52 @@ function getCurriculumCourses(year, semester) {
   const yearMap = O6U_CURRICULUM[normalizedYear] || {};
   const courses = yearMap[normalizedSemester] || [];
   return sanitizeCourseAssignments(courses);
+}
+
+function inferAcademicTermFromCourses(courses) {
+  const scopedCourses = sanitizeCourseAssignments(courses || []);
+  if (!scopedCourses.length) {
+    return { year: null, semester: null };
+  }
+  const matches = [];
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      const termCourses = getCurriculumCourses(year, semester);
+      if (!termCourses.length) {
+        continue;
+      }
+      const overlap = scopedCourses.filter((course) => termCourses.includes(course)).length;
+      if (overlap > 0) {
+        matches.push({
+          year,
+          semester,
+          overlap,
+          termSize: termCourses.length,
+        });
+      }
+    }
+  }
+  if (!matches.length) {
+    return { year: null, semester: null };
+  }
+  matches.sort((a, b) => {
+    if (b.overlap !== a.overlap) {
+      return b.overlap - a.overlap;
+    }
+    if (a.termSize !== b.termSize) {
+      return a.termSize - b.termSize;
+    }
+    if (a.year !== b.year) {
+      return a.year - b.year;
+    }
+    return a.semester - b.semester;
+  });
+  const best = matches[0];
+  const next = matches[1];
+  if (next && next.overlap === best.overlap) {
+    return { year: null, semester: null };
+  }
+  return { year: best.year, semester: best.semester };
 }
 
 function sanitizeCourseAssignments(courses) {
