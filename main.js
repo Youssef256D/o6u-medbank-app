@@ -1185,10 +1185,11 @@ async function initSupabaseAuth() {
       await ensureRelationalSyncReady().catch((syncError) => {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
-      if (localUser && isGoogleOnboardingRequired(localUser)) {
+      const completionRoute = getStudentProfileCompletionRoute(localUser);
+      if (localUser && completionRoute) {
         setGoogleOAuthPendingState(false);
-        if (state.route !== "signup") {
-          navigate("signup");
+        if (state.route !== completionRoute) {
+          navigate(completionRoute);
         } else {
           state.skipNextRouteAnimation = true;
           render();
@@ -1246,10 +1247,11 @@ async function initSupabaseAuth() {
         let localUser = upsertLocalUserFromAuth(session.user);
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
-        if (localUser && isGoogleOnboardingRequired(localUser)) {
+        const completionRoute = getStudentProfileCompletionRoute(localUser);
+        if (localUser && completionRoute) {
           setGoogleOAuthPendingState(false);
-          if (state.route !== "signup") {
-            navigate("signup");
+          if (state.route !== completionRoute) {
+            navigate(completionRoute);
           } else {
             state.skipNextRouteAnimation = true;
             render();
@@ -1276,7 +1278,8 @@ async function initSupabaseAuth() {
           return;
         }
         if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
-          navigate(isGoogleOnboardingRequired(localUser) ? "signup" : localUser.role === "admin" ? "admin" : "dashboard");
+          const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
+          navigate(postAuthRoute);
         }
         await ensureRelationalSyncReady().catch((syncError) => {
           console.warn("Relational sync initialization failed.", syncError?.message || syncError);
@@ -1291,7 +1294,8 @@ async function initSupabaseAuth() {
         if (["login", "signup", "forgot", "landing"].includes(state.route)) {
           const current = getCurrentUser();
           if (current) {
-            navigate(isGoogleOnboardingRequired(current) ? "signup" : current.role === "admin" ? "admin" : "dashboard");
+            const postAuthRoute = getStudentProfileCompletionRoute(current) || (current.role === "admin" ? "admin" : "dashboard");
+            navigate(postAuthRoute);
             return;
           }
         }
@@ -1404,11 +1408,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
   const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
   const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
-  const fallbackYear = normalizeAcademicYearOrNull(localUser?.academicYear);
-  const fallbackSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
-  const year = role === "student" ? (profileYear ?? fallbackYear ?? 1) : null;
-  const semester = role === "student" ? (profileSemester ?? fallbackSemester ?? 1) : null;
+  const year = role === "student" ? profileYear : null;
+  const semester = role === "student" ? profileSemester : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const profilePhone = String(profile.phone || "").trim();
   const autoApprovedFromProfile = shouldAutoApproveStudentAccess({
@@ -1601,10 +1603,10 @@ function hasCompleteStudentProfile(user) {
   if (!user || user.role !== "student") {
     return true;
   }
-  const phoneDigits = String(user.phone || "").replace(/\D/g, "");
+  const phoneValidation = validateAndNormalizePhoneNumber(String(user.phone || ""));
   const year = Number(user.academicYear);
   const semester = Number(user.academicSemester);
-  return phoneDigits.length >= 8 && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
+  return phoneValidation.ok && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
 }
 
 function shouldAutoApproveStudentAccess(user) {
@@ -1623,17 +1625,11 @@ function getUserCreatedAtMs(user) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function isGoogleOnboardingRequired(user) {
+function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (isUserAccessApproved(user)) {
-    return false;
-  }
-  const provider = getAuthProviderFromUser(user);
-  const supabaseManaged = hasSupabaseManagedIdentity(user);
-  const enforceOnboarding = provider === "google" || (supabaseManaged && !provider);
-  if (!enforceOnboarding) {
+  if (!hasSupabaseManagedIdentity(user)) {
     return false;
   }
   if (user.profileCompleted === true && hasCompleteStudentProfile(user)) {
@@ -1643,6 +1639,17 @@ function isGoogleOnboardingRequired(user) {
     return true;
   }
   return !hasCompleteStudentProfile(user);
+}
+
+function getStudentProfileCompletionRoute(user) {
+  if (!isStudentProfileCompletionRequired(user)) {
+    return "";
+  }
+  return getAuthProviderFromUser(user) === "google" ? "signup" : "complete-profile";
+}
+
+function isGoogleOnboardingRequired(user) {
+  return getStudentProfileCompletionRoute(user) === "signup";
 }
 
 function isGoogleSignupCompletionFlow(user) {
@@ -1655,7 +1662,7 @@ function isGoogleSignupCompletionFlow(user) {
   if (!hasSupabaseManagedIdentity(user)) {
     return false;
   }
-  return isGoogleOnboardingRequired(user);
+  return getStudentProfileCompletionRoute(user) === "signup";
 }
 
 function getUserProfileId(user) {
@@ -1713,16 +1720,16 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
   );
 
-  const nextYear =
-    nextRole === "student"
-      ? sanitizeAcademicYear(profileOverrides.academicYear || previous?.academicYear || authUser.user_metadata?.academic_year || 1)
-      : null;
-  const nextSemester =
-    nextRole === "student"
-      ? sanitizeAcademicSemester(
-          profileOverrides.academicSemester || previous?.academicSemester || authUser.user_metadata?.academic_semester || 1,
-        )
-      : null;
+  const nextYearInput = profileOverrides.academicYear
+    ?? previous?.academicYear
+    ?? authUser.user_metadata?.academic_year
+    ?? null;
+  const nextSemesterInput = profileOverrides.academicSemester
+    ?? previous?.academicSemester
+    ?? authUser.user_metadata?.academic_semester
+    ?? null;
+  const nextYear = nextRole === "student" ? normalizeAcademicYearOrNull(nextYearInput) : null;
+  const nextSemester = nextRole === "student" ? normalizeAcademicSemesterOrNull(nextSemesterInput) : null;
 
   let nextCourses;
   if (nextRole === "student") {
@@ -1732,10 +1739,14 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
       : Array.isArray(previous?.assignedCourses)
         ? previous.assignedCourses
         : [];
-    const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
-    nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
-    if (!nextCourses.length) {
-      nextCourses = [...allowedCourses];
+    if (nextYear !== null && nextSemester !== null) {
+      const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
+      nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
+      if (!nextCourses.length) {
+        nextCourses = [...allowedCourses];
+      }
+    } else {
+      nextCourses = sanitizeCourseAssignments(requestedCourses);
     }
   } else {
     const allCourses = Object.keys(QBANK_COURSE_TOPICS);
@@ -1762,12 +1773,6 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
 
   const hasExplicitProfileCompletionFlag = typeof profileOverrides.profileCompleted === "boolean";
   const hasLegacyProfileCompletionFlag = typeof previous?.profileCompleted === "boolean";
-  const metadataYear = profileOverrides.academicYear ?? authUser.user_metadata?.academic_year ?? previous?.academicYear ?? null;
-  const metadataSemester = profileOverrides.academicSemester
-    ?? authUser.user_metadata?.academic_semester
-    ?? previous?.academicSemester
-    ?? null;
-  const metadataHasEnrollment = metadataYear !== null && metadataYear !== undefined && metadataSemester !== null && metadataSemester !== undefined;
   let nextProfileCompleted = nextRole === "admin";
   if (nextRole === "student") {
     if (hasExplicitProfileCompletionFlag) {
@@ -2383,12 +2388,10 @@ async function hydrateRelationalProfiles(currentUser) {
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
-    const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
-    const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
-    const year = role === "student" ? (profileYear ?? existingYear) : null;
-    const semester = role === "student" ? (profileSemester ?? existingSemester) : null;
+    const year = role === "student" ? profileYear : null;
+    const semester = role === "student" ? profileSemester : null;
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
@@ -2396,7 +2399,9 @@ async function hydrateRelationalProfiles(currentUser) {
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
-    const defaultCourses = role === "student" ? getCurriculumCourses(year || 1, semester || 1) : [...allCourses];
+    const defaultCourses = role === "student" && year !== null && semester !== null
+      ? getCurriculumCourses(year, semester)
+      : [];
     const assignedCourses = role !== "student"
       ? [...allCourses]
       : enrolledCourses.length
@@ -4760,17 +4765,18 @@ function render() {
     "admin",
   ];
   const authEntryRoutes = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
-  const googleSignupOnboarding = isGoogleSignupCompletionFlow(user);
+  const studentProfileCompletionRoute = getStudentProfileCompletionRoute(user);
+  const googleSignupOnboarding = studentProfileCompletionRoute === "signup";
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
   }
 
-  if (googleSignupOnboarding && state.route !== "signup") {
-    state.route = "signup";
+  if (studentProfileCompletionRoute && state.route !== studentProfileCompletionRoute) {
+    state.route = studentProfileCompletionRoute;
   }
 
-  if (user && state.route === "complete-profile" && !isGoogleOnboardingRequired(user)) {
+  if (user && state.route === "complete-profile" && studentProfileCompletionRoute !== "complete-profile") {
     state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
@@ -5306,7 +5312,7 @@ function renderAuth(mode) {
             </div>
             <div class="form-row">
               <label>Year
-                <select name="academicYear" id="signup-academic-year">
+                <select name="academicYear" id="signup-academic-year" required aria-required="true">
                   <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
                   <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
                   <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
@@ -5316,7 +5322,7 @@ function renderAuth(mode) {
                 </select>
               </label>
               <label>Semester
-                <select name="academicSemester" id="signup-academic-semester">
+                <select name="academicSemester" id="signup-academic-semester" required aria-required="true">
                   <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
                   <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
                   <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
@@ -5375,7 +5381,7 @@ function renderAuth(mode) {
           </div>
           <div class="form-row">
             <label>Year
-              <select name="academicYear" id="signup-academic-year">
+              <select name="academicYear" id="signup-academic-year" required aria-required="true">
                 <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
                 <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
                 <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
@@ -5385,7 +5391,7 @@ function renderAuth(mode) {
               </select>
             </label>
             <label>Semester
-              <select name="academicSemester" id="signup-academic-semester">
+              <select name="academicSemester" id="signup-academic-semester" required aria-required="true">
                 <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
                 <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
                 <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
@@ -5764,9 +5770,7 @@ function wireAuth(mode) {
           save(STORAGE_KEYS.users, users);
           await syncUsersBackupState(users).catch(() => {});
           await ensureRelationalSyncReady().catch(() => {});
-          await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
-            console.warn("Google signup profile sync failed.", error?.message || error);
-          });
+          await flushPendingSyncNow();
 
           if (autoApproved) {
             save(STORAGE_KEYS.currentUserId, users[idx].id);
@@ -5781,6 +5785,9 @@ function wireAuth(mode) {
             toast("Account created. Await admin approval before first login.");
             navigate("login");
           }
+        } catch (error) {
+          console.warn("Google signup profile sync failed.", error?.message || error);
+          toast("Could not sync your profile to the admin dashboard. Please try again.");
         } finally {
           lockAuthForm(form, false);
         }
@@ -5875,9 +5882,7 @@ function wireAuth(mode) {
           }
 
           await ensureRelationalSyncReady().catch(() => {});
-          await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
-            console.warn("Signup profile sync failed.", error?.message || error);
-          });
+          await flushPendingSyncNow();
 
           if (authData.session && !autoApproved) {
             await authClient.auth.signOut().catch(() => {});
@@ -5922,6 +5927,9 @@ function wireAuth(mode) {
           toast("Account created. Await admin approval before first login.");
           navigate("login");
         }
+      } catch (error) {
+        console.warn("Signup profile sync failed.", error?.message || error);
+        toast("Could not sync your profile to the admin dashboard. Please try again.");
       } finally {
         lockAuthForm(form, false);
       }
@@ -5969,12 +5977,12 @@ function renderCompleteProfile() {
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Before admin review, add your phone number and enrollment details for Google sign-in. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+      <p class="subtle">Before admin review, add your phone number and enrollment details. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
         <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
         <div class="form-row">
           <label>Year
-            <select name="academicYear" id="complete-profile-year">
+            <select name="academicYear" id="complete-profile-year" required aria-required="true">
               <option value="" ${year === null ? "selected" : ""}>Select year</option>
               ${[1, 2, 3, 4, 5]
                 .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
@@ -5982,7 +5990,7 @@ function renderCompleteProfile() {
             </select>
           </label>
           <label>Semester
-            <select name="academicSemester" id="complete-profile-semester">
+            <select name="academicSemester" id="complete-profile-semester" required aria-required="true">
               <option value="" ${semester === null ? "selected" : ""}>Select semester</option>
               <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
               <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
@@ -6097,14 +6105,12 @@ function wireCompleteProfile() {
       users[idx].approvedAt = autoApproved ? users[idx].approvedAt || nowISO() : null;
       users[idx].approvedBy = autoApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
       users[idx].profileCompleted = true;
-      users[idx].authProvider = users[idx].authProvider || "google";
+      users[idx].authProvider = normalizeAuthProvider(users[idx].authProvider || getAuthProviderFromUser(current));
 
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users).catch(() => {});
       await ensureRelationalSyncReady().catch(() => {});
-      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
-        console.warn("Profile completion sync failed.", error?.message || error);
-      });
+      await flushPendingSyncNow();
 
       if (autoApproved) {
         save(STORAGE_KEYS.currentUserId, users[idx].id);
@@ -6119,6 +6125,9 @@ function wireCompleteProfile() {
         toast("Profile submitted. Your account is waiting admin approval.");
         navigate("login");
       }
+    } catch (error) {
+      console.warn("Profile completion sync failed.", error?.message || error);
+      toast("Could not sync your profile to the admin dashboard. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -7809,7 +7818,7 @@ function renderProfile() {
           <p class="subtle">Use source = Incorrect when creating blocks to target weak items.</p>
           <hr />
           <p><b>Role:</b> ${escapeHtml(user.role)}</p>
-          ${user.role === "student" ? `<p><b>Year/Semester:</b> ${user.academicYear || 1} / ${user.academicSemester || 1}</p>` : ""}
+          ${user.role === "student" ? `<p><b>Year/Semester:</b> ${normalizeAcademicYearOrNull(user.academicYear) ?? "-"} / ${normalizeAcademicSemesterOrNull(user.academicSemester) ?? "-"}</p>` : ""}
           <p><b>Phone:</b> ${escapeHtml(user.phone || "-")}</p>
           <p><b>Access approved:</b> ${isUserAccessApproved(user) ? "Yes" : "Pending admin approval"}</p>
           <p><b>Assigned courses:</b> ${escapeHtml((user.assignedCourses || []).join(", "))}</p>
