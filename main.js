@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.11").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.12").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -59,6 +59,8 @@ const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
+const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
+const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const ANALYTICS_RECENT_SESSION_WINDOW = 3;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
@@ -162,6 +164,7 @@ const state = {
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
+  userMenuOpen: false,
 };
 
 let appVersionCheckPromise = null;
@@ -257,6 +260,12 @@ let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
 let supabaseAuthStateUnsubscribe = null;
+let notificationRealtimeChannel = null;
+let notificationRealtimeSubscriptionKey = "";
+let notificationRealtimeHydrateTimer = null;
+let notificationRealtimeHydrateInFlight = false;
+let notificationRealtimeHydrateQueued = false;
+let studentNotificationPollHandle = null;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -1347,6 +1356,7 @@ async function initSupabaseAuth() {
         if (sessionCheck?.data?.session?.user) {
           return;
         }
+        clearNotificationRealtimeSubscription();
         resetRelationalSyncState();
         clearAdminPresencePolling();
         clearAdminDashboardPolling();
@@ -1386,6 +1396,7 @@ async function initSupabaseAuth() {
   } catch (error) {
     console.warn("Supabase auth unavailable. Falling back to local auth only.", error);
     setGoogleOAuthPendingState(false);
+    clearNotificationRealtimeSubscription();
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
   }
@@ -2977,7 +2988,7 @@ async function hydrateRelationalQuestions() {
 async function hydrateRelationalNotifications(currentUser) {
   const user = currentUser || getCurrentUser();
   const client = getRelationalClient();
-  if (!client || !relationalSync.enabled || !user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+  if (!client || !user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
     return false;
   }
 
@@ -3113,10 +3124,6 @@ async function createRelationalNotification(notificationPayload, actorUser, user
   if (!user) {
     return { ok: false, message: "You must be signed in to send notifications." };
   }
-  const ready = await ensureRelationalSyncReady();
-  if (!ready) {
-    return { ok: false, message: relationalSync.lastReadyError || "Relational database sync is unavailable." };
-  }
   const client = getRelationalClient();
   if (!client) {
     return { ok: false, message: "Supabase relational client is not available." };
@@ -3175,10 +3182,6 @@ async function syncNotificationReadsToRelational(user, notificationDbIds) {
     return { ok: true };
   }
 
-  const ready = await ensureRelationalSyncReady();
-  if (!ready) {
-    return { ok: false, message: relationalSync.lastReadyError || "Relational database sync is unavailable." };
-  }
   const client = getRelationalClient();
   if (!client) {
     return { ok: false, message: "Supabase relational client is not available." };
@@ -5224,33 +5227,55 @@ function bindGlobalEvents() {
   globalEventsBound = true;
 
   document.body.addEventListener("click", (event) => {
+    const clickedInsideUserMenu = Boolean(event.target.closest(".user-menu"));
+    const actionTarget = event.target.closest("[data-action]");
+    const action = actionTarget?.getAttribute("data-action") || "";
+
+    if (action === "toggle-user-menu") {
+      state.userMenuOpen = !state.userMenuOpen;
+      syncTopbar();
+      return;
+    }
+
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
+      state.userMenuOpen = false;
       const route = navTarget.getAttribute("data-nav");
       navigate(route);
       return;
     }
 
-    const actionTarget = event.target.closest("[data-action]");
-    if (!actionTarget) {
-      return;
-    }
-
-    const action = actionTarget.getAttribute("data-action");
     if (action === "logout") {
+      state.userMenuOpen = false;
       logout();
+      return;
     }
 
     if (action === "quick-login-admin") {
       loginAsDemo(DEMO_ADMIN_EMAIL, "admin123");
+      return;
     }
 
     if (action === "quick-login-student") {
       loginAsDemo(DEMO_STUDENT_EMAIL, "student123");
+      return;
+    }
+
+    if (state.userMenuOpen && !clickedInsideUserMenu) {
+      state.userMenuOpen = false;
+      syncTopbar();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.userMenuOpen) {
+      state.userMenuOpen = false;
+      syncTopbar();
     }
   });
 
   window.addEventListener("pagehide", () => {
+    clearNotificationRealtimeSubscription();
     markCurrentUserOffline().catch(() => {});
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
@@ -5335,6 +5360,189 @@ function ensureAdminDashboardPolling() {
         console.warn("Admin dashboard auto-refresh failed.", error?.message || error);
       });
   }, ADMIN_DATA_REFRESH_MS);
+}
+
+function clearNotificationRealtimeHydrateTimer() {
+  if (notificationRealtimeHydrateTimer) {
+    window.clearTimeout(notificationRealtimeHydrateTimer);
+    notificationRealtimeHydrateTimer = null;
+  }
+}
+
+function clearStudentNotificationPolling() {
+  if (studentNotificationPollHandle) {
+    window.clearInterval(studentNotificationPollHandle);
+    studentNotificationPollHandle = null;
+  }
+}
+
+function ensureStudentNotificationPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(String(currentUser.supabaseAuthId || "").trim())
+    || !getRelationalClient()
+  ) {
+    clearStudentNotificationPolling();
+    return;
+  }
+  if (studentNotificationPollHandle) {
+    return;
+  }
+
+  studentNotificationPollHandle = window.setInterval(() => {
+    const activeUser = getCurrentUser();
+    if (!activeUser || activeUser.role !== "student" || !isUuidValue(String(activeUser.supabaseAuthId || "").trim())) {
+      clearStudentNotificationPolling();
+      return;
+    }
+    scheduleNotificationRealtimeHydration(0);
+  }, NOTIFICATION_FALLBACK_POLL_MS);
+}
+
+function clearNotificationRealtimeSubscription() {
+  clearNotificationRealtimeHydrateTimer();
+  clearStudentNotificationPolling();
+  notificationRealtimeHydrateQueued = false;
+  notificationRealtimeHydrateInFlight = false;
+  notificationRealtimeSubscriptionKey = "";
+  const activeChannel = notificationRealtimeChannel;
+  notificationRealtimeChannel = null;
+  if (!activeChannel) {
+    return;
+  }
+  const client = getSupabaseAuthClient();
+  if (client && typeof client.removeChannel === "function") {
+    Promise.resolve(client.removeChannel(activeChannel)).catch(() => {
+      if (typeof activeChannel.unsubscribe === "function") {
+        try {
+          activeChannel.unsubscribe();
+        } catch {
+          // Ignore realtime unsubscribe errors.
+        }
+      }
+    });
+    return;
+  }
+  if (typeof activeChannel.unsubscribe === "function") {
+    try {
+      activeChannel.unsubscribe();
+    } catch {
+      // Ignore realtime unsubscribe errors.
+    }
+  }
+}
+
+function shouldRenderAfterNotificationHydration(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.role === "admin") {
+    return state.route === "admin" && state.adminPage === "notifications";
+  }
+  return state.route === "dashboard" || state.route === "analytics" || state.route === "notifications";
+}
+
+async function runNotificationRealtimeHydration() {
+  if (notificationRealtimeHydrateInFlight) {
+    notificationRealtimeHydrateQueued = true;
+    return;
+  }
+  const user = getCurrentUser();
+  const profileId = String(user?.supabaseAuthId || "").trim();
+  if (!user || !isUuidValue(profileId)) {
+    return;
+  }
+
+  notificationRealtimeHydrateInFlight = true;
+  try {
+    const refreshed = await hydrateRelationalNotifications(user);
+    if (!refreshed) {
+      return;
+    }
+    if (user.role === "student") {
+      state.studentDataLastSyncAt = Date.now();
+    } else if (user.role === "admin") {
+      state.adminDataLastSyncAt = Date.now();
+    }
+    if (shouldRenderAfterNotificationHydration(user)) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    syncTopbar();
+  } catch (error) {
+    console.warn("Realtime notification hydration failed.", error?.message || error);
+  } finally {
+    notificationRealtimeHydrateInFlight = false;
+    if (notificationRealtimeHydrateQueued) {
+      notificationRealtimeHydrateQueued = false;
+      scheduleNotificationRealtimeHydration(80);
+    }
+  }
+}
+
+function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_DEBOUNCE_MS) {
+  const user = getCurrentUser();
+  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+    return;
+  }
+  clearNotificationRealtimeHydrateTimer();
+  notificationRealtimeHydrateTimer = window.setTimeout(() => {
+    notificationRealtimeHydrateTimer = null;
+    runNotificationRealtimeHydration().catch((error) => {
+      console.warn("Realtime notification refresh failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function ensureNotificationsRealtimeSubscription(user = null) {
+  const currentUser = user || getCurrentUser();
+  const client = getSupabaseAuthClient();
+  const profileId = String(currentUser?.supabaseAuthId || "").trim();
+  const role = currentUser?.role === "admin" ? "admin" : (currentUser?.role === "student" ? "student" : "");
+  if (!client || !isUuidValue(profileId) || !role) {
+    clearNotificationRealtimeSubscription();
+    return;
+  }
+
+  const nextKey = `${role}:${profileId}`;
+  if (notificationRealtimeChannel && notificationRealtimeSubscriptionKey === nextKey) {
+    return;
+  }
+
+  clearNotificationRealtimeSubscription();
+  const channel = client.channel(`notifications-live:${nextKey}`);
+  channel.on(
+    "postgres_changes",
+    { event: "*", schema: "public", table: "notifications" },
+    () => {
+      scheduleNotificationRealtimeHydration();
+    },
+  );
+  if (role === "student") {
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "notification_reads",
+        filter: `user_id=eq.${profileId}`,
+      },
+      () => {
+        scheduleNotificationRealtimeHydration();
+      },
+    );
+  }
+
+  channel.subscribe((status) => {
+    if (status === "SUBSCRIBED") {
+      scheduleNotificationRealtimeHydration(0);
+    }
+  });
+  notificationRealtimeChannel = channel;
+  notificationRealtimeSubscriptionKey = nextKey;
 }
 
 function shouldTreatPresenceAsOnline(row) {
@@ -5952,6 +6160,8 @@ function render() {
 
 function syncTopbar() {
   const user = getCurrentUser();
+  ensureNotificationsRealtimeSubscription(user);
+  ensureStudentNotificationPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const unreadNotificationCount = user?.role === "student"
@@ -5982,16 +6192,37 @@ function syncTopbar() {
   }
 
   if (!user) {
+    state.userMenuOpen = false;
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       <button data-nav="login">Login</button>
       <button class="btn" data-nav="signup">Sign up</button>
     `;
   } else {
+    const safeName = String(user.name || "Student").trim() || "Student";
+    const firstName = safeName.split(/\s+/).filter(Boolean)[0] || safeName;
+    const firstLetter = firstName.charAt(0).toLocaleUpperCase();
+    const menuOpen = Boolean(state.userMenuOpen);
+    const menuExpanded = menuOpen ? "true" : "false";
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
-      <span class="help">${escapeHtml(user.name)} (${escapeHtml(user.role)})</span>
-      <button class="btn ghost" data-action="logout">Log out</button>
+      <div class="user-menu ${menuOpen ? "is-open" : ""}">
+        <button
+          class="user-menu-trigger"
+          type="button"
+          data-action="toggle-user-menu"
+          aria-haspopup="menu"
+          aria-expanded="${menuExpanded}"
+          aria-label="Open account menu"
+        >
+          <span class="user-menu-avatar">${escapeHtml(firstLetter)}</span>
+        </button>
+        <div class="user-menu-panel" role="menu" aria-label="Account menu">
+          <p class="user-menu-name">${escapeHtml(safeName)}</p>
+          <button class="user-menu-item" type="button" data-nav="profile" role="menuitem">Profile</button>
+          <button class="user-menu-item user-menu-item-danger" type="button" data-action="logout" role="menuitem">Log out</button>
+        </div>
+      </div>
     `;
   }
 
@@ -7202,15 +7433,12 @@ function renderNotifications() {
         </div>
         <div class="stack" style="align-items: flex-end;">
           <p class="subtle" style="margin: 0;">Unread: <b>${unreadCount}</b></p>
-          <button class="btn ghost" type="button" data-action="notifications-refresh" ${state.studentDataRefreshing ? "disabled" : ""}>
-            ${state.studentDataRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
           <button class="btn ghost" type="button" data-action="notifications-mark-all-read" ${unreadCount ? "" : "disabled"}>
             Mark all read
           </button>
         </div>
       </div>
-      <p class="subtle">${escapeHtml(getStudentDataSyncStatusText())}</p>
+      <p class="subtle">Live updates are enabled. ${escapeHtml(getStudentDataSyncStatusText())}</p>
       <div class="notifications-list" style="margin-top: 0.85rem;">
         ${listMarkup || `<article class="card"><p class="subtle" style="margin:0;">No notifications yet.</p></article>`}
       </div>
@@ -7267,10 +7495,6 @@ function wireNotifications() {
     }
   });
 
-  appEl.querySelector("[data-action='notifications-refresh']")?.addEventListener("click", async () => {
-    const ok = await refreshStudentDataSnapshot(user, { force: true, rerender: true });
-    toast(ok ? "Notifications refreshed." : "Could not refresh notifications from cloud.");
-  });
 }
 
 function renderDashboard() {
@@ -10240,16 +10464,15 @@ function wireAdmin() {
       if (!currentUser || currentUser.role !== "admin") {
         return;
       }
-      const ready = await ensureRelationalSyncReady({ force: true });
-      if (!ready) {
-        toast(relationalSync.lastReadyError || "Could not refresh notifications.");
+      if (!isUuidValue(String(currentUser.supabaseAuthId || "").trim()) || !getRelationalClient()) {
+        toast("No active Supabase admin session. Log out and sign in again.");
         return;
       }
       const refreshed = await hydrateRelationalNotifications(currentUser);
       if (refreshed) {
         state.adminDataLastSyncAt = Date.now();
       }
-      toast(refreshed ? "Notifications refreshed." : "Could not refresh notifications from Supabase. Run the notifications migration.");
+      toast(refreshed ? "Notifications refreshed." : "Could not refresh notifications from Supabase.");
       state.skipNextRouteAnimation = true;
       render();
     });
@@ -10309,7 +10532,7 @@ function wireAdmin() {
           if (relationalResult.ok && relationalResult.notification) {
             const latestLocal = getNotifications().filter((entry) => entry.id !== localNotification.id);
             saveNotificationsLocal([relationalResult.notification, ...latestLocal]);
-            await hydrateRelationalNotifications(currentUser).catch(() => {});
+            scheduleNotificationRealtimeHydration(0);
           } else {
             syncWarning = relationalResult.message || "Could not sync notification to Supabase.";
           }
@@ -14655,10 +14878,12 @@ async function logout() {
     : Promise.resolve();
 
   syncPresenceRuntime(null);
+  clearNotificationRealtimeSubscription();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
+  state.userMenuOpen = false;
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
@@ -14751,6 +14976,7 @@ function toast(message) {
 
 function renderBootstrapFallback() {
   try {
+    clearNotificationRealtimeSubscription();
     setGoogleOAuthPendingState(false);
     clearAdminDashboardPolling();
     document.body.classList.remove("is-routing");

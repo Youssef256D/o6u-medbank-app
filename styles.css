@@ -254,6 +254,89 @@ button {
   width: auto;
   justify-content: flex-end;
   flex-wrap: nowrap;
+  position: relative;
+}
+
+.user-menu {
+  position: relative;
+  margin-left: auto;
+}
+
+.user-menu-trigger {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.user-menu-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 1px solid rgba(23, 126, 137, 0.35);
+  background: linear-gradient(160deg, rgba(23, 126, 137, 0.2), rgba(16, 42, 67, 0.14));
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.user-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.45rem);
+  min-width: 210px;
+  padding: 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(16, 42, 67, 0.18);
+  display: none;
+  flex-direction: column;
+  gap: 0.2rem;
+  z-index: 120;
+}
+
+.user-menu.is-open .user-menu-panel {
+  display: flex;
+}
+
+.user-menu-name {
+  margin: 0;
+  padding: 0.45rem 0.54rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.user-menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 10px;
+  padding: 0.46rem 0.54rem;
+  text-align: left;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.user-menu-item:hover {
+  background: rgba(16, 42, 67, 0.08);
+  transform: none;
+}
+
+.user-menu-item.user-menu-item-danger {
+  color: #b42318;
+}
+
+.user-menu-item.user-menu-item-danger:hover {
+  background: rgba(180, 35, 24, 0.1);
 }
 
 .app-shell {
