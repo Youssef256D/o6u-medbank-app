@@ -8729,11 +8729,19 @@ function renderAdmin() {
         const questionId = String(question.id || "").trim();
         const isDeleting = questionDeleteQid === questionId;
         const isSelected = questionId ? selectedQuestionSet.has(questionId) : false;
+        const rowClassNames = ["admin-question-row"];
+        if (isSelected) {
+          rowClassNames.push("is-selected");
+        }
         const meta = getQbankCourseTopicMeta(question);
         const stem = String(question.stem || "").trim();
         const stemPreview = stem.length > 160 ? `${stem.slice(0, 157)}...` : stem;
         return `
-          <tr class="${isSelected ? "is-selected" : ""}">
+          <tr
+            class="${rowClassNames.join(" ")}"
+            data-qid="${escapeHtml(questionId)}"
+            draggable="${questionOpsLocked || !questionId ? "false" : "true"}"
+          >
             <td class="admin-question-select-cell">
               <input
                 type="checkbox"
@@ -8743,6 +8751,11 @@ function renderAdmin() {
                 ${isSelected ? "checked" : ""}
                 ${questionOpsLocked || !questionId ? "disabled" : ""}
               />
+            </td>
+            <td class="admin-question-order-cell">
+              <span class="admin-question-drag-handle" data-role="admin-question-drag-handle" data-qid="${escapeHtml(questionId)}" aria-hidden="true">
+                ${questionOpsLocked || !questionId ? "--" : "::"}
+              </span>
             </td>
             <td>${idx + 1}</td>
             <td>${escapeHtml(meta.topic)}</td>
@@ -8841,11 +8854,13 @@ function renderAdmin() {
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-selection" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>Clear selection</button>
           </div>
         </div>
+        <p class="subtle admin-question-reorder-hint">Drag and drop rows to reorder. On touch devices, swipe up/down on a row to move it.</p>
         <div class="table-wrap" style="margin-top: 0.9rem;">
           <table>
             <thead>
               <tr>
                 <th class="admin-question-select-cell">Select</th>
+                <th class="admin-question-order-cell">Move</th>
                 <th>#</th>
                 <th>Topic</th>
                 <th>Question</th>
@@ -8855,7 +8870,7 @@ function renderAdmin() {
               </tr>
             </thead>
             <tbody>
-              ${questionRows || `<tr><td colspan="7" class="subtle">No questions found for this course/topic.</td></tr>`}
+              ${questionRows || `<tr><td colspan="8" class="subtle">No questions found for this course/topic.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -10032,6 +10047,7 @@ function wireAdmin() {
   const adminFilterCourse = document.getElementById("admin-filter-course");
   const adminFilterTopic = document.getElementById("admin-filter-topic");
   const adminClearFilters = document.getElementById("admin-clear-filters");
+  const adminQuestionsSection = document.getElementById("admin-questions-section");
   const normalizeQuestionIdList = (ids, allowedSet = null) => {
     const seen = new Set();
     const normalized = [];
@@ -10073,6 +10089,208 @@ function wireAdmin() {
   };
   const isQuestionOperationLocked = () =>
     Boolean(state.adminQuestionSaveRunning || state.adminQuestionDeleteQid || state.adminBulkActionRunning);
+  let questionReorderSyncTimer = null;
+  const scheduleQuestionOrderSync = () => {
+    if (questionReorderSyncTimer) {
+      window.clearTimeout(questionReorderSyncTimer);
+    }
+    questionReorderSyncTimer = window.setTimeout(() => {
+      questionReorderSyncTimer = null;
+      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
+        toast(`Question order saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      });
+    }, 900);
+  };
+  const reorderVisibleQuestions = (sourceId, targetId, options = {}) => {
+    if (isQuestionOperationLocked()) {
+      return false;
+    }
+    const source = String(sourceId || "").trim();
+    const target = String(targetId || "").trim();
+    if (!source || !target || source === target) {
+      return false;
+    }
+
+    const visibleQuestions = getVisibleAdminQuestions();
+    const visibleIds = visibleQuestions
+      .map((question) => String(question.id || "").trim())
+      .filter(Boolean);
+    const fromIndex = visibleIds.indexOf(source);
+    const toIndex = visibleIds.indexOf(target);
+    if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) {
+      return false;
+    }
+
+    const placeAfter = Boolean(options.placeAfter);
+    const nextVisibleIds = [...visibleIds];
+    const [movedId] = nextVisibleIds.splice(fromIndex, 1);
+    let insertionIndex = placeAfter
+      ? toIndex + (fromIndex < toIndex ? 0 : 1)
+      : toIndex + (fromIndex < toIndex ? -1 : 0);
+    insertionIndex = Math.max(0, Math.min(nextVisibleIds.length, insertionIndex));
+    nextVisibleIds.splice(insertionIndex, 0, movedId);
+
+    if (nextVisibleIds.every((id, index) => id === visibleIds[index])) {
+      return false;
+    }
+
+    const visibleQuestionById = new Map(
+      visibleQuestions.map((question) => [String(question.id || "").trim(), question]),
+    );
+    const visibleIdSet = new Set(visibleIds);
+    const reorderedVisibleQuestions = nextVisibleIds
+      .map((id) => visibleQuestionById.get(id))
+      .filter(Boolean);
+
+    let visiblePointer = 0;
+    const currentQuestions = getQuestions();
+    const nextQuestions = currentQuestions.map((question) => {
+      const questionId = String(question.id || "").trim();
+      if (!visibleIdSet.has(questionId)) {
+        return question;
+      }
+      const replacement = reorderedVisibleQuestions[visiblePointer];
+      visiblePointer += 1;
+      return replacement || question;
+    });
+
+    save(STORAGE_KEYS.questions, nextQuestions);
+    state.skipNextRouteAnimation = true;
+    render();
+    scheduleQuestionOrderSync();
+    if (options.toast) {
+      toast("Question order updated.");
+    }
+    return true;
+  };
+  const moveVisibleQuestionByStep = (questionId, step, options = {}) => {
+    const direction = Number(step);
+    if (!direction) {
+      return false;
+    }
+    const visibleIds = getVisibleQuestionIds();
+    const currentIndex = visibleIds.indexOf(String(questionId || "").trim());
+    if (currentIndex === -1) {
+      return false;
+    }
+    const targetIndex = currentIndex + (direction > 0 ? 1 : -1);
+    if (targetIndex < 0 || targetIndex >= visibleIds.length) {
+      return false;
+    }
+    return reorderVisibleQuestions(questionId, visibleIds[targetIndex], {
+      placeAfter: direction > 0,
+      toast: options.toast === true,
+    });
+  };
+  const clearQuestionDropIndicators = () => {
+    adminQuestionsSection?.querySelectorAll("tr.admin-question-row").forEach((row) => {
+      row.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+      delete row.dataset.dropPosition;
+    });
+  };
+  const bindQuestionReorderInteractions = () => {
+    if (!adminQuestionsSection) {
+      return;
+    }
+    let draggingQuestionId = "";
+    let touchStart = null;
+    const rows = Array.from(adminQuestionsSection.querySelectorAll("tr.admin-question-row[data-qid]"));
+    rows.forEach((row) => {
+      const qid = String(row.getAttribute("data-qid") || "").trim();
+      if (!qid) {
+        return;
+      }
+
+      row.addEventListener("dragstart", (event) => {
+        if (isQuestionOperationLocked() || row.getAttribute("draggable") === "false") {
+          event.preventDefault();
+          return;
+        }
+        draggingQuestionId = qid;
+        row.classList.add("is-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", qid);
+        }
+      });
+      row.addEventListener("dragover", (event) => {
+        if (!draggingQuestionId || draggingQuestionId === qid || isQuestionOperationLocked()) {
+          return;
+        }
+        event.preventDefault();
+        rows.forEach((candidate) => {
+          if (candidate === row) {
+            return;
+          }
+          candidate.classList.remove("is-drop-before", "is-drop-after");
+          delete candidate.dataset.dropPosition;
+        });
+        const rowRect = row.getBoundingClientRect();
+        const placeAfter = (event.clientY - rowRect.top) > (rowRect.height / 2);
+        row.dataset.dropPosition = placeAfter ? "after" : "before";
+        row.classList.toggle("is-drop-after", placeAfter);
+        row.classList.toggle("is-drop-before", !placeAfter);
+      });
+      row.addEventListener("drop", (event) => {
+        if (!draggingQuestionId || draggingQuestionId === qid || isQuestionOperationLocked()) {
+          return;
+        }
+        event.preventDefault();
+        const placeAfter = row.dataset.dropPosition === "after";
+        reorderVisibleQuestions(draggingQuestionId, qid, { placeAfter });
+        draggingQuestionId = "";
+        clearQuestionDropIndicators();
+      });
+      row.addEventListener("dragend", () => {
+        draggingQuestionId = "";
+        clearQuestionDropIndicators();
+      });
+
+      row.addEventListener("touchstart", (event) => {
+        if (isQuestionOperationLocked()) {
+          return;
+        }
+        const touch = event.changedTouches?.[0];
+        if (!touch) {
+          return;
+        }
+        touchStart = {
+          qid,
+          x: touch.clientX,
+          y: touch.clientY,
+          time: Date.now(),
+        };
+      }, { passive: true });
+      row.addEventListener("touchend", (event) => {
+        if (!touchStart || touchStart.qid !== qid || isQuestionOperationLocked()) {
+          return;
+        }
+        const touch = event.changedTouches?.[0];
+        if (!touch) {
+          touchStart = null;
+          return;
+        }
+        const deltaX = touch.clientX - touchStart.x;
+        const deltaY = touch.clientY - touchStart.y;
+        const elapsedMs = Date.now() - touchStart.time;
+        touchStart = null;
+        const absX = Math.abs(deltaX);
+        const absY = Math.abs(deltaY);
+        if (elapsedMs > 900 || absY < 42 || absY > 220 || absY <= absX) {
+          return;
+        }
+        if (deltaY < 0) {
+          moveVisibleQuestionByStep(qid, -1, { toast: true });
+          return;
+        }
+        moveVisibleQuestionByStep(qid, 1, { toast: true });
+      }, { passive: true });
+      row.addEventListener("touchcancel", () => {
+        touchStart = null;
+      }, { passive: true });
+    });
+  };
+  bindQuestionReorderInteractions();
   const selectAllQuestionsInput = appEl.querySelector("[data-action='admin-select-all-questions']");
   if (selectAllQuestionsInput instanceof HTMLInputElement) {
     selectAllQuestionsInput.indeterminate = selectAllQuestionsInput.dataset.indeterminate === "true";
@@ -10123,7 +10341,6 @@ function wireAdmin() {
     });
   });
 
-  const adminQuestionsSection = document.getElementById("admin-questions-section");
   adminQuestionsSection?.addEventListener("change", (event) => {
     const targetEl = event.target;
     if (!(targetEl instanceof Element)) {

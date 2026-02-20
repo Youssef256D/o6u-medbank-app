@@ -1149,6 +1149,49 @@ body.is-routing .card {
   text-align: center;
 }
 
+.admin-question-order-cell {
+  width: 54px;
+  text-align: center;
+}
+
+.admin-question-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 9px;
+  border: 1px dashed rgba(23, 126, 137, 0.42);
+  color: var(--brand-dark);
+  font-size: 0.86rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  user-select: none;
+  cursor: grab;
+}
+
+.admin-question-row[draggable="false"] .admin-question-drag-handle {
+  opacity: 0.46;
+  cursor: not-allowed;
+}
+
+.admin-question-row.is-dragging td {
+  opacity: 0.5;
+}
+
+.admin-question-row.is-drop-before td {
+  box-shadow: inset 0 3px 0 rgba(23, 126, 137, 0.72);
+}
+
+.admin-question-row.is-drop-after td {
+  box-shadow: inset 0 -3px 0 rgba(23, 126, 137, 0.72);
+}
+
+.admin-question-reorder-hint {
+  margin: 0.58rem 0 0;
+}
+
 #admin-questions-section tbody tr.is-selected td {
   background: rgba(23, 126, 137, 0.08);
 }
