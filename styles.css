@@ -221,6 +221,20 @@ button {
     transform 180ms ease;
 }
 
+.top-nav-count {
+  margin-left: 0.36rem;
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #0f5132;
+  background: #d1e7dd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+}
+
 .top-nav button.is-active {
   background: var(--brand-soft);
   color: var(--brand-strong);
@@ -925,6 +939,30 @@ body.is-routing .card {
 .admin-main {
   display: grid;
   gap: 0.9rem;
+}
+
+.notifications-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.notification-card {
+  border-left: 4px solid transparent;
+}
+
+.notification-card.is-unread {
+  border-left-color: rgba(23, 126, 137, 0.9);
+  background: rgba(23, 126, 137, 0.06);
+}
+
+.notification-card.is-read {
+  border-left-color: rgba(51, 78, 104, 0.24);
+}
+
+.notification-card-body {
+  margin: 0.55rem 0 0;
+  white-space: pre-wrap;
+  line-height: 1.45;
 }
 
 .admin-section {

@@ -16,6 +16,7 @@
     "forgot",
     "complete-profile",
     "dashboard",
+    "notifications",
     "create-test",
     "qbank",
     "builder",

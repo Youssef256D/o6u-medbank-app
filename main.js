@@ -3,6 +3,7 @@ const STORAGE_KEYS = {
   currentUserId: "mcq_current_user_id",
   questions: "mcq_questions",
   sessions: "mcq_sessions",
+  notifications: "mcq_notifications",
   filterPresets: "mcq_filter_presets",
   incorrectQueue: "mcq_incorrect_queue",
   invites: "mcq_invites",
@@ -23,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.9").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.10").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -40,6 +41,7 @@ const KNOWN_ROUTES = new Set([
   "forgot",
   "complete-profile",
   "dashboard",
+  "notifications",
   "create-test",
   "qbank",
   "builder",
@@ -49,7 +51,7 @@ const KNOWN_ROUTES = new Set([
   "profile",
   "admin",
 ]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "activity"]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "notifications", "activity"]);
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -152,6 +154,11 @@ const state = {
   adminSelectedQuestionIds: [],
   adminBulkActionRunning: false,
   adminBulkActionType: "",
+  adminNotificationTargetType: "all",
+  adminNotificationTargetUserId: "",
+  adminNotificationTitle: "",
+  adminNotificationBody: "",
+  adminNotificationSending: false,
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
@@ -1355,6 +1362,7 @@ async function initSupabaseAuth() {
         const privateRoutes = new Set([
           "complete-profile",
           "dashboard",
+          "notifications",
           "create-test",
           "qbank",
           "builder",
@@ -2310,6 +2318,7 @@ async function hydrateRelationalState(user) {
   await hydrateRelationalCoursesAndTopics();
   await hydrateRelationalProfiles(current);
   await hydrateRelationalQuestions();
+  await hydrateRelationalNotifications(current);
   await hydrateRelationalSessions(current);
 }
 
@@ -2963,6 +2972,236 @@ async function hydrateRelationalQuestions() {
       });
     }
   }
+}
+
+async function hydrateRelationalNotifications(currentUser) {
+  const user = currentUser || getCurrentUser();
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled || !user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+    return false;
+  }
+
+  const selectColumns = "id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active";
+  let notificationRows = [];
+  if (user.role === "admin") {
+    const notificationsResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("notifications")
+        .select(selectColumns)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, to)
+    ));
+    if (notificationsResult.error) {
+      if (!isMissingRelationError(notificationsResult.error)) {
+        console.warn("Could not hydrate notifications.", notificationsResult.error?.message || notificationsResult.error);
+      }
+      return false;
+    }
+    notificationRows = Array.isArray(notificationsResult.data) ? notificationsResult.data : [];
+  } else {
+    const globalNotificationsResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("notifications")
+        .select(selectColumns)
+        .eq("is_active", true)
+        .is("recipient_user_id", null)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, to)
+    ));
+    if (globalNotificationsResult.error) {
+      if (!isMissingRelationError(globalNotificationsResult.error)) {
+        console.warn(
+          "Could not hydrate global notifications.",
+          globalNotificationsResult.error?.message || globalNotificationsResult.error,
+        );
+      }
+      return false;
+    }
+
+    const directNotificationsResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("notifications")
+        .select(selectColumns)
+        .eq("is_active", true)
+        .eq("recipient_user_id", user.supabaseAuthId)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, to)
+    ));
+    if (directNotificationsResult.error) {
+      if (!isMissingRelationError(directNotificationsResult.error)) {
+        console.warn(
+          "Could not hydrate direct notifications.",
+          directNotificationsResult.error?.message || directNotificationsResult.error,
+        );
+      }
+      return false;
+    }
+
+    const globalRows = Array.isArray(globalNotificationsResult.data) ? globalNotificationsResult.data : [];
+    const directRows = Array.isArray(directNotificationsResult.data) ? directNotificationsResult.data : [];
+    notificationRows = [...globalRows, ...directRows];
+  }
+
+  if (!notificationRows.length) {
+    const localUnsynced = getNotifications().filter((entry) => !isUuidValue(entry.dbId));
+    saveNotificationsLocal(localUnsynced);
+    return true;
+  }
+
+  const notificationDbIds = [...new Set(
+    notificationRows
+      .map((row) => String(row?.id || "").trim())
+      .filter((id) => isUuidValue(id)),
+  )];
+  const readByNotificationId = {};
+  if (user.role !== "admin" && notificationDbIds.length) {
+    for (const idBatch of splitIntoBatches(notificationDbIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data: readRows, error: readError } = await client
+        .from("notification_reads")
+        .select("notification_id,user_id")
+        .eq("user_id", user.supabaseAuthId)
+        .in("notification_id", idBatch);
+      if (readError) {
+        if (!isMissingRelationError(readError)) {
+          console.warn("Could not hydrate notification read state.", readError?.message || readError);
+        }
+        return false;
+      }
+      (readRows || []).forEach((readRow) => {
+        const notificationId = String(readRow?.notification_id || "").trim();
+        const userId = String(readRow?.user_id || "").trim();
+        if (!isUuidValue(notificationId) || !userId) {
+          return;
+        }
+        if (!readByNotificationId[notificationId]) {
+          readByNotificationId[notificationId] = [];
+        }
+        readByNotificationId[notificationId].push(userId);
+      });
+    }
+  }
+
+  const localNotifications = getNotifications();
+  const localByDbId = new Map(
+    localNotifications
+      .map((entry) => [String(entry?.dbId || "").trim(), entry])
+      .filter(([dbId]) => isUuidValue(dbId)),
+  );
+  const localUnsynced = localNotifications.filter((entry) => !isUuidValue(entry.dbId));
+  const mappedRemoteNotifications = notificationRows
+    .map((row) => {
+      const dbId = String(row?.id || "").trim();
+      const localMatch = localByDbId.get(dbId);
+      const remoteReadBy = readByNotificationId[dbId] || [];
+      const localReadBy = Array.isArray(localMatch?.readByUserIds) ? localMatch.readByUserIds : [];
+      return mapRelationalNotificationRowToLocal(row, {
+        readByUserIds: [...new Set([...remoteReadBy, ...localReadBy])],
+      });
+    })
+    .filter(Boolean);
+
+  saveNotificationsLocal([...localUnsynced, ...mappedRemoteNotifications]);
+  return true;
+}
+
+async function createRelationalNotification(notificationPayload, actorUser, users = null) {
+  const user = actorUser || getCurrentUser();
+  if (!user) {
+    return { ok: false, message: "You must be signed in to send notifications." };
+  }
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return { ok: false, message: relationalSync.lastReadyError || "Relational database sync is unavailable." };
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return { ok: false, message: "Supabase relational client is not available." };
+  }
+
+  const payload = normalizeNotificationRecord(notificationPayload);
+  if (!payload) {
+    return { ok: false, message: "Notification payload is invalid." };
+  }
+  const recipientProfileId = getNotificationTargetProfileId(payload, users);
+  if (payload.targetType === "user" && !recipientProfileId) {
+    return {
+      ok: false,
+      message: "Target user does not have a Supabase account yet. Notification was saved locally only.",
+    };
+  }
+
+  const { data, error } = await client
+    .from("notifications")
+    .upsert([{
+      external_id: payload.id,
+      recipient_user_id: recipientProfileId || null,
+      title: payload.title,
+      message: payload.body,
+      created_by: isUuidValue(user.supabaseAuthId) ? user.supabaseAuthId : null,
+      created_by_name: String(user.name || "Admin").trim() || "Admin",
+      is_active: true,
+    }], { onConflict: "external_id" })
+    .select("id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active")
+    .single();
+  if (error) {
+    if (isMissingRelationError(error)) {
+      return { ok: false, message: "Notifications table is missing in Supabase. Run the new migration first." };
+    }
+    return { ok: false, message: error.message || "Could not save notification to Supabase." };
+  }
+
+  const mapped = mapRelationalNotificationRowToLocal(data, {
+    readByUserIds: payload.readByUserIds,
+  });
+  return { ok: true, notification: mapped };
+}
+
+async function syncNotificationReadsToRelational(user, notificationDbIds) {
+  const currentUser = user || getCurrentUser();
+  const userProfileId = String(currentUser?.supabaseAuthId || "").trim();
+  if (!isUuidValue(userProfileId)) {
+    return { ok: false, message: "No active Supabase profile for this student." };
+  }
+  const ids = [...new Set(
+    (Array.isArray(notificationDbIds) ? notificationDbIds : [])
+      .map((id) => String(id || "").trim())
+      .filter((id) => isUuidValue(id)),
+  )];
+  if (!ids.length) {
+    return { ok: true };
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return { ok: false, message: relationalSync.lastReadyError || "Relational database sync is unavailable." };
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return { ok: false, message: "Supabase relational client is not available." };
+  }
+
+  for (const idBatch of splitIntoBatches(ids, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    const rows = idBatch.map((notificationId) => ({
+      notification_id: notificationId,
+      user_id: userProfileId,
+      read_at: nowISO(),
+    }));
+    const { error } = await client
+      .from("notification_reads")
+      .upsert(rows, { onConflict: "notification_id,user_id" });
+    if (error) {
+      if (isMissingRelationError(error)) {
+        return { ok: false, message: "Notifications read table is missing in Supabase. Run the new migration first." };
+      }
+      return { ok: false, message: error.message || "Could not sync notification read state." };
+    }
+  }
+
+  return { ok: true };
 }
 
 async function hydrateRelationalSessions(currentUser) {
@@ -4953,6 +5192,10 @@ function seedData() {
     save(STORAGE_KEYS.sessions, []);
   }
 
+  if (!load(STORAGE_KEYS.notifications, null)) {
+    save(STORAGE_KEYS.notifications, []);
+  }
+
   if (!load(STORAGE_KEYS.filterPresets, null)) {
     save(STORAGE_KEYS.filterPresets, []);
   }
@@ -5327,11 +5570,12 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       await hydrateRelationalQuestions();
       state.studentDataLastFullSyncAt = now;
     }
+    await hydrateRelationalNotifications(user);
     await hydrateRelationalSessions(user);
     state.studentDataLastSyncAt = Date.now();
     if (
       rerender
-      && (routeBefore === "dashboard" || routeBefore === "analytics")
+      && (routeBefore === "dashboard" || routeBefore === "analytics" || routeBefore === "notifications")
       && state.route === routeBefore
     ) {
       shouldRerenderRoute = routeBefore;
@@ -5419,6 +5663,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     if (shouldHydrateQuestions) {
       await hydrateRelationalQuestions();
     }
+    await hydrateRelationalNotifications(user);
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
       await refreshAdminPresenceSnapshot({ force: true, silent: true });
     }
@@ -5485,6 +5730,7 @@ function render() {
   const privateRoutes = [
     "complete-profile",
     "dashboard",
+    "notifications",
     "create-test",
     "qbank",
     "builder",
@@ -5607,6 +5853,10 @@ function render() {
       appEl.innerHTML = renderDashboard();
       wireDashboard();
       break;
+    case "notifications":
+      appEl.innerHTML = renderNotifications();
+      wireNotifications();
+      break;
     case "create-test":
       appEl.innerHTML = renderCreateTest();
       wireCreateTest();
@@ -5704,6 +5954,9 @@ function syncTopbar() {
   const user = getCurrentUser();
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
+  const unreadNotificationCount = user?.role === "student"
+    ? getUnreadNotificationCountForUser(user)
+    : 0;
 
   topbarEl?.classList.toggle("admin-only-header", isAdminHeader);
   brandWrapEl?.classList.toggle("hidden", false);
@@ -5720,6 +5973,13 @@ function syncTopbar() {
       button.classList.toggle("hidden", route === "admin");
     }
   });
+  const notificationNavButton = privateNavEl.querySelector("[data-nav='notifications']");
+  if (notificationNavButton) {
+    const countLabel = unreadNotificationCount > 99 ? "99+" : String(unreadNotificationCount);
+    notificationNavButton.innerHTML = unreadNotificationCount
+      ? `Notifications <span class="top-nav-count">${escapeHtml(countLabel)}</span>`
+      : "Notifications";
+  }
 
   if (!user) {
     authActionsEl.classList.remove("hidden");
@@ -6893,6 +7153,126 @@ function wireCompleteProfile() {
   });
 }
 
+function renderNotifications() {
+  const user = getCurrentUser();
+  if (!user || user.role !== "student") {
+    return `
+      <section class="panel">
+        <h2 class="title">Notifications unavailable</h2>
+        <p class="subtle">Student role required for this page.</p>
+      </section>
+    `;
+  }
+
+  const notifications = getVisibleNotificationsForUser(user);
+  const unreadCount = notifications.filter((notification) => !isNotificationReadByUser(notification, user)).length;
+  const listMarkup = notifications
+    .map((notification) => {
+      const isRead = isNotificationReadByUser(notification, user);
+      const bodyHtml = escapeHtml(notification.body || "").replaceAll("\n", "<br />");
+      const senderLabel = String(notification.createdByName || "Admin").trim() || "Admin";
+      const createdLabel = new Date(notification.createdAt || nowISO()).toLocaleString();
+      return `
+        <article class="card notification-card ${isRead ? "is-read" : "is-unread"}" data-notification-id="${escapeHtml(notification.id)}">
+          <div class="flex-between">
+            <h3 style="margin: 0;">${escapeHtml(notification.title || "Notification")}</h3>
+            <span class="badge ${isRead ? "neutral" : "good"}">${isRead ? "Read" : "New"}</span>
+          </div>
+          <p class="notification-card-body">${bodyHtml || "-"}</p>
+          <p class="subtle" style="margin: 0.45rem 0 0;">From ${escapeHtml(senderLabel)} • ${escapeHtml(createdLabel)}</p>
+          ${
+            isRead
+              ? ""
+              : `<div class="stack" style="margin-top: 0.55rem;">
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="notification-mark-read" data-notification-id="${escapeHtml(notification.id)}">Mark as read</button>
+                </div>`
+          }
+        </article>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="panel" id="student-notifications-section">
+      <div class="flex-between">
+        <div>
+          <p class="kicker">Updates</p>
+          <h2 class="title">Notifications</h2>
+          <p class="subtle">Messages from admin will appear here.</p>
+        </div>
+        <div class="stack" style="align-items: flex-end;">
+          <p class="subtle" style="margin: 0;">Unread: <b>${unreadCount}</b></p>
+          <button class="btn ghost" type="button" data-action="notifications-refresh" ${state.studentDataRefreshing ? "disabled" : ""}>
+            ${state.studentDataRefreshing ? "Refreshing..." : "Refresh"}
+          </button>
+          <button class="btn ghost" type="button" data-action="notifications-mark-all-read" ${unreadCount ? "" : "disabled"}>
+            Mark all read
+          </button>
+        </div>
+      </div>
+      <p class="subtle">${escapeHtml(getStudentDataSyncStatusText())}</p>
+      <div class="notifications-list" style="margin-top: 0.85rem;">
+        ${listMarkup || `<article class="card"><p class="subtle" style="margin:0;">No notifications yet.</p></article>`}
+      </div>
+    </section>
+  `;
+}
+
+function wireNotifications() {
+  const user = getCurrentUser();
+  if (!user || user.role !== "student") {
+    return;
+  }
+
+  const markAsRead = async (notificationIds) => {
+    const result = markNotificationsReadLocallyForUser(user, notificationIds);
+    if (!result.changed) {
+      return false;
+    }
+    if (result.syncedDbIds.length) {
+      const syncResult = await syncNotificationReadsToRelational(user, result.syncedDbIds);
+      if (!syncResult.ok) {
+        toast(`Marked as read locally, but cloud sync failed: ${syncResult.message || "Sync failed."}`);
+      }
+    }
+    return true;
+  };
+
+  appEl.querySelectorAll("[data-action='notification-mark-read']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const notificationId = String(button.getAttribute("data-notification-id") || "").trim();
+      if (!notificationId) {
+        return;
+      }
+      const changed = await markAsRead([notificationId]);
+      if (changed) {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  });
+
+  appEl.querySelector("[data-action='notifications-mark-all-read']")?.addEventListener("click", async () => {
+    const unreadNotifications = getVisibleNotificationsForUser(user)
+      .filter((notification) => !isNotificationReadByUser(notification, user))
+      .map((notification) => notification.id);
+    if (!unreadNotifications.length) {
+      return;
+    }
+    const changed = await markAsRead(unreadNotifications);
+    if (changed) {
+      toast("All notifications marked as read.");
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+  });
+
+  appEl.querySelector("[data-action='notifications-refresh']")?.addEventListener("click", async () => {
+    const ok = await refreshStudentDataSnapshot(user, { force: true, rerender: true });
+    toast(ok ? "Notifications refreshed." : "Could not refresh notifications from cloud.");
+  });
+}
+
 function renderDashboard() {
   const user = getCurrentUser();
   const questions = getPublishedQuestionsForUser(user);
@@ -6901,6 +7281,7 @@ function renderDashboard() {
   const analytics = getStudentAnalyticsSnapshot(user.id);
   const stats = analytics.stats;
   const syncStatusText = getStudentDataSyncStatusText();
+  const unreadNotifications = getUnreadNotificationCountForUser(user);
 
   return `
     <section class="panel">
@@ -6909,6 +7290,7 @@ function renderDashboard() {
         <h2 class="title">${escapeHtml(user.name)}'s Dashboard</h2>
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
+          <button class="btn ghost" data-nav="notifications">Notifications${unreadNotifications ? ` (${unreadNotifications})` : ""}</button>
           <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
             ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
           </button>
@@ -8711,10 +9093,10 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions", "activity"].includes(state.adminPage)
+  const activeAdminPage = ["dashboard", "users", "courses", "questions", "notifications", "activity"].includes(state.adminPage)
     ? state.adminPage
     : "dashboard";
-  if (activeAdminPage === "users" || activeAdminPage === "courses") {
+  if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
     syncUsersWithCurriculum();
   }
 
@@ -9420,6 +9802,112 @@ function renderAdmin() {
     `;
   }
 
+  if (activeAdminPage === "notifications") {
+    const users = getUsers()
+      .slice()
+      .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
+    const targetType = String(state.adminNotificationTargetType || "").trim() === "user"
+      ? "user"
+      : "all";
+    let targetUserId = String(state.adminNotificationTargetUserId || "").trim();
+    if (targetUserId && !findUserByNotificationTargetId(targetUserId, users)) {
+      targetUserId = "";
+      state.adminNotificationTargetUserId = "";
+    }
+    const titleDraft = String(state.adminNotificationTitle || "");
+    const bodyDraft = String(state.adminNotificationBody || "");
+    const notificationSending = Boolean(state.adminNotificationSending);
+    const notificationRows = getNotifications()
+      .slice(0, 200)
+      .map((notification) => {
+        const targetLabel = getNotificationTargetLabel(notification, users);
+        const senderLabel = String(notification.createdByName || "Admin").trim() || "Admin";
+        const body = String(notification.body || "").trim();
+        const bodyPreview = body.length > 180 ? `${body.slice(0, 177)}...` : body;
+        const createdLabel = new Date(notification.createdAt || nowISO()).toLocaleString();
+        return `
+          <tr>
+            <td><small>${escapeHtml(createdLabel)}</small></td>
+            <td>${escapeHtml(targetLabel)}</td>
+            <td><b>${escapeHtml(notification.title || "Notification")}</b></td>
+            <td>${escapeHtml(bodyPreview || "-")}</td>
+            <td><small>${escapeHtml(senderLabel)}</small></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    pageContent = `
+      <section class="card admin-section" id="admin-notifications-section">
+        <div class="flex-between">
+          <div>
+            <h3 style="margin: 0;">Notifications</h3>
+            <p class="subtle">Send in-app notifications to all users or one specific user.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <p class="subtle" style="margin: 0;">Last sync: <b>${state.adminDataLastSyncAt ? new Date(state.adminDataLastSyncAt).toLocaleTimeString() : "Not yet"}</b></p>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-refresh-notifications" ${notificationSending ? "disabled" : ""}>Refresh list</button>
+          </div>
+        </div>
+
+        <form id="admin-notification-form" style="margin-top: 0.8rem;">
+          <div class="form-row">
+            <label>Audience
+              <select name="targetType" id="admin-notification-target-type" ${notificationSending ? "disabled" : ""}>
+                <option value="all" ${targetType === "all" ? "selected" : ""}>All users</option>
+                <option value="user" ${targetType === "user" ? "selected" : ""}>Specific user</option>
+              </select>
+            </label>
+            <label>Target user
+              <select name="targetUserId" id="admin-notification-target-user" ${targetType === "user" ? "" : "disabled"} ${notificationSending ? "disabled" : ""}>
+                <option value="">Select user</option>
+                ${users
+                  .map((entry) => {
+                    const userId = String(entry?.id || "").trim();
+                    if (!userId) {
+                      return "";
+                    }
+                    const roleLabel = entry.role === "admin" ? "admin" : "student";
+                    const optionLabel = `${entry.name} (${roleLabel})`;
+                    return `<option value="${escapeHtml(userId)}" ${targetUserId === userId ? "selected" : ""}>${escapeHtml(optionLabel)}</option>`;
+                  })
+                  .join("")}
+              </select>
+            </label>
+          </div>
+          <label>Title
+            <input name="title" maxlength="120" required value="${escapeHtml(titleDraft)}" ${notificationSending ? "disabled" : ""} />
+          </label>
+          <label>Message
+            <textarea name="body" maxlength="2000" required ${notificationSending ? "disabled" : ""}>${escapeHtml(bodyDraft)}</textarea>
+          </label>
+          <div class="stack">
+            <button class="btn ${notificationSending ? "is-loading" : ""}" type="submit" ${notificationSending ? "disabled" : ""}>
+              ${notificationSending ? `<span class="inline-loader" aria-hidden="true"></span><span>Sending...</span>` : "Send notification"}
+            </button>
+          </div>
+        </form>
+
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>Sent</th>
+                <th>Target</th>
+                <th>Title</th>
+                <th>Message</th>
+                <th>Sender</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${notificationRows || `<tr><td colspan="5" class="subtle">No notifications sent yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   if (activeAdminPage === "activity") {
     const rows = Array.isArray(state.adminPresenceRows) ? state.adminPresenceRows : [];
     const onlineRows = rows.filter((row) => shouldTreatPresenceAsOnline(row));
@@ -9514,6 +10002,7 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
           <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
+          <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
           <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
         </div>
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
@@ -9577,7 +10066,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions", "activity"].includes(page)) {
+      if (!["dashboard", "users", "courses", "questions", "notifications", "activity"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
@@ -9679,6 +10168,134 @@ function wireAdmin() {
     });
   } else {
     clearAdminPresencePolling();
+  }
+
+  if (state.adminPage === "notifications") {
+    const notificationForm = document.getElementById("admin-notification-form");
+    const targetTypeSelect = document.getElementById("admin-notification-target-type");
+    const targetUserSelect = document.getElementById("admin-notification-target-user");
+
+    const syncNotificationAudienceUi = () => {
+      const targetType = String(targetTypeSelect?.value || "all").trim() === "user" ? "user" : "all";
+      if (state.adminNotificationTargetType !== targetType) {
+        state.adminNotificationTargetType = targetType;
+      }
+      if (!targetUserSelect) {
+        return;
+      }
+      targetUserSelect.disabled = targetType !== "user" || state.adminNotificationSending;
+      if (targetType !== "user") {
+        targetUserSelect.value = "";
+        state.adminNotificationTargetUserId = "";
+      }
+    };
+
+    targetTypeSelect?.addEventListener("change", syncNotificationAudienceUi);
+    targetUserSelect?.addEventListener("change", () => {
+      state.adminNotificationTargetUserId = String(targetUserSelect.value || "").trim();
+    });
+    syncNotificationAudienceUi();
+
+    appEl.querySelector("[data-action='admin-refresh-notifications']")?.addEventListener("click", async () => {
+      const currentUser = getCurrentUser();
+      if (!currentUser || currentUser.role !== "admin") {
+        return;
+      }
+      const ready = await ensureRelationalSyncReady({ force: true });
+      if (!ready) {
+        toast(relationalSync.lastReadyError || "Could not refresh notifications.");
+        return;
+      }
+      const refreshed = await hydrateRelationalNotifications(currentUser);
+      if (refreshed) {
+        state.adminDataLastSyncAt = Date.now();
+      }
+      toast(refreshed ? "Notifications refreshed." : "Could not refresh notifications from Supabase. Run the notifications migration.");
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+
+    notificationForm?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const currentUser = getCurrentUser();
+      if (!currentUser || currentUser.role !== "admin") {
+        return;
+      }
+      const data = new FormData(notificationForm);
+      const targetType = String(data.get("targetType") || "all").trim() === "user" ? "user" : "all";
+      const targetUserId = String(data.get("targetUserId") || "").trim();
+      const title = String(data.get("title") || "").trim();
+      const body = String(data.get("body") || "").trim();
+      if (!title || !body) {
+        toast("Notification title and message are required.");
+        return;
+      }
+      if (targetType === "user" && !targetUserId) {
+        toast("Choose a target user or switch audience to all users.");
+        return;
+      }
+      state.adminNotificationTargetType = targetType;
+      state.adminNotificationTargetUserId = targetType === "user" ? targetUserId : "";
+      state.adminNotificationTitle = title;
+      state.adminNotificationBody = body;
+      state.adminNotificationSending = true;
+      state.skipNextRouteAnimation = true;
+      render();
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+
+      let syncWarning = "";
+      let sentLocally = false;
+      try {
+        const localNotification = normalizeNotificationRecord({
+          id: crypto.randomUUID(),
+          targetType,
+          targetUserId: targetType === "user" ? targetUserId : "",
+          title,
+          body,
+          createdAt: nowISO(),
+          createdById: String(currentUser.id || "").trim(),
+          createdByName: String(currentUser.name || "Admin").trim() || "Admin",
+          readByUserIds: [],
+        });
+        if (!localNotification) {
+          throw new Error("Could not create notification payload.");
+        }
+
+        const currentNotifications = getNotifications();
+        saveNotificationsLocal([localNotification, ...currentNotifications]);
+        sentLocally = true;
+        const canSyncRelational = isUuidValue(String(currentUser.supabaseAuthId || "").trim());
+        if (canSyncRelational) {
+          const relationalResult = await createRelationalNotification(localNotification, currentUser, getUsers());
+          if (relationalResult.ok && relationalResult.notification) {
+            const latestLocal = getNotifications().filter((entry) => entry.id !== localNotification.id);
+            saveNotificationsLocal([relationalResult.notification, ...latestLocal]);
+            await hydrateRelationalNotifications(currentUser).catch(() => {});
+          } else {
+            syncWarning = relationalResult.message || "Could not sync notification to Supabase.";
+          }
+        } else {
+          syncWarning = "No active Supabase admin session. Notification was saved locally only.";
+        }
+      } catch (error) {
+        syncWarning = getErrorMessage(error, "Could not send notification.");
+      } finally {
+        state.adminNotificationSending = false;
+        state.adminNotificationTargetType = "all";
+        state.adminNotificationTargetUserId = "";
+        state.adminNotificationTitle = "";
+        state.adminNotificationBody = "";
+        if (!sentLocally) {
+          toast(`Could not send notification: ${syncWarning || "Unknown error."}`);
+        } else if (syncWarning) {
+          toast(`Notification sent locally, but cloud sync failed: ${syncWarning}`);
+        } else {
+          toast("Notification sent.");
+        }
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
   }
 
   const curriculumFilterForm = document.getElementById("admin-curriculum-filter-form");
@@ -11362,6 +11979,255 @@ function wireAdmin() {
 function getUsers() {
   const users = load(STORAGE_KEYS.users, []);
   return Array.isArray(users) ? users : [];
+}
+
+function normalizeNotificationRecord(entry, fallbackId = "") {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const dbIdCandidate = String(entry.dbId || entry.idOnServer || "").trim();
+  const dbId = isUuidValue(dbIdCandidate) ? dbIdCandidate : "";
+  const idCandidate = String(entry.id || entry.externalId || dbId || fallbackId || "").trim();
+  if (!idCandidate) {
+    return null;
+  }
+  const targetUserId = String(entry.targetUserId || entry.targetProfileId || entry.recipientUserId || "").trim();
+  const targetType = String(entry.targetType || "").trim().toLowerCase() === "user" || targetUserId
+    ? "user"
+    : "all";
+  const createdAtSource = String(entry.createdAt || entry.created_at || "").trim();
+  const createdAtMs = new Date(createdAtSource || 0).getTime();
+  const createdAt = Number.isFinite(createdAtMs) && createdAtMs > 0
+    ? new Date(createdAtMs).toISOString()
+    : nowISO();
+  const readByUserIds = [...new Set(
+    (Array.isArray(entry.readByUserIds) ? entry.readByUserIds : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  )];
+
+  return {
+    id: idCandidate,
+    dbId,
+    targetType,
+    targetUserId: targetType === "user" ? targetUserId : "",
+    title: String(entry.title || "Notification").trim() || "Notification",
+    body: String(entry.body || entry.message || "").trim(),
+    createdAt,
+    createdById: String(entry.createdById || entry.created_by || "").trim(),
+    createdByName: String(entry.createdByName || entry.created_by_name || "Admin").trim() || "Admin",
+    readByUserIds,
+  };
+}
+
+function normalizeNotificationCollection(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const byKey = new Map();
+
+  list.forEach((entry, index) => {
+    const normalized = normalizeNotificationRecord(entry, `notification_${index + 1}`);
+    if (!normalized) {
+      return;
+    }
+    const key = normalized.dbId ? `db:${normalized.dbId}` : `id:${normalized.id}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, normalized);
+      return;
+    }
+    const mergedReadBy = [...new Set([...(existing.readByUserIds || []), ...(normalized.readByUserIds || [])])];
+    const existingMs = new Date(existing.createdAt || 0).getTime();
+    const normalizedMs = new Date(normalized.createdAt || 0).getTime();
+    const preferred = normalizedMs >= existingMs ? normalized : existing;
+    byKey.set(key, {
+      ...preferred,
+      readByUserIds: mergedReadBy,
+    });
+  });
+
+  return [...byKey.values()]
+    .sort((a, b) => {
+      const aMs = new Date(a.createdAt || 0).getTime();
+      const bMs = new Date(b.createdAt || 0).getTime();
+      if (aMs !== bMs) {
+        return bMs - aMs;
+      }
+      return String(b.id || "").localeCompare(String(a.id || ""));
+    })
+    .slice(0, 800);
+}
+
+function getNotifications() {
+  return normalizeNotificationCollection(load(STORAGE_KEYS.notifications, []));
+}
+
+function saveNotificationsLocal(notifications) {
+  saveLocalOnly(STORAGE_KEYS.notifications, normalizeNotificationCollection(notifications));
+}
+
+function getNotificationIdentityListForUser(user) {
+  const ids = [];
+  const localId = String(user?.id || "").trim();
+  if (localId) {
+    ids.push(localId);
+  }
+  const profileId = String(getUserProfileId(user) || "").trim();
+  if (profileId && !ids.includes(profileId)) {
+    ids.push(profileId);
+  }
+  return ids;
+}
+
+function isNotificationVisibleToUser(notification, user) {
+  if (!notification || !user) {
+    return false;
+  }
+  if (notification.targetType !== "user") {
+    return true;
+  }
+  const target = String(notification.targetUserId || "").trim();
+  if (!target) {
+    return false;
+  }
+  const identities = getNotificationIdentityListForUser(user);
+  return identities.includes(target);
+}
+
+function isNotificationReadByUser(notification, user) {
+  if (!notification || !user) {
+    return true;
+  }
+  const identities = getNotificationIdentityListForUser(user);
+  const readSet = new Set(
+    (Array.isArray(notification.readByUserIds) ? notification.readByUserIds : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  );
+  return identities.some((id) => readSet.has(id));
+}
+
+function getVisibleNotificationsForUser(user) {
+  return getNotifications().filter((notification) => isNotificationVisibleToUser(notification, user));
+}
+
+function getUnreadNotificationCountForUser(user) {
+  if (!user || user.role !== "student") {
+    return 0;
+  }
+  return getVisibleNotificationsForUser(user).filter((notification) => !isNotificationReadByUser(notification, user)).length;
+}
+
+function findUserByNotificationTargetId(targetUserId, users = null) {
+  const raw = String(targetUserId || "").trim();
+  if (!raw) {
+    return null;
+  }
+  const list = Array.isArray(users) ? users : getUsers();
+  return list.find((entry) => {
+    const localId = String(entry?.id || "").trim();
+    const profileId = String(getUserProfileId(entry) || "").trim();
+    return raw === localId || raw === profileId;
+  }) || null;
+}
+
+function getNotificationTargetProfileId(notification, users = null) {
+  if (!notification || notification.targetType !== "user") {
+    return "";
+  }
+  const targetUser = findUserByNotificationTargetId(notification.targetUserId, users);
+  const profileId = String(getUserProfileId(targetUser) || "").trim();
+  if (isUuidValue(profileId)) {
+    return profileId;
+  }
+  const rawTarget = String(notification.targetUserId || "").trim();
+  return isUuidValue(rawTarget) ? rawTarget : "";
+}
+
+function mapRelationalNotificationRowToLocal(row, options = {}) {
+  const readByUserIds = Array.isArray(options.readByUserIds) ? options.readByUserIds : [];
+  return normalizeNotificationRecord({
+    id: String(row?.external_id || row?.id || "").trim(),
+    dbId: String(row?.id || "").trim(),
+    targetType: row?.recipient_user_id ? "user" : "all",
+    targetUserId: String(row?.recipient_user_id || "").trim(),
+    title: String(row?.title || "").trim(),
+    body: String(row?.message || "").trim(),
+    createdAt: row?.created_at || nowISO(),
+    createdById: String(row?.created_by || "").trim(),
+    createdByName: String(row?.created_by_name || "Admin").trim() || "Admin",
+    readByUserIds,
+  });
+}
+
+function getNotificationTargetLabel(notification, users = null) {
+  if (!notification || notification.targetType !== "user") {
+    return "All users";
+  }
+  const targetUser = findUserByNotificationTargetId(notification.targetUserId, users);
+  if (targetUser) {
+    const roleLabel = targetUser.role === "admin" ? "admin" : "student";
+    return `${targetUser.name} (${roleLabel})`;
+  }
+  const target = String(notification.targetUserId || "").trim();
+  return target ? `User ${target}` : "Specific user";
+}
+
+function markNotificationsReadLocallyForUser(user, notificationIds) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser) {
+    return { changed: false, syncedDbIds: [] };
+  }
+  const targetIds = new Set(
+    (Array.isArray(notificationIds) ? notificationIds : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  );
+  if (!targetIds.size) {
+    return { changed: false, syncedDbIds: [] };
+  }
+  const identityIds = getNotificationIdentityListForUser(currentUser);
+  if (!identityIds.length) {
+    return { changed: false, syncedDbIds: [] };
+  }
+
+  let changed = false;
+  const dbIdsToSync = new Set();
+  const nextNotifications = getNotifications().map((notification) => {
+    const id = String(notification.id || "").trim();
+    const dbId = String(notification.dbId || "").trim();
+    if (!targetIds.has(id) && !targetIds.has(dbId)) {
+      return notification;
+    }
+    if (!isNotificationVisibleToUser(notification, currentUser)) {
+      return notification;
+    }
+    const readSet = new Set(
+      (Array.isArray(notification.readByUserIds) ? notification.readByUserIds : [])
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean),
+    );
+    const before = readSet.size;
+    identityIds.forEach((entry) => readSet.add(entry));
+    if (readSet.size === before) {
+      return notification;
+    }
+    changed = true;
+    if (isUuidValue(dbId)) {
+      dbIdsToSync.add(dbId);
+    }
+    return {
+      ...notification,
+      readByUserIds: [...readSet],
+    };
+  });
+
+  if (changed) {
+    saveNotificationsLocal(nextNotifications);
+  }
+  return {
+    changed,
+    syncedDbIds: [...dbIdsToSync],
+  };
 }
 
 function normalizeQuestionDedupText(value) {

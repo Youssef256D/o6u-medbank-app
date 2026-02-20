@@ -270,6 +270,31 @@ CREATE TABLE IF NOT EXISTS invites (
 
 CREATE UNIQUE INDEX IF NOT EXISTS invites_code_unique_idx ON invites ((LOWER(code)));
 
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  external_id TEXT NOT NULL UNIQUE,
+  recipient_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_by_name TEXT NOT NULL DEFAULT 'Admin',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS notifications_created_at_idx ON notifications (created_at DESC);
+CREATE INDEX IF NOT EXISTS notifications_recipient_created_at_idx ON notifications (recipient_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notification_reads (
+  notification_id UUID NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (notification_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS notification_reads_user_read_at_idx ON notification_reads (user_id, read_at DESC);
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -313,6 +338,12 @@ EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_flashcards_updated_at ON flashcards;
 CREATE TRIGGER trg_flashcards_updated_at
 BEFORE UPDATE ON flashcards
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_notifications_updated_at ON notifications;
+CREATE TRIGGER trg_notifications_updated_at
+BEFORE UPDATE ON notifications
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
