@@ -1161,13 +1161,13 @@ body.is-routing .card {
   inset: 0;
   z-index: 20000;
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   justify-content: center;
   padding-top: max(0.75rem, env(safe-area-inset-top));
   padding-right: 1rem;
-  padding-bottom: max(0.95rem, calc(env(safe-area-inset-bottom) + 0.95rem));
+  padding-bottom: max(1.35rem, calc(env(safe-area-inset-bottom) + 1.35rem));
   padding-left: 1rem;
-  overflow: hidden;
+  overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   isolation: isolate;
 }
@@ -1186,11 +1186,12 @@ body.is-routing .card {
 .admin-question-modal-card {
   position: relative;
   z-index: 1;
-  display: block;
+  display: flex;
+  flex-direction: column;
   margin: 0;
   width: min(1100px, calc(100vw - 2rem));
-  max-height: calc(100dvh - max(0.75rem, env(safe-area-inset-top)) - max(0.95rem, calc(env(safe-area-inset-bottom) + 0.95rem)));
-  overflow-y: auto;
+  max-height: calc(100svh - max(0.75rem, env(safe-area-inset-top)) - max(1.35rem, calc(env(safe-area-inset-bottom) + 1.35rem)));
+  overflow-y: hidden;
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -1209,6 +1210,7 @@ body.is-routing .card {
   position: sticky;
   top: 0;
   z-index: 2;
+  flex: 0 0 auto;
   padding-bottom: 0.55rem;
   margin-bottom: 0.5rem;
   background: var(--surface-strong);
@@ -1220,12 +1222,17 @@ body.is-routing .card {
   bottom: 0;
   z-index: 2;
   padding-top: 0.65rem;
-  padding-bottom: 0.45rem;
+  padding-bottom: max(0.45rem, env(safe-area-inset-bottom));
   background: var(--surface-strong);
   border-top: 1px solid var(--line);
 }
 
 #admin-question-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding-bottom: 0.35rem;
 }
 

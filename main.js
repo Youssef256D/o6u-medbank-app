@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.2").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -144,6 +144,8 @@ const state = {
   adminImportRunning: false,
   adminImportStatus: "",
   adminImportStatusTone: "neutral",
+  adminQuestionSaveRunning: false,
+  adminQuestionDeleteQid: "",
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
@@ -8551,6 +8553,9 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "questions") {
+    const questionSaveRunning = Boolean(state.adminQuestionSaveRunning);
+    const questionDeleteQid = String(state.adminQuestionDeleteQid || "").trim();
+    const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid);
     const importCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
     const importReport = state.adminImportReport;
@@ -8574,6 +8579,7 @@ function renderAdmin() {
       });
     const questionRows = courseQuestions
       .map((question, idx) => {
+        const isDeleting = questionDeleteQid === String(question.id || "").trim();
         const meta = getQbankCourseTopicMeta(question);
         const stem = String(question.stem || "").trim();
         const stemPreview = stem.length > 160 ? `${stem.slice(0, 157)}...` : stem;
@@ -8586,8 +8592,10 @@ function renderAdmin() {
             <td>${escapeHtml(String(question.status || "draft"))}</td>
             <td>
               <div class="stack">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-edit" data-qid="${escapeHtml(question.id)}">Edit</button>
-                <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete" data-qid="${escapeHtml(question.id)}">Delete</button>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-edit" data-qid="${escapeHtml(question.id)}" ${questionOpsLocked ? "disabled" : ""}>Edit</button>
+                <button class="btn danger admin-btn-sm ${isDeleting ? "is-loading" : ""}" type="button" data-action="admin-delete" data-qid="${escapeHtml(question.id)}" ${questionOpsLocked ? "disabled" : ""}>
+                  ${isDeleting ? `<span class="inline-loader" aria-hidden="true"></span><span>Deleting...</span>` : "Delete"}
+                </button>
               </div>
             </td>
           </tr>
@@ -8620,7 +8628,7 @@ function renderAdmin() {
             <p class="subtle">Open each course, see all uploaded questions, and edit stem, answers, and explanation.</p>
           </div>
           <div class="stack" style="align-items: flex-end; gap: 0.35rem;">
-            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-editor-new">New question</button>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-editor-new" ${questionOpsLocked ? "disabled" : ""}>New question</button>
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-courses">Back to courses</button>
           </div>
         </div>
@@ -8741,8 +8749,11 @@ function renderAdmin() {
                 <div class="flex-between admin-question-modal-head">
                   <h3 style="margin: 0;">${editing ? "Edit Question" : "New Question"}</h3>
                   <div class="stack">
-                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new">New</button>
-                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel">Close</button>
+                    <button class="btn admin-btn-sm ${questionSaveRunning ? "is-loading" : ""}" type="submit" form="admin-question-form" ${questionSaveRunning ? "disabled" : ""}>
+                      ${questionSaveRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Saving...</span>` : "Save"}
+                    </button>
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new" ${questionSaveRunning ? "disabled" : ""}>New</button>
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel" ${questionSaveRunning ? "disabled" : ""}>Close</button>
                   </div>
                 </div>
                 <form id="admin-question-form" style="margin-top: 0.75rem;">
@@ -8831,7 +8842,11 @@ function renderAdmin() {
                     <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
                   </label>
                   <div class="stack admin-question-form-actions">
-                    <button class="btn" type="submit">${editing ? "Save question changes" : "Save question"}</button>
+                    <button class="btn ${questionSaveRunning ? "is-loading" : ""}" type="submit" ${questionSaveRunning ? "disabled" : ""}>
+                      ${questionSaveRunning
+                        ? `<span class="inline-loader" aria-hidden="true"></span><span>${editing ? "Saving changes..." : "Saving question..."}</span>`
+                        : (editing ? "Save question changes" : "Save question")}
+                    </button>
                   </div>
                 </form>
               </section>
@@ -9804,6 +9819,9 @@ function wireAdmin() {
   });
 
   appEl.querySelector("[data-action='admin-open-editor-new']")?.addEventListener("click", () => {
+    if (state.adminQuestionSaveRunning || state.adminQuestionDeleteQid) {
+      return;
+    }
     state.adminEditQuestionId = null;
     state.adminEditorCourse = state.adminFilters.course || allCourses[0] || "";
     state.adminEditorTopic = resolveDefaultTopic(state.adminEditorCourse);
@@ -9813,6 +9831,9 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='admin-close-editor'], [data-action='admin-cancel']").forEach((button) => {
     button.addEventListener("click", () => {
+      if (state.adminQuestionSaveRunning) {
+        return;
+      }
       state.adminEditQuestionId = null;
       state.adminEditorCourse = "";
       state.adminEditorTopic = "";
@@ -9823,6 +9844,9 @@ function wireAdmin() {
 
   const adminQuestionsSection = document.getElementById("admin-questions-section");
   adminQuestionsSection?.addEventListener("click", async (event) => {
+    if (state.adminQuestionSaveRunning) {
+      return;
+    }
     const actionEl = event.target.closest("[data-action]");
     if (!actionEl) {
       return;
@@ -9838,6 +9862,9 @@ function wireAdmin() {
     }
 
     if (action === "admin-edit") {
+      if (state.adminQuestionDeleteQid) {
+        return;
+      }
       state.adminEditQuestionId = qid;
       const questions = getQuestions();
       const editing = questions.find((entry) => String(entry.id || "").trim() === qid);
@@ -9852,23 +9879,38 @@ function wireAdmin() {
     if (!window.confirm(`Delete question ${qid}?`)) {
       return;
     }
+    if (state.adminQuestionDeleteQid) {
+      return;
+    }
 
-    const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
-    save(STORAGE_KEYS.questions, questions);
+    state.adminQuestionDeleteQid = qid;
+    state.skipNextRouteAnimation = true;
+    render();
+
     try {
-      await flushPendingSyncNow();
-      toast("Question deleted.");
+      const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
+      save(STORAGE_KEYS.questions, questions);
       if (state.adminEditQuestionId === qid) {
         state.adminEditQuestionId = null;
         state.adminQuestionModalOpen = false;
       }
+      state.adminQuestionDeleteQid = "";
+      state.skipNextRouteAnimation = true;
       render();
+      toast("Question deleted.");
+      await flushPendingSyncNow();
     } catch (syncError) {
+      state.adminQuestionDeleteQid = "";
+      state.skipNextRouteAnimation = true;
+      render();
       toast(`Question deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
   });
 
   appEl.querySelector("[data-action='admin-new']")?.addEventListener("click", () => {
+    if (state.adminQuestionSaveRunning) {
+      return;
+    }
     state.adminEditQuestionId = null;
     state.adminEditorCourse = state.adminFilters.course || allCourses[0] || "";
     state.adminEditorTopic = (QBANK_COURSE_TOPICS[state.adminEditorCourse] || [])[0] || "";
@@ -10067,9 +10109,20 @@ function wireAdmin() {
   const form = document.getElementById("admin-question-form");
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.adminQuestionSaveRunning) {
+      return;
+    }
+
     const data = new FormData(form);
     const questions = getQuestions();
     const existingId = String(data.get("id") || "");
+    state.adminQuestionSaveRunning = true;
+    state.skipNextRouteAnimation = true;
+    render();
+
+    let successMessage = "Question saved.";
+
+    try {
     let questionImage = String(data.get("questionImage") || "").trim();
     const questionImageFile = data.get("questionImageFile");
     if (questionImageFile instanceof File && Number(questionImageFile.size || 0) > 0) {
@@ -10079,6 +10132,9 @@ function wireAdmin() {
           toast(`Question image upload failed. The provided URL was kept. (${uploadResult.message})`);
         } else {
           toast(`Question image upload failed: ${uploadResult.message}`);
+          state.adminQuestionSaveRunning = false;
+          state.skipNextRouteAnimation = true;
+          render();
           return;
         }
       }
@@ -10127,7 +10183,7 @@ function wireAdmin() {
     }
 
     const idx = questions.findIndex((entry) => entry.id === payload.id);
-    const successMessage = idx >= 0 ? "Question updated." : "Question created.";
+    successMessage = idx >= 0 ? "Question updated." : "Question created.";
     if (idx >= 0) {
       questions[idx] = { ...questions[idx], ...payload };
     } else {
@@ -10135,18 +10191,27 @@ function wireAdmin() {
     }
 
     save(STORAGE_KEYS.questions, questions);
+    state.adminFilters.course = payload.qbankCourse;
+    state.adminFilters.topic = payload.qbankTopic || "";
+    state.adminEditQuestionId = null;
+    state.adminEditorCourse = "";
+    state.adminEditorTopic = "";
+    state.adminQuestionModalOpen = false;
+    state.adminQuestionSaveRunning = false;
+    state.skipNextRouteAnimation = true;
+    render();
+    toast(successMessage);
+
     try {
       await flushPendingSyncNow();
-      toast(successMessage);
-      state.adminFilters.course = payload.qbankCourse;
-      state.adminFilters.topic = payload.qbankTopic || "";
-      state.adminEditQuestionId = null;
-      state.adminEditorCourse = "";
-      state.adminEditorTopic = "";
-      state.adminQuestionModalOpen = false;
-      render();
     } catch (syncError) {
       toast(`${successMessage} locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+    }
+    } catch (saveError) {
+      state.adminQuestionSaveRunning = false;
+      state.skipNextRouteAnimation = true;
+      render();
+      toast(`Could not save question: ${getErrorMessage(saveError, "Save failed.")}`);
     }
   });
 
