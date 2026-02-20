@@ -5409,7 +5409,16 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     }
     await hydrateRelationalCoursesAndTopics();
     await hydrateRelationalProfiles(user);
-    await hydrateRelationalQuestions();
+    let shouldHydrateQuestions = true;
+    if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing) {
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+      if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing) {
+        shouldHydrateQuestions = false;
+      }
+    }
+    if (shouldHydrateQuestions) {
+      await hydrateRelationalQuestions();
+    }
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
       await refreshAdminPresenceSnapshot({ force: true, silent: true });
     }
@@ -10478,16 +10487,25 @@ function wireAdmin() {
       return false;
     }
 
-    const placeAfter = Boolean(options.placeAfter);
-    const nextVisibleIds = [...visibleIds];
-    const [movedId] = nextVisibleIds.splice(fromIndex, 1);
-    let insertionIndex = placeAfter
-      ? toIndex + (fromIndex < toIndex ? 0 : 1)
-      : toIndex + (fromIndex < toIndex ? -1 : 0);
-    insertionIndex = Math.max(0, Math.min(nextVisibleIds.length, insertionIndex));
-    nextVisibleIds.splice(insertionIndex, 0, movedId);
+    const buildReorderedVisibleIds = (placeAfter) => {
+      const reordered = [...visibleIds];
+      const [movedId] = reordered.splice(fromIndex, 1);
+      let insertionIndex = placeAfter
+        ? toIndex + (fromIndex < toIndex ? 0 : 1)
+        : toIndex + (fromIndex < toIndex ? -1 : 0);
+      insertionIndex = Math.max(0, Math.min(reordered.length, insertionIndex));
+      reordered.splice(insertionIndex, 0, movedId);
+      return reordered;
+    };
+    const isSameOrder = (candidate) => candidate.every((id, index) => id === visibleIds[index]);
 
-    if (nextVisibleIds.every((id, index) => id === visibleIds[index])) {
+    const requestedPlaceAfter = Boolean(options.placeAfter);
+    let nextVisibleIds = buildReorderedVisibleIds(requestedPlaceAfter);
+    if (isSameOrder(nextVisibleIds)) {
+      // Fallback: some drop positions resolve to no-op (e.g., adjacent rows).
+      nextVisibleIds = buildReorderedVisibleIds(!requestedPlaceAfter);
+    }
+    if (isSameOrder(nextVisibleIds)) {
       return false;
     }
 
@@ -10516,6 +10534,8 @@ function wireAdmin() {
       sortOrder: index + 1,
     }));
     save(STORAGE_KEYS.questions, nextQuestionsWithOrder);
+    // Prevent immediate admin auto-refresh from rehydrating stale cloud order before this reorder flushes.
+    state.adminDataLastSyncAt = Date.now();
     state.skipNextRouteAnimation = true;
     render();
     scheduleQuestionOrderSync();
