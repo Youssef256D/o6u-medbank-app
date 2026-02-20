@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-18.11").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8738,7 +8738,7 @@ function renderAdmin() {
             <div class="admin-question-modal">
               <button class="admin-question-modal-backdrop" type="button" data-action="admin-close-editor" aria-label="Close question editor"></button>
               <section class="admin-question-modal-card" role="dialog" aria-modal="true" aria-label="Question editor">
-                <div class="flex-between">
+                <div class="flex-between admin-question-modal-head">
                   <h3 style="margin: 0;">${editing ? "Edit Question" : "New Question"}</h3>
                   <div class="stack">
                     <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new">New</button>
@@ -8776,8 +8776,8 @@ function renderAdmin() {
                     </label>
                     <label>Status
                       <select name="status">
-                        <option value="draft" ${String(editing?.status || "draft") === "draft" ? "selected" : ""}>Draft</option>
-                        <option value="published" ${String(editing?.status || "draft") === "published" ? "selected" : ""}>Published</option>
+                        <option value="draft" ${String(editing?.status || "published") === "draft" ? "selected" : ""}>Draft</option>
+                        <option value="published" ${String(editing?.status || "published") === "published" ? "selected" : ""}>Published</option>
                       </select>
                     </label>
                   </div>
@@ -8830,7 +8830,7 @@ function renderAdmin() {
                   <label>Tags (comma-separated)
                     <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
                   </label>
-                  <div class="stack">
+                  <div class="stack admin-question-form-actions">
                     <button class="btn" type="submit">${editing ? "Save question changes" : "Save question"}</button>
                   </div>
                 </form>
@@ -10118,7 +10118,7 @@ function wireAdmin() {
       references: String(data.get("references") || "").trim(),
       questionImage,
       explanationImage: String(data.get("explanationImage") || "").trim(),
-      status: String(data.get("status") || "draft"),
+      status: String(data.get("status") || "published"),
     };
 
     if (!QBANK_COURSE_TOPICS[payload.qbankCourse]?.includes(payload.qbankTopic)) {
@@ -10306,13 +10306,14 @@ function dedupeQuestions(questions) {
     const fingerprint = buildQuestionDedupFingerprint(question);
 
     const hasSeenId = identityKeys.some((key) => seenIdKeys.has(key));
-    const hasSeenFingerprint = Boolean(fingerprint) && seenFingerprints.has(fingerprint);
+    const shouldUseFingerprint = !identityKeys.length;
+    const hasSeenFingerprint = shouldUseFingerprint && Boolean(fingerprint) && seenFingerprints.has(fingerprint);
     if (hasSeenId || hasSeenFingerprint) {
       continue;
     }
 
     identityKeys.forEach((key) => seenIdKeys.add(key));
-    if (fingerprint) {
+    if (shouldUseFingerprint && fingerprint) {
       seenFingerprints.add(fingerprint);
     }
     dedupedReversed.push(question);
