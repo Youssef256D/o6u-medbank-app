@@ -4572,29 +4572,38 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     });
   }
 
-  const coursesResult = await fetchRowsPaged((from, to) => (
-    client
-      .from("courses")
-      .select("id,course_name,is_active")
-      .eq("is_active", true)
-      .order("course_name", { ascending: true })
-      .order("id", { ascending: true })
-      .range(from, to)
-  ));
-  if (coursesResult.error) throw coursesResult.error;
-  const topicsResult = await fetchRowsPaged((from, to) => (
-    client
-      .from("course_topics")
-      .select("id,course_id,topic_name,is_active")
-      .eq("is_active", true)
-      .order("course_id", { ascending: true })
-      .order("topic_name", { ascending: true })
-      .order("id", { ascending: true })
-      .range(from, to)
-  ));
-  if (topicsResult.error) throw topicsResult.error;
-  const courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
-  const topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+  let courses = [];
+  let topics = [];
+  const loadActiveCourseTopicRows = async () => {
+    const coursesResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("courses")
+        .select("id,course_name,is_active")
+        .eq("is_active", true)
+        .order("course_name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
+    if (coursesResult.error) {
+      throw coursesResult.error;
+    }
+    const topicsResult = await fetchRowsPaged((from, to) => (
+      client
+        .from("course_topics")
+        .select("id,course_id,topic_name,is_active")
+        .eq("is_active", true)
+        .order("course_id", { ascending: true })
+        .order("topic_name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    ));
+    if (topicsResult.error) {
+      throw topicsResult.error;
+    }
+    courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
+    topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+  };
+  await loadActiveCourseTopicRows();
   let questionColumnSupport = relationalQuestionColumnSupport;
   try {
     questionColumnSupport = await getRelationalQuestionColumnSupport(client);
@@ -4602,19 +4611,45 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     console.warn("Could not detect optional question media columns for sync.", error?.message || error);
   }
 
-  const courseIdByName = Object.fromEntries((courses || []).map((course) => [course.course_name, course.id]));
-  const topicIdByCourseTopic = {};
-  (topics || []).forEach((topic) => {
-    topicIdByCourseTopic[`${topic.course_id}::${topic.topic_name}`] = topic.id;
-  });
+  let courseIdByName = {};
+  let topicIdByCourseTopic = {};
+  const rebuildCourseTopicIndexes = () => {
+    courseIdByName = Object.fromEntries((courses || []).map((course) => [course.course_name, course.id]));
+    topicIdByCourseTopic = {};
+    (topics || []).forEach((topic) => {
+      topicIdByCourseTopic[`${topic.course_id}::${topic.topic_name}`] = topic.id;
+    });
+  };
+  rebuildCourseTopicIndexes();
+
+  const unresolvedCourseNames = [...new Set(
+    questions
+      .map((question) => String(getQbankCourseTopicMeta(question).course || "").trim())
+      .filter(Boolean)
+      .filter((courseName) => !courseIdByName[courseName]),
+  )];
+  if (unresolvedCourseNames.length) {
+    // Keep course/topic dictionaries aligned with the latest local curriculum before syncing questions.
+    await syncCoursesTopicsToRelational(
+      load(STORAGE_KEYS.curriculum, O6U_CURRICULUM),
+      load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
+    );
+    await loadActiveCourseTopicRows();
+    rebuildCourseTopicIndexes();
+  }
 
   const missingTopics = [];
+  const missingTopicKeys = new Set();
   questions.forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
     const courseId = courseIdByName[meta.course];
     if (!courseId) return;
     const key = `${courseId}::${meta.topic}`;
     if (!topicIdByCourseTopic[key]) {
+      if (missingTopicKeys.has(key)) {
+        return;
+      }
+      missingTopicKeys.add(key);
       missingTopics.push({
         course_id: courseId,
         topic_name: meta.topic,
@@ -4646,12 +4681,8 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     if (refreshedTopics.error) {
       throw refreshedTopics.error;
     }
-    Object.keys(topicIdByCourseTopic).forEach((key) => {
-      delete topicIdByCourseTopic[key];
-    });
-    (refreshedTopics.data || []).forEach((topic) => {
-      topicIdByCourseTopic[`${topic.course_id}::${topic.topic_name}`] = topic.id;
-    });
+    topics = Array.isArray(refreshedTopics.data) ? refreshedTopics.data : [];
+    rebuildCourseTopicIndexes();
   }
 
   const questionSortOrderByExternalId = new Map(
@@ -4660,14 +4691,31 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       .filter(([externalId]) => Boolean(externalId)),
   );
   const upsertRows = [];
+  const unresolvedQuestionMappings = [];
   questions.forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
     const externalId = String(question.id || "").trim();
-    if (!externalId) return;
+    if (!externalId) {
+      return;
+    }
     const courseId = courseIdByName[meta.course];
-    if (!courseId) return;
-    let topicId = topicIdByCourseTopic[`${courseId}::${meta.topic}`];
-    if (!topicId) return;
+    if (!courseId) {
+      unresolvedQuestionMappings.push({
+        id: externalId,
+        course: meta.course,
+        topic: meta.topic,
+      });
+      return;
+    }
+    const topicId = topicIdByCourseTopic[`${courseId}::${meta.topic}`];
+    if (!topicId) {
+      unresolvedQuestionMappings.push({
+        id: externalId,
+        course: meta.course,
+        topic: meta.topic,
+      });
+      return;
+    }
     const stableDbId =
       existingByExternalId[externalId]
       || crypto.randomUUID();
@@ -4714,6 +4762,17 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     await deleteRelationalQuestionsAndDependents(client, existingQuestionIds);
     saveLocalOnly(STORAGE_KEYS.questions, []);
     return;
+  }
+
+  if (unresolvedQuestionMappings.length) {
+    const samples = unresolvedQuestionMappings
+      .slice(0, 3)
+      .map((entry) => `${entry.id} [${entry.course} / ${entry.topic}]`)
+      .join(", ");
+    throw new Error(
+      `Could not sync ${unresolvedQuestionMappings.length} question(s) because their course/topic mapping is missing in Supabase. `
+      + `Examples: ${samples}`,
+    );
   }
 
   if (!upsertRows.length) {
@@ -5902,6 +5961,10 @@ function shouldRefreshAdminData(user) {
   return !last || (Date.now() - last) > ADMIN_DATA_REFRESH_MS;
 }
 
+function isQuestionSyncBusy() {
+  return Boolean(questionSyncInFlightPromise || queuedQuestionSyncPayload);
+}
+
 async function refreshAdminDataSnapshot(user, options = {}) {
   if (!user || user.role !== "admin") {
     return false;
@@ -5934,9 +5997,9 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     await hydrateRelationalCoursesAndTopics();
     await hydrateRelationalProfiles(user);
     let shouldHydrateQuestions = true;
-    if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing) {
+    if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing || isQuestionSyncBusy()) {
       await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
-      if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing) {
+      if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing || isQuestionSyncBusy()) {
         shouldHydrateQuestions = false;
       }
     }
@@ -11910,6 +11973,7 @@ function wireAdmin() {
 
         state.adminBulkActionRunning = false;
         state.adminBulkActionType = "";
+        state.adminDataLastSyncAt = Date.now();
         state.skipNextRouteAnimation = true;
         render();
         toast(localMessage);
@@ -11976,6 +12040,7 @@ function wireAdmin() {
         state.adminQuestionModalOpen = false;
       }
       state.adminQuestionDeleteQid = "";
+      state.adminDataLastSyncAt = Date.now();
       state.skipNextRouteAnimation = true;
       render();
       toast("Question deleted.");
@@ -12305,6 +12370,7 @@ function wireAdmin() {
     state.adminEditorTopic = "";
     state.adminQuestionModalOpen = false;
     state.adminQuestionSaveRunning = false;
+    state.adminDataLastSyncAt = Date.now();
     state.skipNextRouteAnimation = true;
     render();
     toast(successMessage);
