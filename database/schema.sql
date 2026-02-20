@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS questions (
   source_text TEXT,
   difficulty question_difficulty NOT NULL DEFAULT 'medium',
   status question_status NOT NULL DEFAULT 'draft',
+  sort_order INTEGER NOT NULL DEFAULT 1,
   version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -116,6 +117,7 @@ CREATE TABLE IF NOT EXISTS questions (
 
 CREATE INDEX IF NOT EXISTS questions_course_topic_status_idx ON questions (course_id, topic_id, status);
 CREATE INDEX IF NOT EXISTS questions_author_idx ON questions (author_id);
+CREATE INDEX IF NOT EXISTS questions_sort_order_idx ON questions (sort_order, id);
 
 CREATE TABLE IF NOT EXISTS question_choices (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

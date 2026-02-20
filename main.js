@@ -235,6 +235,7 @@ const relationalQuestionColumnSupport = {
   checked: false,
   questionImageUrl: false,
   explanationImageUrl: false,
+  sortOrder: false,
 };
 
 let timerHandle = null;
@@ -2023,6 +2024,7 @@ function resetRelationalSyncState() {
   relationalQuestionColumnSupport.checked = false;
   relationalQuestionColumnSupport.questionImageUrl = false;
   relationalQuestionColumnSupport.explanationImageUrl = false;
+  relationalQuestionColumnSupport.sortOrder = false;
   clearRelationalFlushTimer();
 }
 
@@ -2720,6 +2722,11 @@ async function hydrateRelationalQuestions() {
 
   const users = getUsers();
   const localQuestionsBefore = getQuestions();
+  const localQuestionOrderByExternalId = new Map(
+    localQuestionsBefore
+      .map((question, index) => [String(question?.id || "").trim(), index])
+      .filter(([externalId]) => Boolean(externalId)),
+  );
   const currentUser = getCurrentUser();
   const coursesResult = await fetchRowsPaged((from, to) => (
     client.from("courses").select("id,course_name").range(from, to)
@@ -2754,18 +2761,23 @@ async function hydrateRelationalQuestions() {
     "difficulty",
     "status",
     "created_at",
+    ...(questionColumnSupport.sortOrder ? ["sort_order"] : []),
     ...(questionColumnSupport.questionImageUrl ? ["question_image_url"] : []),
     ...(questionColumnSupport.explanationImageUrl ? ["explanation_image_url"] : []),
   ].join(",");
 
-  let questionsResult = await fetchRowsPaged((from, to) => (
-    client
-      .from("questions")
-      .select(questionSelectColumns)
+  const buildQuestionsQuery = (from, to) => {
+    let query = client.from("questions").select(questionSelectColumns);
+    if (questionColumnSupport.sortOrder) {
+      query = query.order("sort_order", { ascending: true, nullsFirst: false });
+    }
+    return query
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
-      .range(from, to)
-  ));
+      .range(from, to);
+  };
+
+  let questionsResult = await fetchRowsPaged((from, to) => buildQuestionsQuery(from, to));
   if (questionsResult.error) {
     return;
   }
@@ -2780,14 +2792,7 @@ async function hydrateRelationalQuestions() {
       relationalSync.questionsBackfillAttempted = true;
       try {
         await syncQuestionsToRelational(localQuestionsBefore);
-        const retryResult = await fetchRowsPaged((from, to) => (
-          client
-            .from("questions")
-            .select(questionSelectColumns)
-            .order("created_at", { ascending: true })
-            .order("id", { ascending: true })
-            .range(from, to)
-        ));
+        const retryResult = await fetchRowsPaged((from, to) => buildQuestionsQuery(from, to));
         if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
           questionsResult = retryResult;
         } else {
@@ -2886,6 +2891,9 @@ async function hydrateRelationalQuestions() {
     const explanationImageFromDb = questionColumnSupport.explanationImageUrl
       ? String(question.explanation_image_url || "").trim()
       : "";
+    const sortOrderFromDb = questionColumnSupport.sortOrder
+      ? normalizeQuestionSortOrder(question.sort_order)
+      : null;
 
     return {
       id: externalId || String(question.id || ""),
@@ -2905,16 +2913,51 @@ async function hydrateRelationalQuestions() {
       explanation: String(question.explanation || "").trim(),
       objective: String(question.objective || "").trim(),
       references: "",
+      sortOrder: sortOrderFromDb ?? normalizeQuestionSortOrder(existingQuestion?.sortOrder) ?? null,
       questionImage: questionImageFromDb || String(existingQuestion?.questionImage || "").trim(),
       explanationImage: explanationImageFromDb || String(existingQuestion?.explanationImage || "").trim(),
       status: toRelationalQuestionStatus(question.status),
     };
   });
 
-  saveLocalOnly(STORAGE_KEYS.questions, mappedQuestions);
+  mappedQuestions.sort((a, b) => {
+    if (questionColumnSupport.sortOrder) {
+      const aSort = normalizeQuestionSortOrder(a?.sortOrder);
+      const bSort = normalizeQuestionSortOrder(b?.sortOrder);
+      if (aSort !== null && bSort !== null && aSort !== bSort) {
+        return aSort - bSort;
+      }
+      if (aSort !== null && bSort === null) {
+        return -1;
+      }
+      if (aSort === null && bSort !== null) {
+        return 1;
+      }
+    }
+
+    const aLocalOrder = localQuestionOrderByExternalId.get(String(a?.id || "").trim());
+    const bLocalOrder = localQuestionOrderByExternalId.get(String(b?.id || "").trim());
+    if (aLocalOrder != null && bLocalOrder != null && aLocalOrder !== bLocalOrder) {
+      return aLocalOrder - bLocalOrder;
+    }
+    if (aLocalOrder != null && bLocalOrder == null) {
+      return -1;
+    }
+    if (aLocalOrder == null && bLocalOrder != null) {
+      return 1;
+    }
+    return String(a?.id || "").localeCompare(String(b?.id || ""));
+  });
+
+  const normalizedMappedQuestions = mappedQuestions.map((question, index) => ({
+    ...question,
+    sortOrder: index + 1,
+  }));
+
+  saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions);
   if (needsChoiceRepairSync && currentUser?.role === "admin") {
     // If DB rows contain placeholder/partial choices while local has real data, push a background repair sync.
-    if (scheduleRelationalWrite(STORAGE_KEYS.questions, mappedQuestions)) {
+    if (scheduleRelationalWrite(STORAGE_KEYS.questions, normalizedMappedQuestions)) {
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
         console.warn("Could not repair remote question choices from local cache.", syncError?.message || syncError);
       });
@@ -3541,6 +3584,14 @@ function normalizeQuestionChoiceLabel(value) {
   return QUESTION_CHOICE_LABELS.includes(label) ? label : "";
 }
 
+function normalizeQuestionSortOrder(value) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return null;
+  }
+  return parsed;
+}
+
 function normalizeQuestionChoiceEntries(choices) {
   const source = Array.isArray(choices) ? choices : [];
   const byLabel = new Map();
@@ -3727,6 +3778,7 @@ async function getRelationalQuestionColumnSupport(client) {
 
   relationalQuestionColumnSupport.questionImageUrl = await checkColumn("question_image_url");
   relationalQuestionColumnSupport.explanationImageUrl = await checkColumn("explanation_image_url");
+  relationalQuestionColumnSupport.sortOrder = await checkColumn("sort_order");
   relationalQuestionColumnSupport.checked = true;
   return relationalQuestionColumnSupport;
 }
@@ -4359,6 +4411,11 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     });
   }
 
+  const questionSortOrderByExternalId = new Map(
+    questions
+      .map((question, index) => [String(question?.id || "").trim(), index + 1])
+      .filter(([externalId]) => Boolean(externalId)),
+  );
   const upsertRows = [];
   questions.forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
@@ -4385,6 +4442,9 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
         : {}),
       ...(questionColumnSupport.explanationImageUrl
         ? { explanation_image_url: String(question.explanationImage || "").trim() || null }
+        : {}),
+      ...(questionColumnSupport.sortOrder
+        ? { sort_order: questionSortOrderByExternalId.get(externalId) || null }
         : {}),
       difficulty: toRelationalDifficulty(question.difficulty),
       status: toRelationalQuestionStatus(question.status),
@@ -10370,7 +10430,11 @@ function wireAdmin() {
       return replacement || question;
     });
 
-    save(STORAGE_KEYS.questions, nextQuestions);
+    const nextQuestionsWithOrder = nextQuestions.map((question, index) => ({
+      ...question,
+      sortOrder: index + 1,
+    }));
+    save(STORAGE_KEYS.questions, nextQuestionsWithOrder);
     state.skipNextRouteAnimation = true;
     render();
     scheduleQuestionOrderSync();
