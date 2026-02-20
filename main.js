@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.9").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -1495,6 +1495,9 @@ function isUserAccessApproved(user) {
   if (user.role === "admin") {
     return true;
   }
+  if (user.role === "student" && !hasCompleteStudentProfile(user)) {
+    return false;
+  }
   if (shouldAutoApproveStudentAccess(user)) {
     return true;
   }
@@ -2058,7 +2061,10 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   const targetApproved = Boolean(approved);
   const existingRows = [];
   for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error: existingError } = await client.from("profiles").select("id").in("id", idBatch);
+    const { data, error: existingError } = await client
+      .from("profiles")
+      .select("id,role,phone,academic_year,academic_semester")
+      .in("id", idBatch);
     if (existingError) {
       return { ok: false, message: existingError.message || "Could not read profile rows before update." };
     }
@@ -2066,15 +2072,42 @@ async function updateRelationalProfileApproval(profileIds, approved) {
       existingRows.push(...data);
     }
   }
-  const existingIds = new Set((existingRows || []).map((row) => row.id).filter((id) => isUuidValue(id)));
+  const existingRowsById = new Map(
+    (existingRows || [])
+      .map((row) => [String(row?.id || "").trim(), row])
+      .filter(([id]) => isUuidValue(id)),
+  );
+  const existingIds = new Set(existingRowsById.keys());
   const missingIds = ids.filter((id) => !existingIds.has(id));
-  const targetIds = ids.filter((id) => existingIds.has(id));
+  let targetIds = ids.filter((id) => existingIds.has(id));
+  const ineligibleIds = [];
+  if (targetApproved) {
+    targetIds = targetIds.filter((id) => {
+      const row = existingRowsById.get(id);
+      const role = String(row?.role || "student").trim().toLowerCase() === "admin" ? "admin" : "student";
+      if (role !== "student") {
+        return true;
+      }
+      const canApproveStudent = hasCompleteStudentProfile({
+        role: "student",
+        phone: String(row?.phone || "").trim(),
+        academicYear: normalizeAcademicYearOrNull(row?.academic_year),
+        academicSemester: normalizeAcademicSemesterOrNull(row?.academic_semester),
+      });
+      if (!canApproveStudent) {
+        ineligibleIds.push(id);
+      }
+      return canApproveStudent;
+    });
+  }
   if (!targetIds.length) {
     return {
       ok: false,
-      message: "No matching database profiles found for selected users.",
+      message: targetApproved
+        ? "No selected users have complete phone, year, and semester details for approval."
+        : "No matching database profiles found for selected users.",
       updatedIds: [],
-      skippedIds: [...missingIds],
+      skippedIds: [...new Set([...missingIds, ...ineligibleIds])],
       missingIds,
     };
   }
@@ -2119,7 +2152,7 @@ async function updateRelationalProfileApproval(profileIds, approved) {
 
   const unresolvedSet = new Set(unresolvedIds);
   const updatedIds = targetIds.filter((id) => !unresolvedSet.has(id));
-  const skippedIds = [...new Set([...missingIds, ...unresolvedIds])];
+  const skippedIds = [...new Set([...missingIds, ...ineligibleIds, ...unresolvedIds])];
   if (!updatedIds.length) {
     return {
       ok: false,
@@ -4470,7 +4503,7 @@ function seedData() {
         name: "O6U Demo Student",
         email: DEMO_STUDENT_EMAIL,
         password: "student123",
-        phone: "",
+        phone: "+201000000000",
         role: "student",
         verified: true,
         isApproved: true,
@@ -4498,6 +4531,10 @@ function seedData() {
         if (user.email !== DEMO_STUDENT_EMAIL || user.name !== "O6U Demo Student") {
           user.email = DEMO_STUDENT_EMAIL;
           user.name = "O6U Demo Student";
+          changed = true;
+        }
+        if (!validateAndNormalizePhoneNumber(String(user.phone || "")).ok) {
+          user.phone = "+201000000000";
           changed = true;
         }
       }
@@ -8303,14 +8340,12 @@ function renderAdmin() {
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
     const autoApprovalEnabled = AUTO_APPROVE_STUDENT_ACCESS;
-    const pendingCount = autoApprovalEnabled
-      ? 0
-      : users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
+    const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = users
       .map((account) => {
         const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
         const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
-        const isApproved = account.role === "student" && autoApprovalEnabled ? true : isUserAccessApproved(account);
+        const isApproved = isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
         const visibleCourses =
           account.role === "student"
@@ -9511,6 +9546,15 @@ function wireAdmin() {
       normalizedRole === "admin"
         ? [...allCourses]
         : getCurriculumCourses(academicYear, academicSemester);
+    const newStudentAutoApproval = normalizedRole === "student"
+      ? shouldAutoApproveStudentAccess({
+        role: "student",
+        phone: "",
+        academicYear,
+        academicSemester,
+      })
+      : false;
+    const newUserApproved = normalizedRole === "admin" ? true : newStudentAutoApproval;
 
     users.push({
       id: makeId("u"),
@@ -9520,9 +9564,9 @@ function wireAdmin() {
       phone: "",
       role: normalizedRole,
       verified: true,
-      isApproved: true,
-      approvedAt: nowISO(),
-      approvedBy: "admin",
+      isApproved: newUserApproved,
+      approvedAt: newUserApproved ? nowISO() : null,
+      approvedBy: newUserApproved ? (normalizedRole === "admin" ? "admin" : AUTO_APPROVAL_ACTOR) : null,
       assignedCourses,
       academicYear: normalizedRole === "student" ? academicYear : null,
       academicSemester: normalizedRole === "student" ? academicSemester : null,
@@ -9540,16 +9584,22 @@ function wireAdmin() {
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
     if (AUTO_APPROVE_STUDENT_ACCESS) {
-      toast("Auto-approval mode is enabled. Student access is already treated as approved.");
+      toast("Auto-approval is enabled, but only complete student profiles are approved automatically.");
       return;
     }
     const current = getCurrentUser();
     const users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
-    const pendingProfileIds = pendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
+    const eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentProfile(entry));
+    const eligiblePendingUserIdSet = new Set(eligiblePendingUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
+    const pendingProfileIds = eligiblePendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
 
     if (!pendingUsers.length) {
       toast("No pending requests found.");
+      return;
+    }
+    if (!eligiblePendingUsers.length) {
+      toast("Pending users must complete phone number, year, and semester before approval.");
       return;
     }
 
@@ -9564,7 +9614,12 @@ function wireAdmin() {
     let approvedCount = 0;
     let skippedCount = 0;
     users.forEach((entry) => {
-      if (entry.role !== "student" || isUserAccessApproved(entry)) {
+      const entryId = String(entry.id || "").trim();
+      if (
+        entry.role !== "student"
+        || isUserAccessApproved(entry)
+        || !eligiblePendingUserIdSet.has(entryId)
+      ) {
         return;
       }
       const authId = getUserProfileId(entry);
@@ -9653,10 +9708,22 @@ function wireAdmin() {
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
+        if (!hasCompleteStudentProfile(users[idx])) {
+          users[idx].isApproved = false;
+          users[idx].approvedAt = null;
+          users[idx].approvedBy = null;
+        } else if (AUTO_APPROVE_STUDENT_ACCESS) {
+          users[idx].isApproved = true;
+          users[idx].approvedAt = users[idx].approvedAt || nowISO();
+          users[idx].approvedBy = users[idx].approvedBy || AUTO_APPROVAL_ACTOR;
+        }
       } else {
         users[idx].academicYear = null;
         users[idx].academicSemester = null;
         users[idx].assignedCourses = [...allCourses];
+        users[idx].isApproved = true;
+        users[idx].approvedAt = users[idx].approvedAt || nowISO();
+        users[idx].approvedBy = users[idx].approvedBy || "admin";
       }
 
       save(STORAGE_KEYS.users, users);
@@ -9727,9 +9794,15 @@ function wireAdmin() {
         users[idx].academicYear = sanitizeAcademicYear(users[idx].academicYear || 1);
         users[idx].academicSemester = sanitizeAcademicSemester(users[idx].academicSemester || 1);
         users[idx].assignedCourses = getCurriculumCourses(users[idx].academicYear, users[idx].academicSemester);
-        users[idx].isApproved = true;
-        users[idx].approvedAt = users[idx].approvedAt || nowISO();
-        users[idx].approvedBy = users[idx].approvedBy || current?.email || "admin";
+        const studentAutoApproved = shouldAutoApproveStudentAccess({
+          role: "student",
+          phone: String(users[idx].phone || "").trim(),
+          academicYear: users[idx].academicYear,
+          academicSemester: users[idx].academicSemester,
+        });
+        users[idx].isApproved = studentAutoApproved;
+        users[idx].approvedAt = studentAutoApproved ? users[idx].approvedAt || nowISO() : null;
+        users[idx].approvedBy = studentAutoApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
       } else {
         users[idx].academicYear = null;
         users[idx].academicSemester = null;
@@ -9774,6 +9847,10 @@ function wireAdmin() {
       }
 
       const nextApproved = !isUserAccessApproved(users[idx]);
+      if (nextApproved && !hasCompleteStudentProfile(users[idx])) {
+        toast("Student must have phone number, year, and semester before approval.");
+        return;
+      }
       const targetProfileId = getUserProfileId(users[idx]);
       const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
       if (isUuidValue(targetProfileId) && !dbResult.ok) {
@@ -11063,7 +11140,12 @@ function getAvailableTopicsForCourse(course, questions = []) {
     questionTopics.push(meta.topic);
   });
 
-  return [...new Set([...questionTopics, ...configuredTopics])];
+  // Student topic filters should only show topics that currently have published questions.
+  const questionTopicKeys = new Set(questionTopics.map((topic) => String(topic || "").trim().toLowerCase()));
+  const configuredTopicKeys = new Set(configuredTopics.map((topic) => String(topic || "").trim().toLowerCase()));
+  const orderedConfigured = configuredTopics.filter((topic) => questionTopicKeys.has(String(topic || "").trim().toLowerCase()));
+  const extraTopics = questionTopics.filter((topic) => !configuredTopicKeys.has(String(topic || "").trim().toLowerCase()));
+  return [...orderedConfigured, ...extraTopics];
 }
 
 function getQbankCourseTopicMeta(question) {
