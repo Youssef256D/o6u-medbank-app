@@ -1201,12 +1201,22 @@ body.is-routing .card {
   border-radius: 9px;
   border: 1px dashed rgba(23, 126, 137, 0.42);
   color: var(--brand-dark);
-  font-size: 0.86rem;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-weight: 700;
-  letter-spacing: 0.04em;
   user-select: none;
   cursor: grab;
+}
+
+.admin-question-drag-bars {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.admin-question-drag-bars span {
+  display: block;
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .admin-question-row[draggable="false"] .admin-question-drag-handle {

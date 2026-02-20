@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.10").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.11").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -9023,62 +9023,97 @@ function wireProfile() {
   });
 }
 
+function normalizeAdminQuestionFilterToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 function resolveAdminQuestionListView(questions, allCourses, preferredCourse = "", preferredTopic = "") {
   const questionList = Array.isArray(questions) ? questions : [];
   const configuredCourses = Array.isArray(allCourses) ? allCourses.filter(Boolean) : [];
-  const questionCountByCourse = new Map();
-  const questionCountByCourseTopic = new Map();
-  const topicsByCourseFromQuestions = new Map();
+  const questionCountByCourseKey = new Map();
+  const topicsByCourseKeyFromQuestions = new Map();
+  const courseDisplayByKey = new Map();
 
   questionList.forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
     const course = String(meta.course || "").trim();
     const topic = String(meta.topic || "").trim();
-    if (!course) {
+    const courseKey = normalizeAdminQuestionFilterToken(course);
+    if (!courseKey) {
       return;
     }
-    questionCountByCourse.set(course, (questionCountByCourse.get(course) || 0) + 1);
-    if (!topicsByCourseFromQuestions.has(course)) {
-      topicsByCourseFromQuestions.set(course, []);
+    if (!courseDisplayByKey.has(courseKey)) {
+      courseDisplayByKey.set(courseKey, course);
     }
-    if (topic) {
-      const topicKey = `${course}::${topic}`;
-      questionCountByCourseTopic.set(topicKey, (questionCountByCourseTopic.get(topicKey) || 0) + 1);
-      const topicList = topicsByCourseFromQuestions.get(course);
-      if (!topicList.includes(topic)) {
-        topicList.push(topic);
-      }
+    questionCountByCourseKey.set(courseKey, (questionCountByCourseKey.get(courseKey) || 0) + 1);
+
+    if (!topic) {
+      return;
+    }
+    const topicKey = normalizeAdminQuestionFilterToken(topic);
+    if (!topicKey) {
+      return;
+    }
+    if (!topicsByCourseKeyFromQuestions.has(courseKey)) {
+      topicsByCourseKeyFromQuestions.set(courseKey, []);
+    }
+    const topicList = topicsByCourseKeyFromQuestions.get(courseKey);
+    if (!topicList.some((entry) => normalizeAdminQuestionFilterToken(entry) === topicKey)) {
+      topicList.push(topic);
     }
   });
 
-  const questionCourses = [...new Set(questionList.map((question) => String(getQbankCourseTopicMeta(question).course || "").trim()).filter(Boolean))];
-  const availableCourses = [...new Set([...configuredCourses, ...questionCourses])];
+  const questionCourses = [...courseDisplayByKey.values()];
+  const availableCourses = [];
+  const seenCourseKeys = new Set();
+  [...configuredCourses, ...questionCourses].forEach((course) => {
+    const courseName = String(course || "").trim();
+    const courseKey = normalizeAdminQuestionFilterToken(courseName);
+    if (!courseKey || seenCourseKeys.has(courseKey)) {
+      return;
+    }
+    seenCourseKeys.add(courseKey);
+    availableCourses.push(courseName);
+  });
 
-  let selectedCourse = availableCourses.includes(preferredCourse) ? preferredCourse : "";
+  const preferredCourseKey = normalizeAdminQuestionFilterToken(preferredCourse);
+  let selectedCourse = availableCourses.find((course) => normalizeAdminQuestionFilterToken(course) === preferredCourseKey) || "";
   if (!selectedCourse) {
-    selectedCourse = availableCourses.find((course) => (questionCountByCourse.get(course) || 0) > 0)
-      || availableCourses[0]
-      || "";
-  } else if ((questionCountByCourse.get(selectedCourse) || 0) === 0) {
-    const fallbackCourse = availableCourses.find((course) => (questionCountByCourse.get(course) || 0) > 0);
+    selectedCourse = availableCourses.find(
+      (course) => (questionCountByCourseKey.get(normalizeAdminQuestionFilterToken(course)) || 0) > 0,
+    ) || availableCourses[0] || "";
+  } else if ((questionCountByCourseKey.get(normalizeAdminQuestionFilterToken(selectedCourse)) || 0) === 0) {
+    const fallbackCourse = availableCourses.find(
+      (course) => (questionCountByCourseKey.get(normalizeAdminQuestionFilterToken(course)) || 0) > 0,
+    );
     if (fallbackCourse) {
       selectedCourse = fallbackCourse;
     }
   }
 
+  const selectedCourseKey = normalizeAdminQuestionFilterToken(selectedCourse);
   const configuredTopics = selectedCourse ? (QBANK_COURSE_TOPICS[selectedCourse] || []) : [];
-  const questionTopics = selectedCourse ? (topicsByCourseFromQuestions.get(selectedCourse) || []) : [];
-  const selectedCourseTopics = configuredTopics.length
-    ? configuredTopics
-    : questionTopics;
-  let selectedTopic = selectedCourseTopics.includes(preferredTopic) ? preferredTopic : "";
-  if (selectedTopic && (questionCountByCourseTopic.get(`${selectedCourse}::${selectedTopic}`) || 0) === 0) {
-    selectedTopic = "";
-  }
+  const questionTopics = selectedCourseKey ? (topicsByCourseKeyFromQuestions.get(selectedCourseKey) || []) : [];
+  const selectedCourseTopics = configuredTopics.length ? configuredTopics : questionTopics;
+  const preferredTopicKey = normalizeAdminQuestionFilterToken(preferredTopic);
+  const selectedTopic = selectedCourseTopics.find((topic) => normalizeAdminQuestionFilterToken(topic) === preferredTopicKey) || "";
+  const selectedTopicKey = normalizeAdminQuestionFilterToken(selectedTopic);
 
   const filteredQuestions = questionList
-    .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
-    .filter((question) => !selectedTopic || getQbankCourseTopicMeta(question).topic === selectedTopic);
+    .filter((question) => {
+      const meta = getQbankCourseTopicMeta(question);
+      return normalizeAdminQuestionFilterToken(meta.course) === selectedCourseKey;
+    })
+    .filter((question) => {
+      if (!selectedTopicKey) {
+        return true;
+      }
+      const meta = getQbankCourseTopicMeta(question);
+      return normalizeAdminQuestionFilterToken(meta.topic) === selectedTopicKey;
+    });
 
   return {
     selectedCourse,
@@ -9498,7 +9533,11 @@ function renderAdmin() {
             </td>
             <td class="admin-question-order-cell">
               <span class="admin-question-drag-handle" data-role="admin-question-drag-handle" data-qid="${escapeHtml(questionId)}" aria-hidden="true" title="${questionOpsLocked || !questionId ? "Reordering temporarily unavailable." : "Drag to reorder"}">
-                ${questionOpsLocked || !questionId ? "--" : "move"}
+                <span class="admin-question-drag-bars" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
               </span>
             </td>
             <td>${idx + 1}</td>
