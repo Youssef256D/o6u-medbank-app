@@ -1498,13 +1498,14 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     profileCompleted: nextProfileCompleted,
   });
 
+  const shouldPersistAutoApproval = role === "student" && autoApprovedFromProfile && !Boolean(profile.approved);
   const shouldBackfillProfile = role === "student"
     && (
       (profilePhone !== resolvedPhone && Boolean(resolvedPhone))
       || (profileYear === null && year !== null)
       || (profileSemester === null && semester !== null)
     );
-  if (shouldBackfillProfile) {
+  if (shouldBackfillProfile || shouldPersistAutoApproval) {
     const profilePatch = {};
     if (profilePhone !== resolvedPhone && resolvedPhone) {
       profilePatch.phone = resolvedPhone;
@@ -1514,6 +1515,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     }
     if (profileSemester === null && semester !== null) {
       profilePatch.academic_semester = semester;
+    }
+    if (shouldPersistAutoApproval) {
+      profilePatch.approved = true;
     }
     if (Object.keys(profilePatch).length) {
       client
@@ -3782,7 +3786,8 @@ async function syncProfilesToRelational(usersPayload) {
         academic_semester: user.role === "student" ? normalizedSemester : null,
         auth_provider: normalizedAuthProvider || null,
       };
-      if (isAdminSync) {
+      const shouldPersistApproval = isAdminSync || shouldAutoApproveStudentAccess(user);
+      if (shouldPersistApproval) {
         baseRow.approved = Boolean(isUserAccessApproved(user));
       }
       return baseRow;
@@ -6071,6 +6076,18 @@ function wireAuth(mode) {
       const email = String(formData.get("email") || "").trim().toLowerCase();
       const password = String(formData.get("password") || "");
       const authClient = getSupabaseAuthClient();
+      const routeUserToProfileCompletion = (candidateUser) => {
+        const completionRoute = getStudentProfileCompletionRoute(candidateUser);
+        if (!completionRoute) {
+          return false;
+        }
+        if (candidateUser?.id) {
+          save(STORAGE_KEYS.currentUserId, candidateUser.id);
+        }
+        toast("Complete your profile to activate your account.");
+        navigate(completionRoute);
+        return true;
+      };
       try {
         if (authClient) {
           const { data, error } = await runWithTimeoutResult(
@@ -6091,6 +6108,9 @@ function wireAuth(mode) {
                 return;
               }
             }
+            if (routeUserToProfileCompletion(user)) {
+              return;
+            }
             if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
               await authClient.auth.signOut().catch(() => {});
@@ -6109,6 +6129,9 @@ function wireAuth(mode) {
             (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
           );
           if (localDemoUser) {
+            if (routeUserToProfileCompletion(localDemoUser)) {
+              return;
+            }
             if (!isUserAccessApproved(localDemoUser)) {
               toast("Your account is pending admin approval.");
               return;
@@ -6139,6 +6162,9 @@ function wireAuth(mode) {
             return;
           }
           toast("Invalid credentials.");
+          return;
+        }
+        if (routeUserToProfileCompletion(user)) {
           return;
         }
         if (!isUserAccessApproved(user)) {
@@ -6555,7 +6581,7 @@ function renderCompleteProfile() {
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Before admin review, add your phone number and enrollment details. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+      <p class="subtle">Add your phone number and enrollment details to activate access immediately. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
         <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
         <div class="form-row">
@@ -6580,7 +6606,7 @@ function renderCompleteProfile() {
           <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.length ? courses.join(", ") : "Choose year and semester first.")}</small>
         </div>
         <div class="stack">
-          <button class="btn" type="submit">Submit For Approval</button>
+          <button class="btn" type="submit">Save And Activate</button>
           <button class="btn ghost" type="button" data-action="logout">Cancel</button>
         </div>
       </form>
