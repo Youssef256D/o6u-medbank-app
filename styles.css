@@ -1420,6 +1420,47 @@ body.is-routing .card {
   box-shadow: none;
 }
 
+.admin-user-suggestions {
+  margin-top: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.admin-user-suggestion {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid rgba(28, 56, 88, 0.08);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  padding: 0.44rem 0.56rem;
+  display: grid;
+  gap: 0.12rem;
+  cursor: pointer;
+}
+
+.admin-user-suggestion:last-child {
+  border-bottom: 0;
+}
+
+.admin-user-suggestion:hover,
+.admin-user-suggestion.is-active {
+  background: rgba(23, 126, 137, 0.11);
+}
+
+.admin-user-suggestion-name {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.admin-user-suggestion-meta {
+  font-size: 0.79rem;
+  color: var(--muted);
+}
+
 .admin-question-bulk-bar {
   display: flex;
   align-items: center;

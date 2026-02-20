@@ -158,6 +158,7 @@ const state = {
   adminBulkActionType: "",
   adminNotificationTargetType: "all",
   adminNotificationTargetUserId: "",
+  adminNotificationTargetQuery: "",
   adminNotificationTitle: "",
   adminNotificationBody: "",
   adminNotificationSending: false,
@@ -10311,6 +10312,14 @@ function renderAdmin() {
       targetUserId = "";
       state.adminNotificationTargetUserId = "";
     }
+    let targetUserQuery = String(state.adminNotificationTargetQuery || "").trim();
+    const selectedTargetUser = targetUserId ? findUserByNotificationTargetId(targetUserId, users) : null;
+    if (selectedTargetUser && !targetUserQuery) {
+      targetUserQuery = getNotificationTargetSearchDisplayLabel(selectedTargetUser);
+    }
+    const targetUserSuggestions = targetType === "user"
+      ? searchUsersForNotificationTarget(targetUserQuery, users, 8)
+      : [];
     const titleDraft = String(state.adminNotificationTitle || "");
     const bodyDraft = String(state.adminNotificationBody || "");
     const notificationSending = Boolean(state.adminNotificationSending);
@@ -10356,20 +10365,50 @@ function renderAdmin() {
               </select>
             </label>
             <label>Target user
-              <select name="targetUserId" id="admin-notification-target-user" ${targetType === "user" ? "" : "disabled"} ${notificationSending ? "disabled" : ""}>
-                <option value="">Select user</option>
-                ${users
+              <input type="hidden" name="targetUserId" id="admin-notification-target-user-id" value="${escapeHtml(targetUserId)}" />
+              <input
+                type="search"
+                id="admin-notification-target-user-search"
+                name="targetUserQuery"
+                value="${escapeHtml(targetUserQuery)}"
+                placeholder="Type name or email..."
+                autocomplete="off"
+                spellcheck="false"
+                ${targetType === "user" ? "" : "disabled"}
+                ${notificationSending ? "disabled" : ""}
+              />
+              <div
+                class="admin-user-suggestions"
+                id="admin-notification-target-suggestions"
+                ${targetType === "user" && targetUserSuggestions.length ? "" : "hidden"}
+                role="listbox"
+                aria-label="User suggestions"
+              >
+                ${targetUserSuggestions
                   .map((entry) => {
                     const userId = String(entry?.id || "").trim();
                     if (!userId) {
                       return "";
                     }
                     const roleLabel = entry.role === "admin" ? "admin" : "student";
-                    const optionLabel = `${entry.name} (${roleLabel})`;
-                    return `<option value="${escapeHtml(userId)}" ${targetUserId === userId ? "selected" : ""}>${escapeHtml(optionLabel)}</option>`;
+                    const selected = targetUserId === userId;
+                    return `
+                      <button
+                        type="button"
+                        class="admin-user-suggestion${selected ? " is-active" : ""}"
+                        data-action="admin-notification-pick-user"
+                        data-user-id="${escapeHtml(userId)}"
+                        role="option"
+                        aria-selected="${selected ? "true" : "false"}"
+                      >
+                        <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
+                        <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
+                      </button>
+                    `;
                   })
                   .join("")}
-              </select>
+              </div>
+              <small class="subtle">Type a name or email, then choose a suggestion.</small>
             </label>
           </div>
           <label>Title
@@ -10670,26 +10709,130 @@ function wireAdmin() {
   if (state.adminPage === "notifications") {
     const notificationForm = document.getElementById("admin-notification-form");
     const targetTypeSelect = document.getElementById("admin-notification-target-type");
-    const targetUserSelect = document.getElementById("admin-notification-target-user");
+    const targetUserIdInput = document.getElementById("admin-notification-target-user-id");
+    const targetUserSearchInput = document.getElementById("admin-notification-target-user-search");
+    const targetUserSuggestions = document.getElementById("admin-notification-target-suggestions");
+    const notificationUsers = getUsers()
+      .slice()
+      .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
+
+    const updateSelectedTargetUser = (userId, options = {}) => {
+      const normalizedId = String(userId || "").trim();
+      const selectedUser = normalizedId ? findUserByNotificationTargetId(normalizedId, notificationUsers) : null;
+      const nextId = selectedUser ? String(selectedUser.id || "").trim() : "";
+      if (targetUserIdInput) {
+        targetUserIdInput.value = nextId;
+      }
+      state.adminNotificationTargetUserId = nextId;
+      if (!targetUserSearchInput) {
+        return;
+      }
+      if (options.updateSearch !== false) {
+        targetUserSearchInput.value = selectedUser ? getNotificationTargetSearchDisplayLabel(selectedUser) : "";
+      }
+      state.adminNotificationTargetQuery = String(targetUserSearchInput.value || "").trim();
+    };
+
+    const renderNotificationTargetSuggestions = () => {
+      if (!targetUserSuggestions || !targetUserSearchInput) {
+        return;
+      }
+      const targetType = String(targetTypeSelect?.value || "all").trim() === "user" ? "user" : "all";
+      if (targetType !== "user") {
+        targetUserSuggestions.hidden = true;
+        targetUserSuggestions.innerHTML = "";
+        return;
+      }
+      const selectedId = String(targetUserIdInput?.value || state.adminNotificationTargetUserId || "").trim();
+      const query = String(targetUserSearchInput.value || "").trim();
+      const matches = searchUsersForNotificationTarget(query, notificationUsers, 8);
+      if (!matches.length) {
+        targetUserSuggestions.hidden = true;
+        targetUserSuggestions.innerHTML = "";
+        return;
+      }
+      targetUserSuggestions.hidden = false;
+      targetUserSuggestions.innerHTML = matches
+        .map((entry) => {
+          const userId = String(entry?.id || "").trim();
+          if (!userId) {
+            return "";
+          }
+          const roleLabel = entry.role === "admin" ? "admin" : "student";
+          const isActive = selectedId === userId;
+          return `
+            <button
+              type="button"
+              class="admin-user-suggestion${isActive ? " is-active" : ""}"
+              data-action="admin-notification-pick-user"
+              data-user-id="${escapeHtml(userId)}"
+              role="option"
+              aria-selected="${isActive ? "true" : "false"}"
+            >
+              <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
+              <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
+            </button>
+          `;
+        })
+        .join("");
+    };
 
     const syncNotificationAudienceUi = () => {
       const targetType = String(targetTypeSelect?.value || "all").trim() === "user" ? "user" : "all";
       if (state.adminNotificationTargetType !== targetType) {
         state.adminNotificationTargetType = targetType;
       }
-      if (!targetUserSelect) {
-        return;
+      if (targetUserSearchInput) {
+        targetUserSearchInput.disabled = targetType !== "user" || state.adminNotificationSending;
       }
-      targetUserSelect.disabled = targetType !== "user" || state.adminNotificationSending;
+      if (targetUserIdInput && state.adminNotificationSending) {
+        targetUserIdInput.disabled = true;
+      }
+      if (targetUserIdInput && !state.adminNotificationSending) {
+        targetUserIdInput.disabled = false;
+      }
       if (targetType !== "user") {
-        targetUserSelect.value = "";
-        state.adminNotificationTargetUserId = "";
+        updateSelectedTargetUser("", { updateSearch: true });
+      } else if (targetUserIdInput && !targetUserIdInput.value) {
+        state.adminNotificationTargetQuery = String(targetUserSearchInput?.value || "").trim();
       }
+      renderNotificationTargetSuggestions();
     };
 
     targetTypeSelect?.addEventListener("change", syncNotificationAudienceUi);
-    targetUserSelect?.addEventListener("change", () => {
-      state.adminNotificationTargetUserId = String(targetUserSelect.value || "").trim();
+    targetUserSearchInput?.addEventListener("input", () => {
+      const typed = String(targetUserSearchInput.value || "").trim();
+      const currentId = String(targetUserIdInput?.value || "").trim();
+      if (currentId) {
+        const currentUser = findUserByNotificationTargetId(currentId, notificationUsers);
+        const currentLabel = currentUser ? getNotificationTargetSearchDisplayLabel(currentUser) : "";
+        if (normalizeNotificationTargetSearchText(typed) !== normalizeNotificationTargetSearchText(currentLabel)) {
+          updateSelectedTargetUser("", { updateSearch: false });
+        }
+      } else {
+        state.adminNotificationTargetQuery = typed;
+      }
+      renderNotificationTargetSuggestions();
+    });
+    targetUserSearchInput?.addEventListener("focus", () => {
+      renderNotificationTargetSuggestions();
+    });
+    targetUserSuggestions?.addEventListener("mousedown", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const pickButton = target.closest("[data-action='admin-notification-pick-user']");
+      if (!(pickButton instanceof HTMLElement)) {
+        return;
+      }
+      event.preventDefault();
+      const pickedUserId = String(pickButton.getAttribute("data-user-id") || "").trim();
+      if (!pickedUserId) {
+        return;
+      }
+      updateSelectedTargetUser(pickedUserId, { updateSearch: true });
+      renderNotificationTargetSuggestions();
     });
     syncNotificationAudienceUi();
 
@@ -10713,13 +10856,23 @@ function wireAdmin() {
 
     notificationForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (state.adminNotificationSending) {
+        return;
+      }
       const currentUser = getCurrentUser();
       if (!currentUser || currentUser.role !== "admin") {
         return;
       }
       const data = new FormData(notificationForm);
       const targetType = String(data.get("targetType") || "all").trim() === "user" ? "user" : "all";
-      const targetUserId = String(data.get("targetUserId") || "").trim();
+      const targetUserQuery = String(data.get("targetUserQuery") || "").trim();
+      let targetUserId = String(data.get("targetUserId") || "").trim();
+      if (targetType === "user" && !targetUserId && targetUserQuery) {
+        const matchedUser = findUserByNotificationTargetQuery(targetUserQuery, notificationUsers);
+        if (matchedUser?.id) {
+          targetUserId = String(matchedUser.id || "").trim();
+        }
+      }
       const title = String(data.get("title") || "").trim();
       const body = String(data.get("body") || "").trim();
       if (!title || !body) {
@@ -10732,17 +10885,14 @@ function wireAdmin() {
       }
       state.adminNotificationTargetType = targetType;
       state.adminNotificationTargetUserId = targetType === "user" ? targetUserId : "";
+      state.adminNotificationTargetQuery = targetType === "user" ? targetUserQuery : "";
       state.adminNotificationTitle = title;
       state.adminNotificationBody = body;
       state.adminNotificationSending = true;
-      state.skipNextRouteAnimation = true;
-      render();
-      await new Promise((resolve) => window.requestAnimationFrame(resolve));
 
-      let syncWarning = "";
-      let sentLocally = false;
+      let localNotification = null;
       try {
-        const localNotification = normalizeNotificationRecord({
+        localNotification = normalizeNotificationRecord({
           id: crypto.randomUUID(),
           targetType,
           targetUserId: targetType === "user" ? targetUserId : "",
@@ -10759,38 +10909,48 @@ function wireAdmin() {
 
         const currentNotifications = getNotifications();
         saveNotificationsLocal([localNotification, ...currentNotifications]);
-        sentLocally = true;
-        const canSyncRelational = isUuidValue(String(currentUser.supabaseAuthId || "").trim());
-        if (canSyncRelational) {
-          const relationalResult = await createRelationalNotification(localNotification, currentUser, getUsers());
+      } catch (error) {
+        state.adminNotificationSending = false;
+        toast(`Could not send notification: ${getErrorMessage(error, "Unknown error.")}`);
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+
+      state.adminNotificationSending = false;
+      state.adminNotificationTargetType = "all";
+      state.adminNotificationTargetUserId = "";
+      state.adminNotificationTargetQuery = "";
+      state.adminNotificationTitle = "";
+      state.adminNotificationBody = "";
+      state.adminDataLastSyncAt = Date.now();
+      state.skipNextRouteAnimation = true;
+      render();
+
+      const canSyncRelational = isUuidValue(String(currentUser.supabaseAuthId || "").trim());
+      if (!canSyncRelational) {
+        toast("Notification sent locally. No active Supabase admin session for cloud sync.");
+        return;
+      }
+      toast("Notification sent.");
+
+      createRelationalNotification(localNotification, currentUser, getUsers())
+        .then((relationalResult) => {
           if (relationalResult.ok && relationalResult.notification) {
             const latestLocal = getNotifications().filter((entry) => entry.id !== localNotification.id);
             saveNotificationsLocal([relationalResult.notification, ...latestLocal]);
             scheduleNotificationRealtimeHydration(0);
-          } else {
-            syncWarning = relationalResult.message || "Could not sync notification to Supabase.";
+            if (state.route === "admin" && state.adminPage === "notifications") {
+              state.skipNextRouteAnimation = true;
+              render();
+            }
+            return;
           }
-        } else {
-          syncWarning = "No active Supabase admin session. Notification was saved locally only.";
-        }
-      } catch (error) {
-        syncWarning = getErrorMessage(error, "Could not send notification.");
-      } finally {
-        state.adminNotificationSending = false;
-        state.adminNotificationTargetType = "all";
-        state.adminNotificationTargetUserId = "";
-        state.adminNotificationTitle = "";
-        state.adminNotificationBody = "";
-        if (!sentLocally) {
-          toast(`Could not send notification: ${syncWarning || "Unknown error."}`);
-        } else if (syncWarning) {
-          toast(`Notification sent locally, but cloud sync failed: ${syncWarning}`);
-        } else {
-          toast("Notification sent.");
-        }
-        state.skipNextRouteAnimation = true;
-        render();
-      }
+          toast(`Notification sent locally, but cloud sync failed: ${relationalResult.message || "Sync failed."}`);
+        })
+        .catch((error) => {
+          toast(`Notification sent locally, but cloud sync failed: ${getErrorMessage(error, "Sync failed.")}`);
+        });
     });
   }
 
@@ -12629,6 +12789,93 @@ function findUserByNotificationTargetId(targetUserId, users = null) {
   }) || null;
 }
 
+function getNotificationTargetSearchDisplayLabel(user) {
+  if (!user || typeof user !== "object") {
+    return "";
+  }
+  const name = String(user.name || "").trim() || "User";
+  const email = String(user.email || "").trim();
+  if (email) {
+    return `${name} <${email}>`;
+  }
+  return name;
+}
+
+function normalizeNotificationTargetSearchText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function scoreUserNotificationTargetMatch(user, query) {
+  const q = normalizeNotificationTargetSearchText(query);
+  if (!q) {
+    return 1;
+  }
+  const name = normalizeNotificationTargetSearchText(user?.name);
+  const email = normalizeNotificationTargetSearchText(user?.email);
+  const localId = normalizeNotificationTargetSearchText(user?.id);
+  const profileId = normalizeNotificationTargetSearchText(getUserProfileId(user));
+  const label = normalizeNotificationTargetSearchText(getNotificationTargetSearchDisplayLabel(user));
+  if (email === q || localId === q || profileId === q) {
+    return 100;
+  }
+  if (name === q || label === q) {
+    return 90;
+  }
+  if (email.startsWith(q) || name.startsWith(q)) {
+    return 70;
+  }
+  if (email.includes(q)) {
+    return 60;
+  }
+  if (name.includes(q) || label.includes(q)) {
+    return 50;
+  }
+  return 0;
+}
+
+function searchUsersForNotificationTarget(query, users = null, limit = 8) {
+  const list = Array.isArray(users) ? users : getUsers();
+  const normalizedQuery = normalizeNotificationTargetSearchText(query);
+  const scored = list
+    .map((entry) => ({ user: entry, score: scoreUserNotificationTargetMatch(entry, normalizedQuery) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      const byName = String(a.user?.name || "").localeCompare(String(b.user?.name || ""));
+      if (byName !== 0) {
+        return byName;
+      }
+      return String(a.user?.email || "").localeCompare(String(b.user?.email || ""));
+    })
+    .map((entry) => entry.user);
+  if (normalizedQuery) {
+    return scored.slice(0, Math.max(1, Number(limit) || 8));
+  }
+  return list.slice(0, Math.max(1, Number(limit) || 8));
+}
+
+function findUserByNotificationTargetQuery(query, users = null) {
+  const list = Array.isArray(users) ? users : getUsers();
+  const normalized = normalizeNotificationTargetSearchText(query);
+  if (!normalized) {
+    return null;
+  }
+  const exact = list.find((entry) => scoreUserNotificationTargetMatch(entry, normalized) >= 90);
+  if (exact) {
+    return exact;
+  }
+  const ranked = searchUsersForNotificationTarget(normalized, list, 2);
+  if (ranked.length === 1) {
+    return ranked[0];
+  }
+  return null;
+}
+
 function getNotificationTargetProfileId(notification, users = null) {
   if (!notification || notification.targetType !== "user") {
     return "";
@@ -12834,6 +13081,50 @@ function getCurrentUser() {
   return getUsers().find((user) => user.id === userId) || null;
 }
 
+function isLikelyJwtToken(token) {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(token || "").trim());
+}
+
+function parseJwtPayload(token) {
+  const raw = String(token || "").trim();
+  if (!isLikelyJwtToken(raw)) {
+    return null;
+  }
+  const parts = raw.split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+  try {
+    const base64 = parts[1]
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(parts[1].length / 4) * 4, "=");
+    return JSON.parse(atob(base64));
+  } catch {
+    return null;
+  }
+}
+
+function isJwtTokenExpired(token, skewSeconds = 45) {
+  const payload = parseJwtPayload(token);
+  const exp = Number(payload?.exp || 0);
+  if (!Number.isFinite(exp) || exp <= 0) {
+    return false;
+  }
+  return (Date.now() / 1000) >= (exp - Math.max(0, Number(skewSeconds) || 0));
+}
+
+function isInvalidJwtMessage(message) {
+  const text = String(message || "").trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return text.includes("invalid jwt")
+    || (text.includes("jwt") && text.includes("expired"))
+    || (text.includes("token") && text.includes("expired"))
+    || (text.includes("jwt") && text.includes("malformed"));
+}
+
 async function getValidSupabaseAccessToken(authClient) {
   if (!authClient?.auth) {
     return { ok: false, token: "", message: "Supabase auth client is not available." };
@@ -12842,22 +13133,47 @@ async function getValidSupabaseAccessToken(authClient) {
   const readToken = async () => {
     const { data: sessionData, error: sessionError } = await authClient.auth.getSession();
     if (sessionError) {
-      return { ok: false, token: "", message: sessionError.message || "Could not verify Supabase session." };
+      return {
+        ok: false,
+        token: "",
+        refreshToken: "",
+        sessionUserId: "",
+        message: sessionError.message || "Could not verify Supabase session.",
+      };
     }
+    const session = sessionData?.session || null;
     const accessToken = String(sessionData?.session?.access_token || "").trim();
+    const refreshToken = String(session?.refresh_token || "").trim();
+    const sessionUserId = String(session?.user?.id || "").trim();
     if (!accessToken) {
       return {
         ok: false,
         token: "",
+        refreshToken: refreshToken || "",
+        sessionUserId,
         message: "No active Supabase session for admin delete. Log in with your Supabase admin account.",
       };
     }
-    return { ok: true, token: accessToken, message: "" };
+    return {
+      ok: true,
+      token: accessToken,
+      refreshToken: refreshToken || "",
+      sessionUserId,
+      message: "",
+    };
   };
 
   let tokenResult = await readToken();
   if (!tokenResult.ok) {
     return tokenResult;
+  }
+
+  if (!isLikelyJwtToken(tokenResult.token) || isJwtTokenExpired(tokenResult.token, 60)) {
+    await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+    tokenResult = await readToken();
+    if (!tokenResult.ok) {
+      return tokenResult;
+    }
   }
 
   const validateToken = async (token) => {
@@ -12873,7 +13189,7 @@ async function getValidSupabaseAccessToken(authClient) {
     return tokenResult;
   }
 
-  await authClient.auth.refreshSession().catch(() => {});
+  await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
   tokenResult = await readToken();
   if (!tokenResult.ok) {
     return tokenResult;
@@ -12906,11 +13222,34 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
         message: "Supabase function endpoint is not configured in this app.",
       };
     }
+    const actingUser = getCurrentUser();
+    const actingProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!isUuidValue(actingProfileId)) {
+      return {
+        ok: false,
+        message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+
+    const { data: sessionBeforeDelete } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    const sessionUserId = String(sessionBeforeDelete?.session?.user?.id || "").trim();
+    if (sessionUserId && sessionUserId !== actingProfileId) {
+      return {
+        ok: false,
+        message: "Supabase session does not match the active admin account. Log out and sign in again.",
+      };
+    }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const tokenResult = await getValidSupabaseAccessToken(authClient);
       if (!tokenResult.ok) {
         return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
+      }
+      if (tokenResult.sessionUserId && tokenResult.sessionUserId !== actingProfileId) {
+        return {
+          ok: false,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
       }
 
       const response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
@@ -12936,13 +13275,20 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
       const details = String(payload?.error || payload?.message || "").trim();
       if (response.status === 401 || response.status === 403) {
-        if (attempt === 0) {
-          await authClient.auth.refreshSession().catch(() => {});
+        if (attempt === 0 && isInvalidJwtMessage(details)) {
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
           continue;
         }
+        if (attempt === 0 && !details) {
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          continue;
+        }
+        const authMessage = isInvalidJwtMessage(details)
+          ? "Supabase session expired. Log out and log in again with your Supabase admin account."
+          : (details || "Unauthorized. Log out and log in again with your Supabase admin account.");
         return {
           ok: false,
-          message: details || "Unauthorized. Log out and log in again with your Supabase admin account.",
+          message: authMessage,
         };
       }
       if (/user not found/i.test(details)) {
