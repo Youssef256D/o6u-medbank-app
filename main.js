@@ -133,6 +133,8 @@ const state = {
   calcExpression: "",
   adminImportReport: null,
   adminImportDraft: "",
+  adminImportCourse: "",
+  adminImportTopic: "",
   skipNextRouteAnimation: false,
   adminDataRefreshing: false,
   adminDataLastSyncAt: 0,
@@ -1431,23 +1433,39 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
   const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
   const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
-  const localHasCompleteProfile = hasCompleteStudentProfile(localUser);
-  const fallbackYear = localHasCompleteProfile ? normalizeAcademicYearOrNull(localUser?.academicYear) : null;
-  const fallbackSemester = localHasCompleteProfile ? normalizeAcademicSemesterOrNull(localUser?.academicSemester) : null;
+  const fallbackYear = normalizeAcademicYearOrNull(
+    localUser?.academicYear
+    ?? authUser?.user_metadata?.academic_year
+    ?? authUser?.user_metadata?.academicYear
+    ?? null,
+  );
+  const fallbackSemester = normalizeAcademicSemesterOrNull(
+    localUser?.academicSemester
+    ?? authUser?.user_metadata?.academic_semester
+    ?? authUser?.user_metadata?.academicSemester
+    ?? null,
+  );
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
   const year = role === "student" ? (profileYear ?? fallbackYear) : null;
   const semester = role === "student" ? (profileSemester ?? fallbackSemester) : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
+  const metadataPhone = String(
+    authUser?.user_metadata?.phone
+    || authUser?.user_metadata?.phone_number
+    || "",
+  ).trim();
   const profilePhone = String(profile.phone || "").trim();
+  const fallbackPhone = String(localUser?.phone || "").trim();
+  const resolvedPhone = profilePhone || metadataPhone || fallbackPhone;
   const autoApprovedFromProfile = shouldAutoApproveStudentAccess({
     role,
-    phone: profilePhone,
+    phone: resolvedPhone,
     academicYear: year,
     academicSemester: semester,
   });
   const profileHasStudentCompletion = role !== "student"
     ? true
-    : profilePhone.replace(/\D/g, "").length >= 8 && Number(profile.academic_year) >= 1 && Number(profile.academic_semester) >= 1;
+    : validateAndNormalizePhoneNumber(resolvedPhone).ok && Number(year) >= 1 && Number(semester) >= 1;
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let nextProfileCompleted = role !== "student";
   if (role === "student") {
@@ -1463,7 +1481,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const updatedUser = upsertLocalUserFromAuth(authUser, {
     name: String(profile.full_name || "").trim() || localUser?.name || "Student",
     email: normalizedEmail,
-    phone: profilePhone,
+    phone: resolvedPhone,
     role,
     academicYear: year,
     academicSemester: semester,
@@ -1478,6 +1496,51 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
   });
+
+  const shouldBackfillProfile = role === "student"
+    && (
+      (profilePhone !== resolvedPhone && Boolean(resolvedPhone))
+      || (profileYear === null && year !== null)
+      || (profileSemester === null && semester !== null)
+    );
+  if (shouldBackfillProfile) {
+    const profilePatch = {};
+    if (profilePhone !== resolvedPhone && resolvedPhone) {
+      profilePatch.phone = resolvedPhone;
+    }
+    if (profileYear === null && year !== null) {
+      profilePatch.academic_year = year;
+    }
+    if (profileSemester === null && semester !== null) {
+      profilePatch.academic_semester = semester;
+    }
+    if (Object.keys(profilePatch).length) {
+      client
+        .from("profiles")
+        .update(profilePatch)
+        .eq("id", authUser.id)
+        .then(({ error: patchError }) => {
+          if (patchError) {
+            console.warn("Could not backfill profile completion fields.", patchError.message || patchError);
+            return;
+          }
+          const currentLocal = getCurrentUser();
+          if (!currentLocal || getUserProfileId(currentLocal) !== authUser.id) {
+            return;
+          }
+          syncUserCourseEnrollmentsToRelational([updatedUser], {
+            assignedByAuthId: isUuidValue(currentLocal?.supabaseAuthId) ? currentLocal.supabaseAuthId : null,
+          }).catch((syncError) => {
+            if (!isMissingRelationError(syncError)) {
+              console.warn("Could not sync enrollment rows after profile backfill.", syncError?.message || syncError);
+            }
+          });
+        })
+        .catch((patchError) => {
+          console.warn("Could not backfill profile completion fields.", patchError?.message || patchError);
+        });
+    }
+  }
   return { user: updatedUser, approvalChecked: true };
 }
 
@@ -2503,9 +2566,8 @@ async function hydrateRelationalProfiles(currentUser) {
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
-    const existingHasCompleteProfile = hasCompleteStudentProfile(existing);
-    const existingYear = existingHasCompleteProfile ? normalizeAcademicYearOrNull(existing?.academicYear) : null;
-    const existingSemester = existingHasCompleteProfile ? normalizeAcademicSemesterOrNull(existing?.academicSemester) : null;
+    const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
+    const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
     const profilePhone = String(profile.phone || "").trim();
@@ -2525,22 +2587,29 @@ async function hydrateRelationalProfiles(currentUser) {
       : { year: null, semester: null };
     const inferredCourseYear = normalizeAcademicYearOrNull(inferredFromCourses.year);
     const inferredCourseSemester = normalizeAcademicSemesterOrNull(inferredFromCourses.semester);
-    const year = role === "student"
+    let year = role === "student"
       ? (profileYear ?? inferredEnrollmentYear ?? inferredCourseYear ?? existingYear)
       : null;
-    const semester = role === "student"
+    let semester = role === "student"
       ? (profileSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester ?? existingSemester)
       : null;
-    const defaultCourses = role === "student" && year !== null && semester !== null
-      ? getCurriculumCourses(year, semester)
-      : [];
-    const assignedCourses = role !== "student"
+    let assignedCourses = role !== "student"
       ? [...allCourses]
       : enrolledCourses.length
         ? enrolledCourses
         : (existingAssignedCourses.length && (enrollmentLookupFailed || !hasEnrollmentEntry))
           ? existingAssignedCourses
-          : defaultCourses;
+          : [];
+    if (role === "student") {
+      const repairedEnrollment = normalizeStudentEnrollmentProfile({
+        academicYear: year,
+        academicSemester: semester,
+        assignedCourses,
+      });
+      year = repairedEnrollment.academicYear;
+      semester = repairedEnrollment.academicSemester;
+      assignedCourses = repairedEnrollment.assignedCourses;
+    }
     return {
       id: profile.id,
       name: String(profile.full_name || "").trim() || existing?.name || "Student",
@@ -2606,6 +2675,15 @@ async function hydrateRelationalProfiles(currentUser) {
     if (backfillCandidates.length) {
       await syncProfilesToRelational(backfillCandidates).catch((error) => {
         console.warn("Could not backfill missing student profile fields.", error?.message || error);
+      });
+    }
+    if (mapped.length) {
+      await syncUserCourseEnrollmentsToRelational(mapped, {
+        assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
+      }).catch((error) => {
+        if (!isMissingRelationError(error)) {
+          console.warn("Could not backfill missing student enrollment rows.", error?.message || error);
+        }
       });
     }
   }
@@ -3617,10 +3695,16 @@ async function syncProfilesToRelational(usersPayload) {
     }
   }
 
-  if (isAdminSync) {
-    await syncUserCourseEnrollmentsToRelational(users, {
-      assignedByAuthId: isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
-    });
+  const enrollmentSyncOptions = {
+    assignedByAuthId: isAdminSync && isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
+  };
+  try {
+    await syncUserCourseEnrollmentsToRelational(users, enrollmentSyncOptions);
+  } catch (enrollmentError) {
+    if (isAdminSync) {
+      throw enrollmentError;
+    }
+    console.warn("Could not sync student enrollment rows during profile sync.", enrollmentError?.message || enrollmentError);
   }
 }
 
@@ -4575,29 +4659,18 @@ function seedData() {
       }
 
       if (user.role === "student") {
-        const normalizedYear = normalizeAcademicYearOrNull(user.academicYear);
-        const normalizedSemester = normalizeAcademicSemesterOrNull(user.academicSemester);
-
-        if (user.academicYear !== normalizedYear) {
-          user.academicYear = normalizedYear;
+        const repairedEnrollment = normalizeStudentEnrollmentProfile(user);
+        if (user.academicYear !== repairedEnrollment.academicYear) {
+          user.academicYear = repairedEnrollment.academicYear;
           changed = true;
         }
-        if (user.academicSemester !== normalizedSemester) {
-          user.academicSemester = normalizedSemester;
+        if (user.academicSemester !== repairedEnrollment.academicSemester) {
+          user.academicSemester = repairedEnrollment.academicSemester;
           changed = true;
         }
-        if (normalizedYear !== null && normalizedSemester !== null) {
-          const semesterCourses = getCurriculumCourses(normalizedYear, normalizedSemester);
-          if ((user.assignedCourses || []).join("|") !== semesterCourses.join("|")) {
-            user.assignedCourses = semesterCourses;
-            changed = true;
-          }
-        } else {
-          const normalizedCourses = sanitizeCourseAssignments(user.assignedCourses || []);
-          if ((user.assignedCourses || []).join("|") !== normalizedCourses.join("|")) {
-            user.assignedCourses = normalizedCourses;
-            changed = true;
-          }
+        if ((user.assignedCourses || []).join("|") !== repairedEnrollment.assignedCourses.join("|")) {
+          user.assignedCourses = repairedEnrollment.assignedCourses;
+          changed = true;
         }
       } else {
         if (user.academicYear !== null || user.academicSemester !== null) {
@@ -6092,6 +6165,9 @@ function wireAuth(mode) {
       if (form.dataset.submitting === "1") {
         return;
       }
+      if (typeof form.reportValidity === "function" && !form.reportValidity()) {
+        return;
+      }
       const data = new FormData(form);
       const users = getUsers();
       const name = String(data.get("name") || "").trim();
@@ -6106,8 +6182,16 @@ function wireAuth(mode) {
         return;
       }
       const availableCourses = getCurriculumCourses(academicYear, academicSemester);
+      if (!availableCourses.length) {
+        toast("No courses are available for the selected year and semester.");
+        return;
+      }
       const selectedCourses = getSelectedSignupCourses().filter((course) => availableCourses.includes(course));
       const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      if (!selectedCourses.length) {
+        toast("Select at least one course for your enrollment.");
+        return;
+      }
 
       if (isGoogleOnboardingFlow) {
         if (!name || !email || !phone) {
@@ -6122,11 +6206,6 @@ function wireAuth(mode) {
           toast(phoneValidation.message || "Phone number is invalid.");
           return;
         }
-        if (!selectedCourses.length) {
-          toast("Select at least one course for your enrollment.");
-          return;
-        }
-
         const idx = users.findIndex(
           (entry) =>
             entry.id === onboardingUser?.id
@@ -6220,10 +6299,6 @@ function wireAuth(mode) {
           return;
         }
       }
-      if (!selectedCourses.length) {
-        toast("Select at least one course for your enrollment.");
-        return;
-      }
 
       lockAuthForm(form, true, "Creating account...");
       const authClient = getSupabaseAuthClient();
@@ -6243,7 +6318,12 @@ function wireAuth(mode) {
                 full_name: name,
                 academic_year: academicYear,
                 academic_semester: academicSemester,
+                academicYear,
+                academicSemester,
+                phone: normalizedPhone,
                 phone_number: normalizedPhone,
+                assigned_courses: selectedCourses,
+                assignedCourses: selectedCourses,
               },
             },
           });
@@ -6274,6 +6354,7 @@ function wireAuth(mode) {
             return;
           }
 
+          await syncUsersBackupState(getUsers()).catch(() => {});
           await ensureRelationalSyncReady().catch(() => {});
           await flushPendingSyncNow();
 
@@ -8597,8 +8678,12 @@ function renderAdmin() {
     const bulkActionRunning = Boolean(state.adminBulkActionRunning);
     const bulkActionType = String(state.adminBulkActionType || "").trim();
     const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid) || bulkActionRunning;
-    const importCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
+    const selectedCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
+    const selectedCourseTopics = QBANK_COURSE_TOPICS[selectedCourse] || [];
+    const selectedTopic = selectedCourseTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
+    const importCourse = allCourses.includes(state.adminImportCourse) ? state.adminImportCourse : selectedCourse;
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
+    const importTopic = importTopics.includes(state.adminImportTopic) ? state.adminImportTopic : (importTopics[0] || "");
     const importReport = state.adminImportReport;
     const importDraft = String(state.adminImportDraft || "");
     const importRunning = Boolean(state.adminImportRunning);
@@ -8609,8 +8694,6 @@ function renderAdmin() {
       : "neutral";
     const importErrorPreview = (importReport?.errors || []).slice(0, 15);
     const questions = getQuestions();
-    const selectedCourse = importCourse;
-    const selectedTopic = importTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
     const courseQuestions = questions
       .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
       .filter((question) => {
@@ -8721,7 +8804,7 @@ function renderAdmin() {
             <label>Topic
               <select id="admin-filter-topic" name="topic">
                 <option value="" ${selectedTopic ? "" : "selected"}>All topics</option>
-                ${importTopics
+                ${selectedCourseTopics
                   .map((topic) => `<option value="${escapeHtml(topic)}" ${selectedTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
                   .join("")}
               </select>
@@ -8794,7 +8877,9 @@ function renderAdmin() {
             <label>
               Default topic
               <select name="defaultTopic" id="admin-import-topic">
-                ${importTopics.map((topic) => `<option value="${escapeHtml(topic)}">${escapeHtml(topic)}</option>`).join("")}
+                ${importTopics
+                  .map((topic) => `<option value="${escapeHtml(topic)}" ${importTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+                  .join("")}
               </select>
             </label>
           </div>
@@ -10275,9 +10360,23 @@ function wireAdmin() {
 
   const importCourseSelect = document.getElementById("admin-import-course");
   const importTopicSelect = document.getElementById("admin-import-topic");
+  const syncImportSelectionsFromInputs = () => {
+    const course = importCourseSelect?.value || allCourses[0] || "";
+    const topics = QBANK_COURSE_TOPICS[course] || [];
+    const topic = topics.includes(importTopicSelect?.value || "")
+      ? String(importTopicSelect?.value || "")
+      : (topics[0] || "");
+    state.adminImportCourse = course;
+    state.adminImportTopic = topic;
+  };
+  syncImportSelectionsFromInputs();
   importCourseSelect?.addEventListener("change", () => {
     const course = importCourseSelect.value || allCourses[0];
     setSelectOptions(importTopicSelect, QBANK_COURSE_TOPICS[course] || [], false);
+    syncImportSelectionsFromInputs();
+  });
+  importTopicSelect?.addEventListener("change", () => {
+    syncImportSelectionsFromInputs();
   });
 
   const importFileInput = document.getElementById("admin-import-file");
@@ -10585,6 +10684,8 @@ function wireAdmin() {
     const defaultCourse = String(data.get("defaultCourse") || allCourses[0]);
     const defaultTopic = String(data.get("defaultTopic") || (QBANK_COURSE_TOPICS[defaultCourse] || [])[0] || "");
     const importAsDraft = data.get("importAsDraft") != null;
+    state.adminImportCourse = defaultCourse;
+    state.adminImportTopic = defaultTopic;
     state.adminImportAsDraft = importAsDraft;
     state.adminImportRunning = true;
     state.adminImportStatus = "Importing questions...";
@@ -11360,31 +11461,18 @@ function syncUsersWithCurriculum() {
     }
 
     if (user.role === "student") {
-      const year = normalizeAcademicYearOrNull(user.academicYear);
-      const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
-      if (user.academicYear !== year) {
-        user.academicYear = year;
+      const repairedEnrollment = normalizeStudentEnrollmentProfile(user);
+      if (user.academicYear !== repairedEnrollment.academicYear) {
+        user.academicYear = repairedEnrollment.academicYear;
         changed = true;
       }
-      if (user.academicSemester !== semester) {
-        user.academicSemester = semester;
+      if (user.academicSemester !== repairedEnrollment.academicSemester) {
+        user.academicSemester = repairedEnrollment.academicSemester;
         changed = true;
       }
-      if (year !== null && semester !== null) {
-        const semesterCourses = getCurriculumCourses(year, semester);
-        const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
-        const scoped = assigned.filter((course) => semesterCourses.includes(course));
-        const courses = scoped.length ? scoped : semesterCourses;
-        if ((user.assignedCourses || []).join("|") !== courses.join("|")) {
-          user.assignedCourses = courses;
-          changed = true;
-        }
-      } else {
-        const normalizedAssigned = sanitizeCourseAssignments(user.assignedCourses || []);
-        if ((user.assignedCourses || []).join("|") !== normalizedAssigned.join("|")) {
-          user.assignedCourses = normalizedAssigned;
-          changed = true;
-        }
+      if ((user.assignedCourses || []).join("|") !== repairedEnrollment.assignedCourses.join("|")) {
+        user.assignedCourses = repairedEnrollment.assignedCourses;
+        changed = true;
       }
     } else {
       const normalized = sanitizeCourseAssignments(user.assignedCourses || allCourses);
@@ -11402,6 +11490,24 @@ function syncUsersWithCurriculum() {
 
   if (changed) {
     save(STORAGE_KEYS.users, users);
+    const current = getCurrentUser();
+    if (current?.role === "admin") {
+      const syncedUsers = getUsers();
+      syncUsersBackupState(syncedUsers).catch(() => {});
+      ensureRelationalSyncReady()
+        .then((ready) => {
+          if (!ready) {
+            return;
+          }
+          if (scheduleRelationalWrite(STORAGE_KEYS.users, syncedUsers)) {
+            return flushPendingSyncNow({ throwOnRelationalFailure: false });
+          }
+          return undefined;
+        })
+        .catch((syncError) => {
+          console.warn("Could not sync repaired student enrollment data.", syncError?.message || syncError);
+        });
+    }
   }
 }
 
@@ -11561,6 +11667,56 @@ function inferAcademicTermFromCourses(courses) {
     return { year: null, semester: null };
   }
   return { year: best.year, semester: best.semester };
+}
+
+function getFallbackEnrollmentTerm() {
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      if (getCurriculumCourses(year, semester).length) {
+        return { year, semester };
+      }
+    }
+  }
+  return { year: 1, semester: 1 };
+}
+
+function normalizeStudentEnrollmentProfile(user) {
+  const source = user && typeof user === "object" ? user : {};
+  const normalizedAssigned = sanitizeCourseAssignments(source.assignedCourses || []);
+  let year = normalizeAcademicYearOrNull(source.academicYear);
+  let semester = normalizeAcademicSemesterOrNull(source.academicSemester);
+
+  if (year === null || semester === null) {
+    const inferred = inferAcademicTermFromCourses(normalizedAssigned);
+    if (year === null && inferred.year !== null) {
+      year = inferred.year;
+    }
+    if (semester === null && inferred.semester !== null) {
+      semester = inferred.semester;
+    }
+  }
+
+  if (year === null || semester === null) {
+    const fallback = getFallbackEnrollmentTerm();
+    year = year ?? fallback.year;
+    semester = semester ?? fallback.semester;
+  }
+
+  const semesterCourses = getCurriculumCourses(year, semester);
+  if (semesterCourses.length) {
+    const scopedAssigned = normalizedAssigned.filter((course) => semesterCourses.includes(course));
+    return {
+      academicYear: year,
+      academicSemester: semester,
+      assignedCourses: scopedAssigned.length ? scopedAssigned : semesterCourses,
+    };
+  }
+
+  return {
+    academicYear: year,
+    academicSemester: semester,
+    assignedCourses: normalizedAssigned.length ? normalizedAssigned : sanitizeCourseAssignments(CURRICULUM_COURSE_LIST),
+  };
 }
 
 function sanitizeCourseAssignments(courses) {
