@@ -176,6 +176,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/webp",
   "image/gif",
 ]);
+const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -2838,6 +2839,7 @@ async function hydrateRelationalQuestions() {
     choicesByQuestionId[choice.question_id].push(choice);
   });
 
+  let needsChoiceRepairSync = false;
   const mappedQuestions = (questionRows || []).map((question) => {
     const externalId = String(question.external_id || question.id || "").trim();
     const existingQuestion = localQuestionByExternalId[externalId] || localQuestionByDbId[String(question.id || "").trim()] || null;
@@ -2845,15 +2847,35 @@ async function hydrateRelationalQuestions() {
     const topicName = topicById[question.topic_id] || resolveDefaultTopic(courseName);
     const rawChoices = (choicesByQuestionId[question.id] || [])
       .sort((a, b) => String(a.choice_label).localeCompare(String(b.choice_label)));
-    const choices = rawChoices
-      .map((choice) => ({
+    const remoteChoices = normalizeQuestionChoiceEntries(
+      rawChoices.map((choice) => ({
         id: String(choice.choice_label || "").toUpperCase(),
         text: String(choice.choice_text || "").trim(),
-      }))
-      .filter((choice) => choice.id && choice.text);
-    const correct = rawChoices
+      })),
+    );
+    const existingChoices = normalizeQuestionChoiceEntries(existingQuestion?.choices);
+    const useExistingChoices = shouldPreferExistingQuestionChoices(remoteChoices, existingChoices);
+    const resolvedChoices = useExistingChoices && existingChoices.length
+      ? existingChoices
+      : remoteChoices;
+    if (useExistingChoices && existingChoices.length) {
+      const remoteSignature = remoteChoices.map((choice) => `${choice.id}:${choice.text}`).join("|");
+      const existingSignature = existingChoices.map((choice) => `${choice.id}:${choice.text}`).join("|");
+      if (remoteSignature !== existingSignature) {
+        needsChoiceRepairSync = true;
+      }
+    }
+    const remoteCorrect = rawChoices
       .filter((choice) => Boolean(choice.is_correct))
       .map((choice) => String(choice.choice_label || "").toUpperCase());
+    const choices = resolvedChoices.length
+      ? resolvedChoices
+      : [{ id: "A", text: "Option A" }, { id: "B", text: "Option B" }];
+    const correct = resolveQuestionCorrectAnswers(
+      remoteCorrect,
+      existingQuestion?.correct,
+      choices,
+    );
     const questionImageFromDb = questionColumnSupport.questionImageUrl
       ? String(question.question_image_url || "").trim()
       : "";
@@ -2874,8 +2896,8 @@ async function hydrateRelationalQuestions() {
       author: authorById[question.author_id] || "Admin",
       dateAdded: String(question.created_at || nowISO()).slice(0, 10),
       stem: String(question.stem || "").trim(),
-      choices: choices.length ? choices : [{ id: "A", text: "Option A" }, { id: "B", text: "Option B" }],
-      correct: correct.length ? correct : ["A"],
+      choices,
+      correct,
       explanation: String(question.explanation || "").trim(),
       objective: String(question.objective || "").trim(),
       references: "",
@@ -2886,6 +2908,14 @@ async function hydrateRelationalQuestions() {
   });
 
   saveLocalOnly(STORAGE_KEYS.questions, mappedQuestions);
+  if (needsChoiceRepairSync && currentUser?.role === "admin") {
+    // If DB rows contain placeholder/partial choices while local has real data, push a background repair sync.
+    if (scheduleRelationalWrite(STORAGE_KEYS.questions, mappedQuestions)) {
+      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
+        console.warn("Could not repair remote question choices from local cache.", syncError?.message || syncError);
+      });
+    }
+  }
 }
 
 async function hydrateRelationalSessions(currentUser) {
@@ -3500,6 +3530,68 @@ function convertFileToDataUrl(file) {
     reader.onerror = () => reject(new Error("Could not read selected image file."));
     reader.readAsDataURL(file);
   });
+}
+
+function normalizeQuestionChoiceLabel(value) {
+  const label = String(value || "").trim().toUpperCase();
+  return QUESTION_CHOICE_LABELS.includes(label) ? label : "";
+}
+
+function normalizeQuestionChoiceEntries(choices) {
+  const source = Array.isArray(choices) ? choices : [];
+  const byLabel = new Map();
+  source.forEach((choice) => {
+    const label = normalizeQuestionChoiceLabel(choice?.id || choice?.choice_label || choice?.label);
+    const text = String(choice?.text ?? choice?.choice_text ?? "").trim();
+    if (!label || !text || byLabel.has(label)) {
+      return;
+    }
+    byLabel.set(label, { id: label, text });
+  });
+  return QUESTION_CHOICE_LABELS
+    .map((label) => byLabel.get(label))
+    .filter(Boolean);
+}
+
+function isQuestionChoicePlaceholder(choice) {
+  const label = normalizeQuestionChoiceLabel(choice?.id);
+  const text = String(choice?.text || "").trim().toLowerCase();
+  return Boolean(label) && text === `option ${label.toLowerCase()}`;
+}
+
+function shouldPreferExistingQuestionChoices(remoteChoices, existingChoices) {
+  if (!remoteChoices.length && existingChoices.length) {
+    return true;
+  }
+  if (remoteChoices.length < 2 && existingChoices.length >= 2) {
+    return true;
+  }
+  const remoteAllPlaceholder = remoteChoices.length > 0 && remoteChoices.every((choice) => isQuestionChoicePlaceholder(choice));
+  const existingHasMeaningful = existingChoices.some((choice) => !isQuestionChoicePlaceholder(choice));
+  return remoteAllPlaceholder && existingHasMeaningful;
+}
+
+function resolveQuestionCorrectAnswers(remoteCorrect, existingCorrect, choices) {
+  const availableChoiceIds = new Set(
+    normalizeQuestionChoiceEntries(choices).map((choice) => choice.id),
+  );
+  const normalizedRemote = [...new Set(
+    (Array.isArray(remoteCorrect) ? remoteCorrect : [])
+      .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => availableChoiceIds.has(entry)),
+  )];
+  if (normalizedRemote.length) {
+    return normalizedRemote;
+  }
+  const normalizedExisting = [...new Set(
+    (Array.isArray(existingCorrect) ? existingCorrect : [])
+      .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => availableChoiceIds.has(entry)),
+  )];
+  if (normalizedExisting.length) {
+    return normalizedExisting;
+  }
+  return [choices[0]?.id || "A"];
 }
 
 async function getRelationalQuestionColumnSupport(client) {
@@ -9038,8 +9130,8 @@ function renderAdmin() {
                     <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
                   </div>
                   <div class="form-row">
-                    <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" required /></label>
-                    <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" required /></label>
+                    <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" /></label>
+                    <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" /></label>
                   </div>
                   <div class="form-row">
                     <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
@@ -10822,6 +10914,24 @@ function wireAdmin() {
       }
     }
 
+    const choices = normalizeQuestionChoiceEntries(
+      QUESTION_CHOICE_LABELS.map((label) => ({
+        id: label,
+        text: String(data.get(`choice${label}`) || "").trim(),
+      })),
+    );
+    if (choices.length < 2) {
+      toast("Enter at least 2 answer choices.");
+      state.adminQuestionSaveRunning = false;
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const selectedCorrect = normalizeQuestionChoiceLabel(String(data.get("correct") || "A"));
+    const correct = choices.some((choice) => choice.id === selectedCorrect)
+      ? [selectedCorrect]
+      : [choices[0].id];
+
     const payload = {
       id: existingId || makeId("q"),
       qbankCourse: String(data.get("questionCourse") || allCourses[0]).trim(),
@@ -10837,14 +10947,8 @@ function wireAdmin() {
       author: getCurrentUser().name,
       dateAdded: new Date().toISOString().slice(0, 10),
       stem: String(data.get("stem") || "").trim(),
-      choices: [
-        { id: "A", text: String(data.get("choiceA") || "").trim() },
-        { id: "B", text: String(data.get("choiceB") || "").trim() },
-        { id: "C", text: String(data.get("choiceC") || "").trim() },
-        { id: "D", text: String(data.get("choiceD") || "").trim() },
-        { id: "E", text: String(data.get("choiceE") || "").trim() },
-      ],
-      correct: [String(data.get("correct") || "A")],
+      choices,
+      correct,
       explanation: String(data.get("explanation") || "").trim(),
       objective: "",
       references: String(data.get("references") || "").trim(),
