@@ -6167,6 +6167,7 @@ function syncTopbar() {
   const unreadNotificationCount = user?.role === "student"
     ? getUnreadNotificationCountForUser(user)
     : 0;
+  const unreadNotificationLabel = unreadNotificationCount > 99 ? "99+" : String(unreadNotificationCount);
 
   topbarEl?.classList.toggle("admin-only-header", isAdminHeader);
   brandWrapEl?.classList.toggle("hidden", false);
@@ -6183,13 +6184,6 @@ function syncTopbar() {
       button.classList.toggle("hidden", route === "admin");
     }
   });
-  const notificationNavButton = privateNavEl.querySelector("[data-nav='notifications']");
-  if (notificationNavButton) {
-    const countLabel = unreadNotificationCount > 99 ? "99+" : String(unreadNotificationCount);
-    notificationNavButton.innerHTML = unreadNotificationCount
-      ? `Notifications <span class="top-nav-count">${escapeHtml(countLabel)}</span>`
-      : "Notifications";
-  }
 
   if (!user) {
     state.userMenuOpen = false;
@@ -6204,8 +6198,24 @@ function syncTopbar() {
     const firstLetter = firstName.charAt(0).toLocaleUpperCase();
     const menuOpen = Boolean(state.userMenuOpen);
     const menuExpanded = menuOpen ? "true" : "false";
+    const isStudent = user.role === "student";
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
+      ${isStudent ? `
+      <button
+        class="notification-bell-btn ${state.route === "notifications" ? "is-active" : ""}"
+        type="button"
+        data-nav="notifications"
+        aria-label="Open notifications"
+        title="Notifications"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 3.25a4.25 4.25 0 0 0-4.25 4.25v1.68c0 .95-.3 1.87-.85 2.65L5.21 14.2c-.6.87.02 2.05 1.08 2.05h11.42c1.06 0 1.69-1.18 1.08-2.05l-1.69-2.37a4.75 4.75 0 0 1-.85-2.65V7.5A4.25 4.25 0 0 0 12 3.25z" />
+          <path d="M9.25 17.25a2.75 2.75 0 0 0 5.5 0" />
+        </svg>
+        ${unreadNotificationCount ? `<span class="notification-bell-badge">${escapeHtml(unreadNotificationLabel)}</span>` : ""}
+      </button>
+      ` : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
@@ -7505,7 +7515,6 @@ function renderDashboard() {
   const analytics = getStudentAnalyticsSnapshot(user.id);
   const stats = analytics.stats;
   const syncStatusText = getStudentDataSyncStatusText();
-  const unreadNotifications = getUnreadNotificationCountForUser(user);
 
   return `
     <section class="panel">
@@ -7514,7 +7523,6 @@ function renderDashboard() {
         <h2 class="title">${escapeHtml(user.name)}'s Dashboard</h2>
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
-          <button class="btn ghost" data-nav="notifications">Notifications${unreadNotifications ? ` (${unreadNotifications})` : ""}</button>
           <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
             ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
           </button>

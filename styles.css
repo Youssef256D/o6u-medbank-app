@@ -221,20 +221,6 @@ button {
     transform 180ms ease;
 }
 
-.top-nav-count {
-  margin-left: 0.36rem;
-  border-radius: 999px;
-  padding: 0.08rem 0.45rem;
-  font-size: 0.68rem;
-  font-weight: 700;
-  color: #0f5132;
-  background: #d1e7dd;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.4rem;
-}
-
 .top-nav button.is-active {
   background: var(--brand-soft);
   color: var(--brand-strong);
@@ -255,6 +241,57 @@ button {
   justify-content: flex-end;
   flex-wrap: nowrap;
   position: relative;
+}
+
+.notification-bell-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(23, 126, 137, 0.35);
+  background: #ffffff;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.notification-bell-btn svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.notification-bell-btn.is-active {
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  border-color: rgba(23, 126, 137, 0.45);
+}
+
+.notification-bell-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid #ffffff;
+  background: #b42318;
+  color: #ffffff;
+  font-size: 0.64rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 .user-menu {
@@ -3288,6 +3325,18 @@ hr {
     font-size: 0.84rem;
     padding: 0.38rem 0.68rem;
     min-height: 36px;
+  }
+
+  .notification-bell-btn {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    padding: 0;
+  }
+
+  .notification-bell-btn svg {
+    width: 18px;
+    height: 18px;
   }
 
   .panel {
