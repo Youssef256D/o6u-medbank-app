@@ -251,9 +251,9 @@ button {
 
 .auth-actions .notification-bell-btn {
   position: relative;
-  width: 52px;
-  height: 52px;
-  min-width: 52px;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
   padding: 0;
   border-radius: 999px;
   border: 1px solid rgba(23, 126, 137, 0.35);
@@ -266,8 +266,8 @@ button {
 }
 
 .auth-actions .notification-bell-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   stroke: currentColor;
   fill: none;
   stroke-width: 1.8;
@@ -3482,9 +3482,9 @@ hr {
   }
 
   .auth-actions .notification-bell-btn {
-    width: 46px;
-    min-width: 46px;
-    height: 46px;
+    width: 42px;
+    min-width: 42px;
+    height: 42px;
     padding: 0;
   }
 
