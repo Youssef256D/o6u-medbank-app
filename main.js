@@ -3458,6 +3458,12 @@ function isMissingColumnError(error) {
   return false;
 }
 
+function isStorageBucketMissingError(error) {
+  const message = getErrorMessage(error, "").toLowerCase();
+  const statusCode = String(error?.statusCode || error?.status || "").trim();
+  return /bucket not found/i.test(message) || (statusCode === "404" && /bucket/i.test(message));
+}
+
 function sanitizeStoragePathSegment(value, fallback = "item") {
   const normalized = String(value || "")
     .trim()
@@ -3560,7 +3566,11 @@ async function uploadQuestionImageFile(file) {
     });
 
   if (uploadError) {
-    if (file.size <= QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES) {
+    const bucketMissing = isStorageBucketMissingError(uploadError);
+    const inlineFallbackLimit = bucketMissing
+      ? QUESTION_IMAGE_UPLOAD_MAX_BYTES
+      : QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES;
+    if (file.size <= inlineFallbackLimit) {
       try {
         const fallbackDataUrl = await convertFileToDataUrl(file);
         if (fallbackDataUrl) {
@@ -3568,7 +3578,9 @@ async function uploadQuestionImageFile(file) {
             ok: true,
             url: fallbackDataUrl,
             usedFallback: true,
-            message: "Storage upload failed, so the image was saved inline.",
+            message: bucketMissing
+              ? `Storage bucket "${bucket}" was not found, so the image was saved inline.`
+              : "Storage upload failed, so the image was saved inline.",
           };
         }
       } catch {
@@ -10806,7 +10818,7 @@ function wireAdmin() {
         questionImage = String(uploadResult.url || "").trim();
       }
       if (uploadResult.ok && uploadResult.usedFallback) {
-        toast("Question image saved inline because storage upload failed.");
+        toast(String(uploadResult.message || "Question image saved inline because storage upload failed."));
       }
     }
 
