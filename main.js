@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.12").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.13").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -165,6 +165,7 @@ const state = {
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
   userMenuOpen: false,
+  notificationMenuOpen: false,
 };
 
 let appVersionCheckPromise = null;
@@ -5226,20 +5227,81 @@ function bindGlobalEvents() {
   }
   globalEventsBound = true;
 
-  document.body.addEventListener("click", (event) => {
+  document.body.addEventListener("click", async (event) => {
     const clickedInsideUserMenu = Boolean(event.target.closest(".user-menu"));
+    const clickedInsideNotificationMenu = Boolean(event.target.closest(".notification-menu"));
     const actionTarget = event.target.closest("[data-action]");
     const action = actionTarget?.getAttribute("data-action") || "";
 
     if (action === "toggle-user-menu") {
       state.userMenuOpen = !state.userMenuOpen;
+      if (state.userMenuOpen) {
+        state.notificationMenuOpen = false;
+      }
       syncTopbar();
+      return;
+    }
+
+    if (action === "toggle-notification-menu") {
+      state.notificationMenuOpen = !state.notificationMenuOpen;
+      if (state.notificationMenuOpen) {
+        state.userMenuOpen = false;
+      }
+      syncTopbar();
+      return;
+    }
+
+    if (action === "notification-mark-read-topbar") {
+      const user = getCurrentUser();
+      const notificationId = String(actionTarget?.getAttribute("data-notification-id") || "").trim();
+      if (!user || user.role !== "student" || !notificationId) {
+        return;
+      }
+      const result = await markNotificationsReadForUser(user, [notificationId]);
+      if (result.syncWarning) {
+        toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
+      }
+      if (result.changed) {
+        if (state.route === "notifications") {
+          state.skipNextRouteAnimation = true;
+          render();
+          return;
+        }
+        syncTopbar();
+      }
+      return;
+    }
+
+    if (action === "notifications-mark-all-read-topbar") {
+      const user = getCurrentUser();
+      if (!user || user.role !== "student") {
+        return;
+      }
+      const unreadNotificationIds = getVisibleNotificationsForUser(user)
+        .filter((notification) => !isNotificationReadByUser(notification, user))
+        .map((notification) => notification.id);
+      if (!unreadNotificationIds.length) {
+        return;
+      }
+      const result = await markNotificationsReadForUser(user, unreadNotificationIds);
+      if (result.syncWarning) {
+        toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
+      }
+      if (result.changed) {
+        if (state.route === "notifications") {
+          state.skipNextRouteAnimation = true;
+          render();
+          return;
+        }
+        syncTopbar();
+      }
       return;
     }
 
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
       state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
       const route = navTarget.getAttribute("data-nav");
       navigate(route);
       return;
@@ -5247,6 +5309,7 @@ function bindGlobalEvents() {
 
     if (action === "logout") {
       state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
       logout();
       return;
     }
@@ -5261,15 +5324,24 @@ function bindGlobalEvents() {
       return;
     }
 
+    let shouldSyncTopbar = false;
     if (state.userMenuOpen && !clickedInsideUserMenu) {
       state.userMenuOpen = false;
+      shouldSyncTopbar = true;
+    }
+    if (state.notificationMenuOpen && !clickedInsideNotificationMenu) {
+      state.notificationMenuOpen = false;
+      shouldSyncTopbar = true;
+    }
+    if (shouldSyncTopbar) {
       syncTopbar();
     }
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.userMenuOpen) {
+    if (event.key === "Escape" && (state.userMenuOpen || state.notificationMenuOpen)) {
       state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
       syncTopbar();
     }
   });
@@ -6158,6 +6230,88 @@ function render() {
   lastRenderedRoute = state.route;
 }
 
+function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) {
+  if (!user || user.role !== "student") {
+    return "";
+  }
+  const menuOpen = Boolean(state.notificationMenuOpen);
+  const menuExpanded = menuOpen ? "true" : "false";
+  const notifications = getVisibleNotificationsForUser(user).slice(0, 8);
+  const hasUnread = unreadNotificationCount > 0;
+  const listMarkup = notifications.map((notification) => {
+    const isRead = isNotificationReadByUser(notification, user);
+    const title = String(notification.title || "Notification").trim() || "Notification";
+    const senderLabel = String(notification.createdByName || "Admin").trim() || "Admin";
+    const createdLabel = new Date(notification.createdAt || nowISO()).toLocaleString();
+    const bodyText = String(notification.body || "").trim();
+    const bodyPreview = bodyText.length > 110 ? `${bodyText.slice(0, 107)}...` : bodyText;
+    const safeNotificationId = escapeHtml(notification.id);
+    return `
+      <article class="notification-menu-item ${isRead ? "is-read" : "is-unread"}">
+        <div class="notification-menu-item-top">
+          <div class="notification-menu-item-copy">
+            <p class="notification-menu-item-title">${escapeHtml(title)}</p>
+            <p class="notification-menu-item-meta">${escapeHtml(senderLabel)} • ${escapeHtml(createdLabel)}</p>
+          </div>
+          ${
+            isRead
+              ? `<span class="notification-menu-item-done">Read</span>`
+              : `<button
+                  class="notification-menu-read-btn"
+                  type="button"
+                  data-action="notification-mark-read-topbar"
+                  data-notification-id="${safeNotificationId}"
+                  aria-label="Mark as read"
+                  title="Mark as read"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                    <path d="M3 8.5L6.2 11.7 13 4.9" />
+                  </svg>
+                </button>`
+          }
+        </div>
+        ${bodyPreview ? `<p class="notification-menu-item-body">${escapeHtml(bodyPreview)}</p>` : ""}
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <div class="notification-menu ${menuOpen ? "is-open" : ""}">
+      <button
+        class="notification-bell-btn ${menuOpen ? "is-open" : ""}"
+        type="button"
+        data-action="toggle-notification-menu"
+        aria-haspopup="menu"
+        aria-expanded="${menuExpanded}"
+        aria-label="Open notifications"
+        title="Notifications"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 3.25a4.25 4.25 0 0 0-4.25 4.25v1.68c0 .95-.3 1.87-.85 2.65L5.21 14.2c-.6.87.02 2.05 1.08 2.05h11.42c1.06 0 1.69-1.18 1.08-2.05l-1.69-2.37a4.75 4.75 0 0 1-.85-2.65V7.5A4.25 4.25 0 0 0 12 3.25z" />
+          <path d="M9.25 17.25a2.75 2.75 0 0 0 5.5 0" />
+        </svg>
+        ${hasUnread ? `<span class="notification-bell-badge">${escapeHtml(unreadNotificationLabel)}</span>` : ""}
+      </button>
+      <section class="notification-menu-panel" role="menu" aria-label="Notifications">
+        <header class="notification-menu-header">
+          <p class="notification-menu-title">Notifications</p>
+          <button
+            class="notification-menu-mark-all"
+            type="button"
+            data-action="notifications-mark-all-read-topbar"
+            ${hasUnread ? "" : "disabled"}
+          >
+            Mark all
+          </button>
+        </header>
+        <div class="notification-menu-list">
+          ${listMarkup || `<p class="notification-menu-empty">No notifications yet.</p>`}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function syncTopbar() {
   const user = getCurrentUser();
   ensureNotificationsRealtimeSubscription(user);
@@ -6187,6 +6341,7 @@ function syncTopbar() {
 
   if (!user) {
     state.userMenuOpen = false;
+    state.notificationMenuOpen = false;
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       <button data-nav="login">Login</button>
@@ -6199,23 +6354,12 @@ function syncTopbar() {
     const menuOpen = Boolean(state.userMenuOpen);
     const menuExpanded = menuOpen ? "true" : "false";
     const isStudent = user.role === "student";
+    if (!isStudent) {
+      state.notificationMenuOpen = false;
+    }
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
-      ${isStudent ? `
-      <button
-        class="notification-bell-btn ${state.route === "notifications" ? "is-active" : ""}"
-        type="button"
-        data-nav="notifications"
-        aria-label="Open notifications"
-        title="Notifications"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="M12 3.25a4.25 4.25 0 0 0-4.25 4.25v1.68c0 .95-.3 1.87-.85 2.65L5.21 14.2c-.6.87.02 2.05 1.08 2.05h11.42c1.06 0 1.69-1.18 1.08-2.05l-1.69-2.37a4.75 4.75 0 0 1-.85-2.65V7.5A4.25 4.25 0 0 0 12 3.25z" />
-          <path d="M9.25 17.25a2.75 2.75 0 0 0 5.5 0" />
-        </svg>
-        ${unreadNotificationCount ? `<span class="notification-bell-badge">${escapeHtml(unreadNotificationLabel)}</span>` : ""}
-      </button>
-      ` : ""}
+      ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
@@ -7456,6 +7600,28 @@ function renderNotifications() {
   `;
 }
 
+async function markNotificationsReadForUser(user, notificationIds) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return { changed: false, syncWarning: "" };
+  }
+  const result = markNotificationsReadLocallyForUser(currentUser, notificationIds);
+  if (!result.changed) {
+    return { changed: false, syncWarning: "" };
+  }
+  if (!result.syncedDbIds.length) {
+    return { changed: true, syncWarning: "" };
+  }
+  const syncResult = await syncNotificationReadsToRelational(currentUser, result.syncedDbIds);
+  if (!syncResult.ok) {
+    return {
+      changed: true,
+      syncWarning: syncResult.message || "Sync failed.",
+    };
+  }
+  return { changed: true, syncWarning: "" };
+}
+
 function wireNotifications() {
   const user = getCurrentUser();
   if (!user || user.role !== "student") {
@@ -7463,15 +7629,12 @@ function wireNotifications() {
   }
 
   const markAsRead = async (notificationIds) => {
-    const result = markNotificationsReadLocallyForUser(user, notificationIds);
+    const result = await markNotificationsReadForUser(user, notificationIds);
+    if (result.syncWarning) {
+      toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
+    }
     if (!result.changed) {
       return false;
-    }
-    if (result.syncedDbIds.length) {
-      const syncResult = await syncNotificationReadsToRelational(user, result.syncedDbIds);
-      if (!syncResult.ok) {
-        toast(`Marked as read locally, but cloud sync failed: ${syncResult.message || "Sync failed."}`);
-      }
     }
     return true;
   };
@@ -14892,6 +15055,7 @@ async function logout() {
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
   state.userMenuOpen = false;
+  state.notificationMenuOpen = false;
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
