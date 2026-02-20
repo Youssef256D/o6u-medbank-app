@@ -8632,6 +8632,71 @@ function wireProfile() {
   });
 }
 
+function resolveAdminQuestionListView(questions, allCourses, preferredCourse = "", preferredTopic = "") {
+  const questionList = Array.isArray(questions) ? questions : [];
+  const configuredCourses = Array.isArray(allCourses) ? allCourses.filter(Boolean) : [];
+  const questionCountByCourse = new Map();
+  const questionCountByCourseTopic = new Map();
+  const topicsByCourseFromQuestions = new Map();
+
+  questionList.forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    const course = String(meta.course || "").trim();
+    const topic = String(meta.topic || "").trim();
+    if (!course) {
+      return;
+    }
+    questionCountByCourse.set(course, (questionCountByCourse.get(course) || 0) + 1);
+    if (!topicsByCourseFromQuestions.has(course)) {
+      topicsByCourseFromQuestions.set(course, []);
+    }
+    if (topic) {
+      const topicKey = `${course}::${topic}`;
+      questionCountByCourseTopic.set(topicKey, (questionCountByCourseTopic.get(topicKey) || 0) + 1);
+      const topicList = topicsByCourseFromQuestions.get(course);
+      if (!topicList.includes(topic)) {
+        topicList.push(topic);
+      }
+    }
+  });
+
+  const questionCourses = [...new Set(questionList.map((question) => String(getQbankCourseTopicMeta(question).course || "").trim()).filter(Boolean))];
+  const availableCourses = [...new Set([...configuredCourses, ...questionCourses])];
+
+  let selectedCourse = availableCourses.includes(preferredCourse) ? preferredCourse : "";
+  if (!selectedCourse) {
+    selectedCourse = availableCourses.find((course) => (questionCountByCourse.get(course) || 0) > 0)
+      || availableCourses[0]
+      || "";
+  } else if ((questionCountByCourse.get(selectedCourse) || 0) === 0) {
+    const fallbackCourse = availableCourses.find((course) => (questionCountByCourse.get(course) || 0) > 0);
+    if (fallbackCourse) {
+      selectedCourse = fallbackCourse;
+    }
+  }
+
+  const configuredTopics = selectedCourse ? (QBANK_COURSE_TOPICS[selectedCourse] || []) : [];
+  const questionTopics = selectedCourse ? (topicsByCourseFromQuestions.get(selectedCourse) || []) : [];
+  const selectedCourseTopics = configuredTopics.length
+    ? configuredTopics
+    : questionTopics;
+  let selectedTopic = selectedCourseTopics.includes(preferredTopic) ? preferredTopic : "";
+  if (selectedTopic && (questionCountByCourseTopic.get(`${selectedCourse}::${selectedTopic}`) || 0) === 0) {
+    selectedTopic = "";
+  }
+
+  const filteredQuestions = questionList
+    .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
+    .filter((question) => !selectedTopic || getQbankCourseTopicMeta(question).topic === selectedTopic);
+
+  return {
+    selectedCourse,
+    selectedCourseTopics,
+    selectedTopic,
+    filteredQuestions,
+  };
+}
+
 function renderAdmin() {
   const user = getCurrentUser();
   if (!user || user.role !== "admin") {
@@ -8949,15 +9014,35 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "questions") {
+    const questions = getQuestions();
     const questionSaveRunning = Boolean(state.adminQuestionSaveRunning);
-    const questionDeleteQid = String(state.adminQuestionDeleteQid || "").trim();
-    const bulkActionRunning = Boolean(state.adminBulkActionRunning);
+    let questionDeleteQid = String(state.adminQuestionDeleteQid || "").trim();
+    if (questionDeleteQid && !questions.some((entry) => String(entry?.id || "").trim() === questionDeleteQid)) {
+      questionDeleteQid = "";
+      state.adminQuestionDeleteQid = "";
+    }
     const bulkActionType = String(state.adminBulkActionType || "").trim();
+    const bulkActionRunning = Boolean(state.adminBulkActionRunning && ["draft", "publish", "delete"].includes(bulkActionType));
+    if (!bulkActionRunning && state.adminBulkActionRunning) {
+      state.adminBulkActionRunning = false;
+    }
+    const questionView = resolveAdminQuestionListView(
+      questions,
+      allCourses,
+      String(state.adminFilters.course || ""),
+      String(state.adminFilters.topic || ""),
+    );
+    const selectedCourse = questionView.selectedCourse;
+    const selectedCourseTopics = questionView.selectedCourseTopics;
+    const selectedTopic = questionView.selectedTopic;
+    if (state.adminFilters.course !== selectedCourse || state.adminFilters.topic !== selectedTopic) {
+      state.adminFilters.course = selectedCourse;
+      state.adminFilters.topic = selectedTopic;
+    }
     const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid) || bulkActionRunning;
-    const selectedCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
-    const selectedCourseTopics = QBANK_COURSE_TOPICS[selectedCourse] || [];
-    const selectedTopic = selectedCourseTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
-    const importCourse = allCourses.includes(state.adminImportCourse) ? state.adminImportCourse : selectedCourse;
+    const importCourse = allCourses.includes(state.adminImportCourse)
+      ? state.adminImportCourse
+      : (selectedCourse || allCourses[0] || "");
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
     const importTopic = importTopics.includes(state.adminImportTopic) ? state.adminImportTopic : (importTopics[0] || "");
     const importReport = state.adminImportReport;
@@ -8969,15 +9054,7 @@ function renderAdmin() {
       ? state.adminImportStatusTone
       : "neutral";
     const importErrorPreview = (importReport?.errors || []).slice(0, 15);
-    const questions = getQuestions();
-    const courseQuestions = questions
-      .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
-      .filter((question) => {
-        if (!selectedTopic) {
-          return true;
-        }
-        return getQbankCourseTopicMeta(question).topic === selectedTopic;
-      });
+    const courseQuestions = questionView.filteredQuestions;
     const visibleQuestionIds = courseQuestions
       .map((question) => String(question.id || "").trim())
       .filter(Boolean);
@@ -9029,8 +9106,8 @@ function renderAdmin() {
               />
             </td>
             <td class="admin-question-order-cell">
-              <span class="admin-question-drag-handle" data-role="admin-question-drag-handle" data-qid="${escapeHtml(questionId)}" aria-hidden="true">
-                ${questionOpsLocked || !questionId ? "--" : "::"}
+              <span class="admin-question-drag-handle" data-role="admin-question-drag-handle" data-qid="${escapeHtml(questionId)}" aria-hidden="true" title="${questionOpsLocked || !questionId ? "Reordering temporarily unavailable." : "Drag to reorder"}">
+                ${questionOpsLocked || !questionId ? "--" : "move"}
               </span>
             </td>
             <td>${idx + 1}</td>
@@ -10341,17 +10418,21 @@ function wireAdmin() {
     return normalized;
   };
   const getVisibleAdminQuestions = () => {
-    const selectedCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
-    const selectedTopics = QBANK_COURSE_TOPICS[selectedCourse] || [];
-    const selectedTopic = selectedTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
-    return getQuestions()
-      .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
-      .filter((question) => {
-        if (!selectedTopic) {
-          return true;
-        }
-        return getQbankCourseTopicMeta(question).topic === selectedTopic;
-      });
+    const questions = getQuestions();
+    const resolvedView = resolveAdminQuestionListView(
+      questions,
+      allCourses,
+      String(state.adminFilters.course || ""),
+      String(state.adminFilters.topic || ""),
+    );
+    if (
+      state.adminFilters.course !== resolvedView.selectedCourse
+      || state.adminFilters.topic !== resolvedView.selectedTopic
+    ) {
+      state.adminFilters.course = resolvedView.selectedCourse;
+      state.adminFilters.topic = resolvedView.selectedTopic;
+    }
+    return resolvedView.filteredQuestions;
   };
   const getVisibleQuestionIds = () =>
     getVisibleAdminQuestions()
