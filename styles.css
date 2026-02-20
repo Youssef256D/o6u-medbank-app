@@ -1140,6 +1140,22 @@ body.is-routing .card {
   overflow: auto;
 }
 
+.admin-question-image-preview {
+  margin: 0.3rem 0 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  max-width: 520px;
+  background: #fff;
+}
+
+.admin-question-image-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
 .admin-question-modal {
   position: fixed;
   inset: 0;
@@ -2075,6 +2091,23 @@ th {
 
 .exam-question-block {
   min-width: 0;
+}
+
+.exam-question-media {
+  margin: 0 0 0.72rem;
+  border: 1px solid rgba(16, 42, 67, 0.16);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.exam-question-media img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 420px;
+  object-fit: contain;
+  background: #fff;
 }
 
 .exam-stem {

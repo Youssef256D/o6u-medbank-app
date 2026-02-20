@@ -4,4 +4,6 @@ window.__SUPABASE_CONFIG = {
   enabled: true,
   // Optional override for OAuth callbacks; keep this aligned with Supabase Auth redirect URLs.
   authRedirectUrl: "https://youssef256d.github.io/o6u-medbank-app/",
+  // Optional storage bucket for uploaded question images.
+  questionImageBucket: "question-images",
 };

@@ -15,6 +15,7 @@ This folder contains a real relational PostgreSQL database setup for the MCQ pla
 - `migrations/20260213_create_core_relational_tables.sql`: creates normalized core tables (`profiles`, `courses`, `topics`, `questions`, `tests`, `responses`) with RLS
 - `migrations/20260213_add_external_ids_and_fk_indexes.sql`: adds stable external IDs for `questions` and `test_blocks` plus supporting indexes
 - `migrations/20260213_add_user_presence_tracking.sql`: adds `user_presence` table + RLS for admin live activity tracking (online/solving)
+- `migrations/20260220_add_question_media_columns.sql`: adds `question_image_url` and `explanation_image_url` columns to `questions`
 
 ## Quick start (PostgreSQL)
 

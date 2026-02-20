@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS questions (
   explanation TEXT NOT NULL,
   objective TEXT,
   references_text TEXT,
+  question_image_url TEXT,
   explanation_image_url TEXT,
   source_text TEXT,
   difficulty question_difficulty NOT NULL DEFAULT 'medium',

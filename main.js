@@ -156,7 +156,18 @@ const SUPABASE_CONFIG = {
   anonKey: window.__SUPABASE_CONFIG?.anonKey || "",
   enabled: window.__SUPABASE_CONFIG?.enabled !== false,
   authRedirectUrl: window.__SUPABASE_CONFIG?.authRedirectUrl || "",
+  questionImageBucket: window.__SUPABASE_CONFIG?.questionImageBucket || "question-images",
 };
+
+const QUESTION_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
+const QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES = 900 * 1024;
+const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+]);
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -209,6 +220,12 @@ const relationalSync = {
   readyCheckedAt: 0,
   readyPromise: null,
   lastReadyError: "",
+};
+
+const relationalQuestionColumnSupport = {
+  checked: false,
+  questionImageUrl: false,
+  explanationImageUrl: false,
 };
 
 let timerHandle = null;
@@ -1926,6 +1943,9 @@ function resetRelationalSyncState() {
   relationalSync.readyCheckedAt = 0;
   relationalSync.readyPromise = null;
   relationalSync.lastReadyError = "";
+  relationalQuestionColumnSupport.checked = false;
+  relationalQuestionColumnSupport.questionImageUrl = false;
+  relationalQuestionColumnSupport.explanationImageUrl = false;
   clearRelationalFlushTimer();
 }
 
@@ -2594,11 +2614,32 @@ async function hydrateRelationalQuestions() {
     return;
   }
   const topicRows = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+  let questionColumnSupport = relationalQuestionColumnSupport;
+  try {
+    questionColumnSupport = await getRelationalQuestionColumnSupport(client);
+  } catch (error) {
+    console.warn("Could not detect optional question media columns.", error?.message || error);
+  }
+  const questionSelectColumns = [
+    "id",
+    "external_id",
+    "course_id",
+    "topic_id",
+    "author_id",
+    "stem",
+    "explanation",
+    "objective",
+    "difficulty",
+    "status",
+    "created_at",
+    ...(questionColumnSupport.questionImageUrl ? ["question_image_url"] : []),
+    ...(questionColumnSupport.explanationImageUrl ? ["explanation_image_url"] : []),
+  ].join(",");
 
   let questionsResult = await fetchRowsPaged((from, to) => (
     client
       .from("questions")
-      .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+      .select(questionSelectColumns)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to)
@@ -2620,7 +2661,7 @@ async function hydrateRelationalQuestions() {
         const retryResult = await fetchRowsPaged((from, to) => (
           client
             .from("questions")
-            .select("id,external_id,course_id,topic_id,author_id,stem,explanation,objective,difficulty,status,created_at")
+            .select(questionSelectColumns)
             .order("created_at", { ascending: true })
             .order("id", { ascending: true })
             .range(from, to)
@@ -2662,6 +2703,16 @@ async function hydrateRelationalQuestions() {
       .map((entry) => [getUserProfileId(entry), entry.name])
       .filter(([profileId]) => Boolean(profileId)),
   );
+  const localQuestionByExternalId = Object.fromEntries(
+    localQuestionsBefore
+      .map((question) => [String(question?.id || "").trim(), question])
+      .filter(([questionId]) => Boolean(questionId)),
+  );
+  const localQuestionByDbId = Object.fromEntries(
+    localQuestionsBefore
+      .map((question) => [String(question?.dbId || "").trim(), question])
+      .filter(([dbId]) => isUuidValue(dbId)),
+  );
   const choicesByQuestionId = {};
   (choiceRows || []).forEach((choice) => {
     if (!choicesByQuestionId[choice.question_id]) {
@@ -2671,6 +2722,8 @@ async function hydrateRelationalQuestions() {
   });
 
   const mappedQuestions = (questionRows || []).map((question) => {
+    const externalId = String(question.external_id || question.id || "").trim();
+    const existingQuestion = localQuestionByExternalId[externalId] || localQuestionByDbId[String(question.id || "").trim()] || null;
     const courseName = courseById[question.course_id] || CURRICULUM_COURSE_LIST[0] || "Course";
     const topicName = topicById[question.topic_id] || resolveDefaultTopic(courseName);
     const rawChoices = (choicesByQuestionId[question.id] || [])
@@ -2684,9 +2737,15 @@ async function hydrateRelationalQuestions() {
     const correct = rawChoices
       .filter((choice) => Boolean(choice.is_correct))
       .map((choice) => String(choice.choice_label || "").toUpperCase());
+    const questionImageFromDb = questionColumnSupport.questionImageUrl
+      ? String(question.question_image_url || "").trim()
+      : "";
+    const explanationImageFromDb = questionColumnSupport.explanationImageUrl
+      ? String(question.explanation_image_url || "").trim()
+      : "";
 
     return {
-      id: String(question.external_id || question.id),
+      id: externalId || String(question.id || ""),
       dbId: question.id,
       qbankCourse: courseName,
       qbankTopic: topicName,
@@ -2703,7 +2762,8 @@ async function hydrateRelationalQuestions() {
       explanation: String(question.explanation || "").trim(),
       objective: String(question.objective || "").trim(),
       references: "",
-      explanationImage: "",
+      questionImage: questionImageFromDb || String(existingQuestion?.questionImage || "").trim(),
+      explanationImage: explanationImageFromDb || String(existingQuestion?.explanationImage || "").trim(),
       status: toRelationalQuestionStatus(question.status),
     };
   });
@@ -3266,6 +3326,163 @@ function isMissingRelationError(error) {
   return false;
 }
 
+function isMissingColumnError(error) {
+  const code = String(error?.code || "").trim();
+  if (code === "42703" || code === "PGRST204") {
+    return true;
+  }
+  const message = String(error?.message || "");
+  if (/column .* does not exist/i.test(message)) {
+    return true;
+  }
+  if (/could not find the .* column of .* in the schema cache/i.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeStoragePathSegment(value, fallback = "item") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function resolveImageFileExtension(fileName, mimeType) {
+  const normalizedMime = String(mimeType || "").trim().toLowerCase();
+  const mimeMap = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+  };
+  if (mimeMap[normalizedMime]) {
+    return mimeMap[normalizedMime];
+  }
+  const match = String(fileName || "").trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = String(match?.[1] || "").trim();
+  if (["png", "jpg", "jpeg", "webp", "gif"].includes(ext)) {
+    return ext === "jpeg" ? "jpg" : ext;
+  }
+  return "png";
+}
+
+function convertFileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not read selected image file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function getRelationalQuestionColumnSupport(client) {
+  if (relationalQuestionColumnSupport.checked) {
+    return relationalQuestionColumnSupport;
+  }
+  if (!client) {
+    return relationalQuestionColumnSupport;
+  }
+
+  const checkColumn = async (columnName) => {
+    const { error } = await client.from("questions").select(columnName).limit(1);
+    if (!error) {
+      return true;
+    }
+    if (isMissingRelationError(error) || isMissingColumnError(error)) {
+      return false;
+    }
+    throw error;
+  };
+
+  relationalQuestionColumnSupport.questionImageUrl = await checkColumn("question_image_url");
+  relationalQuestionColumnSupport.explanationImageUrl = await checkColumn("explanation_image_url");
+  relationalQuestionColumnSupport.checked = true;
+  return relationalQuestionColumnSupport;
+}
+
+async function uploadQuestionImageFile(file) {
+  if (!(file instanceof File) || !Number(file.size || 0)) {
+    return { ok: false, message: "No image file selected." };
+  }
+
+  if (file.size > QUESTION_IMAGE_UPLOAD_MAX_BYTES) {
+    return { ok: false, message: "Image is too large. Max size is 5 MB." };
+  }
+
+  const normalizedType = String(file.type || "").trim().toLowerCase();
+  if (normalizedType && !QUESTION_IMAGE_ALLOWED_MIME_TYPES.has(normalizedType)) {
+    return { ok: false, message: "Unsupported file type. Use PNG, JPG, WEBP, or GIF." };
+  }
+
+  const client = getRelationalClient() || getSupabaseAuthClient();
+  if (!client) {
+    return { ok: false, message: "Supabase session is unavailable. Log in again and retry." };
+  }
+
+  const bucket = String(SUPABASE_CONFIG.questionImageBucket || "").trim();
+  if (!bucket) {
+    return { ok: false, message: "Question image bucket is not configured." };
+  }
+
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveImageFileExtension(file.name, file.type);
+  const fileId = sanitizeStoragePathSegment(makeId("qimg"), "qimg");
+  const filePath = `questions/${userScope}/${Date.now()}-${fileId}.${extension}`;
+
+  const { error: uploadError } = await client.storage
+    .from(bucket)
+    .upload(filePath, file, {
+      cacheControl: "3600",
+      upsert: false,
+      contentType: normalizedType || undefined,
+    });
+
+  if (uploadError) {
+    if (file.size <= QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES) {
+      try {
+        const fallbackDataUrl = await convertFileToDataUrl(file);
+        if (fallbackDataUrl) {
+          return {
+            ok: true,
+            url: fallbackDataUrl,
+            usedFallback: true,
+            message: "Storage upload failed, so the image was saved inline.",
+          };
+        }
+      } catch {
+        // Continue with storage error below.
+      }
+    }
+    return {
+      ok: false,
+      message: uploadError.message || "Could not upload question image.",
+    };
+  }
+
+  const { data: signedData, error: signedError } = await client.storage
+    .from(bucket)
+    .createSignedUrl(filePath, 60 * 60 * 24 * 365 * 5);
+  if (!signedError && signedData?.signedUrl) {
+    return { ok: true, url: signedData.signedUrl };
+  }
+
+  const { data: publicData } = client.storage.from(bucket).getPublicUrl(filePath);
+  const publicUrl = String(publicData?.publicUrl || "").trim();
+  if (publicUrl) {
+    return { ok: true, url: publicUrl };
+  }
+
+  return {
+    ok: false,
+    message: "Image uploaded, but the app could not generate a usable URL.",
+  };
+}
+
 function isQuestionChoiceForeignKeyError(error) {
   const code = String(error?.code || "").trim();
   const message = String(error?.message || "");
@@ -3743,6 +3960,12 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   if (topicsResult.error) throw topicsResult.error;
   const courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
   const topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+  let questionColumnSupport = relationalQuestionColumnSupport;
+  try {
+    questionColumnSupport = await getRelationalQuestionColumnSupport(client);
+  } catch (error) {
+    console.warn("Could not detect optional question media columns for sync.", error?.message || error);
+  }
 
   const courseIdByName = Object.fromEntries((courses || []).map((course) => [course.course_name, course.id]));
   const topicIdByCourseTopic = {};
@@ -3817,6 +4040,12 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       stem: String(question.stem || "").trim(),
       explanation: String(question.explanation || "").trim() || "No explanation provided.",
       objective: String(question.objective || "").trim() || null,
+      ...(questionColumnSupport.questionImageUrl
+        ? { question_image_url: String(question.questionImage || "").trim() || null }
+        : {}),
+      ...(questionColumnSupport.explanationImageUrl
+        ? { explanation_image_url: String(question.explanationImage || "").trim() || null }
+        : {}),
       difficulty: toRelationalDifficulty(question.difficulty),
       status: toRelationalQuestionStatus(question.status),
     });
@@ -6883,6 +7112,7 @@ function renderSession() {
 
             <section class="exam-question-stage">
               <article class="exam-question-block exam-question-card">
+                ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
                   ${stemLines
                     .map((line, index) => {
@@ -7579,6 +7809,7 @@ function renderReview() {
 
             <section class="exam-question-stage">
               <article class="exam-question-block exam-question-card">
+                ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
                   ${stemLines.map((line) => `<p class="exam-line">${escapeHtml(line)}</p>`).join("")}
                 </div>
@@ -8459,7 +8690,7 @@ function renderAdmin() {
             <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
           </label>
           <label>Paste CSV rows or JSON array
-            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags'>${escapeHtml(importDraft)}</textarea>
+            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags,questionImage,explanationImage'>${escapeHtml(importDraft)}</textarea>
           </label>
           <div class="stack">
             <button class="btn ${importRunning ? "is-loading" : ""}" type="submit" ${importRunning ? "disabled" : ""}>
@@ -8553,6 +8784,24 @@ function renderAdmin() {
                   <label>Question stem
                     <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
                   </label>
+                  <div class="form-row">
+                    <label>Question image URL
+                      <input name="questionImage" value="${escapeHtml(editing?.questionImage || "")}" placeholder="https://example.com/figure.png" />
+                    </label>
+                    <label>Upload question image
+                      <input name="questionImageFile" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif" />
+                    </label>
+                  </div>
+                  <p class="subtle" style="margin: 0;">If you choose a file, upload is automatic and replaces the URL above.</p>
+                  ${
+                    editing?.questionImage
+                      ? `
+                        <figure class="admin-question-image-preview">
+                          <img src="${escapeHtml(editing.questionImage)}" alt="Question visual preview" loading="lazy" />
+                        </figure>
+                      `
+                      : ""
+                  }
                   <div class="form-row">
                     <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
                     <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
@@ -9717,6 +9966,7 @@ function wireAdmin() {
       "tags",
       "objective",
       "references",
+      "questionImage",
       "explanationImage",
     ];
     const sampleRow = {
@@ -9736,6 +9986,7 @@ function wireAdmin() {
       tags: "sample|template",
       objective: "Learning objective text",
       references: "Reference source",
+      questionImage: "https://example.com/question-image.png",
       explanationImage: "https://example.com/image.png",
     };
     const csvRows = [headers, headers.map((header) => sampleRow[header] || "")]
@@ -9819,6 +10070,25 @@ function wireAdmin() {
     const data = new FormData(form);
     const questions = getQuestions();
     const existingId = String(data.get("id") || "");
+    let questionImage = String(data.get("questionImage") || "").trim();
+    const questionImageFile = data.get("questionImageFile");
+    if (questionImageFile instanceof File && Number(questionImageFile.size || 0) > 0) {
+      const uploadResult = await uploadQuestionImageFile(questionImageFile);
+      if (!uploadResult.ok) {
+        if (questionImage) {
+          toast(`Question image upload failed. The provided URL was kept. (${uploadResult.message})`);
+        } else {
+          toast(`Question image upload failed: ${uploadResult.message}`);
+          return;
+        }
+      }
+      if (uploadResult.ok) {
+        questionImage = String(uploadResult.url || "").trim();
+      }
+      if (uploadResult.ok && uploadResult.usedFallback) {
+        toast("Question image saved inline because storage upload failed.");
+      }
+    }
 
     const payload = {
       id: existingId || makeId("q"),
@@ -9846,6 +10116,7 @@ function wireAdmin() {
       explanation: String(data.get("explanation") || "").trim(),
       objective: "",
       references: String(data.get("references") || "").trim(),
+      questionImage,
       explanationImage: String(data.get("explanationImage") || "").trim(),
       status: String(data.get("status") || "draft"),
     };
@@ -10004,8 +10275,10 @@ function buildQuestionDedupFingerprint(question) {
       .sort()
       .join("|")
     : "";
+  const questionImageSignature = normalizeQuestionDedupText(question.questionImage);
+  const explanationImageSignature = normalizeQuestionDedupText(question.explanationImage);
 
-  return `${stem}||${choiceSignature}||${correctSignature}`;
+  return `${stem}||${choiceSignature}||${correctSignature}||${questionImageSignature}||${explanationImageSignature}`;
 }
 
 function dedupeQuestions(questions) {
@@ -10942,7 +11215,8 @@ const IMPORT_FIELD_ALIASES = {
   status: ["status", "visibility"],
   objective: ["objective", "learningobjective", "learning objective", "educationalobjective"],
   references: ["references", "reference", "source", "citation"],
-  explanationImage: ["explanationimage", "explanation image", "image", "imageurl", "image url", "figure"],
+  questionImage: ["questionimage", "question image", "questionimageurl", "question image url", "image", "imageurl", "image url", "figure"],
+  explanationImage: ["explanationimage", "explanation image", "explanationimageurl", "explanation image url", "explanationfigure", "explanation figure"],
 };
 
 const IMPORT_FIELD_LOOKUP = Object.entries(IMPORT_FIELD_ALIASES).reduce((acc, [field, aliases]) => {
@@ -11121,6 +11395,7 @@ function importQuestionsFromRaw(raw, config) {
       explanation: explanation || "No explanation provided.",
       objective: String(row.objective || "").trim(),
       references: String(row.references || "").trim(),
+      questionImage: String(row.questionImage || "").trim(),
       explanationImage: String(row.explanationImage || "").trim(),
       status: ["draft", "published"].includes(String(row.status || "published").toLowerCase())
         ? String(row.status || "published").toLowerCase()
@@ -11869,6 +12144,18 @@ function splitStemLines(stem) {
     .split(/(?<=[.!?])\s+/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function renderQuestionStemVisual(question) {
+  const questionImage = String(question?.questionImage || "").trim();
+  if (!questionImage) {
+    return "";
+  }
+  return `
+    <figure class="exam-question-media">
+      <img src="${escapeHtml(questionImage)}" alt="Question visual" loading="lazy" />
+    </figure>
+  `;
 }
 
 function renderInlineExplanationPane(question, isCorrect) {
