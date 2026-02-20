@@ -3598,6 +3598,114 @@ function resolveQuestionCorrectAnswers(remoteCorrect, existingCorrect, choices) 
   return [choices[0]?.id || "A"];
 }
 
+function buildChoiceSyncSignature(rows) {
+  const sorted = [...(Array.isArray(rows) ? rows : [])]
+    .filter((entry) => normalizeQuestionChoiceLabel(entry?.choice_label))
+    .sort((a, b) => {
+      const labelA = normalizeQuestionChoiceLabel(a?.choice_label);
+      const labelB = normalizeQuestionChoiceLabel(b?.choice_label);
+      return labelA.localeCompare(labelB);
+    });
+  return sorted
+    .map((entry) => {
+      const label = normalizeQuestionChoiceLabel(entry?.choice_label);
+      const text = String(entry?.choice_text || "").trim();
+      const isCorrect = Boolean(entry?.is_correct);
+      return `${label}:${text}:${isCorrect ? 1 : 0}`;
+    })
+    .join("|");
+}
+
+function buildQuestionChoiceSyncPlan(sourceQuestions, idMap = {}) {
+  const questions = Array.isArray(sourceQuestions) ? sourceQuestions : [];
+  const mapping = idMap && typeof idMap === "object" ? idMap : {};
+  const rows = [];
+  const questionIds = [];
+  const signatureByQuestionId = new Map();
+  const skippedQuestionIds = [];
+  const seenQuestionIds = new Set();
+
+  questions.forEach((question) => {
+    const externalId = String(question?.id || "").trim();
+    const mappedDbId = String(mapping[externalId] || question?.dbId || "").trim();
+    if (!isUuidValue(mappedDbId) || seenQuestionIds.has(mappedDbId)) {
+      return;
+    }
+    seenQuestionIds.add(mappedDbId);
+
+    const normalizedChoices = normalizeQuestionChoiceEntries(question?.choices);
+    if (normalizedChoices.length < 2) {
+      skippedQuestionIds.push(externalId || mappedDbId);
+      return;
+    }
+    const normalizedCorrect = resolveQuestionCorrectAnswers(question?.correct, [], normalizedChoices);
+    const correctSet = new Set(normalizedCorrect);
+    const questionRows = normalizedChoices.map((choice) => ({
+      question_id: mappedDbId,
+      choice_label: choice.id,
+      choice_text: choice.text,
+      is_correct: correctSet.has(choice.id),
+    }));
+
+    questionIds.push(mappedDbId);
+    signatureByQuestionId.set(mappedDbId, buildChoiceSyncSignature(questionRows));
+    rows.push(...questionRows);
+  });
+
+  return {
+    rows,
+    questionIds,
+    signatureByQuestionId,
+    skippedQuestionIds,
+  };
+}
+
+async function verifyQuestionChoiceSync(client, questionIds, expectedSignatureByQuestionId) {
+  const targetIds = [...new Set((Array.isArray(questionIds) ? questionIds : []).filter((id) => isUuidValue(id)))];
+  if (!targetIds.length) {
+    return;
+  }
+
+  const remoteRows = [];
+  for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const { data, error } = await client
+      .from("question_choices")
+      .select("question_id,choice_label,choice_text,is_correct")
+      .in("question_id", questionIdBatch);
+    if (error) {
+      throw error;
+    }
+    if (Array.isArray(data) && data.length) {
+      remoteRows.push(...data);
+    }
+  }
+
+  const remoteRowsByQuestionId = new Map();
+  remoteRows.forEach((row) => {
+    const questionId = String(row?.question_id || "").trim();
+    if (!isUuidValue(questionId)) {
+      return;
+    }
+    if (!remoteRowsByQuestionId.has(questionId)) {
+      remoteRowsByQuestionId.set(questionId, []);
+    }
+    remoteRowsByQuestionId.get(questionId).push(row);
+  });
+
+  const mismatchedQuestionIds = [];
+  targetIds.forEach((questionId) => {
+    const expectedSignature = String(expectedSignatureByQuestionId?.get(questionId) || "");
+    const actualSignature = buildChoiceSyncSignature(remoteRowsByQuestionId.get(questionId) || []);
+    if (expectedSignature !== actualSignature) {
+      mismatchedQuestionIds.push(questionId);
+    }
+  });
+
+  if (mismatchedQuestionIds.length) {
+    throw new Error(`Question choice sync verification failed for ${mismatchedQuestionIds.length} question(s).`);
+  }
+}
+
 async function getRelationalQuestionColumnSupport(client) {
   if (relationalQuestionColumnSupport.checked) {
     return relationalQuestionColumnSupport;
@@ -4379,44 +4487,6 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   });
   saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions);
 
-  const questionDbIds = Object.values(dbIdByExternalId)
-    .map((entry) => String(entry || "").trim())
-    .filter(isUuidValue);
-  for (const questionIdBatch of splitIntoBatches(questionDbIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deleteChoicesError } = await client
-      .from("question_choices")
-      .delete()
-      .in("question_id", questionIdBatch);
-    if (deleteChoicesError) {
-      throw deleteChoicesError;
-    }
-  }
-
-  const buildChoiceRows = (sourceQuestions, idMap) => {
-    const rows = [];
-    sourceQuestions.forEach((question) => {
-      const dbId = String(idMap[question.id] || "").trim();
-      if (!isUuidValue(dbId)) {
-        return;
-      }
-      const correct = new Set(Array.isArray(question.correct) ? question.correct.map((entry) => String(entry).toUpperCase()) : []);
-      (question.choices || []).forEach((choice) => {
-        const label = String(choice.id || "").toUpperCase();
-        const text = String(choice.text || "").trim();
-        if (!label || !text) {
-          return;
-        }
-        rows.push({
-          question_id: dbId,
-          choice_label: label,
-          choice_text: text,
-          is_correct: correct.has(label),
-        });
-      });
-    });
-    return rows;
-  };
-
   const insertChoiceRows = async (rows) => {
     for (const choiceBatch of splitIntoBatches(rows, RELATIONAL_INSERT_BATCH_SIZE)) {
       const { error: insertChoicesError } = await client.from("question_choices").insert(choiceBatch);
@@ -4426,9 +4496,33 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     }
   };
 
-  let choiceRows = buildChoiceRows(updatedLocalQuestions, dbIdByExternalId);
+  const applyQuestionChoiceSyncPlan = async (plan) => {
+    const targetIds = [...new Set((plan?.questionIds || []).filter((id) => isUuidValue(id)))];
+    if (!targetIds.length) {
+      return;
+    }
+    for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+      const { error: deleteChoicesError } = await client
+        .from("question_choices")
+        .delete()
+        .in("question_id", questionIdBatch);
+      if (deleteChoicesError) {
+        throw deleteChoicesError;
+      }
+    }
+
+    await insertChoiceRows(plan.rows || []);
+    await verifyQuestionChoiceSync(client, targetIds, plan.signatureByQuestionId);
+  };
+
+  let choiceSyncPlan = buildQuestionChoiceSyncPlan(updatedLocalQuestions, dbIdByExternalId);
+  if (choiceSyncPlan.skippedQuestionIds.length) {
+    console.warn(
+      `Skipped choice sync for ${choiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
+    );
+  }
   try {
-    await insertChoiceRows(choiceRows);
+    await applyQuestionChoiceSyncPlan(choiceSyncPlan);
   } catch (error) {
     if (!isQuestionChoiceForeignKeyError(error)) {
       throw error;
@@ -4459,21 +4553,13 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     });
     saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions);
 
-    const refreshedQuestionDbIds = Object.values(refreshedDbIdByExternalId)
-      .map((entry) => String(entry || "").trim())
-      .filter(isUuidValue);
-    for (const questionIdBatch of splitIntoBatches(refreshedQuestionDbIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-      const { error: deleteChoicesError } = await client
-        .from("question_choices")
-        .delete()
-        .in("question_id", questionIdBatch);
-      if (deleteChoicesError) {
-        throw deleteChoicesError;
-      }
+    choiceSyncPlan = buildQuestionChoiceSyncPlan(refreshedLocalQuestions, refreshedDbIdByExternalId);
+    if (choiceSyncPlan.skippedQuestionIds.length) {
+      console.warn(
+        `Skipped choice sync for ${choiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
+      );
     }
-
-    choiceRows = buildChoiceRows(refreshedLocalQuestions, refreshedDbIdByExternalId);
-    await insertChoiceRows(choiceRows);
+    await applyQuestionChoiceSyncPlan(choiceSyncPlan);
   }
 }
 
@@ -12290,29 +12376,25 @@ function importQuestionsFromRaw(raw, config) {
     const topic = resolveDefaultTopic(course, importedTopic || config.defaultTopic);
     const stem = String(row.stem || "").trim() || `Imported question ${index + 1}`;
     const explanation = String(row.explanation || "").trim();
-    const choiceA = String(row.choiceA || "").trim() || "Option A";
-    const choiceB = String(row.choiceB || "").trim() || "Option B";
-    const choiceC = String(row.choiceC || "").trim() || "Option C";
-    const choiceD = String(row.choiceD || "").trim() || "Option D";
-    let choiceE = String(row.choiceE || "").trim();
+    const importedChoices = normalizeQuestionChoiceEntries([
+      { id: "A", text: String(row.choiceA || "").trim() },
+      { id: "B", text: String(row.choiceB || "").trim() },
+      { id: "C", text: String(row.choiceC || "").trim() },
+      { id: "D", text: String(row.choiceD || "").trim() },
+      { id: "E", text: String(row.choiceE || "").trim() },
+    ]);
+    if (importedChoices.length < 2) {
+      errors.push(`Row ${index + 1}: at least 2 non-empty choices are required (A-E).`);
+      return;
+    }
     let correct = normalizeImportCorrect(row.correct);
     if (!correct.length) {
-      correct = ["A"];
+      correct = [importedChoices[0].id];
     }
-    if (correct.includes("E") && !choiceE) {
-      choiceE = "Option E";
-    }
-    const availableChoices = [
-      { id: "A", text: choiceA },
-      { id: "B", text: choiceB },
-      { id: "C", text: choiceC },
-      { id: "D", text: choiceD },
-      ...(choiceE ? [{ id: "E", text: choiceE }] : []),
-    ];
-    const availableChoiceIds = new Set(availableChoices.map((choice) => choice.id));
+    const availableChoiceIds = new Set(importedChoices.map((choice) => choice.id));
     const validCorrect = correct.filter((choiceId) => availableChoiceIds.has(choiceId));
     if (!validCorrect.length) {
-      validCorrect.push("A");
+      validCorrect.push(importedChoices[0].id);
     }
 
     questions.push({
@@ -12329,7 +12411,7 @@ function importQuestionsFromRaw(raw, config) {
       author: config.author,
       dateAdded: new Date().toISOString().slice(0, 10),
       stem,
-      choices: availableChoices,
+      choices: importedChoices,
       correct: validCorrect,
       explanation: explanation || "No explanation provided.",
       objective: String(row.objective || "").trim(),
