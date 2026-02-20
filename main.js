@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.6").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -144,6 +144,7 @@ const state = {
   adminImportRunning: false,
   adminImportStatus: "",
   adminImportStatusTone: "neutral",
+  adminImportAsDraft: false,
   adminQuestionSaveRunning: false,
   adminQuestionDeleteQid: "",
   adminSelectedQuestionIds: [],
@@ -8566,6 +8567,7 @@ function renderAdmin() {
     const importReport = state.adminImportReport;
     const importDraft = String(state.adminImportDraft || "");
     const importRunning = Boolean(state.adminImportRunning);
+    const importAsDraft = Boolean(state.adminImportAsDraft);
     const importStatus = String(state.adminImportStatus || "").trim();
     const importStatusTone = ["success", "error", "warning"].includes(state.adminImportStatusTone)
       ? state.adminImportStatusTone
@@ -8761,6 +8763,10 @@ function renderAdmin() {
               </select>
             </label>
           </div>
+          <label class="admin-course-check" style="width: fit-content;">
+            <input type="checkbox" name="importAsDraft" ${importAsDraft ? "checked" : ""} />
+            <span>Save all imported questions as draft (hide from students)</span>
+          </label>
           <label>Upload file
             <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
           </label>
@@ -10501,6 +10507,8 @@ function wireAdmin() {
 
     const defaultCourse = String(data.get("defaultCourse") || allCourses[0]);
     const defaultTopic = String(data.get("defaultTopic") || (QBANK_COURSE_TOPICS[defaultCourse] || [])[0] || "");
+    const importAsDraft = data.get("importAsDraft") != null;
+    state.adminImportAsDraft = importAsDraft;
     state.adminImportRunning = true;
     state.adminImportStatus = "Importing questions...";
     state.adminImportStatusTone = "neutral";
@@ -10513,6 +10521,7 @@ function wireAdmin() {
         defaultCourse,
         defaultTopic,
         author: getCurrentUser().name,
+        importAsDraft,
       });
       state.adminImportReport = {
         createdAt: nowISO(),
@@ -10522,6 +10531,7 @@ function wireAdmin() {
       };
 
       let syncMessage = "";
+      const visibilityNote = importAsDraft ? " as draft" : "";
       if (result.added) {
         const syncResult = await persistImportedQuestionsNow(getQuestions());
         if (!syncResult.ok) {
@@ -10530,17 +10540,17 @@ function wireAdmin() {
       }
 
       if (syncMessage) {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows. Saved locally with sync warning: ${syncMessage}`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}. Saved locally with sync warning: ${syncMessage}`;
         state.adminImportStatusTone = "warning";
-        toast(`Imported ${result.added}/${result.total} rows locally, but DB sync failed: ${syncMessage}`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} locally, but DB sync failed: ${syncMessage}`);
       } else if (result.errors.length) {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows with ${result.errors.length} error(s).`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote} with ${result.errors.length} error(s).`;
         state.adminImportStatusTone = result.added ? "warning" : "error";
-        toast(`Imported ${result.added}/${result.total} rows with ${result.errors.length} error(s).`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} with ${result.errors.length} error(s).`);
       } else {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows.`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}.`;
         state.adminImportStatusTone = "success";
-        toast(`Imported ${result.added}/${result.total} rows successfully.`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} successfully.`);
       }
 
       if (result.added) {
@@ -11638,6 +11648,7 @@ function importQuestionsFromRaw(raw, config) {
   let records = [];
   let topicCatalogChanged = false;
   let usedCsvImport = false;
+  const forceDraft = Boolean(config?.importAsDraft);
 
   try {
     const trimmed = String(raw || "").trim();
@@ -11728,9 +11739,11 @@ function importQuestionsFromRaw(raw, config) {
       references: String(row.references || "").trim(),
       questionImage: String(row.questionImage || "").trim(),
       explanationImage: String(row.explanationImage || "").trim(),
-      status: ["draft", "published"].includes(String(row.status || "published").toLowerCase())
-        ? String(row.status || "published").toLowerCase()
-        : "published",
+      status: forceDraft
+        ? "draft"
+        : (["draft", "published"].includes(String(row.status || "published").toLowerCase())
+          ? String(row.status || "published").toLowerCase()
+          : "published"),
     });
     added += 1;
   });
