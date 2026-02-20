@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.14").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.17").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -56,6 +56,9 @@ const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
+const RELATIONAL_FLUSH_DEBOUNCE_MS = 850;
+const RELATIONAL_RETRY_FLUSH_MS = 2200;
+const SUPABASE_RETRY_FLUSH_MS = 3000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
@@ -224,6 +227,11 @@ const supabaseSync = {
   storageKeyColumn: "",
   pendingWrites: new Map(),
   flushTimer: null,
+  flushing: false,
+  lastSuccessAt: 0,
+  lastFailureAt: 0,
+  lastFailureMessage: "",
+  retryAt: 0,
 };
 
 const supabaseAuth = {
@@ -236,6 +244,11 @@ const relationalSync = {
   pendingWrites: new Map(),
   flushTimer: null,
   flushing: false,
+  lastQueuedAt: 0,
+  lastSuccessAt: 0,
+  lastFailureAt: 0,
+  lastFailureMessage: "",
+  retryAt: 0,
   profilesBackfillAttempted: false,
   questionsBackfillAttempted: false,
   readyCheckedAt: 0,
@@ -271,6 +284,7 @@ let studentNotificationPollHandle = null;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
+let syncStatusUiRefreshHandle = null;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -1360,6 +1374,7 @@ async function initSupabaseAuth() {
         }
         clearNotificationRealtimeSubscription();
         resetRelationalSyncState();
+        resetSupabaseSyncRuntimeState();
         clearAdminPresencePolling();
         clearAdminDashboardPolling();
         syncPresenceRuntime(null);
@@ -2026,6 +2041,156 @@ function saveLocalOnly(key, value) {
   invalidateAnalyticsCacheForStorageKey(key);
 }
 
+function getPendingCloudWriteCount() {
+  return Number(relationalSync.pendingWrites.size || 0) + Number(supabaseSync.pendingWrites.size || 0);
+}
+
+function formatRelativeSyncTime(timestamp) {
+  const ts = Number(timestamp || 0);
+  if (!ts) {
+    return "never";
+  }
+  const deltaMs = Date.now() - ts;
+  if (deltaMs < 4000) {
+    return "just now";
+  }
+  const seconds = Math.max(1, Math.round(deltaMs / 1000));
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function getCloudSyncStatusModel(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser) {
+    return null;
+  }
+
+  const hasAuthClient = Boolean(getSupabaseAuthClient());
+  const pendingCount = getPendingCloudWriteCount();
+  const syncingNow = Boolean(relationalSync.flushing || supabaseSync.flushing);
+  const lastSuccessAt = Math.max(
+    Number(relationalSync.lastSuccessAt || 0),
+    Number(supabaseSync.lastSuccessAt || 0),
+    Number(state.adminDataLastSyncAt || 0),
+    Number(state.studentDataLastSyncAt || 0),
+  );
+  const lastFailureAt = Math.max(Number(relationalSync.lastFailureAt || 0), Number(supabaseSync.lastFailureAt || 0));
+  const failureMessage = String(
+    relationalSync.lastFailureMessage
+      || supabaseSync.lastFailureMessage
+      || (pendingCount ? relationalSync.lastReadyError : ""),
+  ).trim();
+  const retryAt = Math.max(Number(relationalSync.retryAt || 0), Number(supabaseSync.retryAt || 0));
+
+  if (!hasAuthClient) {
+    return {
+      tone: "offline",
+      label: "Local only",
+      detail: "Supabase session is not active. Changes stay local until you sign in.",
+      pendingCount,
+    };
+  }
+  if (syncingNow) {
+    const countLabel = Math.max(1, pendingCount);
+    return {
+      tone: "syncing",
+      label: `Syncing ${countLabel} change${countLabel === 1 ? "" : "s"}...`,
+      detail: "Saving your latest edits to Supabase in the background.",
+      pendingCount,
+    };
+  }
+  if (pendingCount > 0) {
+    const retryWaitMs = retryAt > Date.now() ? (retryAt - Date.now()) : 0;
+    const retryLabel = retryWaitMs > 0 ? `Retrying in ${Math.ceil(retryWaitMs / 1000)}s.` : "Retrying automatically.";
+    return {
+      tone: failureMessage ? "warning" : "pending",
+      label: `Pending ${pendingCount} change${pendingCount === 1 ? "" : "s"}`,
+      detail: failureMessage
+        ? `${failureMessage} ${retryLabel}`.trim()
+        : "Your edits are safe locally and will sync to Supabase shortly.",
+      pendingCount,
+    };
+  }
+  if (failureMessage && (Date.now() - lastFailureAt) <= 120000) {
+    return {
+      tone: "warning",
+      label: "Cloud had a sync issue",
+      detail: failureMessage,
+      pendingCount: 0,
+    };
+  }
+  if (lastSuccessAt) {
+    return {
+      tone: "synced",
+      label: `Synced ${formatRelativeSyncTime(lastSuccessAt)}`,
+      detail: `Last successful sync: ${new Date(lastSuccessAt).toLocaleTimeString()}.`,
+      pendingCount: 0,
+    };
+  }
+  return {
+    tone: "ready",
+    label: "Cloud ready",
+    detail: "Supabase is connected and ready to sync.",
+    pendingCount: 0,
+  };
+}
+
+function renderCloudSyncPill(model, options = {}) {
+  if (!model) {
+    return "";
+  }
+  const compact = options?.compact !== false;
+  const classes = [
+    "cloud-sync-pill",
+    compact ? "is-compact" : "is-full",
+    `is-${String(model.tone || "ready").trim() || "ready"}`,
+  ].join(" ");
+  const detail = String(model.detail || model.label || "Cloud sync status").trim();
+  const showLoader = model.tone === "syncing";
+  return `
+    <div class="${classes}" role="status" aria-live="polite" title="${escapeHtml(detail)}">
+      ${showLoader
+        ? `<span class="inline-loader cloud-sync-loader" aria-hidden="true"></span>`
+        : `<span class="cloud-sync-dot" aria-hidden="true"></span>`}
+      <span class="cloud-sync-label">${escapeHtml(String(model.label || "Cloud sync").trim() || "Cloud sync")}</span>
+    </div>
+  `;
+}
+
+function refreshCloudSyncIndicators() {
+  const user = getCurrentUser();
+  const model = getCloudSyncStatusModel(user);
+  const topbarSlot = document.getElementById("topbar-cloud-sync-slot");
+  if (topbarSlot) {
+    topbarSlot.innerHTML = renderCloudSyncPill(model, { compact: true });
+  }
+  const adminSlot = document.getElementById("admin-cloud-sync-slot");
+  if (adminSlot) {
+    adminSlot.innerHTML = renderCloudSyncPill(model, { compact: false });
+  }
+}
+
+function scheduleSyncStatusUiRefresh() {
+  if (syncStatusUiRefreshHandle) {
+    return;
+  }
+  syncStatusUiRefreshHandle = window.setTimeout(() => {
+    syncStatusUiRefreshHandle = null;
+    refreshCloudSyncIndicators();
+  }, 120);
+}
+
 function clearRelationalFlushTimer() {
   if (relationalSync.flushTimer) {
     window.clearTimeout(relationalSync.flushTimer);
@@ -2037,6 +2202,11 @@ function resetRelationalSyncState() {
   relationalSync.enabled = false;
   relationalSync.pendingWrites.clear();
   relationalSync.flushing = false;
+  relationalSync.lastQueuedAt = 0;
+  relationalSync.lastSuccessAt = 0;
+  relationalSync.lastFailureAt = 0;
+  relationalSync.lastFailureMessage = "";
+  relationalSync.retryAt = 0;
   relationalSync.profilesBackfillAttempted = false;
   relationalSync.questionsBackfillAttempted = false;
   relationalSync.readyCheckedAt = 0;
@@ -2047,14 +2217,16 @@ function resetRelationalSyncState() {
   relationalQuestionColumnSupport.explanationImageUrl = false;
   relationalQuestionColumnSupport.sortOrder = false;
   clearRelationalFlushTimer();
+  scheduleSyncStatusUiRefresh();
 }
 
 function scheduleRelationalWrite(storageKey, value) {
-  if (!relationalSync.enabled || !RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
+  if (!RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
     return false;
   }
   const currentUser = getCurrentUser();
-  if (!currentUser?.supabaseAuthId) {
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!isUuidValue(profileId)) {
     return false;
   }
   if (ADMIN_ONLY_RELATIONAL_KEYS.has(storageKey) && currentUser.role !== "admin") {
@@ -2066,7 +2238,28 @@ function scheduleRelationalWrite(storageKey, value) {
       ? deepClone(value)
       : value;
   relationalSync.pendingWrites.set(storageKey, snapshot);
+  relationalSync.lastQueuedAt = Date.now();
+  scheduleSyncStatusUiRefresh();
   if (relationalSync.flushTimer || relationalSync.flushing) {
+    return true;
+  }
+
+  if (!relationalSync.enabled) {
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+    relationalSync.flushTimer = window.setTimeout(() => {
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational sync flush failed.", error);
+      });
+    }, RELATIONAL_RETRY_FLUSH_MS);
+    ensureRelationalSyncReady().then((ready) => {
+      if (!ready) {
+        return;
+      }
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational sync flush failed.", error);
+      });
+    }).catch(() => {});
+    scheduleSyncStatusUiRefresh();
     return true;
   }
 
@@ -2074,7 +2267,7 @@ function scheduleRelationalWrite(storageKey, value) {
     flushRelationalWrites().catch((error) => {
       console.warn("Relational sync flush failed.", error);
     });
-  }, 1400);
+  }, RELATIONAL_FLUSH_DEBOUNCE_MS);
 
   return true;
 }
@@ -2083,8 +2276,15 @@ async function ensureRelationalSyncReady(options = {}) {
   const force = Boolean(options?.force);
   const client = getRelationalClient();
   if (!client) {
-    resetRelationalSyncState();
+    relationalSync.enabled = false;
+    relationalSync.readyCheckedAt = Date.now();
+    relationalSync.readyPromise = null;
+    clearRelationalFlushTimer();
     relationalSync.lastReadyError = "No active Supabase session. Log in with your Supabase admin account and try again.";
+    relationalSync.lastFailureAt = Date.now();
+    relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+    scheduleSyncStatusUiRefresh();
     return false;
   }
 
@@ -2117,6 +2317,9 @@ async function ensureRelationalSyncReady(options = {}) {
         relationalSync.lastReadyError = error.message
           ? `Cannot access ${check.table}: ${error.message}`
           : `Cannot access ${check.table}.`;
+        relationalSync.lastFailureAt = Date.now();
+        relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+        relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
         return false;
       }
     }
@@ -2124,11 +2327,21 @@ async function ensureRelationalSyncReady(options = {}) {
     relationalSync.enabled = true;
     relationalSync.readyCheckedAt = Date.now();
     relationalSync.lastReadyError = "";
+    relationalSync.lastFailureAt = 0;
+    relationalSync.lastFailureMessage = "";
+    relationalSync.retryAt = 0;
     return true;
   })();
 
   try {
-    return await relationalSync.readyPromise;
+    const ready = await relationalSync.readyPromise;
+    if (ready && relationalSync.pendingWrites.size && !relationalSync.flushing) {
+      flushRelationalWrites().catch((error) => {
+        console.warn("Deferred relational sync flush failed.", error?.message || error);
+      });
+    }
+    scheduleSyncStatusUiRefresh();
+    return ready;
   } finally {
     relationalSync.readyPromise = null;
   }
@@ -2324,8 +2537,16 @@ async function hydrateRelationalState(user) {
     return;
   }
   const current = user || getCurrentUser();
-  if (!current?.supabaseAuthId) {
+  const currentProfileId = String(getUserProfileId(current) || "").trim();
+  if (!isUuidValue(currentProfileId)) {
     return;
+  }
+  if (relationalSync.pendingWrites.size || relationalSync.flushing) {
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    if (relationalSync.pendingWrites.size || relationalSync.flushing) {
+      // Avoid pulling older remote data over unsynced local edits.
+      return;
+    }
   }
 
   await hydrateRelationalCoursesAndTopics();
@@ -2990,9 +3211,14 @@ async function hydrateRelationalQuestions() {
 async function hydrateRelationalNotifications(currentUser) {
   const user = currentUser || getCurrentUser();
   const client = getRelationalClient();
-  if (!client || !user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+  const userProfileId = String(getUserProfileId(user) || "").trim();
+  if (!client || !isUuidValue(userProfileId)) {
     return false;
   }
+  const userNotificationIdentityIds = [...new Set(
+    [userProfileId, String(user?.id || "").trim()]
+      .filter((id) => isUuidValue(id)),
+  )];
 
   const selectColumns = "id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active";
   let notificationRows = [];
@@ -3034,16 +3260,21 @@ async function hydrateRelationalNotifications(currentUser) {
       return false;
     }
 
-    const directNotificationsResult = await fetchRowsPaged((from, to) => (
-      client
+    const directNotificationsResult = await fetchRowsPaged((from, to) => {
+      let query = client
         .from("notifications")
         .select(selectColumns)
-        .eq("is_active", true)
-        .eq("recipient_user_id", user.supabaseAuthId)
+        .eq("is_active", true);
+      if (userNotificationIdentityIds.length === 1) {
+        query = query.eq("recipient_user_id", userNotificationIdentityIds[0]);
+      } else {
+        query = query.in("recipient_user_id", userNotificationIdentityIds);
+      }
+      return query
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
-        .range(from, to)
-    ));
+        .range(from, to);
+    });
     if (directNotificationsResult.error) {
       if (!isMissingRelationError(directNotificationsResult.error)) {
         console.warn(
@@ -3076,7 +3307,7 @@ async function hydrateRelationalNotifications(currentUser) {
       const { data: readRows, error: readError } = await client
         .from("notification_reads")
         .select("notification_id,user_id")
-        .eq("user_id", user.supabaseAuthId)
+        .eq("user_id", userProfileId)
         .in("notification_id", idBatch);
       if (readError) {
         if (!isMissingRelationError(readError)) {
@@ -3143,6 +3374,7 @@ async function createRelationalNotification(notificationPayload, actorUser, user
     };
   }
 
+  const creatorProfileId = String(getUserProfileId(user) || "").trim();
   const { data, error } = await client
     .from("notifications")
     .upsert([{
@@ -3150,7 +3382,7 @@ async function createRelationalNotification(notificationPayload, actorUser, user
       recipient_user_id: recipientProfileId || null,
       title: payload.title,
       message: payload.body,
-      created_by: isUuidValue(user.supabaseAuthId) ? user.supabaseAuthId : null,
+      created_by: isUuidValue(creatorProfileId) ? creatorProfileId : null,
       created_by_name: String(user.name || "Admin").trim() || "Admin",
       is_active: true,
     }], { onConflict: "external_id" })
@@ -3171,7 +3403,7 @@ async function createRelationalNotification(notificationPayload, actorUser, user
 
 async function syncNotificationReadsToRelational(user, notificationDbIds) {
   const currentUser = user || getCurrentUser();
-  const userProfileId = String(currentUser?.supabaseAuthId || "").trim();
+  const userProfileId = String(getUserProfileId(currentUser) || "").trim();
   if (!isUuidValue(userProfileId)) {
     return { ok: false, message: "No active Supabase profile for this student." };
   }
@@ -3211,7 +3443,8 @@ async function syncNotificationReadsToRelational(user, notificationDbIds) {
 
 async function hydrateRelationalSessions(currentUser) {
   const client = getRelationalClient();
-  if (!client || !relationalSync.enabled || !currentUser?.supabaseAuthId) {
+  const userProfileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!client || !relationalSync.enabled || !isUuidValue(userProfileId)) {
     return;
   }
 
@@ -3230,7 +3463,7 @@ async function hydrateRelationalSessions(currentUser) {
       .order("updated_at", { ascending: false })
       .order("id", { ascending: true });
     if (currentUser.role !== "admin") {
-      query = query.eq("user_id", currentUser.supabaseAuthId);
+      query = query.eq("user_id", userProfileId);
     }
     return query.range(from, to);
   });
@@ -3532,6 +3765,7 @@ function scheduleSupabaseWrite(storageKey, value) {
 
   const payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
   supabaseSync.pendingWrites.set(remoteKey, { storageKey, payload });
+  scheduleSyncStatusUiRefresh();
   if (supabaseSync.flushTimer) {
     return;
   }
@@ -3566,12 +3800,15 @@ async function flushSupabaseWrites() {
     !supabaseSync.client ||
     !supabaseSync.tableName ||
     !supabaseSync.storageKeyColumn ||
-    !supabaseSync.pendingWrites.size
+    !supabaseSync.pendingWrites.size ||
+    supabaseSync.flushing
   ) {
     clearSupabaseFlushTimer();
     return;
   }
 
+  supabaseSync.flushing = true;
+  scheduleSyncStatusUiRefresh();
   const rows = Array.from(supabaseSync.pendingWrites.entries()).map(([remoteStorageKey, pending]) => ({
     [supabaseSync.storageKeyColumn]: remoteStorageKey,
     payload: pending.payload,
@@ -3580,11 +3817,7 @@ async function flushSupabaseWrites() {
   supabaseSync.pendingWrites.clear();
   clearSupabaseFlushTimer();
 
-  const { error } = await supabaseSync.client
-    .from(supabaseSync.tableName)
-    .upsert(rows, { onConflict: supabaseSync.storageKeyColumn });
-  if (error) {
-    console.warn("Supabase sync error:", error.message);
+  const restoreRowsToPending = () => {
     rows.forEach((row) => {
       const remoteStorageKey = row[supabaseSync.storageKeyColumn];
       if (remoteStorageKey) {
@@ -3595,13 +3828,46 @@ async function flushSupabaseWrites() {
         });
       }
     });
+  };
+  try {
+    const { error } = await supabaseSync.client
+      .from(supabaseSync.tableName)
+      .upsert(rows, { onConflict: supabaseSync.storageKeyColumn });
+    if (error) {
+      console.warn("Supabase sync error:", error.message);
+      supabaseSync.lastFailureAt = Date.now();
+      supabaseSync.lastFailureMessage = String(error.message || "Supabase sync failed.").trim();
+      supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+      restoreRowsToPending();
+      if (!supabaseSync.flushTimer) {
+        supabaseSync.flushTimer = window.setTimeout(() => {
+          flushSupabaseWrites().catch((flushError) => {
+            console.warn("Supabase retry failed.", flushError);
+          });
+        }, SUPABASE_RETRY_FLUSH_MS);
+      }
+      return;
+    }
+    supabaseSync.lastSuccessAt = Date.now();
+    supabaseSync.lastFailureAt = 0;
+    supabaseSync.lastFailureMessage = "";
+    supabaseSync.retryAt = 0;
+  } catch (error) {
+    console.warn("Supabase sync error:", getErrorMessage(error, "Supabase sync failed."));
+    supabaseSync.lastFailureAt = Date.now();
+    supabaseSync.lastFailureMessage = getErrorMessage(error, "Supabase sync failed.");
+    supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+    restoreRowsToPending();
     if (!supabaseSync.flushTimer) {
       supabaseSync.flushTimer = window.setTimeout(() => {
         flushSupabaseWrites().catch((flushError) => {
           console.warn("Supabase retry failed.", flushError);
         });
-      }, 3000);
+      }, SUPABASE_RETRY_FLUSH_MS);
     }
+  } finally {
+    supabaseSync.flushing = false;
+    scheduleSyncStatusUiRefresh();
   }
 }
 
@@ -3612,39 +3878,88 @@ function clearSupabaseFlushTimer() {
   }
 }
 
+function resetSupabaseSyncRuntimeState() {
+  supabaseSync.pendingWrites.clear();
+  supabaseSync.flushing = false;
+  supabaseSync.lastSuccessAt = 0;
+  supabaseSync.lastFailureAt = 0;
+  supabaseSync.lastFailureMessage = "";
+  supabaseSync.retryAt = 0;
+  clearSupabaseFlushTimer();
+  scheduleSyncStatusUiRefresh();
+}
+
 async function flushRelationalWrites(options = {}) {
   const throwOnFailure = Boolean(options?.throwOnFailure);
-  if (!relationalSync.enabled || !relationalSync.pendingWrites.size || relationalSync.flushing) {
+  if (!relationalSync.pendingWrites.size || relationalSync.flushing) {
     clearRelationalFlushTimer();
+    return;
+  }
+  if (!relationalSync.enabled) {
+    clearRelationalFlushTimer();
+    if (!relationalSync.lastFailureMessage && relationalSync.lastReadyError) {
+      relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+      relationalSync.lastFailureAt = Date.now();
+    }
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+    relationalSync.flushTimer = window.setTimeout(() => {
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational retry flush failed.", error);
+      });
+    }, RELATIONAL_RETRY_FLUSH_MS);
+    ensureRelationalSyncReady().then((ready) => {
+      if (!ready) {
+        return;
+      }
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational sync flush failed.", error);
+      });
+    }).catch(() => {});
+    scheduleSyncStatusUiRefresh();
     return;
   }
 
   clearRelationalFlushTimer();
   relationalSync.flushing = true;
+  scheduleSyncStatusUiRefresh();
   const entries = Array.from(relationalSync.pendingWrites.entries());
   relationalSync.pendingWrites.clear();
   let firstError = null;
+  let succeededCount = 0;
 
   for (const [storageKey, payload] of entries) {
     try {
       await syncRelationalKey(storageKey, payload);
+      succeededCount += 1;
     } catch (error) {
       console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
       relationalSync.pendingWrites.set(storageKey, payload);
+      relationalSync.lastFailureAt = Date.now();
+      relationalSync.lastFailureMessage = getErrorMessage(error, "Relational sync failed.");
       if (!firstError) {
         firstError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
       }
     }
   }
 
+  if (succeededCount > 0) {
+    relationalSync.lastSuccessAt = Date.now();
+  }
   relationalSync.flushing = false;
   if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
     relationalSync.flushTimer = window.setTimeout(() => {
       flushRelationalWrites().catch((error) => {
         console.warn("Relational retry flush failed.", error);
       });
-    }, 2800);
+    }, RELATIONAL_RETRY_FLUSH_MS);
+  } else if (!relationalSync.pendingWrites.size) {
+    relationalSync.retryAt = 0;
+    relationalSync.lastFailureAt = 0;
+    relationalSync.lastFailureMessage = "";
   }
+
+  scheduleSyncStatusUiRefresh();
 
   if (firstError && throwOnFailure) {
     throw firstError;
@@ -3670,6 +3985,7 @@ async function flushPendingSyncNow(options = {}) {
   if (supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
   }
+  scheduleSyncStatusUiRefresh();
   if (relationalError && throwOnRelationalFailure) {
     throw relationalError;
   }
@@ -5406,7 +5722,14 @@ function bindGlobalEvents() {
     }
   });
 
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    }
+  });
+
   window.addEventListener("pagehide", () => {
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
     clearNotificationRealtimeSubscription();
     markCurrentUserOffline().catch(() => {});
     syncPresenceRuntime(null);
@@ -5510,10 +5833,11 @@ function clearStudentNotificationPolling() {
 
 function ensureStudentNotificationPolling(user = null) {
   const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
   if (
     !currentUser
     || currentUser.role !== "student"
-    || !isUuidValue(String(currentUser.supabaseAuthId || "").trim())
+    || !isUuidValue(profileId)
     || !getRelationalClient()
   ) {
     clearStudentNotificationPolling();
@@ -5525,7 +5849,8 @@ function ensureStudentNotificationPolling(user = null) {
 
   studentNotificationPollHandle = window.setInterval(() => {
     const activeUser = getCurrentUser();
-    if (!activeUser || activeUser.role !== "student" || !isUuidValue(String(activeUser.supabaseAuthId || "").trim())) {
+    const activeProfileId = String(getUserProfileId(activeUser) || "").trim();
+    if (!activeUser || activeUser.role !== "student" || !isUuidValue(activeProfileId)) {
       clearStudentNotificationPolling();
       return;
     }
@@ -5582,7 +5907,7 @@ async function runNotificationRealtimeHydration() {
     return;
   }
   const user = getCurrentUser();
-  const profileId = String(user?.supabaseAuthId || "").trim();
+  const profileId = String(getUserProfileId(user) || "").trim();
   if (!user || !isUuidValue(profileId)) {
     return;
   }
@@ -5617,7 +5942,8 @@ async function runNotificationRealtimeHydration() {
 
 function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_DEBOUNCE_MS) {
   const user = getCurrentUser();
-  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+  const profileId = String(getUserProfileId(user) || "").trim();
+  if (!isUuidValue(profileId)) {
     return;
   }
   clearNotificationRealtimeHydrateTimer();
@@ -5632,7 +5958,7 @@ function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_D
 function ensureNotificationsRealtimeSubscription(user = null) {
   const currentUser = user || getCurrentUser();
   const client = getSupabaseAuthClient();
-  const profileId = String(currentUser?.supabaseAuthId || "").trim();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
   const role = currentUser?.role === "admin" ? "admin" : (currentUser?.role === "student" ? "student" : "");
   if (!client || !isUuidValue(profileId) || !role) {
     clearNotificationRealtimeSubscription();
@@ -5900,18 +6226,34 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       state.studentDataLastSyncAt = Date.now();
       return false;
     }
+    if (relationalSync.pendingWrites.size || relationalSync.flushing) {
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    }
     const now = Date.now();
     const needsFullSync = force
       || !state.studentDataLastFullSyncAt
       || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
+    const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
+    const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
+    const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions) || relationalSync.flushing;
+    let completedFullSync = false;
     if (needsFullSync) {
       await hydrateRelationalCoursesAndTopics();
-      await hydrateRelationalProfiles(user);
-      await hydrateRelationalQuestions();
+      if (!hasPendingUserWrites) {
+        await hydrateRelationalProfiles(user);
+      }
+      if (!hasPendingQuestionWrites) {
+        await hydrateRelationalQuestions();
+      }
+      completedFullSync = !hasPendingUserWrites && !hasPendingQuestionWrites;
+    }
+    if (completedFullSync) {
       state.studentDataLastFullSyncAt = now;
     }
     await hydrateRelationalNotifications(user);
-    await hydrateRelationalSessions(user);
+    if (!hasPendingSessionWrites) {
+      await hydrateRelationalSessions(user);
+    }
     state.studentDataLastSyncAt = Date.now();
     if (
       rerender
@@ -5927,6 +6269,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   } finally {
     state.studentDataRefreshing = false;
+    scheduleSyncStatusUiRefresh();
     if (shouldRerenderRoute && state.route === shouldRerenderRoute) {
       state.skipNextRouteAnimation = true;
       render();
@@ -5995,16 +6338,25 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       state.adminDataLastSyncAt = Date.now();
       return false;
     }
-    await hydrateRelationalCoursesAndTopics();
-    await hydrateRelationalProfiles(user);
-    let shouldHydrateQuestions = true;
-    if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing || isQuestionSyncBusy()) {
+    if (relationalSync.pendingWrites.size || relationalSync.flushing || isQuestionSyncBusy()) {
       await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
-      if (relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing || isQuestionSyncBusy()) {
-        shouldHydrateQuestions = false;
-      }
     }
-    if (shouldHydrateQuestions) {
+
+    const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
+    const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
+      || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
+      || relationalSync.flushing;
+    const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions)
+      || relationalSync.flushing
+      || isQuestionSyncBusy();
+
+    if (!hasPendingCourseWrites) {
+      await hydrateRelationalCoursesAndTopics();
+    }
+    if (!hasPendingUserWrites) {
+      await hydrateRelationalProfiles(user);
+    }
+    if (!hasPendingQuestionWrites) {
       await hydrateRelationalQuestions();
     }
     await hydrateRelationalNotifications(user);
@@ -6022,6 +6374,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     return false;
   } finally {
     state.adminDataRefreshing = false;
+    scheduleSyncStatusUiRefresh();
   }
 }
 
@@ -6418,11 +6771,13 @@ function syncTopbar() {
     const menuOpen = Boolean(state.userMenuOpen);
     const menuExpanded = menuOpen ? "true" : "false";
     const isStudent = user.role === "student";
+    const cloudSyncModel = getCloudSyncStatusModel(user);
     if (!isStudent) {
       state.notificationMenuOpen = false;
     }
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
+      <div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>
       ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
@@ -7796,6 +8151,10 @@ function renderResumeCard(userId) {
 }
 
 function getStudentDataSyncStatusText() {
+  const cloudModel = getCloudSyncStatusModel(getCurrentUser());
+  if (cloudModel && ["offline", "pending", "syncing", "warning"].includes(String(cloudModel.tone || ""))) {
+    return `Cloud status: ${cloudModel.label}.`;
+  }
   if (state.studentDataRefreshing) {
     return "Syncing latest results...";
   }
@@ -10301,7 +10660,7 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "notifications") {
-    const users = getUsers()
+    const users = getCloudNotificationTargetUsers(getUsers())
       .slice()
       .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
     const targetType = String(state.adminNotificationTargetType || "").trim() === "user"
@@ -10386,7 +10745,7 @@ function renderAdmin() {
               >
                 ${targetUserSuggestions
                   .map((entry) => {
-                    const userId = String(entry?.id || "").trim();
+                    const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
                     if (!userId) {
                       return "";
                     }
@@ -10526,7 +10885,8 @@ function renderAdmin() {
     ? new Date(state.adminDataLastSyncAt).toLocaleTimeString()
     : "Not yet";
   const adminSyncBusy = Boolean(state.adminDataRefreshing);
-  const canManualSupabaseSync = Boolean(getSupabaseAuthClient()) && isUuidValue(user?.supabaseAuthId);
+  const canManualSupabaseSync = Boolean(getSupabaseAuthClient()) && isUuidValue(getUserProfileId(user));
+  const cloudSyncModel = getCloudSyncStatusModel(user);
 
   return `
     <section class="panel admin-shell">
@@ -10543,9 +10903,11 @@ function renderAdmin() {
         </div>
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
+          <div id="admin-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: false })}</div>
           <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy || !canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
-            ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing...</span>` : "Sync from Supabase"}
+            ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh from cloud"}
           </button>
+          <small class="subtle">Edits save locally first, then sync automatically in the background.</small>
           ${!canManualSupabaseSync ? '<small class="subtle">Supabase sync requires an active Supabase admin session.</small>' : ""}
         </div>
       </aside>
@@ -10653,7 +11015,8 @@ function wireAdmin() {
       return;
     }
     const authClient = getSupabaseAuthClient();
-    if (!authClient || !isUuidValue(currentUser.supabaseAuthId)) {
+    const currentProfileId = String(getUserProfileId(currentUser) || "").trim();
+    if (!authClient || !isUuidValue(currentProfileId)) {
       const message = "No active Supabase admin session. Log out and sign in with your Supabase admin account.";
       state.adminDataSyncError = message;
       toast(message);
@@ -10662,7 +11025,7 @@ function wireAdmin() {
       return;
     }
     const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
-    if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentUser.supabaseAuthId) {
+    if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
       const message = "Supabase session expired. Please log out and sign in again.";
       state.adminDataSyncError = message;
       toast(message);
@@ -10675,9 +11038,9 @@ function wireAdmin() {
       await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => {});
     }
     if (synced) {
-      toast("Admin data synced from Supabase.");
+      toast("Admin data refreshed from cloud.");
     } else {
-      toast(state.adminDataSyncError || relationalSync.lastReadyError || "Could not sync admin data from Supabase.");
+      toast(state.adminDataSyncError || relationalSync.lastReadyError || "Could not refresh admin data from Supabase.");
     }
     state.skipNextRouteAnimation = true;
     render();
@@ -10712,14 +11075,14 @@ function wireAdmin() {
     const targetUserIdInput = document.getElementById("admin-notification-target-user-id");
     const targetUserSearchInput = document.getElementById("admin-notification-target-user-search");
     const targetUserSuggestions = document.getElementById("admin-notification-target-suggestions");
-    const notificationUsers = getUsers()
+    const notificationUsers = getCloudNotificationTargetUsers(getUsers())
       .slice()
       .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
 
     const updateSelectedTargetUser = (userId, options = {}) => {
       const normalizedId = String(userId || "").trim();
       const selectedUser = normalizedId ? findUserByNotificationTargetId(normalizedId, notificationUsers) : null;
-      const nextId = selectedUser ? String(selectedUser.id || "").trim() : "";
+      const nextId = selectedUser ? String(getUserProfileId(selectedUser) || selectedUser.id || "").trim() : "";
       if (targetUserIdInput) {
         targetUserIdInput.value = nextId;
       }
@@ -10754,7 +11117,7 @@ function wireAdmin() {
       targetUserSuggestions.hidden = false;
       targetUserSuggestions.innerHTML = matches
         .map((entry) => {
-          const userId = String(entry?.id || "").trim();
+          const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
           if (!userId) {
             return "";
           }
@@ -10841,7 +11204,7 @@ function wireAdmin() {
       if (!currentUser || currentUser.role !== "admin") {
         return;
       }
-      if (!isUuidValue(String(currentUser.supabaseAuthId || "").trim()) || !getRelationalClient()) {
+      if (!isUuidValue(String(getUserProfileId(currentUser) || "").trim()) || !getRelationalClient()) {
         toast("No active Supabase admin session. Log out and sign in again.");
         return;
       }
@@ -10869,8 +11232,9 @@ function wireAdmin() {
       let targetUserId = String(data.get("targetUserId") || "").trim();
       if (targetType === "user" && !targetUserId && targetUserQuery) {
         const matchedUser = findUserByNotificationTargetQuery(targetUserQuery, notificationUsers);
-        if (matchedUser?.id) {
-          targetUserId = String(matchedUser.id || "").trim();
+        const matchedUserId = String(getUserProfileId(matchedUser) || matchedUser?.id || "").trim();
+        if (matchedUserId) {
+          targetUserId = matchedUserId;
         }
       }
       const title = String(data.get("title") || "").trim();
@@ -10881,6 +11245,20 @@ function wireAdmin() {
       }
       if (targetType === "user" && !targetUserId) {
         toast("Choose a target user or switch audience to all users.");
+        return;
+      }
+      if (targetType === "user" && !findUserByNotificationTargetId(targetUserId, notificationUsers)) {
+        toast("Please choose a valid user from suggestions.");
+        return;
+      }
+      const canSyncRelational = isUuidValue(String(getUserProfileId(currentUser) || "").trim());
+      if (!canSyncRelational) {
+        toast("Cloud delivery requires an active Supabase admin session. Log out and sign in again.");
+        return;
+      }
+      const relationalReady = await ensureRelationalSyncReady({ force: true });
+      if (!relationalReady) {
+        toast(relationalSync.lastReadyError || "Cloud delivery is unavailable right now. Please try again.");
         return;
       }
       state.adminNotificationTargetType = targetType;
@@ -10927,14 +11305,9 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
 
-      const canSyncRelational = isUuidValue(String(currentUser.supabaseAuthId || "").trim());
-      if (!canSyncRelational) {
-        toast("Notification sent locally. No active Supabase admin session for cloud sync.");
-        return;
-      }
-      toast("Notification sent.");
+      toast("Notification queued. Syncing to cloud...");
 
-      createRelationalNotification(localNotification, currentUser, getUsers())
+      createRelationalNotification(localNotification, currentUser, notificationUsers)
         .then((relationalResult) => {
           if (relationalResult.ok && relationalResult.notification) {
             const latestLocal = getNotifications().filter((entry) => entry.id !== localNotification.id);
@@ -10944,12 +11317,25 @@ function wireAdmin() {
               state.skipNextRouteAnimation = true;
               render();
             }
+            toast("Notification delivered.");
             return;
           }
-          toast(`Notification sent locally, but cloud sync failed: ${relationalResult.message || "Sync failed."}`);
+          const localWithoutFailed = getNotifications().filter((entry) => entry.id !== localNotification.id);
+          saveNotificationsLocal(localWithoutFailed);
+          if (state.route === "admin" && state.adminPage === "notifications") {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+          toast(`Notification was not delivered: ${relationalResult.message || "Cloud sync failed."}`);
         })
         .catch((error) => {
-          toast(`Notification sent locally, but cloud sync failed: ${getErrorMessage(error, "Sync failed.")}`);
+          const localWithoutFailed = getNotifications().filter((entry) => entry.id !== localNotification.id);
+          saveNotificationsLocal(localWithoutFailed);
+          if (state.route === "admin" && state.adminPage === "notifications") {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+          toast(`Notification was not delivered: ${getErrorMessage(error, "Cloud sync failed.")}`);
         });
     });
   }
@@ -12640,6 +13026,19 @@ function getUsers() {
   return Array.isArray(users) ? users : [];
 }
 
+function getCloudNotificationTargetUsers(users = null) {
+  const list = Array.isArray(users) ? users : getUsers();
+  const byProfileId = new Map();
+  list.forEach((entry) => {
+    const profileId = String(getUserProfileId(entry) || "").trim();
+    if (!isUuidValue(profileId) || byProfileId.has(profileId)) {
+      return;
+    }
+    byProfileId.set(profileId, entry);
+  });
+  return [...byProfileId.values()];
+}
+
 function normalizeNotificationRecord(entry, fallbackId = "") {
   if (!entry || typeof entry !== "object") {
     return null;
@@ -12782,10 +13181,16 @@ function findUserByNotificationTargetId(targetUserId, users = null) {
     return null;
   }
   const list = Array.isArray(users) ? users : getUsers();
+  const byProfileId = list.find((entry) => {
+    const profileId = String(getUserProfileId(entry) || "").trim();
+    return raw === profileId;
+  });
+  if (byProfileId) {
+    return byProfileId;
+  }
   return list.find((entry) => {
     const localId = String(entry?.id || "").trim();
-    const profileId = String(getUserProfileId(entry) || "").trim();
-    return raw === localId || raw === profileId;
+    return raw === localId;
   }) || null;
 }
 
@@ -12886,7 +13291,12 @@ function getNotificationTargetProfileId(notification, users = null) {
     return profileId;
   }
   const rawTarget = String(notification.targetUserId || "").trim();
-  return isUuidValue(rawTarget) ? rawTarget : "";
+  if (!isUuidValue(rawTarget)) {
+    return "";
+  }
+  const list = Array.isArray(users) ? users : getUsers();
+  const hasMatchingProfile = list.some((entry) => String(getUserProfileId(entry) || "").trim() === rawTarget);
+  return hasMatchingProfile ? rawTarget : "";
 }
 
 function mapRelationalNotificationRowToLocal(row, options = {}) {
@@ -13073,12 +13483,16 @@ function getSessions() {
 }
 
 function getCurrentUser() {
-  const userId = load(STORAGE_KEYS.currentUserId, null);
+  const userId = String(load(STORAGE_KEYS.currentUserId, null) || "").trim();
   if (!userId) {
     return null;
   }
-
-  return getUsers().find((user) => user.id === userId) || null;
+  const users = getUsers();
+  const byLocalId = users.find((user) => String(user?.id || "").trim() === userId);
+  if (byLocalId) {
+    return byLocalId;
+  }
+  return users.find((user) => String(user?.supabaseAuthId || "").trim() === userId) || null;
 }
 
 function isLikelyJwtToken(token) {
@@ -15464,6 +15878,8 @@ async function logout() {
   clearNotificationRealtimeSubscription();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
+  resetRelationalSyncState();
+  resetSupabaseSyncRuntimeState();
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
   state.userMenuOpen = false;

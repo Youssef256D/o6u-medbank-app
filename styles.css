@@ -200,6 +200,10 @@ body.is-routing .topbar::after {
   flex-wrap: nowrap;
 }
 
+.topbar.admin-only-header .cloud-sync-pill.is-compact .cloud-sync-label {
+  max-width: 120px;
+}
+
 .top-nav button,
 .auth-actions button,
 .btn,
@@ -241,6 +245,112 @@ button {
   justify-content: flex-end;
   flex-wrap: nowrap;
   position: relative;
+}
+
+#topbar-cloud-sync-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
+.cloud-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 0.26rem 0.58rem;
+  min-height: 32px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.cloud-sync-pill.is-compact {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.cloud-sync-pill.is-full {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.cloud-sync-label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cloud-sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #7f8a99;
+  box-shadow: 0 0 0 2px rgba(127, 138, 153, 0.22);
+}
+
+.cloud-sync-pill.is-syncing {
+  border-color: rgba(23, 126, 137, 0.36);
+  background: rgba(23, 126, 137, 0.08);
+}
+
+.cloud-sync-pill.is-syncing .cloud-sync-dot {
+  background: var(--brand);
+  box-shadow: 0 0 0 2px rgba(23, 126, 137, 0.22);
+}
+
+.cloud-sync-pill.is-synced {
+  border-color: rgba(17, 138, 89, 0.34);
+  background: rgba(17, 138, 89, 0.08);
+}
+
+.cloud-sync-pill.is-synced .cloud-sync-dot {
+  background: #118a59;
+  box-shadow: 0 0 0 2px rgba(17, 138, 89, 0.2);
+}
+
+.cloud-sync-pill.is-pending {
+  border-color: rgba(187, 111, 0, 0.34);
+  background: rgba(187, 111, 0, 0.08);
+}
+
+.cloud-sync-pill.is-pending .cloud-sync-dot {
+  background: #bb6f00;
+  box-shadow: 0 0 0 2px rgba(187, 111, 0, 0.2);
+}
+
+.cloud-sync-pill.is-warning {
+  border-color: rgba(180, 35, 24, 0.32);
+  background: rgba(180, 35, 24, 0.08);
+}
+
+.cloud-sync-pill.is-warning .cloud-sync-dot {
+  background: #b42318;
+  box-shadow: 0 0 0 2px rgba(180, 35, 24, 0.2);
+}
+
+.cloud-sync-pill.is-offline {
+  border-color: rgba(78, 97, 119, 0.34);
+  background: rgba(78, 97, 119, 0.08);
+}
+
+.cloud-sync-pill.is-offline .cloud-sync-dot {
+  background: #4e6177;
+  box-shadow: 0 0 0 2px rgba(78, 97, 119, 0.2);
+}
+
+.cloud-sync-pill.is-ready .cloud-sync-dot {
+  background: #4e6177;
+  box-shadow: 0 0 0 2px rgba(78, 97, 119, 0.2);
+}
+
+.cloud-sync-loader {
+  width: 10px;
+  height: 10px;
+  border-width: 2px;
+  border-color: rgba(23, 126, 137, 0.2);
+  border-top-color: var(--brand);
 }
 
 .notification-menu {
@@ -1208,6 +1318,15 @@ body.is-routing .card {
   border-color: rgba(23, 126, 137, 0.5);
   background: rgba(23, 126, 137, 0.12);
   color: var(--ink);
+}
+
+#admin-cloud-sync-slot {
+  width: 100%;
+}
+
+#admin-cloud-sync-slot .cloud-sync-pill {
+  width: 100%;
+  justify-content: flex-start;
 }
 
 .admin-main {
@@ -3520,6 +3639,16 @@ hr {
     font-size: 0.84rem;
     padding: 0.38rem 0.68rem;
     min-height: 36px;
+  }
+
+  .cloud-sync-pill.is-compact {
+    min-height: 30px;
+    padding: 0.24rem 0.5rem;
+    font-size: 0.72rem;
+  }
+
+  .cloud-sync-pill.is-compact .cloud-sync-label {
+    max-width: 140px;
   }
 
   .auth-actions .notification-bell-btn {
