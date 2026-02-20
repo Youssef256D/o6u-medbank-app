@@ -23,7 +23,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.6").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -146,6 +146,9 @@ const state = {
   adminImportStatusTone: "neutral",
   adminQuestionSaveRunning: false,
   adminQuestionDeleteQid: "",
+  adminSelectedQuestionIds: [],
+  adminBulkActionRunning: false,
+  adminBulkActionType: "",
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
@@ -8555,7 +8558,9 @@ function renderAdmin() {
   if (activeAdminPage === "questions") {
     const questionSaveRunning = Boolean(state.adminQuestionSaveRunning);
     const questionDeleteQid = String(state.adminQuestionDeleteQid || "").trim();
-    const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid);
+    const bulkActionRunning = Boolean(state.adminBulkActionRunning);
+    const bulkActionType = String(state.adminBulkActionType || "").trim();
+    const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid) || bulkActionRunning;
     const importCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
     const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
     const importReport = state.adminImportReport;
@@ -8577,14 +8582,48 @@ function renderAdmin() {
         }
         return getQbankCourseTopicMeta(question).topic === selectedTopic;
       });
+    const visibleQuestionIds = courseQuestions
+      .map((question) => String(question.id || "").trim())
+      .filter(Boolean);
+    const visibleQuestionIdSet = new Set(visibleQuestionIds);
+    const normalizedSelectedQuestionIds = [...new Set(
+      (Array.isArray(state.adminSelectedQuestionIds) ? state.adminSelectedQuestionIds : [])
+        .map((id) => String(id || "").trim())
+        .filter((id) => visibleQuestionIdSet.has(id)),
+    )];
+    const selectionChanged =
+      normalizedSelectedQuestionIds.length !== (Array.isArray(state.adminSelectedQuestionIds) ? state.adminSelectedQuestionIds.length : 0)
+      || normalizedSelectedQuestionIds.some((id, idx) => id !== state.adminSelectedQuestionIds[idx]);
+    if (selectionChanged) {
+      state.adminSelectedQuestionIds = normalizedSelectedQuestionIds;
+    }
+    const selectedQuestionSet = new Set(normalizedSelectedQuestionIds);
+    const selectedQuestionCount = normalizedSelectedQuestionIds.length;
+    const allVisibleSelected = Boolean(visibleQuestionIds.length) && selectedQuestionCount === visibleQuestionIds.length;
+    const partiallyVisibleSelected = selectedQuestionCount > 0 && !allVisibleSelected;
+    const isBulkDrafting = bulkActionRunning && bulkActionType === "draft";
+    const isBulkPublishing = bulkActionRunning && bulkActionType === "publish";
+    const isBulkDeleting = bulkActionRunning && bulkActionType === "delete";
     const questionRows = courseQuestions
       .map((question, idx) => {
-        const isDeleting = questionDeleteQid === String(question.id || "").trim();
+        const questionId = String(question.id || "").trim();
+        const isDeleting = questionDeleteQid === questionId;
+        const isSelected = questionId ? selectedQuestionSet.has(questionId) : false;
         const meta = getQbankCourseTopicMeta(question);
         const stem = String(question.stem || "").trim();
         const stemPreview = stem.length > 160 ? `${stem.slice(0, 157)}...` : stem;
         return `
-          <tr>
+          <tr class="${isSelected ? "is-selected" : ""}">
+            <td class="admin-question-select-cell">
+              <input
+                type="checkbox"
+                data-action="admin-select-question"
+                data-qid="${escapeHtml(questionId)}"
+                aria-label="Select question ${idx + 1}"
+                ${isSelected ? "checked" : ""}
+                ${questionOpsLocked || !questionId ? "disabled" : ""}
+              />
+            </td>
             <td>${idx + 1}</td>
             <td>${escapeHtml(meta.topic)}</td>
             <td>${escapeHtml(stemPreview || "(No stem)")}</td>
@@ -8592,8 +8631,8 @@ function renderAdmin() {
             <td>${escapeHtml(String(question.status || "draft"))}</td>
             <td>
               <div class="stack">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-edit" data-qid="${escapeHtml(question.id)}" ${questionOpsLocked ? "disabled" : ""}>Edit</button>
-                <button class="btn danger admin-btn-sm ${isDeleting ? "is-loading" : ""}" type="button" data-action="admin-delete" data-qid="${escapeHtml(question.id)}" ${questionOpsLocked ? "disabled" : ""}>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-edit" data-qid="${escapeHtml(questionId)}" ${questionOpsLocked || !questionId ? "disabled" : ""}>Edit</button>
+                <button class="btn danger admin-btn-sm ${isDeleting ? "is-loading" : ""}" type="button" data-action="admin-delete" data-qid="${escapeHtml(questionId)}" ${questionOpsLocked || !questionId ? "disabled" : ""}>
                   ${isDeleting ? `<span class="inline-loader" aria-hidden="true"></span><span>Deleting...</span>` : "Delete"}
                 </button>
               </div>
@@ -8619,6 +8658,7 @@ function renderAdmin() {
       choicesById[String(choice?.id || "").toUpperCase()] = String(choice?.text || "");
     });
     const answerKey = String(editing?.correct?.[0] || "A").toUpperCase();
+    const saveQuestionLabel = editing ? "Save changes" : "Save question";
 
     pageContent = `
       <section class="card admin-section" id="admin-questions-section">
@@ -8655,10 +8695,37 @@ function renderAdmin() {
             <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-filters">Reset</button>
           </div>
         </form>
+        <div class="admin-question-bulk-bar" style="margin-top: 0.74rem;">
+          <label class="admin-question-select-all">
+            <input
+              type="checkbox"
+              data-action="admin-select-all-questions"
+              aria-label="Select all questions in this list"
+              data-indeterminate="${partiallyVisibleSelected ? "true" : "false"}"
+              ${allVisibleSelected ? "checked" : ""}
+              ${questionOpsLocked || !visibleQuestionIds.length ? "disabled" : ""}
+            />
+            <span>Select all in this view</span>
+          </label>
+          <p class="admin-question-selection-count">Selected: <b>${selectedQuestionCount}</b></p>
+          <div class="stack">
+            <button class="btn ghost admin-btn-sm ${isBulkDrafting ? "is-loading" : ""}" type="button" data-action="admin-bulk-draft" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>
+              ${isBulkDrafting ? `<span class="inline-loader" aria-hidden="true"></span><span>Drafting...</span>` : "Draft selected"}
+            </button>
+            <button class="btn ghost admin-btn-sm ${isBulkPublishing ? "is-loading" : ""}" type="button" data-action="admin-bulk-publish" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>
+              ${isBulkPublishing ? `<span class="inline-loader" aria-hidden="true"></span><span>Publishing...</span>` : "Publish selected"}
+            </button>
+            <button class="btn danger admin-btn-sm ${isBulkDeleting ? "is-loading" : ""}" type="button" data-action="admin-bulk-delete" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>
+              ${isBulkDeleting ? `<span class="inline-loader" aria-hidden="true"></span><span>Deleting...</span>` : "Delete selected"}
+            </button>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-selection" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>Clear selection</button>
+          </div>
+        </div>
         <div class="table-wrap" style="margin-top: 0.9rem;">
           <table>
             <thead>
               <tr>
+                <th class="admin-question-select-cell">Select</th>
                 <th>#</th>
                 <th>Topic</th>
                 <th>Question</th>
@@ -8668,7 +8735,7 @@ function renderAdmin() {
               </tr>
             </thead>
             <tbody>
-              ${questionRows || `<tr><td colspan="6" class="subtle">No questions found for this course/topic.</td></tr>`}
+              ${questionRows || `<tr><td colspan="7" class="subtle">No questions found for this course/topic.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -8750,7 +8817,7 @@ function renderAdmin() {
                   <h3 style="margin: 0;">${editing ? "Edit Question" : "New Question"}</h3>
                   <div class="stack">
                     <button class="btn admin-btn-sm ${questionSaveRunning ? "is-loading" : ""}" type="submit" form="admin-question-form" ${questionSaveRunning ? "disabled" : ""}>
-                      ${questionSaveRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Saving...</span>` : "Save"}
+                      ${questionSaveRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Saving...</span>` : saveQuestionLabel}
                     </button>
                     <button class="btn ghost admin-btn-sm" type="button" data-action="admin-new" ${questionSaveRunning ? "disabled" : ""}>New</button>
                     <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel" ${questionSaveRunning ? "disabled" : ""}>Close</button>
@@ -8841,13 +8908,6 @@ function renderAdmin() {
                   <label>Tags (comma-separated)
                     <input name="tags" value="${escapeHtml(Array.isArray(editing?.tags) ? editing.tags.join(", ") : "")}" />
                   </label>
-                  <div class="stack admin-question-form-actions">
-                    <button class="btn ${questionSaveRunning ? "is-loading" : ""}" type="submit" ${questionSaveRunning ? "disabled" : ""}>
-                      ${questionSaveRunning
-                        ? `<span class="inline-loader" aria-hidden="true"></span><span>${editing ? "Saving changes..." : "Saving question..."}</span>`
-                        : (editing ? "Save question changes" : "Save question")}
-                    </button>
-                  </div>
                 </form>
               </section>
             </div>
@@ -9023,6 +9083,9 @@ function wireAdmin() {
       state.adminPage = page;
       if (page !== "questions") {
         state.adminQuestionModalOpen = false;
+        state.adminSelectedQuestionIds = [];
+        state.adminBulkActionRunning = false;
+        state.adminBulkActionType = "";
       }
       if (page === "activity") {
         refreshAdminPresenceSnapshot({ force: true })
@@ -9048,6 +9111,9 @@ function wireAdmin() {
       state.adminPage = "courses";
       state.adminEditQuestionId = null;
       state.adminQuestionModalOpen = false;
+      state.adminSelectedQuestionIds = [];
+      state.adminBulkActionRunning = false;
+      state.adminBulkActionType = "";
       state.skipNextRouteAnimation = true;
       render();
     });
@@ -9798,12 +9864,58 @@ function wireAdmin() {
   const adminFilterCourse = document.getElementById("admin-filter-course");
   const adminFilterTopic = document.getElementById("admin-filter-topic");
   const adminClearFilters = document.getElementById("admin-clear-filters");
+  const normalizeQuestionIdList = (ids, allowedSet = null) => {
+    const seen = new Set();
+    const normalized = [];
+    (Array.isArray(ids) ? ids : []).forEach((rawId) => {
+      const id = String(rawId || "").trim();
+      if (!id || seen.has(id)) {
+        return;
+      }
+      if (allowedSet && !allowedSet.has(id)) {
+        return;
+      }
+      seen.add(id);
+      normalized.push(id);
+    });
+    return normalized;
+  };
+  const getVisibleAdminQuestions = () => {
+    const selectedCourse = allCourses.includes(state.adminFilters.course) ? state.adminFilters.course : allCourses[0] || "";
+    const selectedTopics = QBANK_COURSE_TOPICS[selectedCourse] || [];
+    const selectedTopic = selectedTopics.includes(state.adminFilters.topic) ? state.adminFilters.topic : "";
+    return getQuestions()
+      .filter((question) => getQbankCourseTopicMeta(question).course === selectedCourse)
+      .filter((question) => {
+        if (!selectedTopic) {
+          return true;
+        }
+        return getQbankCourseTopicMeta(question).topic === selectedTopic;
+      });
+  };
+  const getVisibleQuestionIds = () =>
+    getVisibleAdminQuestions()
+      .map((question) => String(question.id || "").trim())
+      .filter(Boolean);
+  const getVisibleQuestionIdSet = () => new Set(getVisibleQuestionIds());
+  const getSelectedVisibleQuestionIds = () => {
+    const selectedIds = normalizeQuestionIdList(state.adminSelectedQuestionIds, getVisibleQuestionIdSet());
+    state.adminSelectedQuestionIds = selectedIds;
+    return selectedIds;
+  };
+  const isQuestionOperationLocked = () =>
+    Boolean(state.adminQuestionSaveRunning || state.adminQuestionDeleteQid || state.adminBulkActionRunning);
+  const selectAllQuestionsInput = appEl.querySelector("[data-action='admin-select-all-questions']");
+  if (selectAllQuestionsInput instanceof HTMLInputElement) {
+    selectAllQuestionsInput.indeterminate = selectAllQuestionsInput.dataset.indeterminate === "true";
+  }
 
   adminFilterForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(adminFilterForm);
     state.adminFilters.course = String(data.get("course") || "");
     state.adminFilters.topic = String(data.get("topic") || "");
+    state.adminSelectedQuestionIds = [];
     render();
   });
 
@@ -9815,11 +9927,12 @@ function wireAdmin() {
 
   adminClearFilters?.addEventListener("click", () => {
     state.adminFilters = { course: "", topic: "" };
+    state.adminSelectedQuestionIds = [];
     render();
   });
 
   appEl.querySelector("[data-action='admin-open-editor-new']")?.addEventListener("click", () => {
-    if (state.adminQuestionSaveRunning || state.adminQuestionDeleteQid) {
+    if (isQuestionOperationLocked()) {
       return;
     }
     state.adminEditQuestionId = null;
@@ -9843,19 +9956,166 @@ function wireAdmin() {
   });
 
   const adminQuestionsSection = document.getElementById("admin-questions-section");
-  adminQuestionsSection?.addEventListener("click", async (event) => {
-    if (state.adminQuestionSaveRunning) {
+  adminQuestionsSection?.addEventListener("change", (event) => {
+    const targetEl = event.target;
+    if (!(targetEl instanceof Element)) {
       return;
     }
-    const actionEl = event.target.closest("[data-action]");
+    const checkbox = targetEl.closest("input[type='checkbox'][data-action]");
+    if (!(checkbox instanceof HTMLInputElement)) {
+      return;
+    }
+    const action = String(checkbox.getAttribute("data-action") || "").trim();
+    if (!["admin-select-question", "admin-select-all-questions"].includes(action)) {
+      return;
+    }
+    if (isQuestionOperationLocked()) {
+      return;
+    }
+    if (action === "admin-select-all-questions") {
+      state.adminSelectedQuestionIds = checkbox.checked ? getVisibleQuestionIds() : [];
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const qid = String(checkbox.getAttribute("data-qid") || "").trim();
+    if (!qid) {
+      return;
+    }
+    const visibleQuestionIdSet = getVisibleQuestionIdSet();
+    if (!visibleQuestionIdSet.has(qid)) {
+      return;
+    }
+    const selectedSet = new Set(getSelectedVisibleQuestionIds());
+    if (checkbox.checked) {
+      selectedSet.add(qid);
+    } else {
+      selectedSet.delete(qid);
+    }
+    state.adminSelectedQuestionIds = normalizeQuestionIdList([...selectedSet], visibleQuestionIdSet);
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  adminQuestionsSection?.addEventListener("click", async (event) => {
+    const targetEl = event.target;
+    if (!(targetEl instanceof Element)) {
+      return;
+    }
+    const actionEl = targetEl.closest("[data-action]");
     if (!actionEl) {
       return;
     }
     const action = String(actionEl.getAttribute("data-action") || "").trim();
-    if (!["admin-edit", "admin-delete"].includes(action)) {
+    if (
+      ![
+        "admin-edit",
+        "admin-delete",
+        "admin-bulk-draft",
+        "admin-bulk-publish",
+        "admin-bulk-delete",
+        "admin-clear-selection",
+      ].includes(action)
+    ) {
       return;
     }
 
+    if (action === "admin-clear-selection") {
+      if (isQuestionOperationLocked() || !state.adminSelectedQuestionIds.length) {
+        return;
+      }
+      state.adminSelectedQuestionIds = [];
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+
+    if (["admin-bulk-draft", "admin-bulk-publish", "admin-bulk-delete"].includes(action)) {
+      if (isQuestionOperationLocked()) {
+        return;
+      }
+      const selectedIds = getSelectedVisibleQuestionIds();
+      if (!selectedIds.length) {
+        toast("Select at least one question.");
+        return;
+      }
+      const selectedSet = new Set(selectedIds);
+      const actionType = action === "admin-bulk-delete" ? "delete" : action === "admin-bulk-draft" ? "draft" : "publish";
+      if (actionType === "delete" && !window.confirm(`Delete ${selectedIds.length} selected question(s)?`)) {
+        return;
+      }
+
+      state.adminBulkActionRunning = true;
+      state.adminBulkActionType = actionType;
+      state.skipNextRouteAnimation = true;
+      render();
+
+      try {
+        const questions = getQuestions();
+        let localMessage = "";
+
+        if (actionType === "delete") {
+          const nextQuestions = questions.filter((entry) => !selectedSet.has(String(entry.id || "").trim()));
+          save(STORAGE_KEYS.questions, nextQuestions);
+          if (state.adminEditQuestionId && selectedSet.has(String(state.adminEditQuestionId || "").trim())) {
+            state.adminEditQuestionId = null;
+            state.adminQuestionModalOpen = false;
+          }
+          state.adminSelectedQuestionIds = [];
+          localMessage = `Deleted ${selectedIds.length} question(s).`;
+        } else {
+          const targetStatus = actionType === "draft" ? "draft" : "published";
+          let changedCount = 0;
+          const nextQuestions = questions.map((entry) => {
+            const questionId = String(entry.id || "").trim();
+            if (!selectedSet.has(questionId)) {
+              return entry;
+            }
+            const currentStatus = String(entry.status || "draft").trim().toLowerCase();
+            if (currentStatus === targetStatus) {
+              return entry;
+            }
+            changedCount += 1;
+            return { ...entry, status: targetStatus };
+          });
+          if (!changedCount) {
+            state.adminBulkActionRunning = false;
+            state.adminBulkActionType = "";
+            state.skipNextRouteAnimation = true;
+            render();
+            toast(targetStatus === "draft" ? "Selected questions are already drafts." : "Selected questions are already published.");
+            return;
+          }
+          save(STORAGE_KEYS.questions, nextQuestions);
+          localMessage = targetStatus === "draft"
+            ? `Moved ${changedCount} question(s) to draft.`
+            : `Published ${changedCount} question(s).`;
+        }
+
+        state.adminBulkActionRunning = false;
+        state.adminBulkActionType = "";
+        state.skipNextRouteAnimation = true;
+        render();
+        toast(localMessage);
+
+        try {
+          await flushPendingSyncNow();
+        } catch (syncError) {
+          toast(`${localMessage} Saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+        }
+      } catch (bulkError) {
+        state.adminBulkActionRunning = false;
+        state.adminBulkActionType = "";
+        state.skipNextRouteAnimation = true;
+        render();
+        toast(`Could not apply bulk action: ${getErrorMessage(bulkError, "Action failed.")}`);
+      }
+      return;
+    }
+
+    if (state.adminQuestionSaveRunning || state.adminBulkActionRunning) {
+      return;
+    }
     const qid = String(actionEl.getAttribute("data-qid") || "").trim();
     if (!qid) {
       return;
@@ -9872,6 +10132,7 @@ function wireAdmin() {
       state.adminEditorCourse = meta?.course || allCourses[0] || "";
       state.adminEditorTopic = meta?.topic || (QBANK_COURSE_TOPICS[state.adminEditorCourse] || [])[0] || "";
       state.adminQuestionModalOpen = true;
+      state.skipNextRouteAnimation = true;
       render();
       return;
     }
@@ -9890,6 +10151,10 @@ function wireAdmin() {
     try {
       const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
       save(STORAGE_KEYS.questions, questions);
+      state.adminSelectedQuestionIds = normalizeQuestionIdList(
+        state.adminSelectedQuestionIds,
+        new Set(questions.map((entry) => String(entry.id || "").trim()).filter(Boolean)),
+      );
       if (state.adminEditQuestionId === qid) {
         state.adminEditQuestionId = null;
         state.adminQuestionModalOpen = false;
@@ -9908,7 +10173,7 @@ function wireAdmin() {
   });
 
   appEl.querySelector("[data-action='admin-new']")?.addEventListener("click", () => {
-    if (state.adminQuestionSaveRunning) {
+    if (isQuestionOperationLocked()) {
       return;
     }
     state.adminEditQuestionId = null;
