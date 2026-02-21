@@ -26,7 +26,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.6").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -856,7 +856,11 @@ function persistRouteState() {
 
 async function init() {
   seedData();
+  syncUsersWithCurriculum();
   initVersionTracking();
+  if (await shouldForceRefreshAfterSignIn()) {
+    return;
+  }
   hydrateSessionUiPreferences();
   bindGlobalEvents();
   syncGoogleOAuthLoadingUi();
@@ -3021,6 +3025,7 @@ async function hydrateRelationalProfiles(currentUser) {
   const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
+  syncUsersWithCurriculum();
 }
 
 async function hydrateRelationalQuestions() {
