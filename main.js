@@ -4840,10 +4840,15 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     const desiredCourseIdsByUserId = new Map();
     students.forEach((student) => {
       const userId = getUserProfileId(student);
+      const enrollmentYear = normalizeAcademicYearOrNull(student.academicYear);
+      const enrollmentSemester = normalizeAcademicSemesterOrNull(student.academicSemester);
+      const curriculumCourses = enrollmentYear !== null && enrollmentSemester !== null
+        ? getCurriculumCourses(enrollmentYear, enrollmentSemester)
+        : [];
       const selectedCourses = sanitizeCourseAssignments(
-        (student.assignedCourses || []).length
-          ? student.assignedCourses
-          : getCurriculumCourses(student.academicYear || 1, student.academicSemester || 1),
+        curriculumCourses.length
+          ? curriculumCourses
+          : (student.assignedCourses || []),
       );
       const desiredCourseIds = new Set(
         selectedCourses
@@ -6557,7 +6562,12 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     state.studentDataLastSyncAt = Date.now();
     if (
       rerender
-      && (routeBefore === "dashboard" || routeBefore === "analytics" || routeBefore === "notifications")
+      && (
+        routeBefore === "dashboard"
+        || routeBefore === "analytics"
+        || routeBefore === "notifications"
+        || routeBefore === "create-test"
+      )
       && state.route === routeBefore
     ) {
       shouldRerenderRoute = routeBefore;
@@ -15005,11 +15015,11 @@ function normalizeStudentEnrollmentProfile(user) {
 
   const semesterCourses = getCurriculumCourses(year, semester);
   if (semesterCourses.length) {
-    const scopedAssigned = normalizedAssigned.filter((course) => semesterCourses.includes(course));
     return {
       academicYear: year,
       academicSemester: semester,
-      assignedCourses: scopedAssigned.length ? scopedAssigned : (normalizedAssigned.length ? normalizedAssigned : semesterCourses),
+      // Keep the full registered term as canonical so partial assigned-course arrays cannot hide courses.
+      assignedCourses: [...semesterCourses],
     };
   }
 
@@ -15040,9 +15050,9 @@ function getAvailableCoursesForUser(user) {
       ? getCurriculumCourses(year, semester)
       : [];
     const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
-    if (assigned.length && byEnrollment.length) {
-      const scoped = assigned.filter((course) => byEnrollment.includes(course));
-      return scoped.length ? scoped : assigned;
+    if (byEnrollment.length) {
+      if (!assigned.length) return byEnrollment;
+      return [...new Set([...byEnrollment, ...assigned])];
     }
     if (assigned.length) return assigned;
     if (byEnrollment.length) return byEnrollment;
