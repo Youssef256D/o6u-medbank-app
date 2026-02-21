@@ -55,7 +55,7 @@ const KNOWN_ROUTES = new Set([
   "profile",
   "admin",
 ]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "notifications", "activity"]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"]);
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -10333,12 +10333,128 @@ function resolveAdminQuestionListView(questions, allCourses, preferredCourse = "
   };
 }
 
+function resolveAdminImportView(allCourses, preferredCourse = "") {
+  const configuredCourses = Array.isArray(allCourses) ? allCourses.filter(Boolean) : [];
+  const fallbackCourse = configuredCourses.includes(preferredCourse) ? preferredCourse : (configuredCourses[0] || "");
+  const importCourse = configuredCourses.includes(state.adminImportCourse)
+    ? state.adminImportCourse
+    : fallbackCourse;
+  const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
+  const importTopic = importTopics.includes(state.adminImportTopic)
+    ? state.adminImportTopic
+    : (importTopics[0] || "");
+  return {
+    importCourse,
+    importTopics,
+    importTopic,
+    importReport: state.adminImportReport,
+    importDraft: String(state.adminImportDraft || ""),
+    importRunning: Boolean(state.adminImportRunning),
+    importAsDraft: Boolean(state.adminImportAsDraft),
+    importStatus: String(state.adminImportStatus || "").trim(),
+    importStatusTone: ["success", "error", "warning"].includes(state.adminImportStatusTone)
+      ? state.adminImportStatusTone
+      : "neutral",
+  };
+}
+
+function renderAdminBulkImportSection(allCourses, options = {}) {
+  const preferredCourse = String(options.preferredCourse || "").trim();
+  const {
+    importCourse,
+    importTopics,
+    importTopic,
+    importReport,
+    importDraft,
+    importRunning,
+    importAsDraft,
+    importStatus,
+    importStatusTone,
+  } = resolveAdminImportView(allCourses, preferredCourse);
+  const importErrorPreview = (importReport?.errors || []).slice(0, 15);
+
+  return `
+    <section class="card admin-section" id="admin-bulk-import-section">
+      <h3 style="margin: 0;">Bulk Import</h3>
+      <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
+      <form id="admin-import-form" style="margin-top: 0.7rem;">
+        <div class="form-row">
+          <label>
+            Default course
+            <select name="defaultCourse" id="admin-import-course">
+              ${allCourses
+                .map((course) => `<option value="${escapeHtml(course)}" ${importCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Default topic
+            <select name="defaultTopic" id="admin-import-topic">
+              ${importTopics
+                .map((topic) => `<option value="${escapeHtml(topic)}" ${importTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+                .join("")}
+            </select>
+          </label>
+        </div>
+        <label class="admin-course-check" style="width: fit-content;">
+          <input type="checkbox" name="importAsDraft" ${importAsDraft ? "checked" : ""} />
+          <span>Save all imported questions as draft (hide from students)</span>
+        </label>
+        <label>Upload file
+          <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
+        </label>
+        <label>Paste CSV rows or JSON array
+          <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags,questionImage,explanationImage'>${escapeHtml(importDraft)}</textarea>
+        </label>
+        <div class="stack">
+          <button class="btn ${importRunning ? "is-loading" : ""}" type="submit" ${importRunning ? "disabled" : ""}>
+            ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Importing questions...</span>` : "Run bulk import"}
+          </button>
+          <button class="btn ghost ${importRunning ? "is-loading" : ""}" type="button" id="admin-sync-questions-now" ${importRunning ? "disabled" : ""}>
+            ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing cloud data...</span>` : "Sync existing questions to cloud"}
+          </button>
+          <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
+        </div>
+      </form>
+      ${
+        importStatus
+          ? `<p class="subtle import-status is-${importStatusTone}" aria-live="polite">${escapeHtml(importStatus)}</p>`
+          : ""
+      }
+      ${
+        importReport
+          ? `
+            <div class="admin-import-report card" style="margin-top: 0.7rem;">
+              <p style="margin: 0;"><b>Last import:</b> ${new Date(importReport.createdAt).toLocaleString()}</p>
+              <p class="subtle">Imported ${importReport.added}/${importReport.total} rows. ${importReport.errors.length} error(s).</p>
+              ${
+                importErrorPreview.length
+                  ? `
+                    <ol class="admin-import-error-list">
+                      ${importErrorPreview.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
+                    </ol>
+                    <small class="subtle">Showing first ${importErrorPreview.length} errors.</small>
+                  `
+                  : `<p class="subtle">No errors in last import.</p>`
+              }
+              <div class="stack">
+                <button class="btn ghost admin-btn-sm" type="button" id="admin-download-import-errors" ${importReport.errors.length ? "" : "disabled"}>Download full error report</button>
+                <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-import-report">Clear report</button>
+              </div>
+            </div>
+          `
+          : ""
+      }
+    </section>
+  `;
+}
+
 function renderAdmin() {
   const user = getCurrentUser();
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions", "notifications", "activity"].includes(state.adminPage)
+  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"].includes(state.adminPage)
     ? state.adminPage
     : "dashboard";
   if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
@@ -10676,20 +10792,6 @@ function renderAdmin() {
       state.adminFilters.topic = selectedTopic;
     }
     const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid) || bulkActionRunning;
-    const importCourse = allCourses.includes(state.adminImportCourse)
-      ? state.adminImportCourse
-      : (selectedCourse || allCourses[0] || "");
-    const importTopics = QBANK_COURSE_TOPICS[importCourse] || [];
-    const importTopic = importTopics.includes(state.adminImportTopic) ? state.adminImportTopic : (importTopics[0] || "");
-    const importReport = state.adminImportReport;
-    const importDraft = String(state.adminImportDraft || "");
-    const importRunning = Boolean(state.adminImportRunning);
-    const importAsDraft = Boolean(state.adminImportAsDraft);
-    const importStatus = String(state.adminImportStatus || "").trim();
-    const importStatusTone = ["success", "error", "warning"].includes(state.adminImportStatusTone)
-      ? state.adminImportStatusTone
-      : "neutral";
-    const importErrorPreview = (importReport?.errors || []).slice(0, 15);
     const courseQuestions = questionView.filteredQuestions;
     const visibleQuestionIds = courseQuestions
       .map((question) => String(question.id || "").trim())
@@ -10869,78 +10971,6 @@ function renderAdmin() {
         </div>
       </section>
 
-      <section class="card admin-section" style="margin-top: 0.7rem;">
-        <h3 style="margin: 0;">Bulk Import</h3>
-        <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
-        <form id="admin-import-form" style="margin-top: 0.7rem;">
-          <div class="form-row">
-            <label>
-              Default course
-              <select name="defaultCourse" id="admin-import-course">
-                ${allCourses
-                  .map((course) => `<option value="${escapeHtml(course)}" ${importCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                  .join("")}
-              </select>
-            </label>
-            <label>
-              Default topic
-              <select name="defaultTopic" id="admin-import-topic">
-                ${importTopics
-                  .map((topic) => `<option value="${escapeHtml(topic)}" ${importTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
-                  .join("")}
-              </select>
-            </label>
-          </div>
-          <label class="admin-course-check" style="width: fit-content;">
-            <input type="checkbox" name="importAsDraft" ${importAsDraft ? "checked" : ""} />
-            <span>Save all imported questions as draft (hide from students)</span>
-          </label>
-          <label>Upload file
-            <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
-          </label>
-          <label>Paste CSV rows or JSON array
-            <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags,questionImage,explanationImage'>${escapeHtml(importDraft)}</textarea>
-          </label>
-          <div class="stack">
-            <button class="btn ${importRunning ? "is-loading" : ""}" type="submit" ${importRunning ? "disabled" : ""}>
-              ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Importing questions...</span>` : "Run bulk import"}
-            </button>
-            <button class="btn ghost ${importRunning ? "is-loading" : ""}" type="button" id="admin-sync-questions-now" ${importRunning ? "disabled" : ""}>
-              ${importRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Syncing cloud data...</span>` : "Sync existing questions to cloud"}
-            </button>
-            <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
-          </div>
-        </form>
-        ${
-          importStatus
-            ? `<p class="subtle import-status is-${importStatusTone}" aria-live="polite">${escapeHtml(importStatus)}</p>`
-            : ""
-        }
-        ${
-          importReport
-            ? `
-              <div class="admin-import-report card" style="margin-top: 0.7rem;">
-                <p style="margin: 0;"><b>Last import:</b> ${new Date(importReport.createdAt).toLocaleString()}</p>
-                <p class="subtle">Imported ${importReport.added}/${importReport.total} rows. ${importReport.errors.length} error(s).</p>
-                ${
-                  importErrorPreview.length
-                    ? `
-                      <ol class="admin-import-error-list">
-                        ${importErrorPreview.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
-                      </ol>
-                      <small class="subtle">Showing first ${importErrorPreview.length} errors.</small>
-                    `
-                    : `<p class="subtle">No errors in last import.</p>`
-                }
-                <div class="stack">
-                  <button class="btn ghost admin-btn-sm" type="button" id="admin-download-import-errors" ${importReport.errors.length ? "" : "disabled"}>Download full error report</button>
-                  <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-import-report">Clear report</button>
-                </div>
-              </div>
-            `
-            : ""
-        }
-      </section>
       ${
         state.adminQuestionModalOpen
           ? `
@@ -11049,6 +11079,12 @@ function renderAdmin() {
           : ""
       }
     `;
+  }
+
+  if (activeAdminPage === "bulk-import") {
+    pageContent = renderAdminBulkImportSection(allCourses, {
+      preferredCourse: String(state.adminFilters.course || ""),
+    });
   }
 
   if (activeAdminPage === "notifications") {
@@ -11295,6 +11331,7 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
           <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
+          <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
           <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
           <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
         </div>
@@ -11366,7 +11403,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions", "notifications", "activity"].includes(page)) {
+      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
@@ -13091,11 +13128,18 @@ function wireAdmin() {
   const importCourseSelect = document.getElementById("admin-import-course");
   const importTopicSelect = document.getElementById("admin-import-topic");
   const syncImportSelectionsFromInputs = () => {
-    const course = importCourseSelect?.value || allCourses[0] || "";
+    const currentCourse = allCourses.includes(state.adminImportCourse)
+      ? state.adminImportCourse
+      : (allCourses[0] || "");
+    const course = importCourseSelect?.value || currentCourse;
     const topics = QBANK_COURSE_TOPICS[course] || [];
     const topic = topics.includes(importTopicSelect?.value || "")
       ? String(importTopicSelect?.value || "")
-      : (topics[0] || "");
+      : (
+        topics.includes(state.adminImportTopic)
+          ? String(state.adminImportTopic)
+          : (topics[0] || "")
+      );
     state.adminImportCourse = course;
     state.adminImportTopic = topic;
   };
