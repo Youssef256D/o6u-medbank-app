@@ -68,6 +68,8 @@ const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
+const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
+const NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR = "::";
 const ANALYTICS_RECENT_SESSION_WINDOW = 3;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
@@ -167,6 +169,7 @@ const state = {
   adminNotificationTargetType: "all",
   adminNotificationTargetUserId: "",
   adminNotificationTargetQuery: "",
+  adminNotificationTargetYear: 1,
   adminNotificationTitle: "",
   adminNotificationBody: "",
   adminNotificationSending: false,
@@ -3513,12 +3516,23 @@ async function createRelationalNotification(notificationPayload, actorUser, user
       message: "Target user does not have a Supabase account yet. Notification was saved locally only.",
     };
   }
+  if (payload.targetType === "year" && normalizeAcademicYearOrNull(payload.targetYear) === null) {
+    return {
+      ok: false,
+      message: "Target year is invalid. Notification was saved locally only.",
+    };
+  }
 
   const creatorProfileId = String(getUserProfileId(user) || "").trim();
+  const externalId = buildNotificationExternalId({
+    targetType: payload.targetType,
+    targetYear: payload.targetYear,
+    baseId: payload.id,
+  });
   const { data, error } = await client
     .from("notifications")
     .upsert([{
-      external_id: payload.id,
+      external_id: externalId,
       recipient_user_id: recipientProfileId || null,
       title: payload.title,
       message: payload.body,
@@ -11091,9 +11105,12 @@ function renderAdmin() {
     const users = getCloudNotificationTargetUsers(getUsers())
       .slice()
       .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
-    const targetType = String(state.adminNotificationTargetType || "").trim() === "user"
-      ? "user"
-      : "all";
+    const targetType = normalizeNotificationAudienceType(state.adminNotificationTargetType);
+    let targetYear = normalizeAcademicYearOrNull(state.adminNotificationTargetYear);
+    if (targetYear === null) {
+      targetYear = 1;
+      state.adminNotificationTargetYear = targetYear;
+    }
     let targetUserId = String(state.adminNotificationTargetUserId || "").trim();
     if (targetUserId && !findUserByNotificationTargetId(targetUserId, users)) {
       targetUserId = "";
@@ -11135,7 +11152,7 @@ function renderAdmin() {
         <div class="flex-between">
           <div>
             <h3 style="margin: 0;">Notifications</h3>
-            <p class="subtle">Send in-app notifications to all users or one specific user.</p>
+            <p class="subtle">Send in-app notifications to all users, one user, or students by academic year.</p>
           </div>
           <div class="stack" style="align-items: flex-end;">
             <p class="subtle" style="margin: 0;">Last sync: <b>${state.adminDataLastSyncAt ? new Date(state.adminDataLastSyncAt).toLocaleTimeString() : "Not yet"}</b></p>
@@ -11148,8 +11165,17 @@ function renderAdmin() {
             <label>Audience
               <select name="targetType" id="admin-notification-target-type" ${notificationSending ? "disabled" : ""}>
                 <option value="all" ${targetType === "all" ? "selected" : ""}>All users</option>
+                <option value="year" ${targetType === "year" ? "selected" : ""}>Year group</option>
                 <option value="user" ${targetType === "user" ? "selected" : ""}>Specific user</option>
               </select>
+            </label>
+            <label>Target year
+              <select name="targetYear" id="admin-notification-target-year" ${targetType === "year" ? "" : "disabled"} ${notificationSending ? "disabled" : ""}>
+                ${[1, 2, 3, 4, 5]
+                  .map((yearValue) => `<option value="${yearValue}" ${targetYear === yearValue ? "selected" : ""}>${escapeHtml(formatAcademicYearAudienceLabel(yearValue))}</option>`)
+                  .join("")}
+              </select>
+              <small class="subtle">Year groups include approved student accounts only.</small>
             </label>
             <label>Target user
               <input type="hidden" name="targetUserId" id="admin-notification-target-user-id" value="${escapeHtml(targetUserId)}" />
@@ -11577,6 +11603,7 @@ function wireAdmin() {
   if (state.adminPage === "notifications") {
     const notificationForm = document.getElementById("admin-notification-form");
     const targetTypeSelect = document.getElementById("admin-notification-target-type");
+    const targetYearSelect = document.getElementById("admin-notification-target-year");
     const targetUserIdInput = document.getElementById("admin-notification-target-user-id");
     const targetUserSearchInput = document.getElementById("admin-notification-target-user-search");
     const targetUserSuggestions = document.getElementById("admin-notification-target-suggestions");
@@ -11605,7 +11632,7 @@ function wireAdmin() {
       if (!targetUserSuggestions || !targetUserSearchInput) {
         return;
       }
-      const targetType = String(targetTypeSelect?.value || "all").trim() === "user" ? "user" : "all";
+      const targetType = normalizeNotificationAudienceType(targetTypeSelect?.value || "all");
       if (targetType !== "user") {
         targetUserSuggestions.hidden = true;
         targetUserSuggestions.innerHTML = "";
@@ -11649,9 +11676,15 @@ function wireAdmin() {
     };
 
     const syncNotificationAudienceUi = () => {
-      const targetType = String(targetTypeSelect?.value || "all").trim() === "user" ? "user" : "all";
+      const targetType = normalizeNotificationAudienceType(targetTypeSelect?.value || "all");
       if (state.adminNotificationTargetType !== targetType) {
         state.adminNotificationTargetType = targetType;
+      }
+      const targetYear = normalizeAcademicYearOrNull(targetYearSelect?.value) ?? 1;
+      state.adminNotificationTargetYear = targetYear;
+      if (targetYearSelect) {
+        targetYearSelect.value = String(targetYear);
+        targetYearSelect.disabled = targetType !== "year" || state.adminNotificationSending;
       }
       if (targetUserSearchInput) {
         targetUserSearchInput.disabled = targetType !== "user" || state.adminNotificationSending;
@@ -11671,6 +11704,9 @@ function wireAdmin() {
     };
 
     targetTypeSelect?.addEventListener("change", syncNotificationAudienceUi);
+    targetYearSelect?.addEventListener("change", () => {
+      state.adminNotificationTargetYear = normalizeAcademicYearOrNull(targetYearSelect.value) ?? 1;
+    });
     targetUserSearchInput?.addEventListener("input", () => {
       const typed = String(targetUserSearchInput.value || "").trim();
       const currentId = String(targetUserIdInput?.value || "").trim();
@@ -11739,7 +11775,8 @@ function wireAdmin() {
         return;
       }
       const data = new FormData(notificationForm);
-      const targetType = String(data.get("targetType") || "all").trim() === "user" ? "user" : "all";
+      const targetType = normalizeNotificationAudienceType(data.get("targetType") || "all");
+      const targetYear = normalizeAcademicYearOrNull(data.get("targetYear"));
       const targetUserQuery = String(data.get("targetUserQuery") || "").trim();
       let targetUserId = String(data.get("targetUserId") || "").trim();
       if (targetType === "user" && !targetUserId && targetUserQuery) {
@@ -11759,6 +11796,10 @@ function wireAdmin() {
         toast("Choose a target user or switch audience to all users.");
         return;
       }
+      if (targetType === "year" && targetYear === null) {
+        toast("Choose a valid target year group.");
+        return;
+      }
       const selectedTargetUser = targetType === "user"
         ? findUserByNotificationTargetId(targetUserId, notificationUsers)
         : null;
@@ -11773,22 +11814,37 @@ function wireAdmin() {
       const selectedTargetProfileId = selectedTargetUser
         ? String(getUserProfileId(selectedTargetUser) || "").trim()
         : "";
+      const selectedYearAudienceUsers = targetType === "year"
+        ? getNotificationYearAudienceUsers(targetYear, notificationUsers)
+        : [];
+      if (targetType === "year" && !selectedYearAudienceUsers.length) {
+        toast(`No approved students found for ${formatAcademicYearAudienceLabel(targetYear)}.`);
+        return;
+      }
       const resolvedTargetUserId = targetType === "user"
         ? (selectedTargetProfileId || targetUserId)
         : "";
+      const resolvedTargetYear = targetType === "year" ? targetYear : null;
       state.adminNotificationTargetType = targetType;
       state.adminNotificationTargetUserId = resolvedTargetUserId;
       state.adminNotificationTargetQuery = targetType === "user" ? targetUserQuery : "";
+      state.adminNotificationTargetYear = resolvedTargetYear ?? (normalizeAcademicYearOrNull(state.adminNotificationTargetYear) ?? 1);
       state.adminNotificationTitle = title;
       state.adminNotificationBody = body;
       state.adminNotificationSending = true;
 
       let localNotification = null;
       try {
+        const externalId = buildNotificationExternalId({
+          targetType,
+          targetYear: resolvedTargetYear,
+          baseId: crypto.randomUUID(),
+        });
         localNotification = normalizeNotificationRecord({
-          id: crypto.randomUUID(),
+          id: externalId,
           targetType,
           targetUserId: resolvedTargetUserId,
+          targetYear: resolvedTargetYear,
           title,
           body,
           createdAt: nowISO(),
@@ -11815,6 +11871,7 @@ function wireAdmin() {
       state.adminNotificationTargetType = "all";
       state.adminNotificationTargetUserId = "";
       state.adminNotificationTargetQuery = "";
+      state.adminNotificationTargetYear = normalizeAcademicYearOrNull(targetYear) ?? 1;
       state.adminNotificationTitle = "";
       state.adminNotificationBody = "";
       state.adminDataLastSyncAt = Date.now();
@@ -11832,6 +11889,9 @@ function wireAdmin() {
           const deliveredLabel = selectedTargetUser
             ? getNotificationTargetSearchDisplayLabel(selectedTargetUser)
             : "selected user";
+          toast(`Notification delivered to ${deliveredLabel}.`);
+        } else if (targetType === "year") {
+          const deliveredLabel = formatAcademicYearAudienceLabel(targetYear);
           toast(`Notification delivered to ${deliveredLabel}.`);
         } else {
           toast("Notification delivered.");
@@ -13625,20 +13685,123 @@ function getCloudNotificationTargetUsers(users = null) {
   return [...byProfileId.values()];
 }
 
+function normalizeNotificationAudienceType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "user") {
+    return "user";
+  }
+  if (raw === "year") {
+    return "year";
+  }
+  return "all";
+}
+
+function parseNotificationExternalIdMetadata(externalId) {
+  const raw = String(externalId || "").trim();
+  if (!raw) {
+    return { raw: "", baseId: "", targetType: "all", targetYear: null };
+  }
+  const escapedSeparator = NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX}([1-5])${escapedSeparator}(.+)$`, "i");
+  const match = raw.match(pattern);
+  if (!match) {
+    return { raw, baseId: raw, targetType: "all", targetYear: null };
+  }
+  const targetYear = normalizeAcademicYearOrNull(match[1]);
+  const baseId = String(match[2] || "").trim();
+  return {
+    raw,
+    baseId: baseId || raw,
+    targetType: targetYear === null ? "all" : "year",
+    targetYear,
+  };
+}
+
+function buildNotificationExternalId(options = {}) {
+  const targetType = normalizeNotificationAudienceType(options?.targetType);
+  const baseInput = String(options?.baseId || options?.id || "").trim();
+  const baseId = baseInput || (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : makeId("notification"));
+  if (targetType !== "year") {
+    return baseId;
+  }
+  const targetYear = normalizeAcademicYearOrNull(options?.targetYear);
+  if (targetYear === null) {
+    return baseId;
+  }
+  const parsed = parseNotificationExternalIdMetadata(baseId);
+  if (parsed.targetType === "year" && parsed.targetYear === targetYear) {
+    return baseId;
+  }
+  return `${NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX}${targetYear}${NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR}${baseId}`;
+}
+
+function formatAcademicYearAudienceLabel(year) {
+  const normalizedYear = normalizeAcademicYearOrNull(year);
+  if (normalizedYear === null) {
+    return "Year group";
+  }
+  const mod100 = normalizedYear % 100;
+  const mod10 = normalizedYear % 10;
+  let suffix = "th";
+  if (mod100 < 11 || mod100 > 13) {
+    if (mod10 === 1) {
+      suffix = "st";
+    } else if (mod10 === 2) {
+      suffix = "nd";
+    } else if (mod10 === 3) {
+      suffix = "rd";
+    }
+  }
+  return `${normalizedYear}${suffix} year students`;
+}
+
+function getNotificationYearAudienceUsers(year, users = null) {
+  const targetYear = normalizeAcademicYearOrNull(year);
+  if (targetYear === null) {
+    return [];
+  }
+  const list = Array.isArray(users) ? users : getCloudNotificationTargetUsers(getUsers());
+  return list.filter((entry) => (
+    String(entry?.role || "").trim().toLowerCase() === "student"
+    && isUserAccessApproved(entry)
+    && normalizeAcademicYearOrNull(entry?.academicYear) === targetYear
+  ));
+}
+
 function normalizeNotificationRecord(entry, fallbackId = "") {
   if (!entry || typeof entry !== "object") {
     return null;
   }
   const dbIdCandidate = String(entry.dbId || entry.idOnServer || "").trim();
   const dbId = isUuidValue(dbIdCandidate) ? dbIdCandidate : "";
-  const idCandidate = String(entry.id || entry.externalId || dbId || fallbackId || "").trim();
+  const rawIdCandidate = String(entry.id || entry.externalId || dbId || fallbackId || "").trim();
+  const externalIdMetadata = parseNotificationExternalIdMetadata(rawIdCandidate);
+  const idCandidate = externalIdMetadata.raw;
   if (!idCandidate) {
     return null;
   }
   const targetUserId = String(entry.targetUserId || entry.targetProfileId || entry.recipientUserId || "").trim();
-  const targetType = String(entry.targetType || "").trim().toLowerCase() === "user" || targetUserId
-    ? "user"
-    : "all";
+  const explicitTargetType = normalizeNotificationAudienceType(entry.targetType || "");
+  const explicitTargetYear = normalizeAcademicYearOrNull(
+    entry.targetYear
+      ?? entry.target_year
+      ?? entry.academicYear
+      ?? entry.academic_year
+      ?? null,
+  );
+  let targetType = "all";
+  let targetYear = null;
+  if (explicitTargetType === "user" || targetUserId) {
+    targetType = "user";
+  } else if (explicitTargetType === "year" || explicitTargetYear !== null || externalIdMetadata.targetType === "year") {
+    targetType = "year";
+    targetYear = explicitTargetYear ?? externalIdMetadata.targetYear;
+    if (targetYear === null) {
+      targetType = "all";
+    }
+  }
   const createdAtSource = String(entry.createdAt || entry.created_at || "").trim();
   const createdAtMs = new Date(createdAtSource || 0).getTime();
   const createdAt = Number.isFinite(createdAtMs) && createdAtMs > 0
@@ -13655,6 +13818,7 @@ function normalizeNotificationRecord(entry, fallbackId = "") {
     dbId,
     targetType,
     targetUserId: targetType === "user" ? targetUserId : "",
+    targetYear: targetType === "year" ? targetYear : null,
     title: String(entry.title || "Notification").trim() || "Notification",
     body: String(entry.body || entry.message || "").trim(),
     createdAt,
@@ -13958,6 +14122,14 @@ function isNotificationVisibleToUser(notification, user) {
   if (!notification || !user) {
     return false;
   }
+  if (user.role === "admin") {
+    return true;
+  }
+  if (notification.targetType === "year") {
+    const targetYear = normalizeAcademicYearOrNull(notification.targetYear);
+    const userYear = normalizeAcademicYearOrNull(user?.academicYear);
+    return targetYear !== null && user.role === "student" && targetYear === userYear;
+  }
   if (notification.targetType !== "user") {
     return true;
   }
@@ -14119,11 +14291,20 @@ function getNotificationTargetProfileId(notification, users = null) {
 
 function mapRelationalNotificationRowToLocal(row, options = {}) {
   const readByUserIds = Array.isArray(options.readByUserIds) ? options.readByUserIds : [];
+  const externalId = String(row?.external_id || row?.id || "").trim();
+  const externalIdMetadata = parseNotificationExternalIdMetadata(externalId);
+  const recipientUserId = String(row?.recipient_user_id || "").trim();
+  const targetType = recipientUserId
+    ? "user"
+    : externalIdMetadata.targetType === "year"
+      ? "year"
+      : "all";
   return normalizeNotificationRecord({
-    id: String(row?.external_id || row?.id || "").trim(),
+    id: externalId,
     dbId: String(row?.id || "").trim(),
-    targetType: row?.recipient_user_id ? "user" : "all",
-    targetUserId: String(row?.recipient_user_id || "").trim(),
+    targetType,
+    targetUserId: recipientUserId,
+    targetYear: targetType === "year" ? externalIdMetadata.targetYear : null,
     title: String(row?.title || "").trim(),
     body: String(row?.message || "").trim(),
     createdAt: row?.created_at || nowISO(),
@@ -14134,7 +14315,13 @@ function mapRelationalNotificationRowToLocal(row, options = {}) {
 }
 
 function getNotificationTargetLabel(notification, users = null) {
-  if (!notification || notification.targetType !== "user") {
+  if (!notification) {
+    return "All users";
+  }
+  if (notification.targetType === "year") {
+    return formatAcademicYearAudienceLabel(notification.targetYear);
+  }
+  if (notification.targetType !== "user") {
     return "All users";
   }
   const targetUser = findUserByNotificationTargetId(notification.targetUserId, users);
