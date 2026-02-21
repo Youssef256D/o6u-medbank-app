@@ -184,6 +184,10 @@ const SUPABASE_CONFIG = {
 
 const QUESTION_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
 const QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES = 900 * 1024;
+const QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS = [
+  60 * 60 * 24 * 365 * 5,
+  60 * 60 * 24 * 365,
+];
 const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -4211,6 +4215,31 @@ function convertFileToDataUrl(file) {
   });
 }
 
+async function createInlineQuestionImageFallback(
+  file,
+  message,
+  maxBytes = QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES,
+) {
+  const limit = Number(maxBytes || 0);
+  if (!(file instanceof File) || Number(file.size || 0) <= 0 || limit <= 0 || file.size > limit) {
+    return null;
+  }
+  try {
+    const fallbackDataUrl = await convertFileToDataUrl(file);
+    if (!fallbackDataUrl) {
+      return null;
+    }
+    return {
+      ok: true,
+      url: fallbackDataUrl,
+      usedFallback: true,
+      message: String(message || "Storage upload failed, so the image was saved inline."),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeQuestionChoiceLabel(value) {
   const label = String(value || "").trim().toUpperCase();
   return QUESTION_CHOICE_LABELS.includes(label) ? label : "";
@@ -4455,25 +4484,15 @@ async function uploadQuestionImageFile(file) {
 
   if (uploadError) {
     const bucketMissing = isStorageBucketMissingError(uploadError);
-    const inlineFallbackLimit = bucketMissing
-      ? QUESTION_IMAGE_UPLOAD_MAX_BYTES
-      : QUESTION_IMAGE_DATA_URL_FALLBACK_MAX_BYTES;
-    if (file.size <= inlineFallbackLimit) {
-      try {
-        const fallbackDataUrl = await convertFileToDataUrl(file);
-        if (fallbackDataUrl) {
-          return {
-            ok: true,
-            url: fallbackDataUrl,
-            usedFallback: true,
-            message: bucketMissing
-              ? `Storage bucket "${bucket}" was not found, so the image was saved inline.`
-              : "Storage upload failed, so the image was saved inline.",
-          };
-        }
-      } catch {
-        // Continue with storage error below.
-      }
+    const uploadFallback = await createInlineQuestionImageFallback(
+      file,
+      bucketMissing
+        ? `Storage bucket "${bucket}" was not found, so the image was saved inline.`
+        : "Storage upload failed, so the image was saved inline.",
+      QUESTION_IMAGE_UPLOAD_MAX_BYTES,
+    );
+    if (uploadFallback) {
+      return uploadFallback;
     }
     return {
       ok: false,
@@ -4481,22 +4500,31 @@ async function uploadQuestionImageFile(file) {
     };
   }
 
-  const { data: signedData, error: signedError } = await client.storage
-    .from(bucket)
-    .createSignedUrl(filePath, 60 * 60 * 24 * 365 * 5);
-  if (!signedError && signedData?.signedUrl) {
-    return { ok: true, url: signedData.signedUrl };
+  let lastSignedError = null;
+  for (const expiresIn of QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS) {
+    const { data: signedData, error: signedError } = await client.storage
+      .from(bucket)
+      .createSignedUrl(filePath, expiresIn);
+    if (!signedError && signedData?.signedUrl) {
+      return { ok: true, url: signedData.signedUrl };
+    }
+    if (signedError) {
+      lastSignedError = signedError;
+    }
   }
 
-  const { data: publicData } = client.storage.from(bucket).getPublicUrl(filePath);
-  const publicUrl = String(publicData?.publicUrl || "").trim();
-  if (publicUrl) {
-    return { ok: true, url: publicUrl };
+  const signedUrlFallback = await createInlineQuestionImageFallback(
+    file,
+    "Image uploaded, but the app could not generate a secure link. The image was saved inline instead.",
+    QUESTION_IMAGE_UPLOAD_MAX_BYTES,
+  );
+  if (signedUrlFallback) {
+    return signedUrlFallback;
   }
 
   return {
     ok: false,
-    message: "Image uploaded, but the app could not generate a usable URL.",
+    message: getErrorMessage(lastSignedError, "Image uploaded, but the app could not generate a usable URL."),
   };
 }
 
