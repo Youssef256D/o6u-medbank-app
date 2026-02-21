@@ -4177,6 +4177,18 @@ function isStorageBucketMissingError(error) {
   return /bucket not found/i.test(message) || (statusCode === "404" && /bucket/i.test(message));
 }
 
+function isLikelyNetworkFetchError(error) {
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return true;
+  }
+  const message = getErrorMessage(error, "").toLowerCase();
+  const statusCode = String(error?.statusCode || error?.status || "").trim();
+  if (statusCode === "0") {
+    return true;
+  }
+  return /failed to fetch|networkerror|network request failed|load failed|connection/i.test(message);
+}
+
 function sanitizeStoragePathSegment(value, fallback = "item") {
   const normalized = String(value || "")
     .trim()
@@ -4238,6 +4250,135 @@ async function createInlineQuestionImageFallback(
   } catch {
     return null;
   }
+}
+
+function isInlineImageDataUrl(value) {
+  return /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,/i.test(String(value || "").trim());
+}
+
+async function uploadQuestionImageDataUrlToStorage(dataUrl, options = {}) {
+  const normalizedDataUrl = String(dataUrl || "").trim();
+  if (!isInlineImageDataUrl(normalizedDataUrl)) {
+    return { ok: false, message: "Image is not a supported inline image payload." };
+  }
+
+  const client = options?.client || getRelationalClient() || getSupabaseAuthClient();
+  if (!client) {
+    return { ok: false, message: "Supabase session is unavailable. Log in again and retry." };
+  }
+
+  const bucket = String(options?.bucket || SUPABASE_CONFIG.questionImageBucket || "").trim();
+  if (!bucket) {
+    return { ok: false, message: "Question image bucket is not configured." };
+  }
+
+  let blob;
+  try {
+    const response = await fetch(normalizedDataUrl);
+    blob = await response.blob();
+  } catch (error) {
+    return { ok: false, message: getErrorMessage(error, "Could not read inline image data.") };
+  }
+
+  if (!blob || !Number(blob.size || 0)) {
+    return { ok: false, message: "Inline image payload is empty." };
+  }
+  if (blob.size > QUESTION_IMAGE_UPLOAD_MAX_BYTES) {
+    return { ok: false, message: "Inline image is too large to upload. Max size is 5 MB." };
+  }
+
+  const normalizedType = String(blob.type || "").trim().toLowerCase();
+  if (normalizedType && !QUESTION_IMAGE_ALLOWED_MIME_TYPES.has(normalizedType)) {
+    return { ok: false, message: "Inline image type is unsupported." };
+  }
+
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveImageFileExtension(`inline.${normalizedType.split("/")[1] || "png"}`, normalizedType);
+  const fileId = sanitizeStoragePathSegment(makeId("qimg"), "qimg");
+  const filePath = `questions/${userScope}/${Date.now()}-${fileId}.${extension}`;
+
+  const { error: uploadError } = await client.storage
+    .from(bucket)
+    .upload(filePath, blob, {
+      cacheControl: "3600",
+      upsert: false,
+      contentType: normalizedType || undefined,
+    });
+  if (uploadError) {
+    return { ok: false, message: getErrorMessage(uploadError, "Could not upload question image.") };
+  }
+
+  let lastSignedError = null;
+  for (const expiresIn of QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS) {
+    const { data: signedData, error: signedError } = await client.storage
+      .from(bucket)
+      .createSignedUrl(filePath, expiresIn);
+    if (!signedError && signedData?.signedUrl) {
+      return { ok: true, url: signedData.signedUrl };
+    }
+    if (signedError) {
+      lastSignedError = signedError;
+    }
+  }
+
+  return {
+    ok: false,
+    message: getErrorMessage(lastSignedError, "Image uploaded, but the app could not generate a usable URL."),
+  };
+}
+
+async function promoteInlineQuestionImagesToStorage(questionsPayload, options = {}) {
+  const questions = Array.isArray(questionsPayload) ? questionsPayload : [];
+  if (!questions.length) {
+    return { questions, changed: false };
+  }
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return { questions, changed: false };
+  }
+
+  let changed = false;
+  const uploadCache = new Map();
+  const nextQuestions = questions.map((question) => {
+    if (!question || typeof question !== "object") {
+      return question;
+    }
+    return question;
+  });
+
+  for (let index = 0; index < nextQuestions.length; index += 1) {
+    const question = nextQuestions[index];
+    if (!question || typeof question !== "object") {
+      continue;
+    }
+
+    let nextQuestion = question;
+    for (const fieldName of ["questionImage", "explanationImage"]) {
+      const fieldValue = String(question?.[fieldName] || "").trim();
+      if (!isInlineImageDataUrl(fieldValue)) {
+        continue;
+      }
+
+      let uploadResult = uploadCache.get(fieldValue) || null;
+      if (!uploadResult) {
+        uploadResult = await uploadQuestionImageDataUrlToStorage(fieldValue, options);
+        uploadCache.set(fieldValue, uploadResult);
+      }
+      if (!uploadResult?.ok || !uploadResult?.url) {
+        continue;
+      }
+
+      if (nextQuestion === question) {
+        nextQuestion = { ...question };
+      }
+      nextQuestion[fieldName] = String(uploadResult.url || "").trim();
+      changed = true;
+    }
+
+    nextQuestions[index] = nextQuestion;
+  }
+
+  return { questions: changed ? nextQuestions : questions, changed };
 }
 
 function normalizeQuestionChoiceLabel(value) {
@@ -4458,8 +4599,27 @@ async function uploadQuestionImageFile(file) {
     return { ok: false, message: "Unsupported file type. Use PNG, JPG, WEBP, or GIF." };
   }
 
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    const offlineFallback = await createInlineQuestionImageFallback(
+      file,
+      "You are offline. The image was saved locally and will sync to cloud when you are online again.",
+      QUESTION_IMAGE_UPLOAD_MAX_BYTES,
+    );
+    if (offlineFallback) {
+      return offlineFallback;
+    }
+  }
+
   const client = getRelationalClient() || getSupabaseAuthClient();
   if (!client) {
+    const noSessionFallback = await createInlineQuestionImageFallback(
+      file,
+      "No active cloud session was found. The image was saved locally and will sync when cloud access is restored.",
+      QUESTION_IMAGE_UPLOAD_MAX_BYTES,
+    );
+    if (noSessionFallback) {
+      return noSessionFallback;
+    }
     return { ok: false, message: "Supabase session is unavailable. Log in again and retry." };
   }
 
@@ -4484,11 +4644,14 @@ async function uploadQuestionImageFile(file) {
 
   if (uploadError) {
     const bucketMissing = isStorageBucketMissingError(uploadError);
+    const networkIssue = isLikelyNetworkFetchError(uploadError);
     const uploadFallback = await createInlineQuestionImageFallback(
       file,
       bucketMissing
         ? `Storage bucket "${bucket}" was not found, so the image was saved inline.`
-        : "Storage upload failed, so the image was saved inline.",
+        : networkIssue
+          ? "Network is unavailable. The image was saved locally and will sync when you are online again."
+          : "Storage upload failed, so the image was saved inline.",
       QUESTION_IMAGE_UPLOAD_MAX_BYTES,
     );
     if (uploadFallback) {
@@ -4513,9 +4676,12 @@ async function uploadQuestionImageFile(file) {
     }
   }
 
+  const signedNetworkIssue = isLikelyNetworkFetchError(lastSignedError);
   const signedUrlFallback = await createInlineQuestionImageFallback(
     file,
-    "Image uploaded, but the app could not generate a secure link. The image was saved inline instead.",
+    signedNetworkIssue
+      ? "Cloud link generation failed due to a network issue. The image was saved locally and will sync when online."
+      : "Image uploaded, but the app could not generate a secure link. The image was saved inline instead.",
     QUESTION_IMAGE_UPLOAD_MAX_BYTES,
   );
   if (signedUrlFallback) {
@@ -4965,7 +5131,15 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     return;
   }
 
-  const questions = Array.isArray(questionsPayload) ? questionsPayload : [];
+  let questions = Array.isArray(questionsPayload) ? questionsPayload : [];
+  const promotedInlineImages = await promoteInlineQuestionImagesToStorage(questions, {
+    client,
+    bucket: SUPABASE_CONFIG.questionImageBucket,
+  });
+  if (promotedInlineImages.changed) {
+    questions = promotedInlineImages.questions;
+    saveLocalOnly(STORAGE_KEYS.questions, questions);
+  }
   const payloadExternalIds = [...new Set(
     questions
       .map((question) => String(question?.id || "").trim())
@@ -5136,6 +5310,8 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     const stableDbId =
       existingByExternalId[externalId]
       || crypto.randomUUID();
+    const questionImageValue = String(question.questionImage || "").trim();
+    const explanationImageValue = String(question.explanationImage || "").trim();
     upsertRows.push({
       id: stableDbId,
       external_id: externalId,
@@ -5145,11 +5321,11 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       stem: String(question.stem || "").trim(),
       explanation: String(question.explanation || "").trim() || "No explanation provided.",
       objective: String(question.objective || "").trim() || null,
-      ...(questionColumnSupport.questionImageUrl
-        ? { question_image_url: String(question.questionImage || "").trim() || null }
+      ...(questionColumnSupport.questionImageUrl && !isInlineImageDataUrl(questionImageValue)
+        ? { question_image_url: questionImageValue || null }
         : {}),
-      ...(questionColumnSupport.explanationImageUrl
-        ? { explanation_image_url: String(question.explanationImage || "").trim() || null }
+      ...(questionColumnSupport.explanationImageUrl && !isInlineImageDataUrl(explanationImageValue)
+        ? { explanation_image_url: explanationImageValue || null }
         : {}),
       ...(questionColumnSupport.sortOrder
         ? { sort_order: questionSortOrderByExternalId.get(externalId) || null }
@@ -5837,6 +6013,10 @@ function bindGlobalEvents() {
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
+  });
+
+  window.addEventListener("online", () => {
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
   });
 }
 
