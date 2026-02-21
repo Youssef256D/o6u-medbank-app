@@ -4,6 +4,8 @@ const STORAGE_KEYS = {
   questions: "mcq_questions",
   sessions: "mcq_sessions",
   notifications: "mcq_notifications",
+  notificationOutbox: "mcq_notification_outbox",
+  notificationReadSyncQueue: "mcq_notification_read_sync_queue",
   filterPresets: "mcq_filter_presets",
   incorrectQueue: "mcq_incorrect_queue",
   invites: "mcq_invites",
@@ -884,6 +886,8 @@ async function init() {
   }
   removeSessionStorageKey(BOOT_RECOVERY_FLAG);
   render();
+  flushPendingNotificationReadSync().catch(() => {});
+  flushPendingNotificationOutbox().catch(() => {});
 }
 
 function clearSupabaseBootstrapRetry() {
@@ -4061,6 +4065,8 @@ async function flushPendingSyncNow(options = {}) {
   if (supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
   }
+  await flushPendingNotificationReadSync().catch(() => {});
+  await flushPendingNotificationOutbox().catch(() => {});
   scheduleSyncStatusUiRefresh();
   if (relationalError && throwOnRelationalFailure) {
     throw relationalError;
@@ -5852,6 +5858,14 @@ function seedData() {
     save(STORAGE_KEYS.notifications, []);
   }
 
+  if (!load(STORAGE_KEYS.notificationOutbox, null)) {
+    saveLocalOnly(STORAGE_KEYS.notificationOutbox, []);
+  }
+
+  if (!load(STORAGE_KEYS.notificationReadSyncQueue, null)) {
+    saveLocalOnly(STORAGE_KEYS.notificationReadSyncQueue, {});
+  }
+
   if (!load(STORAGE_KEYS.filterPresets, null)) {
     save(STORAGE_KEYS.filterPresets, []);
   }
@@ -5910,7 +5924,9 @@ function bindGlobalEvents() {
         return;
       }
       const result = await markNotificationsReadForUser(user, [notificationId]);
-      if (result.syncWarning) {
+      if (result.syncDeferred) {
+        toast("Marked as read locally. Cloud sync is queued and will retry automatically.");
+      } else if (result.syncWarning) {
         toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
       }
       if (result.changed) {
@@ -5936,7 +5952,9 @@ function bindGlobalEvents() {
         return;
       }
       const result = await markNotificationsReadForUser(user, unreadNotificationIds);
-      if (result.syncWarning) {
+      if (result.syncDeferred) {
+        toast("Marked as read locally. Cloud sync is queued and will retry automatically.");
+      } else if (result.syncWarning) {
         toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
       }
       if (result.changed) {
@@ -8298,23 +8316,25 @@ function renderNotifications() {
 async function markNotificationsReadForUser(user, notificationIds) {
   const currentUser = user || getCurrentUser();
   if (!currentUser || currentUser.role !== "student") {
-    return { changed: false, syncWarning: "" };
+    return { changed: false, syncWarning: "", syncDeferred: false };
   }
   const result = markNotificationsReadLocallyForUser(currentUser, notificationIds);
   if (!result.changed) {
-    return { changed: false, syncWarning: "" };
+    return { changed: false, syncWarning: "", syncDeferred: false };
   }
   if (!result.syncedDbIds.length) {
-    return { changed: true, syncWarning: "" };
+    return { changed: true, syncWarning: "", syncDeferred: false };
   }
-  const syncResult = await syncNotificationReadsToRelational(currentUser, result.syncedDbIds);
-  if (!syncResult.ok) {
+  queueNotificationReadSync(currentUser, result.syncedDbIds);
+  const flushResult = await flushPendingNotificationReadSync({ user: currentUser });
+  if (!flushResult.ok) {
     return {
       changed: true,
-      syncWarning: syncResult.message || "Sync failed.",
+      syncWarning: flushResult.message || "Notification read sync is queued.",
+      syncDeferred: true,
     };
   }
-  return { changed: true, syncWarning: "" };
+  return { changed: true, syncWarning: "", syncDeferred: false };
 }
 
 function wireNotifications() {
@@ -8325,7 +8345,9 @@ function wireNotifications() {
 
   const markAsRead = async (notificationIds) => {
     const result = await markNotificationsReadForUser(user, notificationIds);
-    if (result.syncWarning) {
+    if (result.syncDeferred) {
+      toast("Marked as read locally. Cloud sync is queued and will retry automatically.");
+    } else if (result.syncWarning) {
       toast(`Marked as read locally, but cloud sync failed: ${result.syncWarning}`);
     }
     if (!result.changed) {
@@ -11290,6 +11312,14 @@ function wireAdmin() {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
+    if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+      const message = "You are offline. Showing locally cached admin data.";
+      state.adminDataSyncError = message;
+      toast(message);
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
     const authClient = getSupabaseAuthClient();
     const currentProfileId = String(getUserProfileId(currentUser) || "").trim();
     if (!authClient || !isUuidValue(currentProfileId)) {
@@ -11483,6 +11513,10 @@ function wireAdmin() {
       if (!currentUser || currentUser.role !== "admin") {
         return;
       }
+      if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+        toast("You are offline. Showing locally cached notifications.");
+        return;
+      }
       if (!isUuidValue(String(getUserProfileId(currentUser) || "").trim()) || !getRelationalClient()) {
         toast("No active Supabase admin session. Log out and sign in again.");
         return;
@@ -11543,19 +11577,6 @@ function wireAdmin() {
       const resolvedTargetUserId = targetType === "user"
         ? (selectedTargetProfileId || targetUserId)
         : "";
-      const canSyncRelational = isUuidValue(String(getUserProfileId(currentUser) || "").trim());
-      if (!canSyncRelational) {
-        toast("Cloud delivery requires an active Supabase admin session. Log out and sign in again.");
-        return;
-      }
-      let relationalReady = await ensureRelationalSyncReady();
-      if (!relationalReady) {
-        relationalReady = await ensureRelationalSyncReady({ force: true });
-      }
-      if (!relationalReady) {
-        toast(relationalSync.lastReadyError || "Cloud delivery is unavailable right now. Please try again.");
-        return;
-      }
       state.adminNotificationTargetType = targetType;
       state.adminNotificationTargetUserId = resolvedTargetUserId;
       state.adminNotificationTargetQuery = targetType === "user" ? targetUserQuery : "";
@@ -11582,6 +11603,7 @@ function wireAdmin() {
 
         const currentNotifications = getNotifications();
         saveNotificationsLocal([localNotification, ...currentNotifications]);
+        queueNotificationForCloudDelivery(localNotification);
       } catch (error) {
         state.adminNotificationSending = false;
         toast(`Could not send notification: ${getErrorMessage(error, "Unknown error.")}`);
@@ -11600,45 +11622,30 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
 
-      toast("Notification queued. Syncing to cloud...");
-
-      createRelationalNotification(localNotification, currentUser, notificationUsers)
-        .then((relationalResult) => {
-          if (relationalResult.ok && relationalResult.notification) {
-            const latestLocal = getNotifications().filter((entry) => entry.id !== localNotification.id);
-            saveNotificationsLocal([relationalResult.notification, ...latestLocal]);
-            scheduleNotificationRealtimeHydration(0);
-            if (state.route === "admin" && state.adminPage === "notifications") {
-              state.skipNextRouteAnimation = true;
-              render();
-            }
-            if (targetType === "user") {
-              const deliveredLabel = selectedTargetUser
-                ? getNotificationTargetSearchDisplayLabel(selectedTargetUser)
-                : "selected user";
-              toast(`Notification delivered to ${deliveredLabel}.`);
-            } else {
-              toast("Notification delivered.");
-            }
-            return;
-          }
-          const localWithoutFailed = getNotifications().filter((entry) => entry.id !== localNotification.id);
-          saveNotificationsLocal(localWithoutFailed);
-          if (state.route === "admin" && state.adminPage === "notifications") {
-            state.skipNextRouteAnimation = true;
-            render();
-          }
-          toast(`Notification was not delivered: ${relationalResult.message || "Cloud sync failed."}`);
-        })
-        .catch((error) => {
-          const localWithoutFailed = getNotifications().filter((entry) => entry.id !== localNotification.id);
-          saveNotificationsLocal(localWithoutFailed);
-          if (state.route === "admin" && state.adminPage === "notifications") {
-            state.skipNextRouteAnimation = true;
-            render();
-          }
-          toast(`Notification was not delivered: ${getErrorMessage(error, "Cloud sync failed.")}`);
-        });
+      const deliveryResult = await flushPendingNotificationOutbox({
+        user: currentUser,
+        users: notificationUsers,
+        targetNotificationIds: [localNotification.id],
+      });
+      const deliveredNow = deliveryResult.deliveredIds.includes(String(localNotification.id || "").trim());
+      if (deliveredNow) {
+        if (targetType === "user") {
+          const deliveredLabel = selectedTargetUser
+            ? getNotificationTargetSearchDisplayLabel(selectedTargetUser)
+            : "selected user";
+          toast(`Notification delivered to ${deliveredLabel}.`);
+        } else {
+          toast("Notification delivered.");
+        }
+      } else if (deliveryResult.message) {
+        toast(`Notification saved locally. Cloud delivery queued: ${deliveryResult.message}`);
+      } else {
+        toast("Notification saved locally. Cloud delivery is queued and will retry automatically.");
+      }
+      if (state.route === "admin" && state.adminPage === "notifications") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
     });
   }
 
@@ -13423,6 +13430,234 @@ function getNotifications() {
 
 function saveNotificationsLocal(notifications) {
   saveLocalOnly(STORAGE_KEYS.notifications, normalizeNotificationCollection(notifications));
+}
+
+function getPendingNotificationOutbox() {
+  return normalizeNotificationCollection(load(STORAGE_KEYS.notificationOutbox, []));
+}
+
+function savePendingNotificationOutbox(entries) {
+  saveLocalOnly(STORAGE_KEYS.notificationOutbox, normalizeNotificationCollection(entries));
+}
+
+function queueNotificationForCloudDelivery(notification) {
+  const normalized = normalizeNotificationRecord(notification);
+  if (!normalized) {
+    return false;
+  }
+  const currentQueue = getPendingNotificationOutbox();
+  const nextQueue = [normalized, ...currentQueue.filter((entry) => String(entry?.id || "").trim() !== normalized.id)];
+  savePendingNotificationOutbox(nextQueue);
+  return true;
+}
+
+function normalizeNotificationReadSyncQueue(queuePayload) {
+  const source = queuePayload && typeof queuePayload === "object" && !Array.isArray(queuePayload)
+    ? queuePayload
+    : {};
+  const normalized = {};
+  Object.entries(source).forEach(([profileId, ids]) => {
+    const profileKey = String(profileId || "").trim();
+    if (!isUuidValue(profileKey)) {
+      return;
+    }
+    const idList = [...new Set(
+      (Array.isArray(ids) ? ids : [])
+        .map((id) => String(id || "").trim())
+        .filter((id) => isUuidValue(id)),
+    )];
+    if (idList.length) {
+      normalized[profileKey] = idList;
+    }
+  });
+  return normalized;
+}
+
+function getPendingNotificationReadSyncQueue() {
+  return normalizeNotificationReadSyncQueue(load(STORAGE_KEYS.notificationReadSyncQueue, {}));
+}
+
+function savePendingNotificationReadSyncQueue(queuePayload) {
+  saveLocalOnly(
+    STORAGE_KEYS.notificationReadSyncQueue,
+    normalizeNotificationReadSyncQueue(queuePayload),
+  );
+}
+
+function queueNotificationReadSync(user, notificationDbIds) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!isUuidValue(profileId)) {
+    return 0;
+  }
+  const ids = [...new Set(
+    (Array.isArray(notificationDbIds) ? notificationDbIds : [])
+      .map((id) => String(id || "").trim())
+      .filter((id) => isUuidValue(id)),
+  )];
+  if (!ids.length) {
+    return 0;
+  }
+
+  const queue = getPendingNotificationReadSyncQueue();
+  const existing = new Set(Array.isArray(queue[profileId]) ? queue[profileId] : []);
+  const beforeSize = existing.size;
+  ids.forEach((id) => existing.add(id));
+  queue[profileId] = [...existing];
+  savePendingNotificationReadSyncQueue(queue);
+  return Math.max(0, existing.size - beforeSize);
+}
+
+async function flushPendingNotificationReadSync(options = {}) {
+  const currentUser = options?.user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return { ok: false, deferred: true, syncedCount: 0, message: "No active student session for notification read sync." };
+  }
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!isUuidValue(profileId)) {
+    return { ok: false, deferred: true, syncedCount: 0, message: "No active Supabase profile for notification read sync." };
+  }
+
+  const queue = getPendingNotificationReadSyncQueue();
+  const pendingIds = [...new Set(
+    (Array.isArray(queue[profileId]) ? queue[profileId] : [])
+      .map((id) => String(id || "").trim())
+      .filter((id) => isUuidValue(id)),
+  )];
+  if (!pendingIds.length) {
+    return { ok: true, deferred: false, syncedCount: 0, message: "" };
+  }
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return { ok: false, deferred: true, syncedCount: 0, message: "You are offline. Notification read sync is queued." };
+  }
+
+  const syncResult = await syncNotificationReadsToRelational(currentUser, pendingIds);
+  if (!syncResult.ok) {
+    return {
+      ok: false,
+      deferred: true,
+      syncedCount: 0,
+      message: syncResult.message || "Could not sync notification read state.",
+    };
+  }
+
+  delete queue[profileId];
+  savePendingNotificationReadSyncQueue(queue);
+  return { ok: true, deferred: false, syncedCount: pendingIds.length, message: "" };
+}
+
+function upsertLocalNotificationFromCloud(notification) {
+  const mapped = normalizeNotificationRecord(notification);
+  if (!mapped) {
+    return;
+  }
+  const existingNotifications = getNotifications();
+  const existingById = existingNotifications.find((entry) => String(entry?.id || "").trim() === mapped.id);
+  const existingByDbId = isUuidValue(mapped.dbId)
+    ? existingNotifications.find((entry) => String(entry?.dbId || "").trim() === mapped.dbId)
+    : null;
+  const existing = existingById || existingByDbId || null;
+  const mergedReadBy = [...new Set([
+    ...(Array.isArray(existing?.readByUserIds) ? existing.readByUserIds : []),
+    ...(Array.isArray(mapped.readByUserIds) ? mapped.readByUserIds : []),
+  ])];
+  const nextNotification = {
+    ...mapped,
+    readByUserIds: mergedReadBy,
+  };
+  const nextNotifications = [
+    nextNotification,
+    ...existingNotifications.filter((entry) => {
+      const sameExternalId = String(entry?.id || "").trim() === mapped.id;
+      const sameDbId = isUuidValue(mapped.dbId) && String(entry?.dbId || "").trim() === mapped.dbId;
+      return !sameExternalId && !sameDbId;
+    }),
+  ];
+  saveNotificationsLocal(nextNotifications);
+}
+
+async function flushPendingNotificationOutbox(options = {}) {
+  const allQueued = getPendingNotificationOutbox();
+  if (!allQueued.length) {
+    return { ok: true, deferred: false, syncedCount: 0, deliveredIds: [], message: "" };
+  }
+
+  const targetIdSet = new Set(
+    (Array.isArray(options?.targetNotificationIds) ? options.targetNotificationIds : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  );
+  const shouldFilterTargets = targetIdSet.size > 0;
+  const queueToAttempt = shouldFilterTargets
+    ? allQueued.filter((entry) => targetIdSet.has(String(entry?.id || "").trim()))
+    : allQueued;
+  if (!queueToAttempt.length) {
+    return { ok: true, deferred: false, syncedCount: 0, deliveredIds: [], message: "" };
+  }
+
+  const currentUser = options?.user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return { ok: false, deferred: true, syncedCount: 0, deliveredIds: [], message: "No active admin session for notification delivery." };
+  }
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return { ok: false, deferred: true, syncedCount: 0, deliveredIds: [], message: "You are offline. Notification delivery is queued." };
+  }
+
+  const notificationUsers = Array.isArray(options?.users)
+    ? options.users
+    : getCloudNotificationTargetUsers(getUsers());
+  const deliveredIds = [];
+  let firstFailureMessage = "";
+  const shouldKeepEntry = new Set();
+
+  for (const queuedNotification of queueToAttempt) {
+    const queuedId = String(queuedNotification?.id || "").trim();
+    if (!queuedId) {
+      continue;
+    }
+
+    const result = await createRelationalNotification(queuedNotification, currentUser, notificationUsers);
+    if (result.ok && result.notification) {
+      upsertLocalNotificationFromCloud(result.notification);
+      deliveredIds.push(queuedId);
+      continue;
+    }
+    shouldKeepEntry.add(queuedId);
+    if (!firstFailureMessage) {
+      firstFailureMessage = String(result?.message || "Cloud delivery failed.").trim();
+    }
+  }
+
+  const nextOutbox = allQueued.filter((entry) => {
+    const queuedId = String(entry?.id || "").trim();
+    if (!queuedId) {
+      return false;
+    }
+    if (deliveredIds.includes(queuedId)) {
+      return false;
+    }
+    if (!shouldFilterTargets) {
+      return true;
+    }
+    if (!targetIdSet.has(queuedId)) {
+      return true;
+    }
+    return shouldKeepEntry.has(queuedId);
+  });
+  savePendingNotificationOutbox(nextOutbox);
+
+  if (deliveredIds.length) {
+    scheduleNotificationRealtimeHydration(0);
+  }
+
+  const failedCount = queueToAttempt.length - deliveredIds.length;
+  return {
+    ok: failedCount === 0,
+    deferred: failedCount > 0,
+    syncedCount: deliveredIds.length,
+    deliveredIds,
+    message: failedCount > 0 ? (firstFailureMessage || "Cloud delivery is queued and will retry automatically.") : "",
+  };
 }
 
 function getNotificationIdentityListForUser(user) {
