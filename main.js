@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.2").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -1762,13 +1762,43 @@ function shouldAutoApproveStudentAccess(user) {
   return hasCompleteStudentProfile(user);
 }
 
-function getUserCreatedAtMs(user) {
-  const rawCreatedAt = String(user?.createdAt || "").trim();
-  if (!rawCreatedAt) {
+function parseTimestampMs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
     return 0;
   }
-  const parsed = Date.parse(rawCreatedAt);
-  return Number.isFinite(parsed) ? parsed : 0;
+  const directParsed = Date.parse(raw);
+  if (Number.isFinite(directParsed)) {
+    return directParsed;
+  }
+
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?([+-]\d{2}(?::?\d{2})?|Z)?$/i);
+  if (!match) {
+    return 0;
+  }
+
+  const datePart = match[1];
+  const timePart = match[2];
+  const fractionPart = match[3] || "";
+  const timezonePart = String(match[4] || "Z").toUpperCase();
+  const milliseconds = fractionPart ? `.${fractionPart.slice(1, 4).padEnd(3, "0")}` : "";
+
+  let normalizedTimezone = timezonePart;
+  if (normalizedTimezone !== "Z") {
+    if (/^[+-]\d{2}$/.test(normalizedTimezone)) {
+      normalizedTimezone = `${normalizedTimezone}:00`;
+    } else if (/^[+-]\d{4}$/.test(normalizedTimezone)) {
+      normalizedTimezone = `${normalizedTimezone.slice(0, 3)}:${normalizedTimezone.slice(3)}`;
+    }
+  }
+
+  const normalized = `${datePart}T${timePart}${milliseconds}${normalizedTimezone}`;
+  const normalizedParsed = Date.parse(normalized);
+  return Number.isFinite(normalizedParsed) ? normalizedParsed : 0;
+}
+
+function getUserCreatedAtMs(user) {
+  return parseTimestampMs(user?.createdAt || user?.created_at || "");
 }
 
 function isStudentProfileCompletionRequired(user) {
@@ -1894,11 +1924,15 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   let nextCourses;
   if (nextRole === "student") {
     const overrideCourses = Array.isArray(profileOverrides.assignedCourses) ? profileOverrides.assignedCourses : [];
+    const metadataCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
+      ? authUser.user_metadata.assigned_courses
+      : (Array.isArray(authUser?.user_metadata?.assignedCourses) ? authUser.user_metadata.assignedCourses : []);
+    const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
     const requestedCourses = overrideCourses.length
       ? overrideCourses
-      : Array.isArray(previous?.assignedCourses)
-        ? previous.assignedCourses
-        : [];
+      : previousCourses.length
+        ? previousCourses
+        : metadataCourses;
     if (nextYear !== null && nextSemester !== null) {
       const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
       nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
@@ -2690,7 +2724,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
 
     const courseIds = [...new Set(enrollmentRows.map((row) => String(row?.course_id || "").trim()).filter(isUuidValue))];
     if (!courseIds.length) {
-      return enrollmentMap;
+      return { coursesByUser: enrollmentMap, termByUser: {} };
     }
 
     const courseRows = [];
@@ -14501,6 +14535,19 @@ function normalizeStudentEnrollmentProfile(user) {
   let year = normalizeAcademicYearOrNull(source.academicYear);
   let semester = normalizeAcademicSemesterOrNull(source.academicSemester);
 
+  // If stored term conflicts with assigned courses, recover term from assigned courses instead of dropping data.
+  if (year !== null && semester !== null && normalizedAssigned.length) {
+    const currentTermCourses = getCurriculumCourses(year, semester);
+    const scopedToCurrentTerm = normalizedAssigned.filter((course) => currentTermCourses.includes(course));
+    if (!scopedToCurrentTerm.length) {
+      const inferredFromAssigned = inferAcademicTermFromCourses(normalizedAssigned);
+      if (inferredFromAssigned.year !== null && inferredFromAssigned.semester !== null) {
+        year = inferredFromAssigned.year;
+        semester = inferredFromAssigned.semester;
+      }
+    }
+  }
+
   if (year === null || semester === null) {
     const inferred = inferAcademicTermFromCourses(normalizedAssigned);
     if (year === null && inferred.year !== null) {
@@ -14512,9 +14559,11 @@ function normalizeStudentEnrollmentProfile(user) {
   }
 
   if (year === null || semester === null) {
-    const fallback = getFallbackEnrollmentTerm();
-    year = year ?? fallback.year;
-    semester = semester ?? fallback.semester;
+    return {
+      academicYear: year,
+      academicSemester: semester,
+      assignedCourses: normalizedAssigned,
+    };
   }
 
   const semesterCourses = getCurriculumCourses(year, semester);
@@ -14523,7 +14572,7 @@ function normalizeStudentEnrollmentProfile(user) {
     return {
       academicYear: year,
       academicSemester: semester,
-      assignedCourses: scopedAssigned.length ? scopedAssigned : semesterCourses,
+      assignedCourses: scopedAssigned.length ? scopedAssigned : (normalizedAssigned.length ? normalizedAssigned : semesterCourses),
     };
   }
 
@@ -14548,15 +14597,19 @@ function getAvailableCoursesForUser(user) {
     return all;
   }
   if (user.role === "student") {
-    const byEnrollment = getCurriculumCourses(user.academicYear || 1, user.academicSemester || 1);
+    const year = normalizeAcademicYearOrNull(user.academicYear);
+    const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
+    const byEnrollment = year !== null && semester !== null
+      ? getCurriculumCourses(year, semester)
+      : [];
     const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
-    const scoped = assigned.filter((course) => byEnrollment.includes(course));
-    if (scoped.length) {
-      return scoped;
+    if (assigned.length && byEnrollment.length) {
+      const scoped = assigned.filter((course) => byEnrollment.includes(course));
+      return scoped.length ? scoped : assigned;
     }
-    if (byEnrollment.length) {
-      return byEnrollment;
-    }
+    if (assigned.length) return assigned;
+    if (byEnrollment.length) return byEnrollment;
+    return [];
   }
   const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
   return assigned.length ? assigned : all;
