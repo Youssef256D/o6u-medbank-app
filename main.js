@@ -16,6 +16,8 @@ const STORAGE_KEYS = {
   courseTopics: "mcq_course_topics",
   appVersionSeen: "mcq_app_version_seen",
   appVersionForced: "mcq_app_version_forced",
+  studentRefreshTrigger: "mcq_student_refresh_trigger",
+  studentRefreshTriggerSeen: "mcq_student_refresh_trigger_seen",
 };
 
 const appEl = document.getElementById("app");
@@ -26,7 +28,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.6").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -148,6 +150,7 @@ const state = {
   adminDataRefreshing: false,
   adminDataLastSyncAt: 0,
   adminDataSyncError: "",
+  adminForceRefreshRunning: false,
   adminPresenceRows: [],
   adminPresenceLoading: false,
   adminPresenceError: "",
@@ -210,6 +213,7 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.flashcards,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.studentRefreshTrigger,
 ];
 
 const USER_SCOPED_SYNC_KEYS = [STORAGE_KEYS.sessions, STORAGE_KEYS.incorrectQueue, STORAGE_KEYS.flashcards];
@@ -806,6 +810,41 @@ async function shouldForceRefreshAfterSignIn() {
   return Boolean(outcome?.shouldRefresh);
 }
 
+function getStudentRefreshTriggerToken() {
+  const payload = load(STORAGE_KEYS.studentRefreshTrigger, null);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "";
+  }
+  return String(payload.token || "").trim();
+}
+
+function shouldForceStudentRefreshFromAdminTrigger(user = null) {
+  const current = user || getCurrentUser();
+  if (!current || current.role !== "student") {
+    return false;
+  }
+  const token = getStudentRefreshTriggerToken();
+  if (!token) {
+    return false;
+  }
+  const seenToken = String(load(STORAGE_KEYS.studentRefreshTriggerSeen, "") || "").trim();
+  if (seenToken === token) {
+    return false;
+  }
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, token);
+  const nextUrl = new URL(window.location.href);
+  nextUrl.searchParams.set("student_refresh", token);
+  window.location.replace(nextUrl.toString());
+  return true;
+}
+
+async function shouldForceRefreshForUpdates(user = null) {
+  if (await shouldForceRefreshAfterSignIn()) {
+    return true;
+  }
+  return shouldForceStudentRefreshFromAdminTrigger(user);
+}
+
 function resolveInitialRoute() {
   const persisted = String(readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
   if (KNOWN_ROUTES.has(persisted)) {
@@ -872,6 +911,9 @@ async function init() {
     syncBootstrap = await initSupabaseSync();
   } catch (error) {
     console.warn("Supabase sync bootstrap failed.", error?.message || error);
+  }
+  if (shouldForceStudentRefreshFromAdminTrigger()) {
+    return;
   }
 
   try {
@@ -1283,7 +1325,7 @@ async function initSupabaseAuth() {
         }
         return;
       } else if (localUser) {
-        if (await shouldForceRefreshAfterSignIn()) {
+        if (await shouldForceRefreshForUpdates(localUser)) {
           return;
         }
         await hydrateRelationalState(localUser).catch((hydrateError) => {
@@ -1350,7 +1392,7 @@ async function initSupabaseAuth() {
           render();
           return;
         }
-        if (event === "SIGNED_IN" && (await shouldForceRefreshAfterSignIn())) {
+        if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
           return;
         }
         if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
@@ -1401,6 +1443,7 @@ async function initSupabaseAuth() {
         state.adminDataRefreshing = false;
         state.adminDataLastSyncAt = 0;
         state.adminDataSyncError = "";
+        state.adminForceRefreshRunning = false;
         state.adminPresenceLoading = false;
         state.adminPresenceError = "";
         state.adminPresenceRows = [];
@@ -6715,6 +6758,7 @@ function render() {
     state.adminDataRefreshing = false;
     state.adminDataLastSyncAt = 0;
     state.adminDataSyncError = "";
+    state.adminForceRefreshRunning = false;
     state.adminPresenceLoading = false;
     state.adminPresenceError = "";
     state.adminPresenceRows = [];
@@ -7648,7 +7692,7 @@ function wireAuth(mode) {
               toast("Your account is pending admin approval.");
               return;
             }
-            if (await shouldForceRefreshAfterSignIn()) {
+            if (await shouldForceRefreshForUpdates(user)) {
               return;
             }
             navigate(user.role === "admin" ? "admin" : "dashboard");
@@ -7667,7 +7711,7 @@ function wireAuth(mode) {
               toast("Your account is pending admin approval.");
               return;
             }
-            if (await shouldForceRefreshAfterSignIn()) {
+            if (await shouldForceRefreshForUpdates(localDemoUser)) {
               return;
             }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
@@ -7702,7 +7746,7 @@ function wireAuth(mode) {
           toast("Your account is pending admin approval.");
           return;
         }
-        if (await shouldForceRefreshAfterSignIn()) {
+        if (await shouldForceRefreshForUpdates(user)) {
           return;
         }
         save(STORAGE_KEYS.currentUserId, user.id);
@@ -11198,7 +11242,12 @@ function renderAdmin() {
     ? new Date(state.adminDataLastSyncAt).toLocaleTimeString()
     : "Not yet";
   const adminSyncBusy = Boolean(state.adminDataRefreshing);
+  const adminForceRefreshBusy = Boolean(state.adminForceRefreshRunning);
   const canManualSupabaseSync = Boolean(getSupabaseAuthClient()) && isUuidValue(getUserProfileId(user));
+  const canForceStudentRefresh = canManualSupabaseSync && supabaseSync.enabled;
+  const studentRefreshTrigger = load(STORAGE_KEYS.studentRefreshTrigger, null);
+  const lastStudentRefreshAt = String(studentRefreshTrigger?.requestedAt || "").trim();
+  const lastStudentRefreshLabel = lastStudentRefreshAt ? new Date(lastStudentRefreshAt).toLocaleString() : "Not yet";
   const cloudSyncModel = getCloudSyncStatusModel(user);
 
   return `
@@ -11220,6 +11269,11 @@ function renderAdmin() {
           <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy || !canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
             ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh from cloud"}
           </button>
+          <button class="btn ghost admin-btn-sm ${adminForceRefreshBusy ? "is-loading" : ""}" type="button" data-action="admin-force-student-refresh" ${adminForceRefreshBusy || !canForceStudentRefresh ? "disabled" : ""} ${!canForceStudentRefresh ? 'title="Supabase app-state sync must be active to broadcast this action."' : ""}>
+            ${adminForceRefreshBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Sending refresh signal...</span>` : "Force student refresh"}
+          </button>
+          <small class="subtle">Students will auto-reload once on their next open/sign-in.</small>
+          <small class="subtle">Last forced student refresh: <b>${escapeHtml(lastStudentRefreshLabel)}</b></small>
           <small class="subtle">Edits save locally first, then sync automatically in the background.</small>
           ${!canManualSupabaseSync ? '<small class="subtle">Supabase sync requires an active Supabase admin session.</small>' : ""}
         </div>
@@ -11365,6 +11419,64 @@ function wireAdmin() {
     }
     state.skipNextRouteAnimation = true;
     render();
+  });
+
+  appEl.querySelector("[data-action='admin-force-student-refresh']")?.addEventListener("click", async () => {
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin" || state.adminForceRefreshRunning) {
+      return;
+    }
+    if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+      toast("You are offline. Connect to the internet to send a refresh signal.");
+      return;
+    }
+    const authClient = getSupabaseAuthClient();
+    const currentProfileId = String(getUserProfileId(currentUser) || "").trim();
+    if (!authClient || !isUuidValue(currentProfileId)) {
+      toast("No active Supabase admin session. Log out and sign in with your Supabase admin account.");
+      return;
+    }
+    if (!supabaseSync.enabled) {
+      toast("Cloud app-state sync is unavailable right now. Try Refresh from cloud first.");
+      return;
+    }
+    const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
+      toast("Supabase session expired. Please log out and sign in again.");
+      return;
+    }
+
+    state.adminForceRefreshRunning = true;
+    state.skipNextRouteAnimation = true;
+    render();
+
+    try {
+      const triggerPayload = {
+        token: makeId("student_refresh"),
+        requestedAt: nowISO(),
+        requestedById: currentProfileId,
+        requestedBy: String(currentUser.name || currentUser.email || "Admin").trim() || "Admin",
+      };
+      save(STORAGE_KEYS.studentRefreshTrigger, triggerPayload);
+      await flushPendingSyncNow({ throwOnRelationalFailure: false });
+      const remoteKey = buildRemoteSyncKey(STORAGE_KEYS.studentRefreshTrigger, getSyncScopeForUser(currentUser));
+      const deferred = supabaseSync.pendingWrites.has(remoteKey);
+      state.adminDataLastSyncAt = Date.now();
+      state.adminDataSyncError = "";
+      if (deferred) {
+        toast("Refresh signal queued locally and will sync to cloud automatically.");
+      } else {
+        toast("Refresh signal sent. Students will reload once on their next open/sign-in.");
+      }
+    } catch (error) {
+      const message = getErrorMessage(error, "Could not send refresh signal.");
+      state.adminDataSyncError = message;
+      toast(message);
+    } finally {
+      state.adminForceRefreshRunning = false;
+      state.skipNextRouteAnimation = true;
+      render();
+    }
   });
 
   if (state.adminPage === "activity") {
@@ -16442,7 +16554,7 @@ async function loginAsDemo(email, password) {
     toast("This account is pending admin approval.");
     return;
   }
-  if (await shouldForceRefreshAfterSignIn()) {
+  if (await shouldForceRefreshForUpdates(user)) {
     return;
   }
 
