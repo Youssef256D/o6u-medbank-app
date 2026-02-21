@@ -1539,6 +1539,41 @@ body.is-routing .card {
   box-shadow: none;
 }
 
+#admin-notification-form {
+  margin-top: 0.8rem;
+}
+
+#admin-notification-form .admin-notification-target-row {
+  align-items: start;
+}
+
+#admin-notification-form .admin-notification-target-type-field.is-full-width {
+  grid-column: 1 / -1;
+}
+
+#admin-notification-form .admin-notification-target-user-field {
+  grid-column: 1 / -1;
+}
+
+#admin-notification-form .admin-notification-target-year-field.is-hidden,
+#admin-notification-form .admin-notification-target-user-field.is-hidden {
+  display: none !important;
+}
+
+#admin-notification-form .admin-target-user-combobox {
+  position: relative;
+}
+
+#admin-notification-form .admin-target-user-combobox .admin-user-suggestions {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  right: 0;
+  margin-top: 0;
+  z-index: 35;
+  box-shadow: 0 12px 28px rgba(10, 24, 39, 0.16);
+}
+
 .admin-user-suggestions {
   margin-top: 0.35rem;
   border: 1px solid var(--line);

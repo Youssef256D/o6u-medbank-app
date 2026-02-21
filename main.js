@@ -11160,16 +11160,16 @@ function renderAdmin() {
           </div>
         </div>
 
-        <form id="admin-notification-form" style="margin-top: 0.8rem;">
-          <div class="form-row">
-            <label>Audience
+        <form id="admin-notification-form">
+          <div class="form-row admin-notification-target-row">
+            <label class="admin-notification-target-type-field ${targetType === "year" ? "" : "is-full-width"}" id="admin-notification-target-type-field-wrap">Audience
               <select name="targetType" id="admin-notification-target-type" ${notificationSending ? "disabled" : ""}>
                 <option value="all" ${targetType === "all" ? "selected" : ""}>All users</option>
                 <option value="year" ${targetType === "year" ? "selected" : ""}>Year group</option>
                 <option value="user" ${targetType === "user" ? "selected" : ""}>Specific user</option>
               </select>
             </label>
-            <label>Target year
+            <label class="admin-notification-target-year-field" id="admin-notification-target-year-field" ${targetType === "year" ? "" : "hidden"}>Target year
               <select name="targetYear" id="admin-notification-target-year" ${targetType === "year" ? "" : "disabled"} ${notificationSending ? "disabled" : ""}>
                 ${[1, 2, 3, 4, 5]
                   .map((yearValue) => `<option value="${yearValue}" ${targetYear === yearValue ? "selected" : ""}>${escapeHtml(formatAcademicYearAudienceLabel(yearValue))}</option>`)
@@ -11177,49 +11177,51 @@ function renderAdmin() {
               </select>
               <small class="subtle">Year groups include approved student accounts only.</small>
             </label>
-            <label>Target user
+            <label class="admin-notification-target-user-field" id="admin-notification-target-user-field" ${targetType === "user" ? "" : "hidden"}>Target user
               <input type="hidden" name="targetUserId" id="admin-notification-target-user-id" value="${escapeHtml(targetUserId)}" />
-              <input
-                type="search"
-                id="admin-notification-target-user-search"
-                name="targetUserQuery"
-                value="${escapeHtml(targetUserQuery)}"
-                placeholder="Type name or email..."
-                autocomplete="off"
-                spellcheck="false"
-                ${targetType === "user" ? "" : "disabled"}
-                ${notificationSending ? "disabled" : ""}
-              />
-              <div
-                class="admin-user-suggestions"
-                id="admin-notification-target-suggestions"
-                ${targetType === "user" && targetUserSuggestions.length ? "" : "hidden"}
-                role="listbox"
-                aria-label="User suggestions"
-              >
-                ${targetUserSuggestions
-                  .map((entry) => {
-                    const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
-                    if (!userId) {
-                      return "";
-                    }
-                    const roleLabel = entry.role === "admin" ? "admin" : "student";
-                    const selected = targetUserId === userId;
-                    return `
-                      <button
-                        type="button"
-                        class="admin-user-suggestion${selected ? " is-active" : ""}"
-                        data-action="admin-notification-pick-user"
-                        data-user-id="${escapeHtml(userId)}"
-                        role="option"
-                        aria-selected="${selected ? "true" : "false"}"
-                      >
-                        <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
-                        <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
-                      </button>
-                    `;
-                  })
-                  .join("")}
+              <div class="admin-target-user-combobox">
+                <input
+                  type="search"
+                  id="admin-notification-target-user-search"
+                  name="targetUserQuery"
+                  value="${escapeHtml(targetUserQuery)}"
+                  placeholder="Type name or email..."
+                  autocomplete="off"
+                  spellcheck="false"
+                  ${targetType === "user" ? "" : "disabled"}
+                  ${notificationSending ? "disabled" : ""}
+                />
+                <div
+                  class="admin-user-suggestions"
+                  id="admin-notification-target-suggestions"
+                  ${targetType === "user" && targetUserSuggestions.length ? "" : "hidden"}
+                  role="listbox"
+                  aria-label="User suggestions"
+                >
+                  ${targetUserSuggestions
+                    .map((entry) => {
+                      const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
+                      if (!userId) {
+                        return "";
+                      }
+                      const roleLabel = entry.role === "admin" ? "admin" : "student";
+                      const selected = targetUserId === userId;
+                      return `
+                        <button
+                          type="button"
+                          class="admin-user-suggestion${selected ? " is-active" : ""}"
+                          data-action="admin-notification-pick-user"
+                          data-user-id="${escapeHtml(userId)}"
+                          role="option"
+                          aria-selected="${selected ? "true" : "false"}"
+                        >
+                          <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
+                          <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
+                        </button>
+                      `;
+                    })
+                    .join("")}
+                </div>
               </div>
               <small class="subtle">Type a name or email, then choose a suggestion.</small>
             </label>
@@ -11603,10 +11605,13 @@ function wireAdmin() {
   if (state.adminPage === "notifications") {
     const notificationForm = document.getElementById("admin-notification-form");
     const targetTypeSelect = document.getElementById("admin-notification-target-type");
+    const targetTypeField = document.getElementById("admin-notification-target-type-field-wrap");
     const targetYearSelect = document.getElementById("admin-notification-target-year");
+    const targetYearField = document.getElementById("admin-notification-target-year-field");
     const targetUserIdInput = document.getElementById("admin-notification-target-user-id");
     const targetUserSearchInput = document.getElementById("admin-notification-target-user-search");
     const targetUserSuggestions = document.getElementById("admin-notification-target-suggestions");
+    const targetUserField = document.getElementById("admin-notification-target-user-field");
     const notificationUsers = getCloudNotificationTargetUsers(getUsers())
       .slice()
       .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
@@ -11680,6 +11685,19 @@ function wireAdmin() {
       if (state.adminNotificationTargetType !== targetType) {
         state.adminNotificationTargetType = targetType;
       }
+      if (targetTypeField) {
+        targetTypeField.classList.toggle("is-full-width", targetType !== "year");
+      }
+      if (targetYearField) {
+        const showTargetYear = targetType === "year";
+        targetYearField.hidden = !showTargetYear;
+        targetYearField.classList.toggle("is-hidden", !showTargetYear);
+      }
+      if (targetUserField) {
+        const showTargetUser = targetType === "user";
+        targetUserField.hidden = !showTargetUser;
+        targetUserField.classList.toggle("is-hidden", !showTargetUser);
+      }
       const targetYear = normalizeAcademicYearOrNull(targetYearSelect?.value) ?? 1;
       state.adminNotificationTargetYear = targetYear;
       if (targetYearSelect) {
@@ -11724,6 +11742,14 @@ function wireAdmin() {
     targetUserSearchInput?.addEventListener("focus", () => {
       renderNotificationTargetSuggestions();
     });
+    targetUserSearchInput?.addEventListener("blur", () => {
+      window.setTimeout(() => {
+        if (!targetUserSuggestions) {
+          return;
+        }
+        targetUserSuggestions.hidden = true;
+      }, 120);
+    });
     targetUserSuggestions?.addEventListener("mousedown", (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
@@ -11740,6 +11766,7 @@ function wireAdmin() {
       }
       updateSelectedTargetUser(pickedUserId, { updateSearch: true });
       renderNotificationTargetSuggestions();
+      targetUserSuggestions.hidden = true;
     });
     syncNotificationAudienceUi();
 
