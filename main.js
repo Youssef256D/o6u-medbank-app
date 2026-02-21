@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -6732,8 +6732,6 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
   const listMarkup = notifications.map((notification) => {
     const isRead = isNotificationReadByUser(notification, user);
     const title = String(notification.title || "Notification").trim() || "Notification";
-    const senderLabel = String(notification.createdByName || "Admin").trim() || "Admin";
-    const createdLabel = new Date(notification.createdAt || nowISO()).toLocaleString();
     const bodyText = String(notification.body || "").trim();
     const bodyPreview = bodyText.length > 110 ? `${bodyText.slice(0, 107)}...` : bodyText;
     const safeNotificationId = escapeHtml(notification.id);
@@ -6742,7 +6740,6 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
         <div class="notification-menu-item-top">
           <div class="notification-menu-item-copy">
             <p class="notification-menu-item-title">${escapeHtml(title)}</p>
-            <p class="notification-menu-item-meta">${escapeHtml(senderLabel)} • ${escapeHtml(createdLabel)}</p>
           </div>
           ${
             isRead
@@ -8048,8 +8045,6 @@ function renderNotifications() {
     .map((notification) => {
       const isRead = isNotificationReadByUser(notification, user);
       const bodyHtml = escapeHtml(notification.body || "").replaceAll("\n", "<br />");
-      const senderLabel = String(notification.createdByName || "Admin").trim() || "Admin";
-      const createdLabel = new Date(notification.createdAt || nowISO()).toLocaleString();
       return `
         <article class="card notification-card ${isRead ? "is-read" : "is-unread"}" data-notification-id="${escapeHtml(notification.id)}">
           <div class="flex-between">
@@ -8057,7 +8052,6 @@ function renderNotifications() {
             <span class="badge ${isRead ? "neutral" : "good"}">${isRead ? "Read" : "New"}</span>
           </div>
           <p class="notification-card-body">${bodyHtml || "-"}</p>
-          <p class="subtle" style="margin: 0.45rem 0 0;">From ${escapeHtml(senderLabel)} • ${escapeHtml(createdLabel)}</p>
           ${
             isRead
               ? ""
