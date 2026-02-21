@@ -10400,8 +10400,8 @@ function renderAdminBulkImportSection(allCourses, options = {}) {
           <input type="checkbox" name="importAsDraft" ${importAsDraft ? "checked" : ""} />
           <span>Save all imported questions as draft (hide from students)</span>
         </label>
-        <label>Upload file
-          <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" />
+        <label>Upload file(s)
+          <input type="file" id="admin-import-file" accept=".csv,.json,text/csv,application/json" multiple />
         </label>
         <label>Paste CSV rows or JSON array
           <textarea id="admin-import-text" name="importText" placeholder='CSV headers example: stem,choiceA,choiceB,choiceC,choiceD,choiceE,correct,explanation,course,topic,system,difficulty,status,tags,questionImage,explanationImage'>${escapeHtml(importDraft)}</textarea>
@@ -13169,6 +13169,11 @@ function wireAdmin() {
     });
   }
 
+  const isSupportedBulkImportFile = (file) => {
+    const fileName = String(file?.name || "").toLowerCase();
+    return fileName.endsWith(".csv") || fileName.endsWith(".json");
+  };
+
   const toCsvCell = (value) => {
     const text = String(value == null ? "" : value);
     if (/["\n\r,]/.test(text)) {
@@ -13278,17 +13283,24 @@ function wireAdmin() {
   });
 
   importFileInput?.addEventListener("change", async () => {
-    const file = importFileInput.files?.[0];
-    if (!file) return;
-    const fileName = String(file.name || "").toLowerCase();
-    if (!(fileName.endsWith(".csv") || fileName.endsWith(".json"))) {
+    const files = [...(importFileInput.files || [])];
+    if (!files.length) return;
+    const invalidFile = files.find((file) => !isSupportedBulkImportFile(file));
+    if (invalidFile) {
       toast("Only CSV or JSON files are supported for bulk import.");
       importFileInput.value = "";
       return;
     }
+    if (files.length > 1) {
+      toast(`${files.length} files selected. Click Run bulk import to import them together.`);
+      return;
+    }
+    const [file] = files;
     const text = await file.text();
     state.adminImportDraft = text;
-    importTextInput.value = text;
+    if (importTextInput) {
+      importTextInput.value = text;
+    }
   });
 
   importErrorDownloadButton?.addEventListener("click", () => {
@@ -13456,16 +13468,55 @@ function wireAdmin() {
       return;
     }
     const data = new FormData(importForm);
+    const selectedImportFiles = [...(importFileInput?.files || [])];
     const rawInput = String(data.get("importText") || state.adminImportDraft || "");
     state.adminImportDraft = rawInput;
-    const raw = rawInput.trim();
-    if (!raw) {
-      state.adminImportStatus = "Paste import content or upload a file first.";
-      state.adminImportStatusTone = "error";
-      state.skipNextRouteAnimation = true;
-      render();
-      toast("Paste import content or upload a file first.");
-      return;
+    let importSources = [];
+
+    if (selectedImportFiles.length > 1) {
+      const invalidFile = selectedImportFiles.find((file) => !isSupportedBulkImportFile(file));
+      if (invalidFile) {
+        const invalidFileName = String(invalidFile.name || "file");
+        state.adminImportStatus = `Only CSV or JSON files are supported. Unsupported file: ${invalidFileName}`;
+        state.adminImportStatusTone = "error";
+        state.skipNextRouteAnimation = true;
+        render();
+        toast(`Unsupported file type: ${invalidFileName}`);
+        return;
+      }
+      importSources = await Promise.all(
+        selectedImportFiles.map(async (file) => ({
+          label: String(file.name || "Uploaded file"),
+          raw: String(await file.text()),
+        })),
+      );
+    } else {
+      const raw = rawInput.trim();
+      if (raw) {
+        importSources = [{ label: "Pasted import text", raw }];
+      } else if (selectedImportFiles.length === 1) {
+        const [singleFile] = selectedImportFiles;
+        if (!isSupportedBulkImportFile(singleFile)) {
+          const invalidFileName = String(singleFile.name || "file");
+          state.adminImportStatus = `Only CSV or JSON files are supported. Unsupported file: ${invalidFileName}`;
+          state.adminImportStatusTone = "error";
+          state.skipNextRouteAnimation = true;
+          render();
+          toast(`Unsupported file type: ${invalidFileName}`);
+          return;
+        }
+        importSources = [{
+          label: String(singleFile.name || "Uploaded file"),
+          raw: String(await singleFile.text()),
+        }];
+      } else {
+        state.adminImportStatus = "Paste import content or upload a file first.";
+        state.adminImportStatusTone = "error";
+        state.skipNextRouteAnimation = true;
+        render();
+        toast("Paste import content or upload a file first.");
+        return;
+      }
     }
 
     const defaultCourse = String(data.get("defaultCourse") || allCourses[0]);
@@ -13482,12 +13533,31 @@ function wireAdmin() {
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
 
     try {
-      const result = importQuestionsFromRaw(raw, {
-        defaultCourse,
-        defaultTopic,
-        author: getCurrentUser().name,
-        importAsDraft,
-      });
+      const shouldPrefixErrors = importSources.length > 1;
+      const result = importSources.reduce((aggregate, source) => {
+        const sourceLabel = String(source?.label || "Import source").trim() || "Import source";
+        const sourceRaw = String(source?.raw || "").trim();
+        if (!sourceRaw) {
+          const emptyError = "No import rows found. File is empty.";
+          aggregate.errors.push(shouldPrefixErrors ? `${sourceLabel}: ${emptyError}` : emptyError);
+          return aggregate;
+        }
+        const sourceResult = importQuestionsFromRaw(sourceRaw, {
+          defaultCourse,
+          defaultTopic,
+          author: getCurrentUser().name,
+          importAsDraft,
+        });
+        aggregate.total += sourceResult.total;
+        aggregate.added += sourceResult.added;
+        if (Array.isArray(sourceResult.errors) && sourceResult.errors.length) {
+          sourceResult.errors.forEach((errorText) => {
+            const normalizedError = String(errorText || "").trim() || "Unknown import error.";
+            aggregate.errors.push(shouldPrefixErrors ? `${sourceLabel}: ${normalizedError}` : normalizedError);
+          });
+        }
+        return aggregate;
+      }, { total: 0, added: 0, errors: [] });
       state.adminImportReport = {
         createdAt: nowISO(),
         total: result.total,
@@ -13497,6 +13567,7 @@ function wireAdmin() {
 
       let syncMessage = "";
       const visibilityNote = importAsDraft ? " as draft" : "";
+      const sourceSummary = importSources.length > 1 ? ` across ${importSources.length} files` : "";
       if (result.added) {
         const syncResult = await persistImportedQuestionsNow(getQuestions());
         if (!syncResult.ok) {
@@ -13505,17 +13576,17 @@ function wireAdmin() {
       }
 
       if (syncMessage) {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}. Saved locally with sync warning: ${syncMessage}`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}${sourceSummary}. Saved locally with sync warning: ${syncMessage}`;
         state.adminImportStatusTone = "warning";
-        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} locally, but DB sync failed: ${syncMessage}`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote}${sourceSummary} locally, but DB sync failed: ${syncMessage}`);
       } else if (result.errors.length) {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote} with ${result.errors.length} error(s).`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}${sourceSummary} with ${result.errors.length} error(s).`;
         state.adminImportStatusTone = result.added ? "warning" : "error";
-        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} with ${result.errors.length} error(s).`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote}${sourceSummary} with ${result.errors.length} error(s).`);
       } else {
-        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}.`;
+        state.adminImportStatus = `Done importing ${result.added}/${result.total} rows${visibilityNote}${sourceSummary}.`;
         state.adminImportStatusTone = "success";
-        toast(`Imported ${result.added}/${result.total} rows${visibilityNote} successfully.`);
+        toast(`Imported ${result.added}/${result.total} rows${visibilityNote}${sourceSummary} successfully.`);
       }
 
       if (result.added) {
