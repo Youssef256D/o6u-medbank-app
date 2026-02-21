@@ -1570,6 +1570,15 @@ body.is-routing .card {
   background: rgba(23, 126, 137, 0.11);
 }
 
+.admin-user-suggestion:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.admin-user-suggestion:disabled:hover {
+  background: transparent;
+}
+
 .admin-user-suggestion-name {
   font-size: 0.92rem;
   font-weight: 600;

@@ -24,7 +24,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-20.17").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.2").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -237,6 +237,7 @@ const supabaseSync = {
 const supabaseAuth = {
   enabled: false,
   client: null,
+  activeUserId: "",
 };
 
 const relationalSync = {
@@ -1234,6 +1235,8 @@ async function initSupabaseAuth() {
       }
     }
     const { data, error } = sessionResult;
+    const bootSessionUserId = String(data?.session?.user?.id || "").trim();
+    supabaseAuth.activeUserId = isUuidValue(bootSessionUserId) ? bootSessionUserId : "";
     if (error) {
       console.warn("Supabase auth session bootstrap failed.", error.message);
       setGoogleOAuthPendingState(false);
@@ -1299,6 +1302,8 @@ async function initSupabaseAuth() {
     }
 
     const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
+      const sessionUserId = String(session?.user?.id || "").trim();
+      supabaseAuth.activeUserId = isUuidValue(sessionUserId) ? sessionUserId : "";
       if (session?.user) {
         if (event === "TOKEN_REFRESHED") {
           return;
@@ -1367,9 +1372,12 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
+        supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
         const sessionCheck = await supabaseAuth.client.auth.getSession().catch(() => ({ data: { session: null } }));
         if (sessionCheck?.data?.session?.user) {
+          const recoveredSessionUserId = String(sessionCheck.data.session.user.id || "").trim();
+          supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
           return;
         }
         clearNotificationRealtimeSubscription();
@@ -1416,6 +1424,7 @@ async function initSupabaseAuth() {
     clearNotificationRealtimeSubscription();
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
+    supabaseAuth.activeUserId = "";
   }
 }
 
@@ -1814,6 +1823,20 @@ function getUserProfileId(user) {
   return "";
 }
 
+function getActiveSupabaseAuthUserId() {
+  const authId = String(supabaseAuth.activeUserId || "").trim();
+  return isUuidValue(authId) ? authId : "";
+}
+
+function getCurrentSessionProfileId(user = null) {
+  const activeAuthId = getActiveSupabaseAuthUserId();
+  if (activeAuthId) {
+    return activeAuthId;
+  }
+  const fallbackProfileId = String(getUserProfileId(user || getCurrentUser()) || "").trim();
+  return isUuidValue(fallbackProfileId) ? fallbackProfileId : "";
+}
+
 function hasSupabaseManagedIdentity(user) {
   return Boolean(getUserProfileId(user));
 }
@@ -2171,9 +2194,10 @@ function renderCloudSyncPill(model, options = {}) {
 function refreshCloudSyncIndicators() {
   const user = getCurrentUser();
   const model = getCloudSyncStatusModel(user);
+  const isAdmin = user?.role === "admin";
   const topbarSlot = document.getElementById("topbar-cloud-sync-slot");
   if (topbarSlot) {
-    topbarSlot.innerHTML = renderCloudSyncPill(model, { compact: true });
+    topbarSlot.innerHTML = isAdmin ? renderCloudSyncPill(model, { compact: true }) : "";
   }
   const adminSlot = document.getElementById("admin-cloud-sync-slot");
   if (adminSlot) {
@@ -3211,14 +3235,18 @@ async function hydrateRelationalQuestions() {
 async function hydrateRelationalNotifications(currentUser) {
   const user = currentUser || getCurrentUser();
   const client = getRelationalClient();
-  const userProfileId = String(getUserProfileId(user) || "").trim();
-  if (!client || !isUuidValue(userProfileId)) {
+  const sessionProfileId = getCurrentSessionProfileId(user);
+  if (!client || !isUuidValue(sessionProfileId)) {
     return false;
   }
   const userNotificationIdentityIds = [...new Set(
-    [userProfileId, String(user?.id || "").trim()]
+    getNotificationIdentityListForUser(user)
+      .map((id) => String(id || "").trim())
       .filter((id) => isUuidValue(id)),
   )];
+  if (!userNotificationIdentityIds.length) {
+    return false;
+  }
 
   const selectColumns = "id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active";
   let notificationRows = [];
@@ -3240,6 +3268,8 @@ async function hydrateRelationalNotifications(currentUser) {
     }
     notificationRows = Array.isArray(notificationsResult.data) ? notificationsResult.data : [];
   } else {
+    let globalQueryError = null;
+    let directQueryError = null;
     const globalNotificationsResult = await fetchRowsPaged((from, to) => (
       client
         .from("notifications")
@@ -3251,13 +3281,13 @@ async function hydrateRelationalNotifications(currentUser) {
         .range(from, to)
     ));
     if (globalNotificationsResult.error) {
+      globalQueryError = globalNotificationsResult.error;
       if (!isMissingRelationError(globalNotificationsResult.error)) {
         console.warn(
           "Could not hydrate global notifications.",
           globalNotificationsResult.error?.message || globalNotificationsResult.error,
         );
       }
-      return false;
     }
 
     const directNotificationsResult = await fetchRowsPaged((from, to) => {
@@ -3276,17 +3306,20 @@ async function hydrateRelationalNotifications(currentUser) {
         .range(from, to);
     });
     if (directNotificationsResult.error) {
+      directQueryError = directNotificationsResult.error;
       if (!isMissingRelationError(directNotificationsResult.error)) {
         console.warn(
           "Could not hydrate direct notifications.",
           directNotificationsResult.error?.message || directNotificationsResult.error,
         );
       }
+    }
+    if (globalQueryError && directQueryError) {
       return false;
     }
 
-    const globalRows = Array.isArray(globalNotificationsResult.data) ? globalNotificationsResult.data : [];
-    const directRows = Array.isArray(directNotificationsResult.data) ? directNotificationsResult.data : [];
+    const globalRows = globalQueryError ? [] : (Array.isArray(globalNotificationsResult.data) ? globalNotificationsResult.data : []);
+    const directRows = directQueryError ? [] : (Array.isArray(directNotificationsResult.data) ? directNotificationsResult.data : []);
     notificationRows = [...globalRows, ...directRows];
   }
 
@@ -3302,18 +3335,20 @@ async function hydrateRelationalNotifications(currentUser) {
       .filter((id) => isUuidValue(id)),
   )];
   const readByNotificationId = {};
+  let readStateUnavailable = false;
   if (user.role !== "admin" && notificationDbIds.length) {
     for (const idBatch of splitIntoBatches(notificationDbIds, RELATIONAL_IN_BATCH_SIZE)) {
       const { data: readRows, error: readError } = await client
         .from("notification_reads")
         .select("notification_id,user_id")
-        .eq("user_id", userProfileId)
+        .eq("user_id", sessionProfileId)
         .in("notification_id", idBatch);
       if (readError) {
         if (!isMissingRelationError(readError)) {
           console.warn("Could not hydrate notification read state.", readError?.message || readError);
         }
-        return false;
+        readStateUnavailable = true;
+        break;
       }
       (readRows || []).forEach((readRow) => {
         const notificationId = String(readRow?.notification_id || "").trim();
@@ -3327,6 +3362,9 @@ async function hydrateRelationalNotifications(currentUser) {
         readByNotificationId[notificationId].push(userId);
       });
     }
+  }
+  if (readStateUnavailable) {
+    console.warn("Notification read-state table unavailable. Showing notifications as unread.");
   }
 
   const localNotifications = getNotifications();
@@ -3403,7 +3441,7 @@ async function createRelationalNotification(notificationPayload, actorUser, user
 
 async function syncNotificationReadsToRelational(user, notificationDbIds) {
   const currentUser = user || getCurrentUser();
-  const userProfileId = String(getUserProfileId(currentUser) || "").trim();
+  const userProfileId = getCurrentSessionProfileId(currentUser);
   if (!isUuidValue(userProfileId)) {
     return { ok: false, message: "No active Supabase profile for this student." };
   }
@@ -5725,7 +5763,9 @@ function bindGlobalEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+      return;
     }
+    scheduleNotificationRealtimeHydration(0);
   });
 
   window.addEventListener("pagehide", () => {
@@ -5833,7 +5873,7 @@ function clearStudentNotificationPolling() {
 
 function ensureStudentNotificationPolling(user = null) {
   const currentUser = user || getCurrentUser();
-  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  const profileId = getCurrentSessionProfileId(currentUser);
   if (
     !currentUser
     || currentUser.role !== "student"
@@ -5849,7 +5889,7 @@ function ensureStudentNotificationPolling(user = null) {
 
   studentNotificationPollHandle = window.setInterval(() => {
     const activeUser = getCurrentUser();
-    const activeProfileId = String(getUserProfileId(activeUser) || "").trim();
+    const activeProfileId = getCurrentSessionProfileId(activeUser);
     if (!activeUser || activeUser.role !== "student" || !isUuidValue(activeProfileId)) {
       clearStudentNotificationPolling();
       return;
@@ -5907,7 +5947,7 @@ async function runNotificationRealtimeHydration() {
     return;
   }
   const user = getCurrentUser();
-  const profileId = String(getUserProfileId(user) || "").trim();
+  const profileId = getCurrentSessionProfileId(user);
   if (!user || !isUuidValue(profileId)) {
     return;
   }
@@ -5942,7 +5982,7 @@ async function runNotificationRealtimeHydration() {
 
 function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_DEBOUNCE_MS) {
   const user = getCurrentUser();
-  const profileId = String(getUserProfileId(user) || "").trim();
+  const profileId = getCurrentSessionProfileId(user);
   if (!isUuidValue(profileId)) {
     return;
   }
@@ -5958,7 +5998,7 @@ function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_D
 function ensureNotificationsRealtimeSubscription(user = null) {
   const currentUser = user || getCurrentUser();
   const client = getSupabaseAuthClient();
-  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  const profileId = getCurrentSessionProfileId(currentUser);
   const role = currentUser?.role === "admin" ? "admin" : (currentUser?.role === "student" ? "student" : "");
   if (!client || !isUuidValue(profileId) || !role) {
     clearNotificationRealtimeSubscription();
@@ -6771,13 +6811,13 @@ function syncTopbar() {
     const menuOpen = Boolean(state.userMenuOpen);
     const menuExpanded = menuOpen ? "true" : "false";
     const isStudent = user.role === "student";
-    const cloudSyncModel = getCloudSyncStatusModel(user);
+    const cloudSyncModel = isAdmin ? getCloudSyncStatusModel(user) : null;
     if (!isStudent) {
       state.notificationMenuOpen = false;
     }
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
-      <div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>
+      ${isAdmin ? `<div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>` : ""}
       ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
@@ -11122,6 +11162,8 @@ function wireAdmin() {
             return "";
           }
           const roleLabel = entry.role === "admin" ? "admin" : "student";
+          const canReceive = isUserAccessApproved(entry);
+          const availabilityLabel = canReceive ? "" : " • pending approval";
           const isActive = selectedId === userId;
           return `
             <button
@@ -11131,9 +11173,10 @@ function wireAdmin() {
               data-user-id="${escapeHtml(userId)}"
               role="option"
               aria-selected="${isActive ? "true" : "false"}"
+              ${canReceive ? "" : "disabled"}
             >
               <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
-              <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
+              <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}${escapeHtml(availabilityLabel)}</span>
             </button>
           `;
         })
@@ -11247,22 +11290,38 @@ function wireAdmin() {
         toast("Choose a target user or switch audience to all users.");
         return;
       }
-      if (targetType === "user" && !findUserByNotificationTargetId(targetUserId, notificationUsers)) {
+      const selectedTargetUser = targetType === "user"
+        ? findUserByNotificationTargetId(targetUserId, notificationUsers)
+        : null;
+      if (targetType === "user" && !selectedTargetUser) {
         toast("Please choose a valid user from suggestions.");
         return;
       }
+      if (selectedTargetUser && !isUserAccessApproved(selectedTargetUser)) {
+        toast("Target user is pending approval and cannot receive notifications yet.");
+        return;
+      }
+      const selectedTargetProfileId = selectedTargetUser
+        ? String(getUserProfileId(selectedTargetUser) || "").trim()
+        : "";
+      const resolvedTargetUserId = targetType === "user"
+        ? (selectedTargetProfileId || targetUserId)
+        : "";
       const canSyncRelational = isUuidValue(String(getUserProfileId(currentUser) || "").trim());
       if (!canSyncRelational) {
         toast("Cloud delivery requires an active Supabase admin session. Log out and sign in again.");
         return;
       }
-      const relationalReady = await ensureRelationalSyncReady({ force: true });
+      let relationalReady = await ensureRelationalSyncReady();
+      if (!relationalReady) {
+        relationalReady = await ensureRelationalSyncReady({ force: true });
+      }
       if (!relationalReady) {
         toast(relationalSync.lastReadyError || "Cloud delivery is unavailable right now. Please try again.");
         return;
       }
       state.adminNotificationTargetType = targetType;
-      state.adminNotificationTargetUserId = targetType === "user" ? targetUserId : "";
+      state.adminNotificationTargetUserId = resolvedTargetUserId;
       state.adminNotificationTargetQuery = targetType === "user" ? targetUserQuery : "";
       state.adminNotificationTitle = title;
       state.adminNotificationBody = body;
@@ -11273,7 +11332,7 @@ function wireAdmin() {
         localNotification = normalizeNotificationRecord({
           id: crypto.randomUUID(),
           targetType,
-          targetUserId: targetType === "user" ? targetUserId : "",
+          targetUserId: resolvedTargetUserId,
           title,
           body,
           createdAt: nowISO(),
@@ -11317,7 +11376,14 @@ function wireAdmin() {
               state.skipNextRouteAnimation = true;
               render();
             }
-            toast("Notification delivered.");
+            if (targetType === "user") {
+              const deliveredLabel = selectedTargetUser
+                ? getNotificationTargetSearchDisplayLabel(selectedTargetUser)
+                : "selected user";
+              toast(`Notification delivered to ${deliveredLabel}.`);
+            } else {
+              toast("Notification delivered.");
+            }
             return;
           }
           const localWithoutFailed = getNotifications().filter((entry) => entry.id !== localNotification.id);
@@ -13125,13 +13191,17 @@ function saveNotificationsLocal(notifications) {
 
 function getNotificationIdentityListForUser(user) {
   const ids = [];
-  const localId = String(user?.id || "").trim();
-  if (localId) {
-    ids.push(localId);
+  const sessionProfileId = getCurrentSessionProfileId(user);
+  if (sessionProfileId) {
+    ids.push(sessionProfileId);
   }
   const profileId = String(getUserProfileId(user) || "").trim();
   if (profileId && !ids.includes(profileId)) {
     ids.push(profileId);
+  }
+  const localId = String(user?.id || "").trim();
+  if (localId && !ids.includes(localId)) {
+    ids.push(localId);
   }
   return ids;
 }
@@ -13483,11 +13553,21 @@ function getSessions() {
 }
 
 function getCurrentUser() {
+  const users = getUsers();
+  const activeAuthId = getActiveSupabaseAuthUserId();
+  if (activeAuthId) {
+    const byActiveAuthId = users.find((user) => (
+      String(user?.supabaseAuthId || "").trim() === activeAuthId
+      || String(user?.id || "").trim() === activeAuthId
+    ));
+    if (byActiveAuthId) {
+      return byActiveAuthId;
+    }
+  }
   const userId = String(load(STORAGE_KEYS.currentUserId, null) || "").trim();
   if (!userId) {
     return null;
   }
-  const users = getUsers();
   const byLocalId = users.find((user) => String(user?.id || "").trim() === userId);
   if (byLocalId) {
     return byLocalId;
@@ -15880,6 +15960,7 @@ async function logout() {
   clearAdminDashboardPolling();
   resetRelationalSyncState();
   resetSupabaseSyncRuntimeState();
+  supabaseAuth.activeUserId = "";
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
   state.userMenuOpen = false;
