@@ -3160,6 +3160,9 @@ async function hydrateRelationalQuestions() {
         return;
       }
     } else if (hasLocalQuestions) {
+      if (currentUser?.role === "student") {
+        saveLocalOnly(STORAGE_KEYS.questions, []);
+      }
       return;
     }
   }
@@ -3206,6 +3209,7 @@ async function hydrateRelationalQuestions() {
   });
 
   let needsChoiceRepairSync = false;
+  const skippedMalformedQuestionIds = [];
   const mappedQuestions = (questionRows || []).map((question) => {
     const externalId = String(question.external_id || question.id || "").trim();
     const existingQuestion = localQuestionByExternalId[externalId] || localQuestionByDbId[String(question.id || "").trim()] || null;
@@ -3234,9 +3238,11 @@ async function hydrateRelationalQuestions() {
     const remoteCorrect = rawChoices
       .filter((choice) => Boolean(choice.is_correct))
       .map((choice) => String(choice.choice_label || "").toUpperCase());
-    const choices = resolvedChoices.length
-      ? resolvedChoices
-      : [{ id: "A", text: "Option A" }, { id: "B", text: "Option B" }];
+    const choices = resolvedChoices;
+    if (choices.length < 2) {
+      skippedMalformedQuestionIds.push(externalId || String(question.id || ""));
+      return null;
+    }
     const correct = resolveQuestionCorrectAnswers(
       remoteCorrect,
       existingQuestion?.correct,
@@ -3275,7 +3281,13 @@ async function hydrateRelationalQuestions() {
       explanationImage: explanationImageFromDb || String(existingQuestion?.explanationImage || "").trim(),
       status: toRelationalQuestionStatus(question.status),
     };
-  });
+  }).filter(Boolean);
+
+  if (skippedMalformedQuestionIds.length) {
+    console.warn(
+      `Skipped ${skippedMalformedQuestionIds.length} malformed question(s) with missing choices during hydration.`,
+    );
+  }
 
   mappedQuestions.sort((a, b) => {
     if (questionColumnSupport.sortOrder) {
@@ -4471,14 +4483,14 @@ function isQuestionChoicePlaceholder(choice) {
 }
 
 function shouldPreferExistingQuestionChoices(remoteChoices, existingChoices) {
-  if (!remoteChoices.length && existingChoices.length) {
+  if (!remoteChoices.length && existingChoices.length >= 2) {
     return true;
   }
   if (remoteChoices.length < 2 && existingChoices.length >= 2) {
     return true;
   }
   const remoteAllPlaceholder = remoteChoices.length > 0 && remoteChoices.every((choice) => isQuestionChoicePlaceholder(choice));
-  const existingHasMeaningful = existingChoices.some((choice) => !isQuestionChoicePlaceholder(choice));
+  const existingHasMeaningful = existingChoices.length >= 2 && existingChoices.some((choice) => !isQuestionChoicePlaceholder(choice));
   return remoteAllPlaceholder && existingHasMeaningful;
 }
 
@@ -4503,6 +4515,29 @@ function resolveQuestionCorrectAnswers(remoteCorrect, existingCorrect, choices) 
     return normalizedExisting;
   }
   return [choices[0]?.id || "A"];
+}
+
+function isQuestionUsableForTesting(question) {
+  const stem = String(question?.stem || "").trim();
+  if (!stem) {
+    return false;
+  }
+
+  const choices = normalizeQuestionChoiceEntries(question?.choices);
+  if (choices.length < 2) {
+    return false;
+  }
+  if (choices.every((choice) => isQuestionChoicePlaceholder(choice))) {
+    return false;
+  }
+
+  const choiceIds = new Set(choices.map((choice) => choice.id));
+  const correctIds = [...new Set(
+    (Array.isArray(question?.correct) ? question.correct : [])
+      .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => choiceIds.has(entry)),
+  )];
+  return correctIds.length > 0;
 }
 
 function buildChoiceSyncSignature(rows) {
@@ -15182,7 +15217,10 @@ function getAvailableCoursesForUser(user) {
 function getPublishedQuestionsForUser(user) {
   const availableCourses = new Set(getAvailableCoursesForUser(user));
   return applyQbankFilters(
-    getQuestions().filter((question) => question.status === "published"),
+    getQuestions().filter((question) => (
+      question.status === "published"
+      && isQuestionUsableForTesting(question)
+    )),
     { course: "", topics: [] },
   ).filter((question) => availableCourses.has(question.qbankCourse));
 }
