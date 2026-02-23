@@ -14781,7 +14781,13 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
         const canFallbackToLegacy = Boolean(response)
           && hasLegacySupabaseFunction
-          && (response.status === 404 || response.status === 405 || response.status === 501);
+          && (
+            response.status === 404
+            || response.status === 405
+            || response.status === 501
+            || response.status >= 500
+            || /missing required environment variable/i.test(details)
+          );
         if (canFallbackToLegacy || (!response && hasLegacySupabaseFunction)) {
           response = null;
           payload = null;

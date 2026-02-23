@@ -34,17 +34,30 @@ function json(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function requireEnv(name) {
-  const value = String(process.env[name] || "").trim();
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
+function getEnvValue(name) {
+  return String(process.env[name] || "").trim();
+}
+
+function requireAnyEnv(names) {
+  for (const name of names) {
+    const value = getEnvValue(name);
+    if (value) {
+      return value;
+    }
   }
-  return value;
+  throw new Error(`Missing required environment variable. Set one of: ${names.join(", ")}`);
 }
 
 function getServerEnv() {
-  const rawUrl = requireEnv("SUPABASE_URL");
-  const serviceRoleKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+  const rawUrl = requireAnyEnv([
+    "SUPABASE_URL",
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "PUBLIC_SUPABASE_URL",
+  ]);
+  const serviceRoleKey = requireAnyEnv([
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_SECRET_KEY",
+  ]);
   return {
     supabaseUrl: rawUrl.replace(/\/+$/, ""),
     serviceRoleKey,

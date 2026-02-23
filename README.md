@@ -96,14 +96,15 @@ What it does:
 
 Required environment variables (server):
 
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_URL`)
+- `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`)
 - `ALLOWED_ORIGIN` (optional, defaults to `*`)
 
 Frontend config:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js` now supports `serverApiBaseUrl`.
-- Default value is `"/api"` for same-origin deploys (for example, Vercel static + functions together).
+- Default value is empty (`""`) for GitHub Pages/static deploys.
+- For same-origin deploys with functions (for example, Vercel static + functions together), set it to `"/api"`.
 - If frontend and API are on different domains, set a full URL (for example, `https://your-api.vercel.app/api`).
 
 Local smoke run:
