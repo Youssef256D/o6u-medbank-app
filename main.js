@@ -10736,10 +10736,7 @@ function renderAdmin() {
         const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
-        const isSupabaseManagedUser = hasSupabaseManagedIdentity(account);
-        const resetActionLabel = isGoogleAuthUser
-          ? "Google account"
-          : (isSupabaseManagedUser ? "Send reset link" : "Set temp password");
+        const resetActionLabel = "Set password";
         const visibleCourses =
           account.role === "student"
             ? year && semester
@@ -10795,7 +10792,7 @@ function renderAdmin() {
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
                 <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
-                <button class="btn ghost admin-btn-sm" data-action="reset-user-password" ${isGoogleAuthUser ? "disabled" : ""}>${resetActionLabel}</button>
+                <button class="btn ghost admin-btn-sm" data-action="reset-user-password">${resetActionLabel}</button>
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" || autoApprovalEnabled ? "disabled" : ""}>
                   ${autoApprovalEnabled ? "Auto-approval on" : (isApproved ? "Suspend access" : "Approve access")}
                 </button>
@@ -12704,57 +12701,64 @@ function wireAdmin() {
         return;
       }
       const target = users[idx];
-      if (getAuthProviderFromUser(target) === "google") {
-        toast("Google sign-in accounts must reset credentials through Google.");
+      const hasSupabaseIdentity = hasSupabaseManagedIdentity(target);
+      const targetAuthId = hasSupabaseIdentity ? String(getUserProfileId(target) || "").trim() : "";
+      if (hasSupabaseIdentity && !isUuidValue(targetAuthId)) {
+        toast("Target account is not linked to a valid Supabase Auth profile.");
+        return;
+      }
+
+      const nextPassword = String(
+        window.prompt(
+          `Set a new password for ${target.email}\n(Minimum 6 characters)`,
+          "",
+        ) || "",
+      );
+      if (!nextPassword) {
+        return;
+      }
+      if (nextPassword.length < 6) {
+        toast("Password must be at least 6 characters.");
+        return;
+      }
+      if (nextPassword.length > 128) {
+        toast("Password is too long (maximum 128 characters).");
         return;
       }
 
       button.dataset.busy = "1";
       if (!button.dataset.baseLabel) {
-        button.dataset.baseLabel = String(button.textContent || "Send reset link").trim();
+        button.dataset.baseLabel = String(button.textContent || "Set password").trim();
       }
       button.disabled = true;
-      button.textContent = hasSupabaseManagedIdentity(target) ? "Sending..." : "Saving...";
+      button.textContent = "Saving...";
 
       try {
-        if (hasSupabaseManagedIdentity(target)) {
-          const authClient = getSupabaseAuthClient();
-          if (!authClient) {
-            toast("Supabase auth is not configured. Cannot send password reset email.");
+        if (hasSupabaseIdentity) {
+          const updateResult = await setSupabaseAuthUserPasswordAsAdmin(targetAuthId, nextPassword);
+          if (!updateResult.ok) {
+            toast(`Could not update user password. ${updateResult.message || "Unknown error."}`);
             return;
           }
-          const redirectTo = getAuthRedirectToUrl();
-          if (!redirectTo) {
-            toast("Password reset requires an http(s) app URL. Open the deployed site and retry.");
-            return;
+          if (users[idx]) {
+            users[idx].password = "";
+            save(STORAGE_KEYS.users, users);
+            await syncUsersBackupState(users).catch(() => {});
           }
-          const { error } = await authClient.auth.resetPasswordForEmail(target.email, { redirectTo });
-          if (error) {
-            toast(error.message || "Could not send reset email.");
-            return;
-          }
-          toast(`Password reset email sent to ${target.email}.`);
+          toast(`Password updated for ${target.email}.`);
           return;
         }
 
-        const temporaryPassword = String(window.prompt(`Set a temporary password for ${target.email}`, "") || "").trim();
-        if (!temporaryPassword) {
-          return;
-        }
-        if (temporaryPassword.length < 6) {
-          toast("Temporary password must be at least 6 characters.");
-          return;
-        }
-        users[idx].password = temporaryPassword;
+        users[idx].password = nextPassword;
         save(STORAGE_KEYS.users, users);
         await flushPendingSyncNow();
-        toast("Temporary password saved.");
+        toast(`Password updated for ${target.email}.`);
       } catch (error) {
-        toast(getErrorMessage(error, "Could not reset password for this user."));
+        toast(getErrorMessage(error, "Could not update password for this user."));
       } finally {
         button.dataset.busy = "0";
         button.disabled = false;
-        button.textContent = button.dataset.baseLabel || "Send reset link";
+        button.textContent = button.dataset.baseLabel || "Set password";
       }
     });
   });
@@ -15125,6 +15129,158 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
     return { ok: false, message: "Could not delete Supabase user." };
   } catch (error) {
     return { ok: false, message: error?.message || "Unexpected error during Supabase auth delete." };
+  }
+}
+
+async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
+  const safeTargetAuthId = String(targetAuthId || "").trim();
+  if (!isUuidValue(safeTargetAuthId)) {
+    return { ok: false, message: "Target auth user ID is invalid." };
+  }
+  if (!password || String(password).length < 6) {
+    return { ok: false, message: "Password must be at least 6 characters." };
+  }
+
+  const authClient = getSupabaseAuthClient();
+  if (!authClient) {
+    return { ok: false, message: "Supabase auth client is not available." };
+  }
+
+  try {
+    const serverSetPasswordUrl = buildServerApiUrl("/admin-set-user-password");
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    if (!serverSetPasswordUrl && !hasLegacySupabaseFunction) {
+      return {
+        ok: false,
+        message: "No admin password endpoint is configured in this app.",
+      };
+    }
+    const actingUser = getCurrentUser();
+    const actingProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!isUuidValue(actingProfileId)) {
+      return {
+        ok: false,
+        message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+
+    const { data: sessionBeforeUpdate } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    const sessionUserId = String(sessionBeforeUpdate?.session?.user?.id || "").trim();
+    if (sessionUserId && sessionUserId !== actingProfileId) {
+      return {
+        ok: false,
+        message: "Supabase session does not match the active admin account. Log out and sign in again.",
+      };
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tokenResult = await getValidSupabaseAccessToken(authClient);
+      if (!tokenResult.ok) {
+        return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
+      }
+      if (tokenResult.sessionUserId && tokenResult.sessionUserId !== actingProfileId) {
+        return {
+          ok: false,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+
+      let response = null;
+      let payload = null;
+      let details = "";
+      let serverErrorMessage = "";
+
+      if (serverSetPasswordUrl) {
+        try {
+          response = await fetch(serverSetPasswordUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenResult.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetAuthId: safeTargetAuthId, password }),
+          });
+          payload = await readJsonResponseSafe(response);
+          details = await getResponseDetails(response, payload);
+        } catch (serverError) {
+          response = null;
+          payload = null;
+          details = "";
+          serverErrorMessage = getErrorMessage(serverError, "Server API request failed.");
+        }
+
+        const canFallbackToLegacy = Boolean(response)
+          && hasLegacySupabaseFunction
+          && (
+            response.status === 404
+            || response.status === 405
+            || response.status === 501
+            || response.status >= 500
+            || /missing required environment variable/i.test(details)
+          );
+        if (canFallbackToLegacy || (!response && hasLegacySupabaseFunction)) {
+          response = null;
+          payload = null;
+          details = "";
+        }
+      }
+
+      if (!response) {
+        if (!hasLegacySupabaseFunction) {
+          return {
+            ok: false,
+            message: serverErrorMessage || "Admin password API is unavailable. Configure serverApiBaseUrl and retry.",
+          };
+        }
+        response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-set-user-password`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            apikey: SUPABASE_CONFIG.anonKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ targetAuthId: safeTargetAuthId, password }),
+        });
+        payload = await readJsonResponseSafe(response);
+        details = await getResponseDetails(response, payload);
+      }
+
+      if (response.ok && (payload?.ok !== false)) {
+        return { ok: true };
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        if (attempt === 0 && isInvalidJwtMessage(details)) {
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          continue;
+        }
+        if (attempt === 0 && !details) {
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          continue;
+        }
+        const authMessage = isInvalidJwtMessage(details)
+          ? "Supabase session expired. Log out and log in again with your Supabase admin account."
+          : (details || "Unauthorized. Log out and log in again with your Supabase admin account.");
+        return {
+          ok: false,
+          message: authMessage,
+        };
+      }
+      if (/not found|user not found/i.test(details)) {
+        return {
+          ok: false,
+          message: "Target auth user was not found.",
+        };
+      }
+      return {
+        ok: false,
+        message: details || `Admin password request failed (${response.status}).`,
+      };
+    }
+
+    return { ok: false, message: "Could not update Supabase user password." };
+  } catch (error) {
+    return { ok: false, message: error?.message || "Unexpected error during Supabase password update." };
   }
 }
 

@@ -86,6 +86,7 @@ Alternative hosts (often easier for env management): Netlify, Vercel, Cloudflare
 This repo now includes a backend function for sensitive admin actions:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-delete-user.js`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-set-user-password.js`
 - shared helpers: `/Users/youssefayoub/Documents/Apps/MCQs Website/api/_supabase.js`
 
 What it does:
@@ -93,6 +94,7 @@ What it does:
 - Verifies the caller's Supabase access token.
 - Checks the caller role from `profiles` (`admin` only).
 - Deletes target users via Supabase Admin API using `SUPABASE_SERVICE_ROLE_KEY` (server-side only).
+- Updates target user passwords via Supabase Admin API using `SUPABASE_SERVICE_ROLE_KEY` (server-side only).
 
 Required environment variables (server):
 

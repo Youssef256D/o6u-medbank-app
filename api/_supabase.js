@@ -186,6 +186,29 @@ async function deleteAuthUser(env, targetAuthId) {
   };
 }
 
+async function updateAuthUserPassword(env, targetAuthId, password) {
+  const response = await fetch(`${env.supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(targetAuthId)}`, {
+    method: "PUT",
+    headers: {
+      apikey: env.serviceRoleKey,
+      Authorization: `Bearer ${env.serviceRoleKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ password }),
+  });
+  const payload = await readJsonSafe(response);
+  const errorMessage = String(
+    payload?.msg || payload?.error_description || payload?.error || payload?.message || "",
+  ).trim();
+  const isNotFound = response.status === 404 || /not found/i.test(errorMessage);
+  return {
+    ok: response.ok,
+    notFound: isNotFound,
+    status: response.status,
+    error: errorMessage,
+  };
+}
+
 module.exports = {
   applyCorsHeaders,
   deleteAuthUser,
@@ -196,4 +219,5 @@ module.exports = {
   json,
   parseBearerToken,
   parseJsonBody,
+  updateAuthUserPassword,
 };
