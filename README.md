@@ -116,6 +116,33 @@ cp .env.example .env
 vercel dev
 ```
 
+### Supabase Edge Function fallback (no separate `/api` backend)
+
+You can deploy these Edge Functions and keep `serverApiBaseUrl` empty:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
+
+Deploy:
+
+```bash
+supabase functions deploy admin-delete-user
+supabase functions deploy admin-set-user-password
+```
+
+Optional CORS allow-list (defaults to `*` if not set):
+
+```bash
+supabase secrets set ALLOWED_ORIGIN=https://your-site.example.com
+```
+
+How it works with this app:
+
+- The frontend first tries `serverApiBaseUrl/admin-delete-user` and `serverApiBaseUrl/admin-set-user-password` if configured.
+- If not available, it automatically falls back to:
+  - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
+  - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
+
 ## Real SQL database (added)
 
 A real PostgreSQL schema and seed setup is now included:

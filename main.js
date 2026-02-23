@@ -14,6 +14,7 @@ const STORAGE_KEYS = {
   flashcards: "mcq_flashcards",
   curriculum: "mcq_curriculum",
   courseTopics: "mcq_course_topics",
+  autoApproveStudentAccess: "mcq_auto_approve_student_access",
   appVersionSeen: "mcq_app_version_seen",
   appVersionForced: "mcq_app_version_forced",
   studentRefreshTrigger: "mcq_student_refresh_trigger",
@@ -28,7 +29,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-21.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-23.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -58,6 +59,7 @@ const KNOWN_ROUTES = new Set([
   "admin",
 ]);
 const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"]);
+const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -68,6 +70,7 @@ const SUPABASE_RETRY_FLUSH_MS = 3000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
+const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
@@ -85,8 +88,7 @@ const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
-// Temporary demand switch: set to false to restore manual admin approval.
-const AUTO_APPROVE_STUDENT_ACCESS = true;
+const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
@@ -220,6 +222,7 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.flashcards,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.autoApproveStudentAccess,
   STORAGE_KEYS.studentRefreshTrigger,
 ];
 
@@ -299,6 +302,8 @@ let notificationRealtimeHydrateTimer = null;
 let notificationRealtimeHydrateInFlight = false;
 let notificationRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
+let studentDataAutoRefreshPollHandle = null;
+let studentDataAutoRefreshInFlight = false;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -1342,6 +1347,12 @@ async function initSupabaseAuth() {
         }
       }
     }
+    if (!sessionResult?.error && !sessionResult?.data?.session?.user) {
+      const refreshedSessionResult = await supabaseAuth.client.auth.refreshSession().catch(() => null);
+      if (refreshedSessionResult?.data?.session?.user && !refreshedSessionResult?.error) {
+        sessionResult = refreshedSessionResult;
+      }
+    }
     const { data, error } = sessionResult;
     const bootSessionUserId = String(data?.session?.user?.id || "").trim();
     supabaseAuth.activeUserId = isUuidValue(bootSessionUserId) ? bootSessionUserId : "";
@@ -1595,6 +1606,94 @@ function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
   });
 }
 
+function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
+  const profileId = String(authUser?.id || "").trim();
+  if (!isUuidValue(profileId)) {
+    return null;
+  }
+  const email = String(authUser?.email || fallbackUser?.email || "").trim().toLowerCase();
+  if (!email) {
+    return null;
+  }
+  const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
+  const metadataYear = normalizeAcademicYearOrNull(
+    authUser?.user_metadata?.academic_year
+    ?? authUser?.user_metadata?.academicYear
+    ?? fallbackUser?.academicYear
+    ?? null,
+  );
+  const metadataSemester = normalizeAcademicSemesterOrNull(
+    authUser?.user_metadata?.academic_semester
+    ?? authUser?.user_metadata?.academicSemester
+    ?? fallbackUser?.academicSemester
+    ?? null,
+  );
+  const rawPhone = String(
+    authUser?.user_metadata?.phone_number
+    ?? authUser?.user_metadata?.phone
+    ?? fallbackUser?.phone
+    ?? "",
+  ).trim();
+  const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
+  const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
+  const role = isForcedAdminEmail(email) ? "admin" : "student";
+  const approved = role === "admin"
+    ? true
+    : shouldAutoApproveStudentAccess({
+      role: "student",
+      phone: normalizedPhone,
+      academicYear: metadataYear,
+      academicSemester: metadataSemester,
+    });
+
+  return {
+    id: profileId,
+    full_name: String(authUser?.user_metadata?.full_name || fallbackUser?.name || fallbackName).trim() || fallbackName,
+    email,
+    phone: normalizedPhone || null,
+    role,
+    approved,
+    academic_year: role === "student" ? metadataYear : null,
+    academic_semester: role === "student" ? metadataSemester : null,
+    auth_provider: normalizeAuthProvider(
+      getAuthProviderFromAuthUser(authUser)
+      || fallbackUser?.authProvider
+      || authUser?.app_metadata?.provider
+      || "",
+    ) || null,
+  };
+}
+
+async function bootstrapRelationalProfileFromAuth(authUser, fallbackUser = null) {
+  const client = getRelationalClient();
+  if (!client) {
+    return null;
+  }
+  const profileRow = buildBootstrapProfileRowFromAuth(authUser, fallbackUser);
+  if (!profileRow) {
+    return null;
+  }
+
+  const { error: upsertError } = await client.from("profiles").upsert([profileRow], { onConflict: "id" });
+  if (upsertError) {
+    return null;
+  }
+
+  const profileResult = await runWithTimeoutResult(
+    client
+      .from("profiles")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
+      .eq("id", profileRow.id)
+      .maybeSingle(),
+    PROFILE_LOOKUP_TIMEOUT_MS,
+    "Profile lookup timed out.",
+  );
+  if (profileResult?.error || !profileResult?.data) {
+    return null;
+  }
+  return profileResult.data;
+}
+
 async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = null) {
   if (!authUser?.id) {
     return { user: fallbackUser, approvalChecked: false };
@@ -1615,8 +1714,11 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     PROFILE_LOOKUP_TIMEOUT_MS,
     "Profile lookup timed out.",
   );
-  const profile = profileResult?.data || null;
+  let profile = profileResult?.data || null;
   const error = profileResult?.error || null;
+  if (!error && !profile) {
+    profile = await bootstrapRelationalProfileFromAuth(authUser, localUser).catch(() => null);
+  }
   if (error || !profile) {
     return { user: localUser, approvalChecked: false };
   }
@@ -1648,12 +1750,14 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profilePhone = String(profile.phone || "").trim();
   const fallbackPhone = String(localUser?.phone || "").trim();
   const resolvedPhone = profilePhone || metadataPhone || fallbackPhone;
-  const autoApprovedFromProfile = shouldAutoApproveStudentAccess({
-    role,
-    phone: resolvedPhone,
-    academicYear: year,
-    academicSemester: semester,
-  });
+  const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
+  const resolvedApproval = role === "admin"
+    ? true
+    : (
+      profileApproved !== null
+        ? profileApproved
+        : (typeof localUser?.isApproved === "boolean" ? localUser.isApproved : false)
+    );
   const profileHasStudentCompletion = role !== "student"
     ? true
     : validateAndNormalizePhoneNumber(resolvedPhone).ok && Number(year) >= 1 && Number(semester) >= 1;
@@ -1676,26 +1780,21 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     role,
     academicYear: year,
     academicSemester: semester,
-    isApproved: autoApprovedFromProfile ? true : Boolean(profile.approved),
-    approvedAt: (autoApprovedFromProfile || profile.approved) ? localUser?.approvedAt || profile.created_at || nowISO() : null,
-    approvedBy: autoApprovedFromProfile
-      ? localUser?.approvedBy || AUTO_APPROVAL_ACTOR
-      : profile.approved
-        ? localUser?.approvedBy || "admin"
-        : null,
+    isApproved: resolvedApproval,
+    approvedAt: resolvedApproval ? localUser?.approvedAt || profile.created_at || nowISO() : null,
+    approvedBy: resolvedApproval ? localUser?.approvedBy || "admin" : null,
     authProvider,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
   });
 
-  const shouldPersistAutoApproval = role === "student" && autoApprovedFromProfile && !Boolean(profile.approved);
   const shouldBackfillProfile = role === "student"
     && (
       (profilePhone !== resolvedPhone && Boolean(resolvedPhone))
       || (profileYear === null && year !== null)
       || (profileSemester === null && semester !== null)
     );
-  if (shouldBackfillProfile || shouldPersistAutoApproval) {
+  if (shouldBackfillProfile) {
     const profilePatch = {};
     if (profilePhone !== resolvedPhone && resolvedPhone) {
       profilePatch.phone = resolvedPhone;
@@ -1705,9 +1804,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     }
     if (profileSemester === null && semester !== null) {
       profilePatch.academic_semester = semester;
-    }
-    if (shouldPersistAutoApproval) {
-      profilePatch.approved = true;
     }
     if (Object.keys(profilePatch).length) {
       client
@@ -1755,9 +1851,6 @@ function isUserAccessApproved(user) {
   }
   if (user.role === "student" && !hasCompleteStudentProfile(user)) {
     return false;
-  }
-  if (shouldAutoApproveStudentAccess(user)) {
-    return true;
   }
   return user.isApproved !== false;
 }
@@ -1899,8 +1992,16 @@ function hasCompleteStudentProfile(user) {
   return phoneValidation.ok && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
 }
 
+function isAutoApproveStudentAccessEnabled() {
+  const savedSetting = load(STORAGE_KEYS.autoApproveStudentAccess, null);
+  if (typeof savedSetting === "boolean") {
+    return savedSetting;
+  }
+  return DEFAULT_AUTO_APPROVE_STUDENT_ACCESS;
+}
+
 function shouldAutoApproveStudentAccess(user) {
-  if (!AUTO_APPROVE_STUDENT_ACCESS || !user || user.role !== "student") {
+  if (!isAutoApproveStudentAccessEnabled() || !user || user.role !== "student") {
     return false;
   }
   return hasCompleteStudentProfile(user);
@@ -2094,14 +2195,15 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     academicYear: nextYear,
     academicSemester: nextSemester,
   });
+  const hasExplicitIsApprovedOverride = typeof profileOverrides.isApproved === "boolean";
   const nextIsApproved =
-    nextRole === "admin" || shouldAutoApproveNextStudent
+    nextRole === "admin"
       ? true
-      : typeof profileOverrides.isApproved === "boolean"
+      : hasExplicitIsApprovedOverride
         ? profileOverrides.isApproved
         : typeof previous?.isApproved === "boolean"
           ? previous.isApproved
-          : false;
+          : shouldAutoApproveNextStudent;
   const inferredStudentProfileCompletion = nextRole !== "student"
     ? true
     : hasCompleteStudentProfile({
@@ -2280,6 +2382,7 @@ function getCloudSyncStatusModel(user = null) {
   }
 
   const hasAuthClient = Boolean(getSupabaseAuthClient());
+  const hasActiveSupabaseSession = Boolean(getActiveSupabaseAuthUserId());
   const pendingCount = getPendingCloudWriteCount();
   const syncingNow = Boolean(relationalSync.flushing || supabaseSync.flushing);
   const lastSuccessAt = Math.max(
@@ -2296,7 +2399,7 @@ function getCloudSyncStatusModel(user = null) {
   ).trim();
   const retryAt = Math.max(Number(relationalSync.retryAt || 0), Number(supabaseSync.retryAt || 0));
 
-  if (!hasAuthClient) {
+  if (!hasAuthClient || !hasActiveSupabaseSession) {
     return {
       tone: "offline",
       label: "Local only",
@@ -2501,7 +2604,82 @@ async function ensureRelationalSyncReady(options = {}) {
     return relationalSync.readyPromise;
   }
 
+  const readCurrentSession = async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { data, error } = await client.auth.getSession();
+        if (error) {
+          if (attempt === 0 && isLikelyNetworkFetchError(error)) {
+            await new Promise((resolve) => window.setTimeout(resolve, 220));
+            continue;
+          }
+          return {
+            ok: false,
+            error,
+            userId: "",
+            issue: isLikelyNetworkFetchError(error) ? "network" : "session",
+          };
+        }
+        const userId = String(data?.session?.user?.id || "").trim();
+        if (isUuidValue(userId)) {
+          return { ok: true, error: null, userId, issue: "" };
+        }
+        return { ok: false, error: null, userId: "", issue: "session" };
+      } catch (error) {
+        if (attempt === 0 && isLikelyNetworkFetchError(error)) {
+          await new Promise((resolve) => window.setTimeout(resolve, 220));
+          continue;
+        }
+        return {
+          ok: false,
+          error,
+          userId: "",
+          issue: isLikelyNetworkFetchError(error) ? "network" : "session",
+        };
+      }
+    }
+    return { ok: false, error: null, userId: "", issue: "network" };
+  };
+  const refreshCurrentSession = async () => {
+    try {
+      const { data } = await client.auth.getSession().catch(() => ({ data: { session: null } }));
+      const refreshToken = String(data?.session?.refresh_token || "").trim();
+      if (refreshToken) {
+        await client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => {});
+      } else {
+        await client.auth.refreshSession().catch(() => {});
+      }
+      const sessionCheck = await readCurrentSession();
+      return sessionCheck.ok;
+    } catch {
+      return false;
+    }
+  };
+
   relationalSync.readyPromise = (async () => {
+    const sessionCheck = await readCurrentSession();
+    if (!sessionCheck.ok) {
+      const sessionErrorMessage = getErrorMessage(sessionCheck.error, "");
+      const refreshed = (
+        isInvalidJwtMessage(sessionErrorMessage)
+        || !sessionErrorMessage
+        || sessionCheck.issue === "network"
+      )
+        ? await refreshCurrentSession()
+        : false;
+      if (!refreshed) {
+        relationalSync.enabled = false;
+        relationalSync.readyCheckedAt = Date.now();
+        relationalSync.lastReadyError = sessionCheck.issue === "network"
+          ? "Network issue contacting Supabase. Check your connection and retry cloud refresh."
+          : "No active Supabase session. Log in again and retry cloud refresh.";
+        relationalSync.lastFailureAt = Date.now();
+        relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+        relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+        return false;
+      }
+    }
+
     const checks = [
       { table: "profiles", select: "id" },
       { table: "courses", select: "id" },
@@ -2514,12 +2692,32 @@ async function ensureRelationalSyncReady(options = {}) {
     ];
 
     for (const check of checks) {
-      const { error } = await client.from(check.table).select(check.select).limit(1);
-      if (error) {
+      let checkError = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const { error } = await client.from(check.table).select(check.select).limit(1);
+        if (!error) {
+          checkError = null;
+          break;
+        }
+        checkError = error;
+        const errorMessage = getErrorMessage(error, "");
+        if (attempt === 0 && isInvalidJwtMessage(errorMessage)) {
+          const refreshed = await refreshCurrentSession();
+          if (refreshed) {
+            continue;
+          }
+        }
+        if (attempt === 0 && isLikelyNetworkFetchError(error)) {
+          await new Promise((resolve) => window.setTimeout(resolve, 220));
+          continue;
+        }
+      }
+      if (checkError) {
         relationalSync.enabled = false;
         relationalSync.readyCheckedAt = Date.now();
-        relationalSync.lastReadyError = error.message
-          ? `Cannot access ${check.table}: ${error.message}`
+        const details = getErrorMessage(checkError, "");
+        relationalSync.lastReadyError = details
+          ? `Cannot access ${check.table}: ${details}`
           : `Cannot access ${check.table}.`;
         relationalSync.lastFailureAt = Date.now();
         relationalSync.lastFailureMessage = relationalSync.lastReadyError;
@@ -3247,10 +3445,16 @@ async function hydrateRelationalQuestions() {
         console.warn("Questions backfill failed.", syncError?.message || syncError);
         return;
       }
-    } else if (hasLocalQuestions) {
-      if (currentUser?.role === "student") {
-        saveLocalOnly(STORAGE_KEYS.questions, []);
+    } else if (currentUser?.role === "student") {
+      if (hasLocalQuestions) {
+        return;
       }
+      const recoveredFromBackup = await hydrateQuestionsFromSupabaseBackup().catch(() => false);
+      if (recoveredFromBackup) {
+        return;
+      }
+      return;
+    } else if (hasLocalQuestions) {
       return;
     }
   }
@@ -3988,6 +4192,36 @@ async function hydrateUserScopedSupabaseState(user) {
     scheduleFullSupabaseSync({ includeUserScoped: true, scope, user });
   }
   return result;
+}
+
+async function hydrateUsersFromSupabaseBackup() {
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
+    if (!bootstrap?.enabled) {
+      return false;
+    }
+  }
+  const result = await hydrateSupabaseSyncKeys([STORAGE_KEYS.users]).catch((error) => ({ error }));
+  if (result?.error || !result?.hadRemoteData) {
+    return false;
+  }
+  syncUsersWithCurriculum();
+  return true;
+}
+
+async function hydrateQuestionsFromSupabaseBackup() {
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
+    if (!bootstrap?.enabled) {
+      return false;
+    }
+  }
+  const result = await hydrateSupabaseSyncKeys([STORAGE_KEYS.questions]).catch((error) => ({ error }));
+  if (result?.error) {
+    return false;
+  }
+  const questions = getQuestions();
+  return Array.isArray(questions) && questions.some((question) => String(question?.stem || "").trim());
 }
 
 function scheduleSupabaseWrite(storageKey, value) {
@@ -5904,6 +6138,9 @@ function seedData() {
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  if (typeof load(STORAGE_KEYS.autoApproveStudentAccess, null) !== "boolean") {
+    save(STORAGE_KEYS.autoApproveStudentAccess, DEFAULT_AUTO_APPROVE_STUDENT_ACCESS);
+  }
 
   const allCourses = CURRICULUM_COURSE_LIST;
 
@@ -5980,11 +6217,9 @@ function seedData() {
       }
       const shouldApprove = user.role === "admin"
         ? true
-        : shouldAutoApproveStudentAccess(user)
-          ? true
-          : typeof user.isApproved === "boolean"
-            ? user.isApproved
-            : true;
+        : typeof user.isApproved === "boolean"
+          ? user.isApproved
+          : true;
       if (user.isApproved !== shouldApprove) {
         user.isApproved = shouldApprove;
         changed = true;
@@ -6280,7 +6515,12 @@ function ensureAdminDashboardPolling() {
   }
   adminDashboardPollHandle = window.setInterval(() => {
     const currentUser = getCurrentUser();
-    if (!currentUser || currentUser.role !== "admin" || state.route !== "admin" || state.adminPage !== "dashboard") {
+    if (
+      !currentUser
+      || currentUser.role !== "admin"
+      || state.route !== "admin"
+      || !ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())
+    ) {
       clearAdminDashboardPolling();
       return;
     }
@@ -6292,7 +6532,10 @@ function ensureAdminDashboardPolling() {
         if (!ok) {
           return;
         }
-        if (state.route !== "admin" || state.adminPage !== "dashboard") {
+        if (
+          state.route !== "admin"
+          || !ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())
+        ) {
           return;
         }
         state.skipNextRouteAnimation = true;
@@ -6691,6 +6934,49 @@ function shouldRefreshStudentData(user) {
   return !last || (Date.now() - last) > STUDENT_DATA_REFRESH_MS;
 }
 
+async function refreshStudentDataFromSupabaseState(user) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  const scope = getSyncScopeForUser(user);
+  if (!scope) {
+    return false;
+  }
+
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
+    if (!bootstrap?.enabled) {
+      return false;
+    }
+  }
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    return false;
+  }
+
+  if (supabaseSync.pendingWrites.size || supabaseSync.flushing) {
+    await flushSupabaseWrites().catch(() => {});
+  }
+
+  const globalRefreshResult = await hydrateSupabaseSyncKeys([
+    STORAGE_KEYS.users,
+    STORAGE_KEYS.questions,
+    STORAGE_KEYS.curriculum,
+    STORAGE_KEYS.courseTopics,
+  ]).catch((error) => ({ error }));
+  if (globalRefreshResult?.error) {
+    return false;
+  }
+
+  const userRefreshResult = await hydrateSupabaseSyncKeys(USER_SCOPED_SYNC_KEYS, scope).catch((error) => ({ error }));
+  if (userRefreshResult?.error) {
+    return false;
+  }
+  if (!userRefreshResult?.hadRemoteData) {
+    scheduleFullSupabaseSync({ includeUserScoped: true, scope, user });
+  }
+  return true;
+}
+
 async function refreshStudentDataSnapshot(user, options = {}) {
   if (!user || user.role !== "student") {
     return false;
@@ -6710,8 +6996,24 @@ async function refreshStudentDataSnapshot(user, options = {}) {
   try {
     const ready = await ensureRelationalSyncReady({ force });
     if (!ready) {
+      const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user);
       state.studentDataLastSyncAt = Date.now();
-      return false;
+      if (!fallbackRefreshed) {
+        return false;
+      }
+      if (
+        rerender
+        && (
+          routeBefore === "dashboard"
+          || routeBefore === "analytics"
+          || routeBefore === "notifications"
+          || routeBefore === "create-test"
+        )
+        && state.route === routeBefore
+      ) {
+        shouldRerenderRoute = routeBefore;
+      }
+      return true;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing) {
       await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
@@ -6756,7 +7058,23 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     }
     return true;
   } catch (error) {
+    const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user).catch(() => false);
     state.studentDataLastSyncAt = Date.now();
+    if (fallbackRefreshed) {
+      if (
+        rerender
+        && (
+          routeBefore === "dashboard"
+          || routeBefore === "analytics"
+          || routeBefore === "notifications"
+          || routeBefore === "create-test"
+        )
+        && state.route === routeBefore
+      ) {
+        shouldRerenderRoute = routeBefore;
+      }
+      return true;
+    }
     console.warn("Student data refresh failed.", error?.message || error);
     return false;
   } finally {
@@ -6824,11 +7142,15 @@ async function refreshAdminDataSnapshot(user, options = {}) {
   try {
     const ready = await ensureRelationalSyncReady({ force });
     if (!ready) {
+      const usersRecovered = await hydrateUsersFromSupabaseBackup().catch(() => false);
       if (surfaceErrors || !state.adminDataLastSyncAt) {
-        state.adminDataSyncError = String(relationalSync.lastReadyError || "Relational sync is unavailable.");
+        const baseMessage = String(relationalSync.lastReadyError || "Relational sync is unavailable.");
+        state.adminDataSyncError = usersRecovered
+          ? `${baseMessage} Loaded users from cloud backup.`
+          : baseMessage;
       }
       state.adminDataLastSyncAt = Date.now();
-      return false;
+      return usersRecovered;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing || isQuestionSyncBusy()) {
       await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
@@ -7005,7 +7327,11 @@ function render() {
   topbarEl?.classList.toggle("hidden", false);
 
   syncTopbar();
-  if (state.route === "admin" && user?.role === "admin" && state.adminPage === "dashboard") {
+  if (
+    state.route === "admin"
+    && user?.role === "admin"
+    && ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())
+  ) {
     ensureAdminDashboardPolling();
   } else {
     clearAdminDashboardPolling();
@@ -7082,16 +7408,20 @@ function render() {
     case "admin":
       if (user?.role === "admin" && shouldRefreshAdminData(user)) {
         const initialAdminHydration = !state.adminDataLastSyncAt;
+        const adminPageBeforeRefresh = String(state.adminPage || "").trim();
         refreshAdminDataSnapshot(user, {
           force: !state.adminDataLastSyncAt,
           surfaceErrors: !state.adminDataLastSyncAt,
-        }).catch((error) => {
-          console.warn("Admin data refresh failed.", error?.message || error);
-        }).finally(() => {
-          if (initialAdminHydration && state.route === "admin") {
+        }).then((ok) => {
+          if (!ok || state.route !== "admin" || String(state.adminPage || "").trim() !== adminPageBeforeRefresh) {
+            return;
+          }
+          if (initialAdminHydration || ADMIN_AUTO_REFRESH_PAGES.has(adminPageBeforeRefresh)) {
             state.skipNextRouteAnimation = true;
             render();
           }
+        }).catch((error) => {
+          console.warn("Admin data refresh failed.", error?.message || error);
         });
       }
       if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
@@ -8931,7 +9261,17 @@ async function refreshStudentAnalyticsNow(options = {}) {
 
   const ok = await refreshStudentDataSnapshot(user, { force: true, rerender: true });
   if (!options?.silent) {
-    toast(ok ? "Analytics refreshed." : "Could not refresh cloud data. Showing local analytics.");
+    if (ok) {
+      toast("Analytics refreshed.");
+    } else {
+      const readyError = String(relationalSync.lastReadyError || "").trim().toLowerCase();
+      const noSession = readyError.includes("no active supabase session");
+      toast(
+        noSession
+          ? "Supabase session expired. Log out and log in again, then refresh analytics."
+          : "Could not refresh cloud data. Showing local analytics.",
+      );
+    }
   }
   return ok;
 }
@@ -10728,7 +11068,7 @@ function renderAdmin() {
       }
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
-    const autoApprovalEnabled = AUTO_APPROVE_STUDENT_ACCESS;
+    const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = users
       .map((account) => {
@@ -10736,7 +11076,9 @@ function renderAdmin() {
         const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
-        const resetActionLabel = "Set password";
+        const resetPasswordAction = isGoogleAuthUser
+          ? ""
+          : '<button class="btn ghost admin-btn-sm" data-action="reset-user-password">Set password</button>';
         const visibleCourses =
           account.role === "student"
             ? year && semester
@@ -10792,9 +11134,9 @@ function renderAdmin() {
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
                 <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
-                <button class="btn ghost admin-btn-sm" data-action="reset-user-password">${resetActionLabel}</button>
-                <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" || autoApprovalEnabled ? "disabled" : ""}>
-                  ${autoApprovalEnabled ? "Auto-approval on" : (isApproved ? "Suspend access" : "Approve access")}
+                ${resetPasswordAction}
+                <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
+                  ${isApproved ? "Suspend" : "Approve"}
                 </button>
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
                   ${account.role === "admin" ? "Make student" : "Make admin"}
@@ -10815,8 +11157,12 @@ function renderAdmin() {
             <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
           </div>
           <div class="stack" style="align-items: flex-end;">
-            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b>${autoApprovalEnabled ? " (auto-approval enabled)" : ""}</p>
-            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount && !autoApprovalEnabled ? "" : "disabled"}>Accept all pending</button>
+            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b></p>
+            <label class="subtle" style="display: inline-flex; gap: 0.45rem; align-items: center; margin: 0;">
+              <input id="admin-auto-approval-toggle" type="checkbox" ${autoApprovalEnabled ? "checked" : ""} />
+              <span>Auto-approve new complete student accounts</span>
+            </label>
+            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
           </div>
         </div>
         <form id="admin-add-user-form" style="margin-top: 0.85rem;">
@@ -12501,11 +12847,21 @@ function wireAdmin() {
     }
   });
 
-  appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
-    if (AUTO_APPROVE_STUDENT_ACCESS) {
-      toast("Auto-approval is enabled, but only complete student profiles are approved automatically.");
-      return;
+  const autoApprovalToggle = document.getElementById("admin-auto-approval-toggle");
+  autoApprovalToggle?.addEventListener("change", async () => {
+    const enabled = Boolean(autoApprovalToggle.checked);
+    save(STORAGE_KEYS.autoApproveStudentAccess, enabled);
+    try {
+      await flushPendingSyncNow({ throwOnRelationalFailure: false });
+    } catch {
+      // Keep local state even if sync fails.
     }
+    toast(enabled ? "Auto-approval enabled for new complete student accounts." : "Auto-approval disabled.");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
     const current = getCurrentUser();
     const users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
@@ -12631,7 +12987,7 @@ function wireAdmin() {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
           users[idx].approvedBy = null;
-        } else if (AUTO_APPROVE_STUDENT_ACCESS) {
+        } else if (isAutoApproveStudentAccessEnabled()) {
           users[idx].isApproved = true;
           users[idx].approvedAt = users[idx].approvedAt || nowISO();
           users[idx].approvedBy = users[idx].approvedBy || AUTO_APPROVAL_ACTOR;
@@ -12822,10 +13178,6 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='toggle-user-approval']").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (AUTO_APPROVE_STUDENT_ACCESS) {
-        toast("Auto-approval mode is enabled. Disable it first to manage manual approvals.");
-        return;
-      }
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       if (!userId) {
@@ -15738,11 +16090,9 @@ function syncUsersWithCurriculum() {
     }
     const shouldApprove = user.role === "admin"
       ? true
-      : shouldAutoApproveStudentAccess(user)
-        ? true
-        : typeof user.isApproved === "boolean"
-          ? user.isApproved
-          : true;
+      : typeof user.isApproved === "boolean"
+        ? user.isApproved
+        : true;
     if (user.isApproved !== shouldApprove) {
       user.isApproved = shouldApprove;
       changed = true;
