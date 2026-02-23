@@ -34,6 +34,7 @@ const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
 const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
 const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
+const PASSWORD_RECOVERY_PENDING_KEY = "mcq_password_recovery_pending";
 const KNOWN_ROUTES = new Set([
   "landing",
   "features",
@@ -43,6 +44,7 @@ const KNOWN_ROUTES = new Set([
   "login",
   "signup",
   "forgot",
+  "reset-password",
   "complete-profile",
   "dashboard",
   "notifications",
@@ -90,6 +92,7 @@ const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
+  "type",
   "error",
   "error_code",
   "error_description",
@@ -1105,6 +1108,18 @@ function setGoogleOAuthPendingState(isPending) {
   syncGoogleOAuthLoadingUi();
 }
 
+function isPasswordRecoveryPendingState() {
+  return readSessionStorageKey(PASSWORD_RECOVERY_PENDING_KEY) === "1";
+}
+
+function setPasswordRecoveryPendingState(isPending) {
+  if (isPending) {
+    writeSessionStorageKey(PASSWORD_RECOVERY_PENDING_KEY, "1");
+  } else {
+    removeSessionStorageKey(PASSWORD_RECOVERY_PENDING_KEY);
+  }
+}
+
 function resolveGoogleOAuthPendingState(user, privateRoutes = []) {
   const pending = isGoogleOAuthPendingState();
   if (!pending) {
@@ -1198,12 +1213,18 @@ async function resolveSupabaseAuthCallback(authClient) {
   if (!hasCallbackParams) {
     return "none";
   }
+  const callbackType = String(callbackParams.get("type") || "").trim().toLowerCase();
+  const isPasswordRecoveryCallback = callbackType === "recovery";
 
-  const callbackError = getFriendlyOAuthCallbackErrorMessage(
-    callbackParams.get("error_description") || callbackParams.get("error"),
-  );
+  const rawCallbackError = callbackParams.get("error_description") || callbackParams.get("error");
+  const callbackError = isPasswordRecoveryCallback
+    ? decodeOAuthErrorMessage(rawCallbackError)
+    : getFriendlyOAuthCallbackErrorMessage(rawCallbackError);
   if (callbackError) {
     setGoogleOAuthPendingState(false);
+    if (isPasswordRecoveryCallback) {
+      setPasswordRecoveryPendingState(false);
+    }
     clearAuthCallbackParams();
     toast(callbackError);
     return "error";
@@ -1220,7 +1241,15 @@ async function resolveSupabaseAuthCallback(authClient) {
       if (error) {
         console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
         setGoogleOAuthPendingState(false);
-        toast(error.message || "Google sign-in callback failed. Please try again.");
+        if (isPasswordRecoveryCallback) {
+          setPasswordRecoveryPendingState(false);
+        }
+        toast(
+          error.message
+            || (isPasswordRecoveryCallback
+              ? "Password reset callback failed. Request a new reset email and try again."
+              : "Google sign-in callback failed. Please try again."),
+        );
         callbackFailed = true;
       }
     }
@@ -1233,13 +1262,32 @@ async function resolveSupabaseAuthCallback(authClient) {
       if (error) {
         console.warn("Supabase OAuth token callback failed.", error?.message || error);
         setGoogleOAuthPendingState(false);
-        toast(error.message || "Google sign-in callback failed. Please try again.");
+        if (isPasswordRecoveryCallback) {
+          setPasswordRecoveryPendingState(false);
+        }
+        toast(
+          error.message
+            || (isPasswordRecoveryCallback
+              ? "Password reset callback failed. Request a new reset email and try again."
+              : "Google sign-in callback failed. Please try again."),
+        );
         callbackFailed = true;
       }
     }
   } else {
     setGoogleOAuthPendingState(false);
+    if (isPasswordRecoveryCallback) {
+      setPasswordRecoveryPendingState(false);
+    }
     callbackFailed = true;
+  }
+
+  if (!callbackFailed && isPasswordRecoveryCallback) {
+    setGoogleOAuthPendingState(false);
+    setPasswordRecoveryPendingState(true);
+    state.route = "reset-password";
+  } else if (!callbackFailed) {
+    setPasswordRecoveryPendingState(false);
   }
 
   clearAuthCallbackParams();
@@ -1260,6 +1308,7 @@ async function initSupabaseAuth() {
     if (isGoogleOAuthPendingState()) {
       setGoogleOAuthPendingState(false);
     }
+    setPasswordRecoveryPendingState(false);
     return;
   }
 
@@ -1279,6 +1328,7 @@ async function initSupabaseAuth() {
     const callbackStatus = await resolveSupabaseAuthCallback(supabaseAuth.client).catch((callbackError) => {
       console.warn("Supabase auth callback handling failed.", callbackError?.message || callbackError);
       setGoogleOAuthPendingState(false);
+      setPasswordRecoveryPendingState(false);
       return "error";
     });
 
@@ -1305,6 +1355,21 @@ async function initSupabaseAuth() {
       await ensureRelationalSyncReady().catch((syncError) => {
         console.warn("Relational sync initialization failed.", syncError?.message || syncError);
       });
+      const hasRecoveryFlag = isPasswordRecoveryPendingState();
+      const shouldHonorRecoveryRoute = hasRecoveryFlag && (callbackStatus === "processed" || state.route === "reset-password");
+      if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
+        setPasswordRecoveryPendingState(false);
+      }
+      if (shouldHonorRecoveryRoute) {
+        setGoogleOAuthPendingState(false);
+        if (state.route !== "reset-password") {
+          navigate("reset-password");
+        } else {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
+      }
       const completionRoute = getStudentProfileCompletionRoute(localUser);
       if (localUser && completionRoute) {
         setGoogleOAuthPendingState(false);
@@ -1366,9 +1431,27 @@ async function initSupabaseAuth() {
         if (event === "TOKEN_REFRESHED") {
           return;
         }
+        if (event === "PASSWORD_RECOVERY") {
+          setGoogleOAuthPendingState(false);
+          setPasswordRecoveryPendingState(true);
+        }
         let localUser = upsertLocalUserFromAuth(session.user);
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
+        const hasRecoveryFlag = isPasswordRecoveryPendingState();
+        const shouldHonorRecoveryRoute = event === "PASSWORD_RECOVERY" || (hasRecoveryFlag && state.route === "reset-password");
+        if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
+          setPasswordRecoveryPendingState(false);
+        }
+        if (shouldHonorRecoveryRoute) {
+          if (state.route !== "reset-password") {
+            navigate("reset-password");
+          } else {
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+          return;
+        }
         const completionRoute = getStudentProfileCompletionRoute(localUser);
         if (localUser && completionRoute) {
           setGoogleOAuthPendingState(false);
@@ -1432,6 +1515,7 @@ async function initSupabaseAuth() {
       if (event === "SIGNED_OUT") {
         supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
+        setPasswordRecoveryPendingState(false);
         const sessionCheck = await supabaseAuth.client.auth.getSession().catch(() => ({ data: { session: null } }));
         if (sessionCheck?.data?.session?.user) {
           const recoveredSessionUserId = String(sessionCheck.data.session.user.id || "").trim();
@@ -1480,6 +1564,7 @@ async function initSupabaseAuth() {
   } catch (error) {
     console.warn("Supabase auth unavailable. Falling back to local auth only.", error);
     setGoogleOAuthPendingState(false);
+    setPasswordRecoveryPendingState(false);
     clearNotificationRealtimeSubscription();
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
@@ -6848,16 +6933,23 @@ function render() {
   const authEntryRoutes = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
   const studentProfileCompletionRoute = getStudentProfileCompletionRoute(user);
   const googleSignupOnboarding = studentProfileCompletionRoute === "signup";
+  const passwordRecoveryPending = isPasswordRecoveryPendingState();
 
   if (privateRoutes.includes(state.route) && !user) {
     state.route = "login";
   }
 
-  if (studentProfileCompletionRoute && state.route !== studentProfileCompletionRoute) {
+  if (state.route === "reset-password" && !passwordRecoveryPending) {
+    state.route = user ? (user.role === "admin" ? "admin" : "dashboard") : "forgot";
+  } else if (state.route !== "reset-password" && passwordRecoveryPending) {
+    setPasswordRecoveryPendingState(false);
+  }
+
+  if (!passwordRecoveryPending && studentProfileCompletionRoute && state.route !== studentProfileCompletionRoute) {
     state.route = studentProfileCompletionRoute;
   }
 
-  if (user && state.route === "complete-profile" && studentProfileCompletionRoute !== "complete-profile") {
+  if (!passwordRecoveryPending && user && state.route === "complete-profile" && studentProfileCompletionRoute !== "complete-profile") {
     state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
@@ -6895,7 +6987,7 @@ function render() {
       });
   }
 
-  if (user?.role === "admin" && state.route !== "admin") {
+  if (user?.role === "admin" && state.route !== "admin" && !passwordRecoveryPending) {
     state.route = "admin";
   }
 
@@ -6950,6 +7042,10 @@ function render() {
     case "forgot":
       appEl.innerHTML = renderAuth("forgot");
       wireAuth("forgot");
+      break;
+    case "reset-password":
+      appEl.innerHTML = renderPasswordReset();
+      wirePasswordReset();
       break;
     case "complete-profile":
       appEl.innerHTML = renderCompleteProfile();
@@ -8192,6 +8288,110 @@ function wireAuth(mode) {
       toast("Supabase auth is not configured. Password reset email is unavailable.");
     } finally {
       lockAuthForm(form, false);
+    }
+  });
+}
+
+function renderPasswordReset() {
+  const hasRecoverySession = isPasswordRecoveryPendingState();
+  if (!hasRecoverySession) {
+    return `
+      <section class="panel" style="max-width: 560px; margin-inline: auto;">
+        <h2 class="title">Reset Password</h2>
+        <p class="subtle">Your password reset session is not active. Request a new reset link and try again.</p>
+        <div class="auth-inline">
+          <button class="btn" data-nav="forgot" type="button">Request reset link</button>
+          <button class="btn ghost" data-nav="login" type="button">Back to login</button>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel" style="max-width: 560px; margin-inline: auto;">
+      <h2 class="title">Set New Password</h2>
+      <p class="subtle">Enter your new password to complete account recovery.</p>
+      <form id="reset-password-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+        <label>New password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
+        <label>Confirm new password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
+        <button class="btn" type="submit">Update password</button>
+      </form>
+      <div class="auth-inline">
+        <button class="btn ghost" data-nav="login" type="button">Cancel</button>
+      </div>
+    </section>
+  `;
+}
+
+function wirePasswordReset() {
+  const form = document.getElementById("reset-password-form");
+  if (!form) {
+    return;
+  }
+
+  const lockForm = (isSubmitting) => {
+    form.dataset.submitting = isSubmitting ? "1" : "0";
+    const submit = form.querySelector('button[type="submit"]');
+    if (!submit) {
+      return;
+    }
+    if (!submit.dataset.baseLabel) {
+      submit.dataset.baseLabel = submit.textContent || "Update password";
+    }
+    submit.disabled = isSubmitting;
+    submit.textContent = isSubmitting ? "Updating..." : submit.dataset.baseLabel;
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (form.dataset.submitting === "1") {
+      return;
+    }
+    if (!isPasswordRecoveryPendingState()) {
+      toast("Reset session expired. Request a new reset link.");
+      navigate("forgot");
+      return;
+    }
+
+    const data = new FormData(form);
+    const password = String(data.get("password") || "");
+    const confirmPassword = String(data.get("confirmPassword") || "");
+    if (!password || password.length < 6) {
+      toast("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      toast("Password and confirm password must match.");
+      return;
+    }
+
+    const authClient = getSupabaseAuthClient();
+    if (!authClient) {
+      toast("Supabase auth is not configured. Password reset is unavailable.");
+      return;
+    }
+
+    lockForm(true);
+    try {
+      const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+      if (!sessionData?.session?.user) {
+        setPasswordRecoveryPendingState(false);
+        toast("Reset session expired. Request a new reset link.");
+        navigate("forgot");
+        return;
+      }
+      const { error } = await authClient.auth.updateUser({ password });
+      if (error) {
+        toast(error.message || "Could not update password.");
+        return;
+      }
+      setPasswordRecoveryPendingState(false);
+      removeStorageKey(STORAGE_KEYS.currentUserId);
+      await authClient.auth.signOut().catch(() => {});
+      toast("Password updated. Log in with your new password.");
+      navigate("login");
+    } finally {
+      lockForm(false);
     }
   });
 }
@@ -10536,6 +10736,10 @@ function renderAdmin() {
         const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
+        const isSupabaseManagedUser = hasSupabaseManagedIdentity(account);
+        const resetActionLabel = isGoogleAuthUser
+          ? "Google account"
+          : (isSupabaseManagedUser ? "Send reset link" : "Set temp password");
         const visibleCourses =
           account.role === "student"
             ? year && semester
@@ -10591,6 +10795,7 @@ function renderAdmin() {
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
                 <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
+                <button class="btn ghost admin-btn-sm" data-action="reset-user-password" ${isGoogleAuthUser ? "disabled" : ""}>${resetActionLabel}</button>
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" || autoApprovalEnabled ? "disabled" : ""}>
                   ${autoApprovalEnabled ? "Auto-approval on" : (isApproved ? "Suspend access" : "Approve access")}
                 </button>
@@ -12479,6 +12684,78 @@ function wireAdmin() {
     button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
       await saveUserEnrollmentFromRow(row, { mode: "manual" });
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='reset-user-password']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.dataset.busy === "1") {
+        return;
+      }
+      const row = button.closest("tr[data-user-id]");
+      const userId = row?.getAttribute("data-user-id");
+      if (!userId) {
+        return;
+      }
+      const users = getUsers();
+      const idx = users.findIndex((entry) => entry.id === userId);
+      if (idx === -1) {
+        toast("Account not found.");
+        return;
+      }
+      const target = users[idx];
+      if (getAuthProviderFromUser(target) === "google") {
+        toast("Google sign-in accounts must reset credentials through Google.");
+        return;
+      }
+
+      button.dataset.busy = "1";
+      if (!button.dataset.baseLabel) {
+        button.dataset.baseLabel = String(button.textContent || "Send reset link").trim();
+      }
+      button.disabled = true;
+      button.textContent = hasSupabaseManagedIdentity(target) ? "Sending..." : "Saving...";
+
+      try {
+        if (hasSupabaseManagedIdentity(target)) {
+          const authClient = getSupabaseAuthClient();
+          if (!authClient) {
+            toast("Supabase auth is not configured. Cannot send password reset email.");
+            return;
+          }
+          const redirectTo = getAuthRedirectToUrl();
+          if (!redirectTo) {
+            toast("Password reset requires an http(s) app URL. Open the deployed site and retry.");
+            return;
+          }
+          const { error } = await authClient.auth.resetPasswordForEmail(target.email, { redirectTo });
+          if (error) {
+            toast(error.message || "Could not send reset email.");
+            return;
+          }
+          toast(`Password reset email sent to ${target.email}.`);
+          return;
+        }
+
+        const temporaryPassword = String(window.prompt(`Set a temporary password for ${target.email}`, "") || "").trim();
+        if (!temporaryPassword) {
+          return;
+        }
+        if (temporaryPassword.length < 6) {
+          toast("Temporary password must be at least 6 characters.");
+          return;
+        }
+        users[idx].password = temporaryPassword;
+        save(STORAGE_KEYS.users, users);
+        await flushPendingSyncNow();
+        toast("Temporary password saved.");
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not reset password for this user."));
+      } finally {
+        button.dataset.busy = "0";
+        button.disabled = false;
+        button.textContent = button.dataset.baseLabel || "Send reset link";
+      }
     });
   });
 
@@ -17049,6 +17326,7 @@ async function logout() {
   supabaseAuth.activeUserId = "";
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
+  setPasswordRecoveryPendingState(false);
   state.userMenuOpen = false;
   state.notificationMenuOpen = false;
   state.sessionId = null;

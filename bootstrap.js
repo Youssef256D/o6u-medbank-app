@@ -14,6 +14,7 @@
     "login",
     "signup",
     "forgot",
+    "reset-password",
     "complete-profile",
     "dashboard",
     "notifications",
@@ -29,6 +30,7 @@
   const OAUTH_CALLBACK_QUERY_KEYS = new Set([
     "code",
     "state",
+    "type",
     "error",
     "error_code",
     "error_description",
