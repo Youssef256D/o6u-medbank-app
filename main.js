@@ -1864,9 +1864,6 @@ function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (!hasSupabaseManagedIdentity(user)) {
-    return false;
-  }
   if (user.profileCompleted === true && hasCompleteStudentProfile(user)) {
     return false;
   }
@@ -2914,13 +2911,11 @@ async function hydrateRelationalProfiles(currentUser) {
 
   let enrollmentCourseMap = {};
   let enrollmentTermMap = {};
-  let enrollmentLookupFailed = false;
   try {
     const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
     enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
     enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
   } catch (enrollmentError) {
-    enrollmentLookupFailed = true;
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
 
@@ -2943,7 +2938,6 @@ async function hydrateRelationalProfiles(currentUser) {
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
-    const hasEnrollmentEntry = Object.prototype.hasOwnProperty.call(enrollmentCourseMap, profile.id);
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
@@ -2964,7 +2958,7 @@ async function hydrateRelationalProfiles(currentUser) {
       ? [...allCourses]
       : enrolledCourses.length
         ? enrolledCourses
-        : (existingAssignedCourses.length && (enrollmentLookupFailed || !hasEnrollmentEntry))
+        : existingAssignedCourses.length
           ? existingAssignedCourses
           : [];
     if (role === "student") {
@@ -6866,6 +6860,7 @@ function render() {
     privateRoutes.includes(state.route)
     && user
     && !isUserAccessApproved(user)
+    && !studentProfileCompletionRoute
     && !hasSupabaseManagedIdentity(user)
   ) {
     removeStorageKey(STORAGE_KEYS.currentUserId);
@@ -15628,13 +15623,18 @@ function getAvailableCoursesForUser(user) {
 
 function getPublishedQuestionsForUser(user) {
   const availableCourses = new Set(getAvailableCoursesForUser(user));
-  return applyQbankFilters(
+  const publishedQuestions = applyQbankFilters(
     getQuestions().filter((question) => (
       question.status === "published"
       && isQuestionUsableForTesting(question)
     )),
     { course: "", topics: [] },
-  ).filter((question) => availableCourses.has(question.qbankCourse));
+  );
+  // Fail safe: if enrollment metadata is temporarily missing, keep published questions visible.
+  if (!availableCourses.size) {
+    return publishedQuestions;
+  }
+  return publishedQuestions.filter((question) => availableCourses.has(question.qbankCourse));
 }
 
 function setSelectOptions(selectEl, options, includeAll = false) {
