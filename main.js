@@ -1575,10 +1575,10 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let nextProfileCompleted = role !== "student";
   if (role === "student") {
-    if (typeof localUser?.profileCompleted === "boolean") {
+    if (profileHasStudentCompletion) {
+      nextProfileCompleted = true;
+    } else if (typeof localUser?.profileCompleted === "boolean") {
       nextProfileCompleted = localUser.profileCompleted;
-    } else if (authProvider !== "google") {
-      nextProfileCompleted = profileHasStudentCompletion;
     } else {
       nextProfileCompleted = false;
     }
@@ -1864,11 +1864,8 @@ function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (user.profileCompleted === true && hasCompleteStudentProfile(user)) {
+  if (isUserAccessApproved(user)) {
     return false;
-  }
-  if (user.profileCompleted === false) {
-    return true;
   }
   return !hasCompleteStudentProfile(user);
 }
@@ -2020,17 +2017,25 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
         : typeof previous?.isApproved === "boolean"
           ? previous.isApproved
           : false;
+  const inferredStudentProfileCompletion = nextRole !== "student"
+    ? true
+    : hasCompleteStudentProfile({
+      role: "student",
+      phone: nextPhone,
+      academicYear: nextYear,
+      academicSemester: nextSemester,
+    });
 
   const hasExplicitProfileCompletionFlag = typeof profileOverrides.profileCompleted === "boolean";
   const hasLegacyProfileCompletionFlag = typeof previous?.profileCompleted === "boolean";
   let nextProfileCompleted = nextRole === "admin";
   if (nextRole === "student") {
-    if (hasExplicitProfileCompletionFlag) {
+    if (inferredStudentProfileCompletion) {
+      nextProfileCompleted = true;
+    } else if (hasExplicitProfileCompletionFlag) {
       nextProfileCompleted = Boolean(profileOverrides.profileCompleted);
     } else if (hasLegacyProfileCompletionFlag) {
       nextProfileCompleted = Boolean(previous.profileCompleted);
-    } else if (nextAuthProvider !== "google") {
-      nextProfileCompleted = true;
     } else {
       nextProfileCompleted = false;
     }
@@ -15340,6 +15345,14 @@ function syncUsersWithCurriculum() {
         user.academicSemester = null;
         changed = true;
       }
+    }
+
+    const shouldMarkProfileCompleted = user.role === "student"
+      ? hasCompleteStudentProfile(user)
+      : true;
+    if (user.profileCompleted !== shouldMarkProfileCompleted) {
+      user.profileCompleted = shouldMarkProfileCompleted;
+      changed = true;
     }
   });
 
