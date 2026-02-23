@@ -186,6 +186,7 @@ const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
   anonKey: window.__SUPABASE_CONFIG?.anonKey || "",
   enabled: window.__SUPABASE_CONFIG?.enabled !== false,
+  serverApiBaseUrl: window.__SUPABASE_CONFIG?.serverApiBaseUrl || "",
   authRedirectUrl: window.__SUPABASE_CONFIG?.authRedirectUrl || "",
   questionImageBucket: window.__SUPABASE_CONFIG?.questionImageBucket || "question-images",
 };
@@ -14581,6 +14582,50 @@ function isInvalidJwtMessage(message) {
     || (text.includes("jwt") && text.includes("malformed"));
 }
 
+function normalizeApiBaseUrl(baseUrl) {
+  const raw = String(baseUrl || "").trim();
+  if (!raw) {
+    return "";
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+function buildServerApiUrl(pathname) {
+  const normalizedBase = normalizeApiBaseUrl(SUPABASE_CONFIG.serverApiBaseUrl || "");
+  if (!normalizedBase) {
+    return "";
+  }
+  const normalizedPath = `/${String(pathname || "").replace(/^\/+/, "")}`;
+  if (/^https?:\/\//i.test(normalizedBase)) {
+    try {
+      return new URL(normalizedPath, `${normalizedBase}/`).toString();
+    } catch {
+      return `${normalizedBase}${normalizedPath}`;
+    }
+  }
+  return normalizedBase.startsWith("/") ? `${normalizedBase}${normalizedPath}` : `/${normalizedBase}${normalizedPath}`;
+}
+
+async function readJsonResponseSafe(response) {
+  try {
+    return await response.clone().json();
+  } catch {
+    return null;
+  }
+}
+
+async function getResponseDetails(response, payload) {
+  const structured = String(payload?.error || payload?.message || "").trim();
+  if (structured) {
+    return structured;
+  }
+  try {
+    return String(await response.text()).trim();
+  } catch {
+    return "";
+  }
+}
+
 async function getValidSupabaseAccessToken(authClient) {
   if (!authClient?.auth) {
     return { ok: false, token: "", message: "Supabase auth client is not available." };
@@ -14672,10 +14717,12 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
   }
 
   try {
-    if (!SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
+    const serverDeleteUrl = buildServerApiUrl("/admin-delete-user");
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    if (!serverDeleteUrl && !hasLegacySupabaseFunction) {
       return {
         ok: false,
-        message: "Supabase function endpoint is not configured in this app.",
+        message: "No admin delete endpoint is configured in this app.",
       };
     }
     const actingUser = getCurrentUser();
@@ -14708,28 +14755,64 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
         };
       }
 
-      const response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${tokenResult.token}`,
-          apikey: SUPABASE_CONFIG.anonKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ targetAuthId }),
-      });
-
+      let response = null;
       let payload = null;
-      try {
-        payload = await response.json();
-      } catch {
-        payload = null;
+      let details = "";
+      let serverErrorMessage = "";
+
+      if (serverDeleteUrl) {
+        try {
+          response = await fetch(serverDeleteUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenResult.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetAuthId }),
+          });
+          payload = await readJsonResponseSafe(response);
+          details = await getResponseDetails(response, payload);
+        } catch (serverError) {
+          response = null;
+          payload = null;
+          details = "";
+          serverErrorMessage = getErrorMessage(serverError, "Server API request failed.");
+        }
+
+        const canFallbackToLegacy = Boolean(response)
+          && hasLegacySupabaseFunction
+          && (response.status === 404 || response.status === 405 || response.status === 501);
+        if (canFallbackToLegacy || (!response && hasLegacySupabaseFunction)) {
+          response = null;
+          payload = null;
+          details = "";
+        }
       }
 
-      if (response.ok && payload?.ok) {
+      if (!response) {
+        if (!hasLegacySupabaseFunction) {
+          return {
+            ok: false,
+            message: serverErrorMessage || "Admin delete API is unavailable. Configure serverApiBaseUrl and retry.",
+          };
+        }
+        response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            apikey: SUPABASE_CONFIG.anonKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ targetAuthId }),
+        });
+        payload = await readJsonResponseSafe(response);
+        details = await getResponseDetails(response, payload);
+      }
+
+      if (response.ok && (payload?.ok !== false)) {
         return { ok: true };
       }
 
-      const details = String(payload?.error || payload?.message || "").trim();
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
           await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});

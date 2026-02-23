@@ -81,6 +81,38 @@ Quick GitHub Pages steps:
 
 Alternative hosts (often easier for env management): Netlify, Vercel, Cloudflare Pages.
 
+## Server Functions (phase 1)
+
+This repo now includes a backend function for sensitive admin actions:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-delete-user.js`
+- shared helpers: `/Users/youssefayoub/Documents/Apps/MCQs Website/api/_supabase.js`
+
+What it does:
+
+- Verifies the caller's Supabase access token.
+- Checks the caller role from `profiles` (`admin` only).
+- Deletes target users via Supabase Admin API using `SUPABASE_SERVICE_ROLE_KEY` (server-side only).
+
+Required environment variables (server):
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `ALLOWED_ORIGIN` (optional, defaults to `*`)
+
+Frontend config:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js` now supports `serverApiBaseUrl`.
+- Default value is `"/api"` for same-origin deploys (for example, Vercel static + functions together).
+- If frontend and API are on different domains, set a full URL (for example, `https://your-api.vercel.app/api`).
+
+Local smoke run:
+
+```bash
+cp .env.example .env
+vercel dev
+```
+
 ## Real SQL database (added)
 
 A real PostgreSQL schema and seed setup is now included:
@@ -124,7 +156,7 @@ Then verify:
 
 ## Notes
 
-This is still a frontend prototype UI. SQL database files are production-style, but API wiring is still needed.
+This is still mostly a frontend prototype UI. SQL database files are production-style; server API wiring has started and should be expanded for other admin/data writes.
 
 1. Replace localStorage with a real backend + database.
 2. Add secure auth (hashed passwords, email verification, reset tokens).
