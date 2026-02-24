@@ -1751,12 +1751,21 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const fallbackPhone = String(localUser?.phone || "").trim();
   const resolvedPhone = profilePhone || metadataPhone || fallbackPhone;
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
+  const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
+  const autoApprovalFallback = shouldAutoApproveStudentAccess({
+    role,
+    phone: String(profile.phone || localUser?.phone || "").trim(),
+    academicYear: normalizeAcademicYearOrNull(profile.academic_year ?? localUser?.academicYear),
+    academicSemester: normalizeAcademicSemesterOrNull(profile.academic_semester ?? localUser?.academicSemester),
+  });
   const resolvedApproval = role === "admin"
     ? true
     : (
       profileApproved !== null
         ? profileApproved
-        : (typeof localUser?.isApproved === "boolean" ? localUser.isApproved : false)
+        : localApproval !== null
+          ? localApproval
+          : autoApprovalFallback
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
@@ -8422,6 +8431,12 @@ function wireAuth(mode) {
           save(STORAGE_KEYS.users, users);
           await syncUsersBackupState(users).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
+          if (autoApproved) {
+            const profileId = getUserProfileId(users[idx]);
+            if (isUuidValue(profileId)) {
+              updateRelationalProfileApproval([profileId], true).catch(() => { });
+            }
+          }
           await flushPendingSyncNow();
 
           if (autoApproved) {
@@ -8536,6 +8551,12 @@ function wireAuth(mode) {
 
           await syncUsersBackupState(getUsers()).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
+          if (autoApproved) {
+            const profileId = getUserProfileId(user);
+            if (isUuidValue(profileId)) {
+              updateRelationalProfileApproval([profileId], true).catch(() => { });
+            }
+          }
           await flushPendingSyncNow();
 
           if (authData.session && !autoApproved) {
@@ -8868,6 +8889,12 @@ function wireCompleteProfile() {
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users).catch(() => { });
       await ensureRelationalSyncReady().catch(() => { });
+      if (autoApproved) {
+        const profileId = getUserProfileId(users[idx]);
+        if (isUuidValue(profileId)) {
+          updateRelationalProfileApproval([profileId], true).catch(() => { });
+        }
+      }
       await flushPendingSyncNow();
 
       if (autoApproved) {
@@ -11140,13 +11167,16 @@ function renderAdmin() {
 
     pageContent = `
       <section class="card admin-section" id="admin-users-section">
-        <div class="flex-between">
+        <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">Users</h3>
             <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
           </div>
-          <div class="stack" style="align-items: flex-end;">
-            <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b></p>
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.6rem;">
+            <div style="display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end;">
+              <span class="badge ${pendingCount ? 'bad' : 'good'}" style="font-size: 0.8rem; padding: 0.3rem 0.7rem;">Pending: <b>${pendingCount}</b></span>
+              <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
+            </div>
             <label class="toggle-switch-label" style="margin: 0;">
               <input id="admin-auto-approval-toggle" type="checkbox" class="toggle-switch-input" ${autoApprovalEnabled ? "checked" : ""} />
               <span class="toggle-switch-track" aria-hidden="true">
@@ -11154,7 +11184,6 @@ function renderAdmin() {
               </span>
               <span class="toggle-switch-text subtle">Auto-approve new complete student accounts</span>
             </label>
-            <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
           </div>
         </div>
         <form id="admin-add-user-form" style="margin-top: 0.85rem;">
