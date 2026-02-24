@@ -736,8 +736,8 @@ async function fetchPublishedAppVersion() {
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const timeoutHandle = controller
       ? window.setTimeout(() => {
-          controller.abort();
-        }, APP_VERSION_FETCH_TIMEOUT_MS)
+        controller.abort();
+      }, APP_VERSION_FETCH_TIMEOUT_MS)
       : null;
     const response = await fetch(checkUrl.toString(), {
       cache: "no-store",
@@ -944,8 +944,8 @@ async function init() {
   }
   removeSessionStorageKey(BOOT_RECOVERY_FLAG);
   render();
-  flushPendingNotificationReadSync().catch(() => {});
-  flushPendingNotificationOutbox().catch(() => {});
+  flushPendingNotificationReadSync().catch(() => { });
+  flushPendingNotificationOutbox().catch(() => { });
 }
 
 function clearSupabaseBootstrapRetry() {
@@ -996,14 +996,14 @@ function scheduleSupabaseBootstrapRetry() {
   }
 
   supabaseBootstrapRetries = 0;
-  tryBootstrapSupabaseInBackground().catch(() => {});
+  tryBootstrapSupabaseInBackground().catch(() => { });
   supabaseBootstrapRetryHandle = window.setInterval(() => {
     if (supabaseBootstrapRetries >= SUPABASE_BOOTSTRAP_RETRY_LIMIT) {
       clearSupabaseBootstrapRetry();
       return;
     }
     supabaseBootstrapRetries += 1;
-    tryBootstrapSupabaseInBackground().catch(() => {});
+    tryBootstrapSupabaseInBackground().catch(() => { });
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
 
@@ -1251,9 +1251,9 @@ async function resolveSupabaseAuthCallback(authClient) {
         }
         toast(
           error.message
-            || (isPasswordRecoveryCallback
-              ? "Password reset callback failed. Request a new reset email and try again."
-              : "Google sign-in callback failed. Please try again."),
+          || (isPasswordRecoveryCallback
+            ? "Password reset callback failed. Request a new reset email and try again."
+            : "Google sign-in callback failed. Please try again."),
         );
         callbackFailed = true;
       }
@@ -1272,9 +1272,9 @@ async function resolveSupabaseAuthCallback(authClient) {
         }
         toast(
           error.message
-            || (isPasswordRecoveryCallback
-              ? "Password reset callback failed. Request a new reset email and try again."
-              : "Google sign-in callback failed. Please try again."),
+          || (isPasswordRecoveryCallback
+            ? "Password reset callback failed. Request a new reset email and try again."
+            : "Google sign-in callback failed. Please try again."),
         );
         callbackFailed = true;
       }
@@ -1395,7 +1395,7 @@ async function initSupabaseAuth() {
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         setGoogleOAuthPendingState(false);
         removeStorageKey(STORAGE_KEYS.currentUserId);
-        await supabaseAuth.client.auth.signOut().catch(() => {});
+        await supabaseAuth.client.auth.signOut().catch(() => { });
         toast("Your account is pending admin approval.");
         if (state.route !== "login") {
           navigate("login");
@@ -2394,8 +2394,8 @@ function getCloudSyncStatusModel(user = null) {
   const lastFailureAt = Math.max(Number(relationalSync.lastFailureAt || 0), Number(supabaseSync.lastFailureAt || 0));
   const failureMessage = String(
     relationalSync.lastFailureMessage
-      || supabaseSync.lastFailureMessage
-      || (pendingCount ? relationalSync.lastReadyError : ""),
+    || supabaseSync.lastFailureMessage
+    || (pendingCount ? relationalSync.lastReadyError : ""),
   ).trim();
   const retryAt = Math.max(Number(relationalSync.retryAt || 0), Number(supabaseSync.retryAt || 0));
 
@@ -2467,8 +2467,8 @@ function renderCloudSyncPill(model, options = {}) {
   return `
     <div class="${classes}" role="status" aria-live="polite" title="${escapeHtml(detail)}">
       ${showLoader
-        ? `<span class="inline-loader cloud-sync-loader" aria-hidden="true"></span>`
-        : `<span class="cloud-sync-dot" aria-hidden="true"></span>`}
+      ? `<span class="inline-loader cloud-sync-loader" aria-hidden="true"></span>`
+      : `<span class="cloud-sync-dot" aria-hidden="true"></span>`}
       <span class="cloud-sync-label">${escapeHtml(String(model.label || "Cloud sync").trim() || "Cloud sync")}</span>
     </div>
   `;
@@ -2565,7 +2565,7 @@ function scheduleRelationalWrite(storageKey, value) {
       flushRelationalWrites().catch((error) => {
         console.warn("Relational sync flush failed.", error);
       });
-    }).catch(() => {});
+    }).catch(() => { });
     scheduleSyncStatusUiRefresh();
     return true;
   }
@@ -2645,9 +2645,9 @@ async function ensureRelationalSyncReady(options = {}) {
       const { data } = await client.auth.getSession().catch(() => ({ data: { session: null } }));
       const refreshToken = String(data?.session?.refresh_token || "").trim();
       if (refreshToken) {
-        await client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => {});
+        await client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => { });
       } else {
-        await client.auth.refreshSession().catch(() => {});
+        await client.auth.refreshSession().catch(() => { });
       }
       const sessionCheck = await readCurrentSession();
       return sessionCheck.ok;
@@ -2944,7 +2944,7 @@ async function hydrateRelationalState(user) {
     return;
   }
   if (relationalSync.pendingWrites.size || relationalSync.flushing) {
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     if (relationalSync.pendingWrites.size || relationalSync.flushing) {
       // Avoid pulling older remote data over unsynced local edits.
       return;
@@ -4160,8 +4160,8 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
     const primaryKey = buildRemoteSyncKey(storageKey, scope);
     const primaryRows = primaryKey
       ? rows
-          .filter((row) => String(row?.[supabaseSync.storageKeyColumn] || "") === primaryKey)
-          .sort((a, b) => new Date(b?.updated_at || 0) - new Date(a?.updated_at || 0))
+        .filter((row) => String(row?.[supabaseSync.storageKeyColumn] || "") === primaryKey)
+        .sort((a, b) => new Date(b?.updated_at || 0) - new Date(a?.updated_at || 0))
       : [];
     const fallbackRows = rows
       .filter((row) => candidates.includes(String(row?.[supabaseSync.storageKeyColumn] || "")))
@@ -4387,7 +4387,7 @@ async function flushRelationalWrites(options = {}) {
       flushRelationalWrites().catch((error) => {
         console.warn("Relational sync flush failed.", error);
       });
-    }).catch(() => {});
+    }).catch(() => { });
     scheduleSyncStatusUiRefresh();
     return;
   }
@@ -4458,8 +4458,8 @@ async function flushPendingSyncNow(options = {}) {
   if (supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
   }
-  await flushPendingNotificationReadSync().catch(() => {});
-  await flushPendingNotificationOutbox().catch(() => {});
+  await flushPendingNotificationReadSync().catch(() => { });
+  await flushPendingNotificationOutbox().catch(() => { });
   scheduleSyncStatusUiRefresh();
   if (relationalError && throwOnRelationalFailure) {
     throw relationalError;
@@ -5967,7 +5967,7 @@ async function persistImportedQuestionsNow(questionsPayload) {
     return { ok: false, message: "Relational database sync is unavailable." };
   }
 
-  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
 
   try {
     const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
@@ -6440,23 +6440,23 @@ function bindGlobalEvents() {
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
-      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
       return;
     }
     scheduleNotificationRealtimeHydration(0);
   });
 
   window.addEventListener("pagehide", () => {
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
-    markCurrentUserOffline().catch(() => {});
+    markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
   });
 
   window.addEventListener("online", () => {
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
   });
 }
 
@@ -6954,7 +6954,7 @@ async function refreshStudentDataFromSupabaseState(user) {
   }
 
   if (supabaseSync.pendingWrites.size || supabaseSync.flushing) {
-    await flushSupabaseWrites().catch(() => {});
+    await flushSupabaseWrites().catch(() => { });
   }
 
   const globalRefreshResult = await hydrateSupabaseSyncKeys([
@@ -7016,7 +7016,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       return true;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing) {
-      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     }
     const now = Date.now();
     const needsFullSync = force
@@ -7097,7 +7097,7 @@ function ensureAdminPresencePolling() {
       return;
     }
     refreshAdminPresenceSnapshot()
-      .then(() => {})
+      .then(() => { })
       .catch((error) => {
         console.warn("Admin presence refresh failed.", error?.message || error);
       });
@@ -7153,7 +7153,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       return usersRecovered;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing || isQuestionSyncBusy()) {
-      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => {});
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     }
 
     const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
@@ -7502,10 +7502,9 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
           <div class="notification-menu-item-copy">
             <p class="notification-menu-item-title">${escapeHtml(title)}</p>
           </div>
-          ${
-            isRead
-              ? `<span class="notification-menu-item-done">Read</span>`
-              : `<button
+          ${isRead
+        ? `<span class="notification-menu-item-done">Read</span>`
+        : `<button
                   class="notification-menu-read-btn"
                   type="button"
                   data-action="notification-mark-read-topbar"
@@ -7517,7 +7516,7 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
                     <path d="M3 8.5L6.2 11.7 13 4.9" />
                   </svg>
                 </button>`
-          }
+      }
         </div>
         ${bodyPreview ? `<p class="notification-menu-item-body">${escapeHtml(bodyPreview)}</p>` : ""}
       </article>
@@ -7959,15 +7958,15 @@ function renderAuth(mode) {
               <p class="signup-course-label">Courses (from selected year and semester)</p>
               <div id="signup-course-options" class="signup-course-grid">
                 ${defaultCourses
-                  .map(
-                    (course) => `
+          .map(
+            (course) => `
                       <label class="admin-course-check">
                         <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" ${initiallyCheckedCourses.includes(course) ? "checked" : ""} />
                         <span>${escapeHtml(course)}</span>
                       </label>
                     `,
-                  )
-                  .join("")}
+          )
+          .join("")}
               </div>
               <small id="signup-course-help" class="subtle">Choose one or more courses.</small>
             </div>
@@ -8028,15 +8027,15 @@ function renderAuth(mode) {
             <p class="signup-course-label">Courses (from selected year and semester)</p>
             <div id="signup-course-options" class="signup-course-grid">
               ${defaultCourses
-                .map(
-                  (course) => `
+        .map(
+          (course) => `
                     <label class="admin-course-check">
                       <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" checked />
                       <span>${escapeHtml(course)}</span>
                     </label>
                   `,
-                )
-                .join("")}
+        )
+        .join("")}
             </div>
             <small id="signup-course-help" class="subtle">Choose one or more courses.</small>
           </div>
@@ -8164,7 +8163,7 @@ function wireAuth(mode) {
             }
             if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
-              await authClient.auth.signOut().catch(() => {});
+              await authClient.auth.signOut().catch(() => { });
               toast("Your account is pending admin approval.");
               return;
             }
@@ -8421,8 +8420,8 @@ function wireAuth(mode) {
           users[idx].authProvider = "google";
 
           save(STORAGE_KEYS.users, users);
-          await syncUsersBackupState(users).catch(() => {});
-          await ensureRelationalSyncReady().catch(() => {});
+          await syncUsersBackupState(users).catch(() => { });
+          await ensureRelationalSyncReady().catch(() => { });
           await flushPendingSyncNow();
 
           if (autoApproved) {
@@ -8432,7 +8431,7 @@ function wireAuth(mode) {
           } else {
             const authClient = getSupabaseAuthClient();
             if (authClient) {
-              await authClient.auth.signOut().catch(() => {});
+              await authClient.auth.signOut().catch(() => { });
             }
             removeStorageKey(STORAGE_KEYS.currentUserId);
             toast("Account created. Await admin approval before first login.");
@@ -8535,12 +8534,12 @@ function wireAuth(mode) {
             return;
           }
 
-          await syncUsersBackupState(getUsers()).catch(() => {});
-          await ensureRelationalSyncReady().catch(() => {});
+          await syncUsersBackupState(getUsers()).catch(() => { });
+          await ensureRelationalSyncReady().catch(() => { });
           await flushPendingSyncNow();
 
           if (authData.session && !autoApproved) {
-            await authClient.auth.signOut().catch(() => {});
+            await authClient.auth.signOut().catch(() => { });
           }
           if (autoApproved && authData.session) {
             save(STORAGE_KEYS.currentUserId, user.id);
@@ -8717,7 +8716,7 @@ function wirePasswordReset() {
       }
       setPasswordRecoveryPendingState(false);
       removeStorageKey(STORAGE_KEYS.currentUserId);
-      await authClient.auth.signOut().catch(() => {});
+      await authClient.auth.signOut().catch(() => { });
       toast("Password updated. Log in with your new password.");
       navigate("login");
     } finally {
@@ -8744,8 +8743,8 @@ function renderCompleteProfile() {
             <select name="academicYear" id="complete-profile-year" required aria-required="true">
               <option value="" ${year === null ? "selected" : ""}>Select year</option>
               ${[1, 2, 3, 4, 5]
-                .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
-                .join("")}
+      .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
+      .join("")}
             </select>
           </label>
           <label>Semester
@@ -8867,8 +8866,8 @@ function wireCompleteProfile() {
       users[idx].authProvider = normalizeAuthProvider(users[idx].authProvider || getAuthProviderFromUser(current));
 
       save(STORAGE_KEYS.users, users);
-      await syncUsersBackupState(users).catch(() => {});
-      await ensureRelationalSyncReady().catch(() => {});
+      await syncUsersBackupState(users).catch(() => { });
+      await ensureRelationalSyncReady().catch(() => { });
       await flushPendingSyncNow();
 
       if (autoApproved) {
@@ -8878,7 +8877,7 @@ function wireCompleteProfile() {
       } else {
         const authClient = getSupabaseAuthClient();
         if (authClient) {
-          await authClient.auth.signOut().catch(() => {});
+          await authClient.auth.signOut().catch(() => { });
         }
         removeStorageKey(STORAGE_KEYS.currentUserId);
         toast("Profile submitted. Your account is waiting admin approval.");
@@ -8917,13 +8916,12 @@ function renderNotifications() {
             <span class="badge ${isRead ? "neutral" : "good"}">${isRead ? "Read" : "New"}</span>
           </div>
           <p class="notification-card-body">${bodyHtml || "-"}</p>
-          ${
-            isRead
-              ? ""
-              : `<div class="stack" style="margin-top: 0.55rem;">
+          ${isRead
+          ? ""
+          : `<div class="stack" style="margin-top: 0.55rem;">
                   <button class="btn ghost admin-btn-sm" type="button" data-action="notification-mark-read" data-notification-id="${escapeHtml(notification.id)}">Mark as read</button>
                 </div>`
-          }
+        }
         </article>
       `;
     })
@@ -9333,11 +9331,10 @@ function renderCreateTest() {
     <section class="panel">
       <h2 class="title">Create a Test</h2>
       <p class="subtle">Choose course and topics, then generate a test block.</p>
-      ${
-        inProgress
-          ? `<div class="card" style="margin-top: 0.7rem;"><b>Active block detected</b> (${inProgress.questionIds.length} questions) <button class="btn" data-nav="session">Resume</button></div>`
-          : ""
-      }
+      ${inProgress
+      ? `<div class="card" style="margin-top: 0.7rem;"><b>Active block detected</b> (${inProgress.questionIds.length} questions) <button class="btn" data-nav="session">Resume</button></div>`
+      : ""
+    }
 
       <div class="create-test-filter-layout">
         <div class="create-test-filter-card">
@@ -9345,8 +9342,8 @@ function renderCreateTest() {
             Course
             <select name="course" id="create-test-course-select">
               ${availableCourses
-                .map((course) => `<option value="${course}" ${selectedCourse === course ? "selected" : ""}>${course}</option>`)
-                .join("")}
+      .map((course) => `<option value="${course}" ${selectedCourse === course ? "selected" : ""}>${course}</option>`)
+      .join("")}
             </select>
           </label>
         </div>
@@ -9354,15 +9351,15 @@ function renderCreateTest() {
           <p class="create-test-topics-label">Topics (choose one or more)</p>
           <div class="create-test-topic-grid">
             ${topicOptions
-              .map(
-                (topic) => `
+      .map(
+        (topic) => `
                   <label class="admin-course-check create-test-topic-chip">
                     <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${selectedTopics.includes(topic) ? "checked" : ""} />
                     <span>${escapeHtml(topic)}</span>
                   </label>
                 `,
-              )
-              .join("")}
+      )
+      .join("")}
             <label class="admin-course-check create-test-topic-chip is-all">
               <input type="checkbox" data-role="create-test-all-topics" ${allTopicsSelected ? "checked" : ""} />
               <span>All topics</span>
@@ -9657,11 +9654,10 @@ function renderSession() {
               <h3>Question <b>${session.currentIndex + 1}</b></h3>
               <p class="exam-question-status ${isSubmitted ? (isCorrect ? "good" : "bad") : "neutral"}">${statusText}</p>
               <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
-              ${
-                isTimedMode
-                  ? `<p class="countdown exam-countdown" title="Timed mode (${session.durationMin} minutes)">Time left: <span id="countdown">${formatDuration(countdownSeconds)}</span></p>`
-                  : `<p class="exam-mark-line subtle">Mode: Tutor</p>`
-              }
+              ${isTimedMode
+      ? `<p class="countdown exam-countdown" title="Timed mode (${session.durationMin} minutes)">Time left: <span id="countdown">${formatDuration(countdownSeconds)}</span></p>`
+      : `<p class="exam-mark-line subtle">Mode: Tutor</p>`
+    }
               <button class="exam-meta-link" data-action="toggle-flag">⚑ ${response.flagged ? "Unflag question" : "Flag question"}</button>
               <span class="exam-meta-badge">v1 (latest)</span>
             </aside>
@@ -9671,11 +9667,11 @@ function renderSession() {
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
                   ${stemLines
-                    .map((line, index) => {
-                      const highlighted = response.highlightedLines.includes(index) ? "is-highlighted" : "";
-                      return `<p class="exam-line ${highlighted}">${escapeHtml(line)}</p>`;
-                    })
-                    .join("")}
+      .map((line, index) => {
+        const highlighted = response.highlightedLines.includes(index) ? "is-highlighted" : "";
+        return `<p class="exam-line ${highlighted}">${escapeHtml(line)}</p>`;
+      })
+      .join("")}
                 </div>
 
                 <div class="exam-answers">
@@ -10318,21 +10314,21 @@ function renderReview() {
 
   const choicesHtml = question
     ? questionChoices
-        .map((choice) => {
-          const selectedChoice = response.selected.includes(choice.id);
-          const correctChoice = correctChoiceIds.includes(choice.id);
-          const wrongSelected = selectedChoice && !correctChoice;
-          const showCorrect = correctChoice;
-          const statusClass = `${showCorrect ? "is-correct" : ""} ${wrongSelected ? "is-user-wrong" : ""}`;
-          const statusIndicator = showCorrect
-            ? `<span class="exam-choice-indicator good">✓</span>`
-            : wrongSelected
-              ? `<span class="exam-choice-indicator bad">✕</span>`
-              : `<span class="exam-choice-indicator neutral"></span>`;
-          const inlineFeedback = isCorrect && selectedChoice && correctChoice
-            ? `<span class="exam-choice-inline-note">Excellent! This is the correct answer.</span>`
-            : "";
-          return `
+      .map((choice) => {
+        const selectedChoice = response.selected.includes(choice.id);
+        const correctChoice = correctChoiceIds.includes(choice.id);
+        const wrongSelected = selectedChoice && !correctChoice;
+        const showCorrect = correctChoice;
+        const statusClass = `${showCorrect ? "is-correct" : ""} ${wrongSelected ? "is-user-wrong" : ""}`;
+        const statusIndicator = showCorrect
+          ? `<span class="exam-choice-indicator good">✓</span>`
+          : wrongSelected
+            ? `<span class="exam-choice-indicator bad">✕</span>`
+            : `<span class="exam-choice-indicator neutral"></span>`;
+        const inlineFeedback = isCorrect && selectedChoice && correctChoice
+          ? `<span class="exam-choice-inline-note">Excellent! This is the correct answer.</span>`
+          : "";
+        return `
             <div class="exam-choice ${selectedChoice ? "is-selected" : ""} ${statusClass}">
               <label class="exam-choice-hit">
                 ${statusIndicator}
@@ -10342,8 +10338,8 @@ function renderReview() {
               </label>
             </div>
           `;
-        })
-        .join("")
+      })
+      .join("")
     : `<p class="subtle">This question was removed from the bank and cannot be rendered.</p>`;
   const isFirstReviewQuestion = state.reviewIndex <= 0;
   const isLastReviewQuestion = state.reviewIndex >= total - 1;
@@ -10588,8 +10584,8 @@ function renderAnalytics() {
           <label>Course
             <select id="analytics-course-select" name="analyticsCourse">
               ${availableCourses
-                .map((course) => `<option value="${escapeHtml(course)}" ${course === selectedCourse ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                .join("")}
+      .map((course) => `<option value="${escapeHtml(course)}" ${course === selectedCourse ? "selected" : ""}>${escapeHtml(course)}</option>`)
+      .join("")}
             </select>
           </label>
         </form>
@@ -10618,14 +10614,13 @@ function renderAnalytics() {
       </article>
       <article class="card">
         <h4>Weak Areas</h4>
-        ${
-          weak.length
-            ? weak
-                .slice(0, 6)
-                .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% (${entry.total} q) • ${entry.timePerQuestion || 0}s/q</p>`)
-                .join("")
-            : `<p class="subtle">No weak areas until you complete a block.</p>`
-        }
+        ${weak.length
+      ? weak
+        .slice(0, 6)
+        .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% (${entry.total} q) • ${entry.timePerQuestion || 0}s/q</p>`)
+        .join("")
+      : `<p class="subtle">No weak areas until you complete a block.</p>`
+    }
       </article>
     </section>
 
@@ -10712,11 +10707,10 @@ function renderProfile() {
               required
             />
           </label>
-          ${
-            isGoogleAuthUser
-              ? `<p class="subtle" style="margin: -0.35rem 0 0;">Email is locked for Google sign-in accounts.</p>`
-              : ""
-          }
+          ${isGoogleAuthUser
+      ? `<p class="subtle" style="margin: -0.35rem 0 0;">Email is locked for Google sign-in accounts.</p>`
+      : ""
+    }
           <label>New password <input name="password" type="password" minlength="6" /></label>
           <button class="btn" type="submit">Save changes</button>
         </form>
@@ -10938,16 +10932,16 @@ function renderAdminBulkImportSection(allCourses, options = {}) {
             Default course
             <select name="defaultCourse" id="admin-import-course">
               ${allCourses
-                .map((course) => `<option value="${escapeHtml(course)}" ${importCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                .join("")}
+      .map((course) => `<option value="${escapeHtml(course)}" ${importCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+      .join("")}
             </select>
           </label>
           <label>
             Default topic
             <select name="defaultTopic" id="admin-import-topic">
               ${importTopics
-                .map((topic) => `<option value="${escapeHtml(topic)}" ${importTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
-                .join("")}
+      .map((topic) => `<option value="${escapeHtml(topic)}" ${importTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+      .join("")}
             </select>
           </label>
         </div>
@@ -10971,35 +10965,32 @@ function renderAdminBulkImportSection(allCourses, options = {}) {
           <button class="btn ghost" type="button" id="admin-download-template">Download Excel template (.csv)</button>
         </div>
       </form>
-      ${
-        importStatus
-          ? `<p class="subtle import-status is-${importStatusTone}" aria-live="polite">${escapeHtml(importStatus)}</p>`
-          : ""
-      }
-      ${
-        importReport
-          ? `
+      ${importStatus
+      ? `<p class="subtle import-status is-${importStatusTone}" aria-live="polite">${escapeHtml(importStatus)}</p>`
+      : ""
+    }
+      ${importReport
+      ? `
             <div class="admin-import-report card" style="margin-top: 0.7rem;">
               <p style="margin: 0;"><b>Last import:</b> ${new Date(importReport.createdAt).toLocaleString()}</p>
               <p class="subtle">Imported ${importReport.added}/${importReport.total} rows. ${importReport.errors.length} error(s).</p>
-              ${
-                importErrorPreview.length
-                  ? `
+              ${importErrorPreview.length
+        ? `
                     <ol class="admin-import-error-list">
                       ${importErrorPreview.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
                     </ol>
                     <small class="subtle">Showing first ${importErrorPreview.length} errors.</small>
                   `
-                  : `<p class="subtle">No errors in last import.</p>`
-              }
+        : `<p class="subtle">No errors in last import.</p>`
+      }
               <div class="stack">
                 <button class="btn ghost admin-btn-sm" type="button" id="admin-download-import-errors" ${importReport.errors.length ? "" : "disabled"}>Download full error report</button>
                 <button class="btn ghost admin-btn-sm" type="button" id="admin-clear-import-report">Clear report</button>
               </div>
             </div>
           `
-          : ""
-      }
+      : ""
+    }
     </section>
   `;
 }
@@ -11106,27 +11097,25 @@ function renderAdmin() {
             </td>
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
             <td>
-              ${
-                account.role === "student"
-                  ? `<select class="admin-mini-select" data-field="academicYear">
+              ${account.role === "student"
+            ? `<select class="admin-mini-select" data-field="academicYear">
                        <option value="" ${year === null ? "selected" : ""}>Select year</option>
                        ${[1, 2, 3, 4, 5]
-                         .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
-                         .join("")}
+              .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
+              .join("")}
                      </select>`
-                  : `<span class="admin-na">-</span>`
-              }
+            : `<span class="admin-na">-</span>`
+          }
             </td>
             <td>
-              ${
-                account.role === "student"
-                  ? `<select class="admin-mini-select" data-field="academicSemester">
+              ${account.role === "student"
+            ? `<select class="admin-mini-select" data-field="academicSemester">
                        <option value="" ${semester === null ? "selected" : ""}>Select semester</option>
                        <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
                        <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
                      </select>`
-                  : `<span class="admin-na">-</span>`
-              }
+            : `<span class="admin-na">-</span>`
+          }
             </td>
             <td class="admin-user-courses">
               <small class="admin-course-preview" title="${escapeHtml(visibleCourses.join(", "))}">${escapeHtml(coursePreview || "No courses assigned")}</small>
@@ -11158,9 +11147,12 @@ function renderAdmin() {
           </div>
           <div class="stack" style="align-items: flex-end;">
             <p class="subtle" style="margin: 0;">Pending requests: <b>${pendingCount}</b></p>
-            <label class="subtle" style="display: inline-flex; gap: 0.45rem; align-items: center; margin: 0;">
-              <input id="admin-auto-approval-toggle" type="checkbox" ${autoApprovalEnabled ? "checked" : ""} />
-              <span>Auto-approve new complete student accounts</span>
+            <label class="toggle-switch-label" style="margin: 0;">
+              <input id="admin-auto-approval-toggle" type="checkbox" class="toggle-switch-input" ${autoApprovalEnabled ? "checked" : ""} />
+              <span class="toggle-switch-track" aria-hidden="true">
+                <span class="toggle-switch-thumb"></span>
+              </span>
+              <span class="toggle-switch-text subtle">Auto-approve new complete student accounts</span>
             </label>
             <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
           </div>
@@ -11468,16 +11460,16 @@ function renderAdmin() {
             <label>Course
               <select id="admin-filter-course" name="course">
                 ${allCourses
-                  .map((course) => `<option value="${escapeHtml(course)}" ${selectedCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                  .join("")}
+        .map((course) => `<option value="${escapeHtml(course)}" ${selectedCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+        .join("")}
               </select>
             </label>
             <label>Topic
               <select id="admin-filter-topic" name="topic">
                 <option value="" ${selectedTopic ? "" : "selected"}>All topics</option>
                 ${selectedCourseTopics
-                  .map((topic) => `<option value="${escapeHtml(topic)}" ${selectedTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
-                  .join("")}
+        .map((topic) => `<option value="${escapeHtml(topic)}" ${selectedTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+        .join("")}
               </select>
             </label>
           </div>
@@ -11534,9 +11526,8 @@ function renderAdmin() {
         </div>
       </section>
 
-      ${
-        state.adminQuestionModalOpen
-          ? `
+      ${state.adminQuestionModalOpen
+        ? `
             <div class="admin-question-modal">
               <button class="admin-question-modal-backdrop" type="button" data-action="admin-close-editor" aria-label="Close question editor"></button>
               <section class="admin-question-modal-card" role="dialog" aria-modal="true" aria-label="Question editor">
@@ -11556,15 +11547,15 @@ function renderAdmin() {
                     <label>Course
                       <select id="admin-question-course" name="questionCourse">
                         ${allCourses
-                          .map((course) => `<option value="${escapeHtml(course)}" ${editorCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
-                          .join("")}
+          .map((course) => `<option value="${escapeHtml(course)}" ${editorCourse === course ? "selected" : ""}>${escapeHtml(course)}</option>`)
+          .join("")}
                       </select>
                     </label>
                     <label>Topic
                       <select id="admin-question-topic" name="questionTopic">
                         ${editorTopics
-                          .map((topic) => `<option value="${escapeHtml(topic)}" ${editorTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
-                          .join("")}
+          .map((topic) => `<option value="${escapeHtml(topic)}" ${editorTopic === topic ? "selected" : ""}>${escapeHtml(topic)}</option>`)
+          .join("")}
                       </select>
                     </label>
                   </div>
@@ -11598,15 +11589,14 @@ function renderAdmin() {
                     </label>
                   </div>
                   <p class="subtle" style="margin: 0;">If you choose a file, upload is automatic and replaces the URL above.</p>
-                  ${
-                    editing?.questionImage
-                      ? `
+                  ${editing?.questionImage
+          ? `
                         <figure class="admin-question-image-preview">
                           <img src="${escapeHtml(editing.questionImage)}" alt="Question visual preview" loading="lazy" />
                         </figure>
                       `
-                      : ""
-                  }
+          : ""
+        }
                   <div class="form-row">
                     <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
                     <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
@@ -11620,8 +11610,8 @@ function renderAdmin() {
                     <label>Correct answer
                       <select name="correct">
                         ${["A", "B", "C", "D", "E"]
-                          .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
-                          .join("")}
+          .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
+          .join("")}
                       </select>
                     </label>
                   </div>
@@ -11639,7 +11629,7 @@ function renderAdmin() {
               </section>
             </div>
           `
-          : ""
+        : ""
       }
     `;
   }
@@ -11721,8 +11711,8 @@ function renderAdmin() {
             <label class="admin-notification-target-year-field" id="admin-notification-target-year-field" ${targetType === "year" ? "" : "hidden"}>Target year
               <select name="targetYear" id="admin-notification-target-year" ${targetType === "year" ? "" : "disabled"} ${notificationSending ? "disabled" : ""}>
                 ${[1, 2, 3, 4, 5]
-                  .map((yearValue) => `<option value="${yearValue}" ${targetYear === yearValue ? "selected" : ""}>${escapeHtml(formatAcademicYearAudienceLabel(yearValue))}</option>`)
-                  .join("")}
+        .map((yearValue) => `<option value="${yearValue}" ${targetYear === yearValue ? "selected" : ""}>${escapeHtml(formatAcademicYearAudienceLabel(yearValue))}</option>`)
+        .join("")}
               </select>
               <small class="subtle">Year groups include approved student accounts only.</small>
             </label>
@@ -11748,14 +11738,14 @@ function renderAdmin() {
                   aria-label="User suggestions"
                 >
                   ${targetUserSuggestions
-                    .map((entry) => {
-                      const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
-                      if (!userId) {
-                        return "";
-                      }
-                      const roleLabel = entry.role === "admin" ? "admin" : "student";
-                      const selected = targetUserId === userId;
-                      return `
+        .map((entry) => {
+          const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
+          if (!userId) {
+            return "";
+          }
+          const roleLabel = entry.role === "admin" ? "admin" : "student";
+          const selected = targetUserId === userId;
+          return `
                         <button
                           type="button"
                           class="admin-user-suggestion${selected ? " is-active" : ""}"
@@ -11768,8 +11758,8 @@ function renderAdmin() {
                           <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(roleLabel)}</span>
                         </button>
                       `;
-                    })
-                    .join("")}
+        })
+        .join("")}
                 </div>
               </div>
               <small class="subtle">Type a name or email, then choose a suggestion.</small>
@@ -11851,16 +11841,14 @@ function renderAdmin() {
           <article class="card"><p class="metric">${onlineRows.length}<small>Currently online</small></p></article>
           <article class="card"><p class="metric">${solvingRows.length}<small>Currently solving</small></p></article>
         </div>
-        ${
-          state.adminPresenceLoading
-            ? `<p class="subtle loading-inline" style="margin-top:0.9rem;"><span class="inline-loader" aria-hidden="true"></span><span>Refreshing activity data...</span></p>`
-            : ""
-        }
-        ${
-          state.adminPresenceError
-            ? `<p class="subtle" style="margin-top:0.9rem;">${escapeHtml(state.adminPresenceError)}</p>`
-            : ""
-        }
+        ${state.adminPresenceLoading
+        ? `<p class="subtle loading-inline" style="margin-top:0.9rem;"><span class="inline-loader" aria-hidden="true"></span><span>Refreshing activity data...</span></p>`
+        : ""
+      }
+        ${state.adminPresenceError
+        ? `<p class="subtle" style="margin-top:0.9rem;">${escapeHtml(state.adminPresenceError)}</p>`
+        : ""
+      }
         <div class="table-wrap" style="margin-top: 0.9rem;">
           <table>
             <thead>
@@ -11939,8 +11927,8 @@ function renderAdminCourseTopicControls(course) {
     <div class="admin-course-topics">
       <div class="admin-topic-list">
         ${topics
-          .map(
-            (topic, topicIdx) => `
+      .map(
+        (topic, topicIdx) => `
               <span class="admin-topic-chip">
                 <span>${escapeHtml(topic)}</span>
                 <button
@@ -11963,8 +11951,8 @@ function renderAdminCourseTopicControls(course) {
                 </button>
               </span>
             `,
-          )
-          .join("")}
+      )
+      .join("")}
       </div>
       <div class="admin-topic-add">
         <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
@@ -12059,7 +12047,7 @@ function wireAdmin() {
     }
     const synced = await refreshAdminDataSnapshot(currentUser, { force: true });
     if (state.adminPage === "activity") {
-      await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => {});
+      await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => { });
     }
     if (synced) {
       toast("Admin data refreshed from cloud.");
@@ -12848,7 +12836,8 @@ function wireAdmin() {
   });
 
   const autoApprovalToggle = document.getElementById("admin-auto-approval-toggle");
-  autoApprovalToggle?.addEventListener("change", async () => {
+  autoApprovalToggle?.addEventListener("change", async (e) => {
+    e.stopPropagation();
     const enabled = Boolean(autoApprovalToggle.checked);
     save(STORAGE_KEYS.autoApproveStudentAccess, enabled);
     try {
@@ -13099,7 +13088,7 @@ function wireAdmin() {
           if (users[idx]) {
             users[idx].password = "";
             save(STORAGE_KEYS.users, users);
-            await syncUsersBackupState(users).catch(() => {});
+            await syncUsersBackupState(users).catch(() => { });
           }
           toast(`Password updated for ${target.email}.`);
           return;
@@ -14077,103 +14066,103 @@ function wireAdmin() {
     let successMessage = "Question saved.";
 
     try {
-    let questionImage = String(data.get("questionImage") || "").trim();
-    const questionImageFile = data.get("questionImageFile");
-    if (questionImageFile instanceof File && Number(questionImageFile.size || 0) > 0) {
-      const uploadResult = await uploadQuestionImageFile(questionImageFile);
-      if (!uploadResult.ok) {
-        if (questionImage) {
-          toast(`Question image upload failed. The provided URL was kept. (${uploadResult.message})`);
-        } else {
-          toast(`Question image upload failed: ${uploadResult.message}`);
-          state.adminQuestionSaveRunning = false;
-          state.skipNextRouteAnimation = true;
-          render();
-          return;
+      let questionImage = String(data.get("questionImage") || "").trim();
+      const questionImageFile = data.get("questionImageFile");
+      if (questionImageFile instanceof File && Number(questionImageFile.size || 0) > 0) {
+        const uploadResult = await uploadQuestionImageFile(questionImageFile);
+        if (!uploadResult.ok) {
+          if (questionImage) {
+            toast(`Question image upload failed. The provided URL was kept. (${uploadResult.message})`);
+          } else {
+            toast(`Question image upload failed: ${uploadResult.message}`);
+            state.adminQuestionSaveRunning = false;
+            state.skipNextRouteAnimation = true;
+            render();
+            return;
+          }
+        }
+        if (uploadResult.ok) {
+          questionImage = String(uploadResult.url || "").trim();
+        }
+        if (uploadResult.ok && uploadResult.usedFallback) {
+          toast(String(uploadResult.message || "Question image saved inline because storage upload failed."));
         }
       }
-      if (uploadResult.ok) {
-        questionImage = String(uploadResult.url || "").trim();
-      }
-      if (uploadResult.ok && uploadResult.usedFallback) {
-        toast(String(uploadResult.message || "Question image saved inline because storage upload failed."));
-      }
-    }
 
-    const choices = normalizeQuestionChoiceEntries(
-      QUESTION_CHOICE_LABELS.map((label) => ({
-        id: label,
-        text: String(data.get(`choice${label}`) || "").trim(),
-      })),
-    );
-    if (choices.length < 2) {
-      toast("Enter at least 2 answer choices.");
+      const choices = normalizeQuestionChoiceEntries(
+        QUESTION_CHOICE_LABELS.map((label) => ({
+          id: label,
+          text: String(data.get(`choice${label}`) || "").trim(),
+        })),
+      );
+      if (choices.length < 2) {
+        toast("Enter at least 2 answer choices.");
+        state.adminQuestionSaveRunning = false;
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+      const selectedCorrect = normalizeQuestionChoiceLabel(String(data.get("correct") || "A"));
+      const correct = choices.some((choice) => choice.id === selectedCorrect)
+        ? [selectedCorrect]
+        : [choices[0].id];
+
+      const payload = {
+        id: existingId || makeId("q"),
+        qbankCourse: String(data.get("questionCourse") || allCourses[0]).trim(),
+        qbankTopic: String(data.get("questionTopic") || "").trim(),
+        course: String(data.get("questionCourse") || allCourses[0]).trim(),
+        system: String(data.get("system") || "").trim(),
+        topic: String(data.get("questionTopic") || "").trim(),
+        difficulty: String(data.get("difficulty") || "Easy"),
+        tags: String(data.get("tags") || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        author: getCurrentUser().name,
+        dateAdded: new Date().toISOString().slice(0, 10),
+        stem: String(data.get("stem") || "").trim(),
+        choices,
+        correct,
+        explanation: String(data.get("explanation") || "").trim(),
+        objective: "",
+        references: String(data.get("references") || "").trim(),
+        questionImage,
+        explanationImage: String(data.get("explanationImage") || "").trim(),
+        status: String(data.get("status") || "published"),
+      };
+
+      if (!QBANK_COURSE_TOPICS[payload.qbankCourse]?.includes(payload.qbankTopic)) {
+        payload.qbankTopic = (QBANK_COURSE_TOPICS[payload.qbankCourse] || [])[0] || payload.qbankTopic;
+        payload.topic = payload.qbankTopic;
+      }
+
+      const idx = questions.findIndex((entry) => entry.id === payload.id);
+      successMessage = idx >= 0 ? "Question updated." : "Question created.";
+      if (idx >= 0) {
+        questions[idx] = { ...questions[idx], ...payload };
+      } else {
+        questions.push(payload);
+      }
+
+      save(STORAGE_KEYS.questions, questions);
+      state.adminFilters.course = payload.qbankCourse;
+      state.adminFilters.topic = payload.qbankTopic || "";
+      state.adminEditQuestionId = null;
+      state.adminEditorCourse = "";
+      state.adminEditorTopic = "";
+      state.adminQuestionModalOpen = false;
       state.adminQuestionSaveRunning = false;
+      state.adminDataLastSyncAt = Date.now();
       state.skipNextRouteAnimation = true;
       render();
-      return;
-    }
-    const selectedCorrect = normalizeQuestionChoiceLabel(String(data.get("correct") || "A"));
-    const correct = choices.some((choice) => choice.id === selectedCorrect)
-      ? [selectedCorrect]
-      : [choices[0].id];
+      toast(successMessage);
 
-    const payload = {
-      id: existingId || makeId("q"),
-      qbankCourse: String(data.get("questionCourse") || allCourses[0]).trim(),
-      qbankTopic: String(data.get("questionTopic") || "").trim(),
-      course: String(data.get("questionCourse") || allCourses[0]).trim(),
-      system: String(data.get("system") || "").trim(),
-      topic: String(data.get("questionTopic") || "").trim(),
-      difficulty: String(data.get("difficulty") || "Easy"),
-      tags: String(data.get("tags") || "")
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-      author: getCurrentUser().name,
-      dateAdded: new Date().toISOString().slice(0, 10),
-      stem: String(data.get("stem") || "").trim(),
-      choices,
-      correct,
-      explanation: String(data.get("explanation") || "").trim(),
-      objective: "",
-      references: String(data.get("references") || "").trim(),
-      questionImage,
-      explanationImage: String(data.get("explanationImage") || "").trim(),
-      status: String(data.get("status") || "published"),
-    };
-
-    if (!QBANK_COURSE_TOPICS[payload.qbankCourse]?.includes(payload.qbankTopic)) {
-      payload.qbankTopic = (QBANK_COURSE_TOPICS[payload.qbankCourse] || [])[0] || payload.qbankTopic;
-      payload.topic = payload.qbankTopic;
-    }
-
-    const idx = questions.findIndex((entry) => entry.id === payload.id);
-    successMessage = idx >= 0 ? "Question updated." : "Question created.";
-    if (idx >= 0) {
-      questions[idx] = { ...questions[idx], ...payload };
-    } else {
-      questions.push(payload);
-    }
-
-    save(STORAGE_KEYS.questions, questions);
-    state.adminFilters.course = payload.qbankCourse;
-    state.adminFilters.topic = payload.qbankTopic || "";
-    state.adminEditQuestionId = null;
-    state.adminEditorCourse = "";
-    state.adminEditorTopic = "";
-    state.adminQuestionModalOpen = false;
-    state.adminQuestionSaveRunning = false;
-    state.adminDataLastSyncAt = Date.now();
-    state.skipNextRouteAnimation = true;
-    render();
-    toast(successMessage);
-
-    try {
-      await flushPendingSyncNow();
-    } catch (syncError) {
-      toast(`${successMessage} locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-    }
+      try {
+        await flushPendingSyncNow();
+      } catch (syncError) {
+        toast(`${successMessage} locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
     } catch (saveError) {
       state.adminQuestionSaveRunning = false;
       state.skipNextRouteAnimation = true;
@@ -14447,10 +14436,10 @@ function normalizeNotificationRecord(entry, fallbackId = "") {
   const explicitTargetType = normalizeNotificationAudienceType(entry.targetType || "");
   const explicitTargetYear = normalizeAcademicYearOrNull(
     entry.targetYear
-      ?? entry.target_year
-      ?? entry.academicYear
-      ?? entry.academic_year
-      ?? null,
+    ?? entry.target_year
+    ?? entry.academicYear
+    ?? entry.academic_year
+    ?? null,
   );
   let targetType = "all";
   let targetYear = null;
@@ -15303,7 +15292,7 @@ async function getValidSupabaseAccessToken(authClient) {
   }
 
   if (!isLikelyJwtToken(tokenResult.token) || isJwtTokenExpired(tokenResult.token, 60)) {
-    await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+    await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
     tokenResult = await readToken();
     if (!tokenResult.ok) {
       return tokenResult;
@@ -15323,7 +15312,7 @@ async function getValidSupabaseAccessToken(authClient) {
     return tokenResult;
   }
 
-  await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+  await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
   tokenResult = await readToken();
   if (!tokenResult.ok) {
     return tokenResult;
@@ -15454,11 +15443,11 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
           continue;
         }
         if (attempt === 0 && !details) {
-          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
           continue;
         }
         const authMessage = isInvalidJwtMessage(details)
@@ -15603,11 +15592,11 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
 
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
           continue;
         }
         if (attempt === 0 && !details) {
-          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => {});
+          await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
           continue;
         }
         const authMessage = isInvalidJwtMessage(details)
@@ -16150,7 +16139,7 @@ function syncUsersWithCurriculum() {
     const current = getCurrentUser();
     if (current?.role === "admin") {
       const syncedUsers = getUsers();
-      syncUsersBackupState(syncedUsers).catch(() => {});
+      syncUsersBackupState(syncedUsers).catch(() => { });
       ensureRelationalSyncReady()
         .then((ready) => {
           if (!ready) {
@@ -17527,8 +17516,8 @@ function renderSessionPanel(session, question, response) {
         <div class="exam-calc-display">${escapeHtml(state.calcExpression || "0")}</div>
         <div class="exam-calc-grid">
           ${["7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "0", ".", "%", "+"]
-            .map((token) => `<button class="exam-calc-key" data-action="calc-input" data-value="${token}">${token}</button>`)
-            .join("")}
+        .map((token) => `<button class="exam-calc-key" data-action="calc-input" data-value="${token}">${token}</button>`)
+        .join("")}
           <button class="exam-calc-key wide" data-action="calc-clear">C</button>
           <button class="exam-calc-key" data-action="calc-delete">⌫</button>
           <button class="exam-calc-key" data-action="calc-eval">=</button>
@@ -17567,14 +17556,13 @@ function renderSessionPanel(session, question, response) {
     content = `
       <p class="subtle">Saved notes: ${notebookEntries.length} entries • Flashcards: ${flashcards.length}</p>
       <div class="exam-note-list">
-        ${
-          notebookEntries.length
-            ? notebookEntries
-                .slice(0, 12)
-                .map((entry) => `<article><b>${escapeHtml(entry.questionId)}</b><p>${escapeHtml(entry.note)}</p></article>`)
-                .join("")
-            : `<p class="subtle">No notes captured yet.</p>`
-        }
+        ${notebookEntries.length
+        ? notebookEntries
+          .slice(0, 12)
+          .map((entry) => `<article><b>${escapeHtml(entry.questionId)}</b><p>${escapeHtml(entry.note)}</p></article>`)
+          .join("")
+        : `<p class="subtle">No notes captured yet.</p>`
+      }
       </div>
     `;
   }
@@ -17815,12 +17803,12 @@ async function loginAsDemo(email, password) {
 }
 
 async function logout() {
-  const offlinePromise = markCurrentUserOffline().catch(() => {});
+  const offlinePromise = markCurrentUserOffline().catch(() => { });
   const authClient = getSupabaseAuthClient();
   const signOutPromise = authClient
     ? authClient.auth.signOut().catch((error) => {
-        console.warn("Supabase sign-out failed.", error?.message || error);
-      })
+      console.warn("Supabase sign-out failed.", error?.message || error);
+    })
     : Promise.resolve();
 
   syncPresenceRuntime(null);
@@ -17840,7 +17828,7 @@ async function logout() {
   state.reviewIndex = 0;
   navigate("landing");
   toast("Logged out.");
-  Promise.allSettled([offlinePromise, signOutPromise]).catch(() => {});
+  Promise.allSettled([offlinePromise, signOutPromise]).catch(() => { });
 }
 
 function selectHtml(name, options, selected) {
@@ -17848,8 +17836,8 @@ function selectHtml(name, options, selected) {
     <select name="${name}">
       <option value="">All</option>
       ${options
-        .map((option) => `<option value="${escapeHtml(option)}" ${selected === option ? "selected" : ""}>${escapeHtml(option)}</option>`)
-        .join("")}
+      .map((option) => `<option value="${escapeHtml(option)}" ${selected === option ? "selected" : ""}>${escapeHtml(option)}</option>`)
+      .join("")}
     </select>
   `;
 }
