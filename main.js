@@ -6897,7 +6897,7 @@ async function refreshAdminPresenceSnapshot(options = {}) {
   }
   const force = Boolean(options?.force);
   const silent = Boolean(options?.silent);
-  if (!force && state.adminPresenceLastSyncAt && (Date.now() - state.adminPresenceLastSyncAt) < ADMIN_DATA_REFRESH_MS) {
+  if (!force && state.adminPresenceLastSyncAt && (Date.now() - state.adminPresenceLastSyncAt) < (ADMIN_DATA_REFRESH_MS - 2000)) {
     return true;
   }
 
@@ -7106,7 +7106,12 @@ function ensureAdminPresencePolling() {
       return;
     }
     refreshAdminPresenceSnapshot()
-      .then(() => { })
+      .then((ok) => {
+        if (ok && state.route === "admin" && state.adminPage === "activity") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      })
       .catch((error) => {
         console.warn("Admin presence refresh failed.", error?.message || error);
       });
@@ -11829,70 +11834,130 @@ function renderAdmin() {
 
   if (activeAdminPage === "activity") {
     const rows = Array.isArray(state.adminPresenceRows) ? state.adminPresenceRows : [];
+    const nowMs = Date.now();
     const onlineRows = rows.filter((row) => shouldTreatPresenceAsOnline(row));
+    const offlineRows = rows.filter((row) => !shouldTreatPresenceAsOnline(row));
     const solvingRows = onlineRows.filter((row) => Boolean(row?.is_solving));
-    const activityRows = rows
+    const studentOnline = onlineRows.filter((row) => String(row?.role || "student") === "student").length;
+
+    const formatTimeAgo = (isoStr) => {
+      if (!isoStr) return "-";
+      const diffMs = nowMs - new Date(isoStr).getTime();
+      if (!Number.isFinite(diffMs) || diffMs < 0) return "just now";
+      const secs = Math.floor(diffMs / 1000);
+      if (secs < 10) return "just now";
+      if (secs < 60) return secs + "s ago";
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return mins + "m ago";
+      const hours = Math.floor(mins / 60);
+      if (hours < 24) return hours + "h " + (mins % 60) + "m ago";
+      const days = Math.floor(hours / 24);
+      return days + "d ago";
+    };
+
+    const formatDuration = (isoStr) => {
+      if (!isoStr) return "-";
+      const diffMs = nowMs - new Date(isoStr).getTime();
+      if (!Number.isFinite(diffMs) || diffMs < 0) return "0s";
+      const secs = Math.floor(diffMs / 1000);
+      if (secs < 60) return secs + "s";
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return mins + "m " + (secs % 60) + "s";
+      const hours = Math.floor(mins / 60);
+      return hours + "h " + (mins % 60) + "m";
+    };
+
+    const sortedRows = [...onlineRows].sort((a, b) => {
+      const aSolving = Boolean(a?.is_solving);
+      const bSolving = Boolean(b?.is_solving);
+      if (aSolving !== bSolving) return bSolving ? 1 : -1;
+      return new Date(b?.last_seen_at || 0) - new Date(a?.last_seen_at || 0);
+    }).concat([...offlineRows].sort((a, b) => {
+      return new Date(b?.last_seen_at || 0) - new Date(a?.last_seen_at || 0);
+    }));
+
+    const activityRows = sortedRows
       .map((row) => {
         const online = shouldTreatPresenceAsOnline(row);
         const solvingNow = online && Boolean(row?.is_solving);
         const name = String(row?.full_name || "").trim() || String(row?.email || "").trim() || "User";
+        const email = String(row?.email || "").trim() || "-";
+        const role = String(row?.role || "student");
         const route = String(row?.current_route || "").trim() || "-";
-        const lastSeen = row?.last_seen_at ? new Date(row.last_seen_at).toLocaleString() : "-";
-        const solvingSince = solvingNow && row?.solving_started_at ? new Date(row.solving_started_at).toLocaleString() : "-";
+        const lastSeenAgo = formatTimeAgo(row?.last_seen_at);
+        const lastSeenFull = row?.last_seen_at ? new Date(row.last_seen_at).toLocaleString() : "";
+        const solvingDuration = solvingNow && row?.solving_started_at ? formatDuration(row.solving_started_at) : "-";
+        const statusClass = online ? "good" : "neutral";
+        const statusLabel = online ? "online" : "offline";
+        const sessionBadge = solvingNow
+          ? `<span class="badge good">solving</span>`
+          : online
+            ? `<span class="badge neutral">idle</span>`
+            : `<span class="badge neutral">-</span>`;
         return `
-          <tr>
-            <td><b>${escapeHtml(name)}</b><br /><small>${escapeHtml(String(row?.email || "").trim() || "-")}</small></td>
-            <td>${escapeHtml(String(row?.role || "student"))}</td>
-            <td><span class="badge ${online ? "good" : "neutral"}">${online ? "online" : "offline"}</span></td>
-            <td>${escapeHtml(route)}</td>
-            <td>${solvingNow ? `<span class="badge good">solving</span>` : `<span class="badge neutral">idle</span>`}</td>
-            <td><small>${escapeHtml(solvingSince)}</small></td>
-            <td><small>${escapeHtml(lastSeen)}</small></td>
+          <tr style="${online ? "" : "opacity: 0.55;"}">
+            <td>
+              <b>${escapeHtml(name)}</b><br />
+              <small>${escapeHtml(email)}</small>
+            </td>
+            <td><span class="badge ${role === "admin" ? "good" : "neutral"}">${escapeHtml(role)}</span></td>
+            <td><span class="badge ${statusClass}">${statusLabel}</span></td>
+            <td>${online ? escapeHtml(route) : '<span class="admin-na">-</span>'}</td>
+            <td>${sessionBadge}</td>
+            <td><small>${escapeHtml(solvingDuration)}</small></td>
+            <td><small title="${escapeHtml(lastSeenFull)}">${escapeHtml(lastSeenAgo)}</small></td>
           </tr>
         `;
       })
       .join("");
 
+    const lastSyncLabel = state.adminPresenceLastSyncAt
+      ? new Date(state.adminPresenceLastSyncAt).toLocaleTimeString()
+      : "Not yet";
+
     pageContent = `
       <section class="card admin-section" id="admin-activity-section">
-        <div class="flex-between">
+        <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">Live User Activity</h3>
-            <p class="subtle">Track who is online and who started solving in real time.</p>
+            <p class="subtle">Real-time tracking of all users. Auto-refreshes every 15 seconds.</p>
           </div>
-          <div class="stack" style="align-items: flex-end;">
-            <p class="subtle" style="margin: 0;">Last sync: <b>${state.adminPresenceLastSyncAt ? new Date(state.adminPresenceLastSyncAt).toLocaleTimeString() : "Not yet"}</b></p>
-            <button class="btn ghost admin-btn-sm" type="button" data-action="refresh-admin-activity">Refresh now</button>
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.45rem;">
+            <div style="display: flex; align-items: center; gap: 0.6rem;">
+              <span class="subtle" style="font-size: 0.8rem;">Last sync: <b>${lastSyncLabel}</b></span>
+              <button class="btn ghost admin-btn-sm ${state.adminPresenceLoading ? "is-loading" : ""}" type="button" data-action="refresh-admin-activity" ${state.adminPresenceLoading ? "disabled" : ""}>
+                ${state.adminPresenceLoading ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh now"}
+              </button>
+            </div>
+            <small class="subtle" style="font-size: 0.72rem;">\u25CF Auto-refresh active</small>
           </div>
         </div>
         <div class="stats-grid" style="margin-top: 0.85rem;">
-          <article class="card"><p class="metric">${rows.length}<small>Tracked users</small></p></article>
-          <article class="card"><p class="metric">${onlineRows.length}<small>Currently online</small></p></article>
-          <article class="card"><p class="metric">${solvingRows.length}<small>Currently solving</small></p></article>
+          <article class="card"><p class="metric">${rows.length}<small>Total tracked</small></p></article>
+          <article class="card"><p class="metric">${onlineRows.length}<small>Online now</small></p></article>
+          <article class="card"><p class="metric">${solvingRows.length}<small>Solving now</small></p></article>
+          <article class="card"><p class="metric">${studentOnline}<small>Students online</small></p></article>
+          <article class="card"><p class="metric">${offlineRows.length}<small>Offline</small></p></article>
         </div>
-        ${state.adminPresenceLoading
-        ? `<p class="subtle loading-inline" style="margin-top:0.9rem;"><span class="inline-loader" aria-hidden="true"></span><span>Refreshing activity data...</span></p>`
-        : ""
-      }
         ${state.adminPresenceError
         ? `<p class="subtle" style="margin-top:0.9rem;">${escapeHtml(state.adminPresenceError)}</p>`
         : ""
       }
         <div class="table-wrap" style="margin-top: 0.9rem;">
-          <table>
+          <table class="admin-users-table">
             <thead>
               <tr>
                 <th>User</th>
                 <th>Role</th>
                 <th>Status</th>
-                <th>Route</th>
+                <th>Page</th>
                 <th>Session</th>
-                <th>Solving Since</th>
+                <th>Solving For</th>
                 <th>Last Seen</th>
               </tr>
             </thead>
             <tbody>
-              ${activityRows || `<tr><td colspan="7" class="subtle">No activity records yet.</td></tr>`}
+              ${activityRows || `<tr><td colspan="7" class="subtle">No activity records yet. Users will appear here once they open the app.</td></tr>`}
             </tbody>
           </table>
         </div>
