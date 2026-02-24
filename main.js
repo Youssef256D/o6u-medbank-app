@@ -9783,6 +9783,7 @@ function wireSession() {
       response.submitted = false;
       latest.updatedAt = nowISO();
       upsertSession(latest);
+      state.skipNextRouteAnimation = true;
       render();
     });
   });
@@ -10161,6 +10162,7 @@ function handleSessionKeydown(event) {
 }
 
 function startSessionTicker(sessionId) {
+  clearTimer();
   const countdown = document.getElementById("countdown");
   const elapsed = document.getElementById("elapsed-time");
 
@@ -10192,8 +10194,23 @@ function startSessionTicker(sessionId) {
       }
     }
 
-    session.updatedAt = nowISO();
-    upsertSession(session);
+    const freshSession = getSessionById(sessionId);
+    if (freshSession) {
+      freshSession.elapsedSec = session.elapsedSec;
+      freshSession.updatedAt = nowISO();
+      if (session.mode === "timed") {
+        freshSession.timeRemainingSec = session.timeRemainingSec;
+        const freshActiveQid = freshSession.questionIds[freshSession.currentIndex];
+        if (freshActiveQid && freshSession.responses[freshActiveQid]) {
+          freshSession.responses[freshActiveQid].timeSpentSec =
+            (freshSession.responses[freshActiveQid].timeSpentSec || 0) + 1;
+        }
+      }
+      upsertSession(freshSession);
+    } else {
+      session.updatedAt = nowISO();
+      upsertSession(session);
+    }
 
     if (session.mode === "timed" && session.timeRemainingSec <= 0) {
       finalizeSession(session.id);
