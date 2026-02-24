@@ -5211,9 +5211,10 @@ async function syncProfilesToRelational(usersPayload) {
         academic_semester: user.role === "student" ? normalizedSemester : null,
         auth_provider: normalizedAuthProvider || null,
       };
-      const shouldPersistApproval = isAdminSync || shouldAutoApproveStudentAccess(user);
+      const hasExplicitApproval = typeof user.isApproved === "boolean";
+      const shouldPersistApproval = isAdminSync || hasExplicitApproval || shouldAutoApproveStudentAccess(user);
       if (shouldPersistApproval) {
-        baseRow.approved = Boolean(isUserAccessApproved(user));
+        baseRow.approved = Boolean(isAdminSync ? isUserAccessApproved(user) : user.isApproved);
       }
       return baseRow;
     })
@@ -8441,12 +8442,13 @@ function wireAuth(mode) {
           users[idx].authProvider = "google";
 
           save(STORAGE_KEYS.users, users);
+          save(STORAGE_KEYS.currentUserId, users[idx].id);
           await syncUsersBackupState(users).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
           if (autoApproved) {
             const profileId = getUserProfileId(users[idx]);
             if (isUuidValue(profileId)) {
-              updateRelationalProfileApproval([profileId], true).catch(() => { });
+              await updateRelationalProfileApproval([profileId], true).catch(() => { });
             }
           }
           await flushPendingSyncNow();
@@ -8561,12 +8563,13 @@ function wireAuth(mode) {
             return;
           }
 
+          save(STORAGE_KEYS.currentUserId, user.id);
           await syncUsersBackupState(getUsers()).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
           if (autoApproved) {
             const profileId = getUserProfileId(user);
             if (isUuidValue(profileId)) {
-              updateRelationalProfileApproval([profileId], true).catch(() => { });
+              await updateRelationalProfileApproval([profileId], true).catch(() => { });
             }
           }
           await flushPendingSyncNow();
@@ -8899,12 +8902,13 @@ function wireCompleteProfile() {
       users[idx].authProvider = normalizeAuthProvider(users[idx].authProvider || getAuthProviderFromUser(current));
 
       save(STORAGE_KEYS.users, users);
+      save(STORAGE_KEYS.currentUserId, users[idx].id);
       await syncUsersBackupState(users).catch(() => { });
       await ensureRelationalSyncReady().catch(() => { });
       if (autoApproved) {
         const profileId = getUserProfileId(users[idx]);
         if (isUuidValue(profileId)) {
-          updateRelationalProfileApproval([profileId], true).catch(() => { });
+          await updateRelationalProfileApproval([profileId], true).catch(() => { });
         }
       }
       await flushPendingSyncNow();
