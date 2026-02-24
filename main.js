@@ -1758,15 +1758,21 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     academicYear: normalizeAcademicYearOrNull(profile.academic_year ?? localUser?.academicYear),
     academicSemester: normalizeAcademicSemesterOrNull(profile.academic_semester ?? localUser?.academicSemester),
   });
+  const needsAutoApprovalOverride = role === "student" && profileApproved === false && autoApprovalFallback;
   const resolvedApproval = role === "admin"
     ? true
-    : (
-      profileApproved !== null
-        ? profileApproved
-        : localApproval !== null
-          ? localApproval
-          : autoApprovalFallback
-    );
+    : needsAutoApprovalOverride
+      ? true
+      : (
+        profileApproved !== null
+          ? profileApproved
+          : localApproval !== null
+            ? localApproval
+            : autoApprovalFallback
+      );
+  if (needsAutoApprovalOverride && isUuidValue(authUser?.id)) {
+    updateRelationalProfileApproval([authUser.id], true).catch(() => { });
+  }
   const profileHasStudentCompletion = role !== "student"
     ? true
     : validateAndNormalizePhoneNumber(resolvedPhone).ok && Number(year) >= 1 && Number(semester) >= 1;
@@ -2210,9 +2216,11 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
       ? true
       : hasExplicitIsApprovedOverride
         ? profileOverrides.isApproved
-        : typeof previous?.isApproved === "boolean"
-          ? previous.isApproved
-          : shouldAutoApproveNextStudent;
+        : (typeof previous?.isApproved === "boolean" && previous.isApproved === false && shouldAutoApproveNextStudent)
+          ? true
+          : typeof previous?.isApproved === "boolean"
+            ? previous.isApproved
+            : shouldAutoApproveNextStudent;
   const inferredStudentProfileCompletion = nextRole !== "student"
     ? true
     : hasCompleteStudentProfile({
