@@ -6925,8 +6925,7 @@ async function refreshAdminPresenceSnapshot(options = {}) {
     const { data, error } = await client
       .from("user_presence")
       .select("user_id,full_name,email,role,current_route,is_online,is_solving,solving_started_at,last_seen_at,updated_at")
-      .order("last_seen_at", { ascending: false })
-      .limit(200);
+      .order("last_seen_at", { ascending: false });
     if (error) {
       state.adminPresenceError = error.message || "Could not load presence data.";
       return false;
