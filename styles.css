@@ -1187,6 +1187,8 @@ body.is-routing .card {
   min-height: 40px;
   letter-spacing: 0.01em;
   cursor: pointer;
+  transform: translateZ(0);
+  will-change: transform, box-shadow;
   transition:
     background 180ms ease,
     transform 160ms ease,
