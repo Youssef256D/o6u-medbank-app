@@ -9719,6 +9719,17 @@ function renderSession() {
 
             <section class="exam-question-stage">
               <article class="exam-question-block exam-question-card">
+                <div class="exam-question-topbar">
+                  <button
+                    class="exam-ask-ai-btn"
+                    data-action="open-course-ai"
+                    ${askAiLink ? "" : "disabled"}
+                    title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
+                  >
+                    <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
+                    <span>Ask AI</span>
+                  </button>
+                </div>
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
                   ${stemLines
@@ -9741,17 +9752,7 @@ function renderSession() {
             </section>
 
             <aside class="exam-nav-panel">
-              <div class="exam-nav-head">
-                <h3>Quiz navigation</h3>
-                <button
-                  class="btn ghost exam-ask-ai-btn"
-                  data-action="open-course-ai"
-                  ${askAiLink ? "" : "disabled"}
-                  title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
-                >
-                  Ask AI
-                </button>
-              </div>
+              <h3>Quiz navigation</h3>
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>

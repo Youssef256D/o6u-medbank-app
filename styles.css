@@ -2648,13 +2648,6 @@ th {
   gap: 0.8rem;
 }
 
-.exam-nav-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
 .exam-nav-panel h3 {
   margin: 0;
   font-size: 0.98rem;
@@ -2662,10 +2655,54 @@ th {
   line-height: 1.2;
 }
 
+.exam-question-topbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: -0.15rem 0 0.4rem;
+}
+
 .exam-ask-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.36rem;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #0d5ea8 0%, #1d8cd8 52%, #2ea6c8 100%);
+  color: #ffffff;
   width: auto;
-  padding: 0.35rem 0.7rem;
-  font-size: 0.82rem;
+  min-height: 36px;
+  padding: 0.36rem 0.92rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(13, 94, 168, 0.28);
+  transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease;
+}
+
+.exam-ask-ai-btn:hover {
+  transform: translateY(-1px);
+  filter: saturate(1.06);
+  box-shadow: 0 10px 24px rgba(13, 94, 168, 0.34);
+}
+
+.exam-ask-ai-btn:active {
+  transform: translateY(0);
+}
+
+.exam-ask-ai-btn:disabled {
+  background: #d5dae1;
+  color: #6b7482;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.92;
+}
+
+.exam-ask-ai-spark {
+  font-size: 0.9rem;
+  line-height: 1;
 }
 
 .exam-nav-grid {
