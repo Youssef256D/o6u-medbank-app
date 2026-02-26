@@ -1597,6 +1597,11 @@ body.is-routing .card {
   justify-items: start;
 }
 
+.admin-course-notebook-link {
+  display: grid;
+  gap: 0.45rem;
+}
+
 .admin-btn-sm {
   padding: 0.42rem 0.7rem;
   font-size: 0.86rem;
@@ -2643,11 +2648,24 @@ th {
   gap: 0.8rem;
 }
 
+.exam-nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .exam-nav-panel h3 {
   margin: 0;
   font-size: 0.98rem;
   font-weight: 700;
   line-height: 1.2;
+}
+
+.exam-ask-ai-btn {
+  width: auto;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.82rem;
 }
 
 .exam-nav-grid {

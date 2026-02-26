@@ -14,6 +14,7 @@ const STORAGE_KEYS = {
   flashcards: "mcq_flashcards",
   curriculum: "mcq_curriculum",
   courseTopics: "mcq_course_topics",
+  courseNotebookLinks: "mcq_course_notebook_links",
   autoApproveStudentAccess: "mcq_auto_approve_student_access",
   appVersionSeen: "mcq_app_version_seen",
   appVersionForced: "mcq_app_version_forced",
@@ -222,6 +223,7 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.flashcards,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.courseNotebookLinks,
   STORAGE_KEYS.autoApproveStudentAccess,
   STORAGE_KEYS.studentRefreshTrigger,
 ];
@@ -410,6 +412,7 @@ const REMOVED_TOPIC_KEYS = new Set(REMOVED_TOPIC_NAMES.map((topic) => topic.toLo
 let O6U_CURRICULUM = deepClone(DEFAULT_O6U_CURRICULUM);
 let CURRICULUM_COURSE_LIST = [];
 let COURSE_TOPIC_OVERRIDES = {};
+let COURSE_NOTEBOOK_LINKS = {};
 let QBANK_COURSE_TOPICS = {};
 rebuildCurriculumCatalog();
 
@@ -3047,6 +3050,7 @@ async function hydrateRelationalCoursesAndTopics() {
   rebuildCurriculumCatalog();
   saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
 }
 
 async function fetchEnrollmentCourseMapForUsers(userIds) {
@@ -6154,8 +6158,13 @@ function seedData() {
   }
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, null);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
+  const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, null);
+  COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
+    ? savedCourseNotebookLinks
+    : {};
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
   if (typeof load(STORAGE_KEYS.autoApproveStudentAccess, null) !== "boolean") {
     save(STORAGE_KEYS.autoApproveStudentAccess, DEFAULT_AUTO_APPROVE_STUDENT_ACCESS);
   }
@@ -6979,6 +6988,7 @@ async function refreshStudentDataFromSupabaseState(user) {
     STORAGE_KEYS.questions,
     STORAGE_KEYS.curriculum,
     STORAGE_KEYS.courseTopics,
+    STORAGE_KEYS.courseNotebookLinks,
   ]).catch((error) => ({ error }));
   if (globalRefreshResult?.error) {
     return false;
@@ -9631,6 +9641,8 @@ function renderSession() {
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
   const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
   const isTimedMode = session.mode === "timed";
+  const currentCourse = getQbankCourseTopicMeta(question).course;
+  const askAiLink = getCourseNotebookLinkForCourse(currentCourse);
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -9729,7 +9741,17 @@ function renderSession() {
             </section>
 
             <aside class="exam-nav-panel">
-              <h3>Quiz navigation</h3>
+              <div class="exam-nav-head">
+                <h3>Quiz navigation</h3>
+                <button
+                  class="btn ghost exam-ask-ai-btn"
+                  data-action="open-course-ai"
+                  ${askAiLink ? "" : "disabled"}
+                  title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
+                >
+                  Ask AI
+                </button>
+              </div>
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
@@ -9840,7 +9862,7 @@ function wireSession() {
   });
 }
 
-function handleSessionClick(event) {
+async function handleSessionClick(event) {
   const target = event.target.closest("[data-action]");
   if (!target) {
     return;
@@ -9910,6 +9932,31 @@ function handleSessionClick(event) {
 
   if (action === "open-ai-tutor") {
     toggleSessionPanel("aiTutor");
+    return;
+  }
+
+  if (action === "open-course-ai") {
+    const qid = session.questionIds[session.currentIndex];
+    const question = getQuestions().find((entry) => entry.id === qid);
+    if (!question) {
+      toast("Current question could not be loaded.");
+      return;
+    }
+    const course = getQbankCourseTopicMeta(question).course;
+    const notebookUrl = getCourseNotebookLinkForCourse(course);
+    if (!notebookUrl) {
+      toast("No Ask AI link configured for this course yet.");
+      return;
+    }
+    const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      toast("Popup blocked. Allow popups, then try Ask AI again.");
+      return;
+    }
+    const copied = await copyTextToClipboard(buildAskAiPromptText(question));
+    toast(copied
+      ? "Opened Ask AI. Question copied, now paste with Ctrl/Cmd+V."
+      : "Opened Ask AI. Could not auto-copy, please copy/paste manually.");
     return;
   }
 
@@ -11287,6 +11334,7 @@ function renderAdmin() {
     const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
     const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
+    const notebookLinksByCourse = COURSE_NOTEBOOK_LINKS;
     const questionCountByCourse = questions.reduce((acc, question) => {
       const mappedCourse = getQbankCourseTopicMeta(question).course;
       if (!mappedCourse) {
@@ -11302,6 +11350,16 @@ function renderAdmin() {
             <td>${idx + 1}</td>
             <td><input data-field="curriculumCourseName" value="${escapeHtml(course)}" /></td>
             <td data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</td>
+            <td>
+              <div class="admin-course-notebook-link">
+                <input
+                  data-field="courseNotebookLink"
+                  value="${escapeHtml(notebookLinksByCourse[course] || "")}"
+                  placeholder="https://notebooklm.google.com/..."
+                />
+                <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save link</button>
+              </div>
+            </td>
             <td>
               <div class="admin-course-qbank">
                 <p class="admin-course-qbank-count">
@@ -11369,12 +11427,13 @@ function renderAdmin() {
                 <th>#</th>
                 <th>Course Name</th>
                 <th>Topics</th>
+                <th>Ask AI Link</th>
                 <th>Question Bank</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              ${curriculumRows || `<tr><td colspan="5" class="subtle">No courses in this semester yet.</td></tr>`}
+              ${curriculumRows || `<tr><td colspan="6" class="subtle">No courses in this semester yet.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -12733,6 +12792,7 @@ function wireAdmin() {
         "course-topic-rename",
         "course-topic-remove",
         "course-topic-clear",
+        "course-notebook-link-save",
         "course-question-edit",
         "course-question-clear",
       ].includes(action)
@@ -12759,6 +12819,34 @@ function wireAdmin() {
       state.adminQuestionModalOpen = false;
       state.skipNextRouteAnimation = true;
       render();
+      return;
+    }
+
+    if (action === "course-notebook-link-save") {
+      const input = row.querySelector("input[data-field='courseNotebookLink']");
+      const entered = String(input?.value || "").trim();
+      const normalizedLink = normalizeCourseNotebookLink(entered);
+      if (entered && !normalizedLink) {
+        toast("Enter a valid URL starting with http:// or https://.");
+        return;
+      }
+      const nextLinks = { ...COURSE_NOTEBOOK_LINKS };
+      if (normalizedLink) {
+        nextLinks[course] = normalizedLink;
+      } else {
+        delete nextLinks[course];
+      }
+      COURSE_NOTEBOOK_LINKS = normalizeCourseNotebookLinkMap(nextLinks);
+      save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
+      if (input) {
+        input.value = COURSE_NOTEBOOK_LINKS[course] || "";
+      }
+      try {
+        await flushPendingSyncNow({ throwOnRelationalFailure: false });
+        toast(normalizedLink ? "Ask AI link saved." : "Ask AI link removed.");
+      } catch (syncError) {
+        toast(`Link saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
       return;
     }
 
@@ -16167,6 +16255,42 @@ function normalizeCourseTopicMap(rawMap) {
   return normalized;
 }
 
+function normalizeCourseNotebookLink(link) {
+  const raw = String(link || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeCourseNotebookLinkMap(rawMap) {
+  const source = rawMap && typeof rawMap === "object" ? rawMap : {};
+  const normalized = {};
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    const link = normalizeCourseNotebookLink(source[course]);
+    if (link) {
+      normalized[course] = link;
+    }
+  });
+  return normalized;
+}
+
+function getCourseNotebookLinkForCourse(courseName) {
+  const course = String(courseName || "").trim();
+  if (!course) {
+    return "";
+  }
+  return String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
+}
+
 function rebuildCurriculumCatalog() {
   CURRICULUM_COURSE_LIST = [
     ...new Set(
@@ -16176,6 +16300,7 @@ function rebuildCurriculumCatalog() {
     ),
   ];
   COURSE_TOPIC_OVERRIDES = normalizeCourseTopicMap(COURSE_TOPIC_OVERRIDES);
+  COURSE_NOTEBOOK_LINKS = normalizeCourseNotebookLinkMap(COURSE_NOTEBOOK_LINKS);
   QBANK_COURSE_TOPICS = Object.fromEntries(
     Object.entries(COURSE_TOPIC_OVERRIDES).map(([course, topics]) => [course, [...topics]]),
   );
@@ -16288,11 +16413,18 @@ function applyCurriculumUpdate(nextCurriculum, options = {}) {
       renamedTo,
     );
   }
+  if (renamedFrom && renamedTo && COURSE_NOTEBOOK_LINKS[renamedFrom] && !COURSE_NOTEBOOK_LINKS[renamedTo]) {
+    COURSE_NOTEBOOK_LINKS[renamedTo] = COURSE_NOTEBOOK_LINKS[renamedFrom];
+  }
+  if (removedCourse) {
+    delete COURSE_NOTEBOOK_LINKS[removedCourse];
+  }
 
   O6U_CURRICULUM = normalizeCurriculum(nextCurriculum);
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
 
   const questions = getQuestions();
   let questionsChanged = false;
@@ -17517,6 +17649,70 @@ function splitStemLines(stem) {
     .split(/(?<=[.!?])\s+/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function buildAskAiPromptText(question) {
+  const meta = getQbankCourseTopicMeta(question || {});
+  const stem = String(question?.stem || "").trim();
+  const choices = Array.isArray(question?.choices) ? question.choices : [];
+  const choiceLines = choices
+    .map((choice) => {
+      const id = String(choice?.id || "").trim();
+      const text = String(choice?.text || "").trim();
+      if (!id || !text) {
+        return "";
+      }
+      return `${id}. ${text}`;
+    })
+    .filter(Boolean);
+  const lines = [
+    "Please explain this MCQ and the reasoning behind the best answer.",
+    "",
+    meta.course ? `Course: ${meta.course}` : "",
+    meta.topic ? `Topic: ${meta.topic}` : "",
+    "",
+    "Question:",
+    stem || "N/A",
+    "",
+    "Options:",
+    choiceLines.join("\n"),
+  ].filter((line, index, source) => {
+    if (!line) {
+      return source[index - 1] && source[index - 1] !== "";
+    }
+    return true;
+  });
+  return lines.join("\n").trim();
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) {
+    return false;
+  }
+  if (navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // Fall back to legacy copy.
+    }
+  }
+  try {
+    const textArea = document.createElement("textarea");
+    textArea.value = value;
+    textArea.setAttribute("readonly", "readonly");
+    textArea.style.position = "fixed";
+    textArea.style.top = "-9999px";
+    textArea.style.left = "-9999px";
+    document.body.appendChild(textArea);
+    textArea.select();
+    const copied = document.execCommand("copy");
+    textArea.remove();
+    return Boolean(copied);
+  } catch {
+    return false;
+  }
 }
 
 function renderQuestionStemVisual(question) {
