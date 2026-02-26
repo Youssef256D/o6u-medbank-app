@@ -290,6 +290,7 @@ let timerHandle = null;
 let lastRenderedRoute = null;
 let routeTransitionHandle = null;
 let sessionQuestionTransitionHandle = null;
+let askAiTabHandle = null;
 let lastRenderedSessionPointer = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
@@ -9949,15 +9950,32 @@ async function handleSessionClick(event) {
       toast("No Ask AI link configured for this course yet.");
       return;
     }
-    const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
-    if (!opened) {
-      toast("Popup blocked. Allow popups, then try Ask AI again.");
-      return;
+    const promptText = buildAskAiPromptText(question);
+    const copyPromise = copyTextToClipboard(promptText);
+    const canReuseAskAiTab = askAiTabHandle && !askAiTabHandle.closed;
+    if (canReuseAskAiTab) {
+      try {
+        askAiTabHandle.location.href = notebookUrl;
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+      try {
+        askAiTabHandle.focus();
+      } catch {
+        // Ignore focus errors.
+      }
+    } else {
+      const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        toast("Popup blocked. Allow popups, then try Ask AI again.");
+        return;
+      }
+      askAiTabHandle = opened;
     }
-    const copied = await copyTextToClipboard(buildAskAiPromptText(question));
+    const copied = await copyPromise;
     toast(copied
-      ? "Opened Ask AI. Question copied, now paste with Ctrl/Cmd+V."
-      : "Opened Ask AI. Could not auto-copy, please copy/paste manually.");
+      ? `${canReuseAskAiTab ? "Focused Ask AI tab." : "Opened Ask AI."} Question copied, now paste with Ctrl/Cmd+V.`
+      : `${canReuseAskAiTab ? "Focused Ask AI tab." : "Opened Ask AI."} Could not auto-copy, please copy/paste manually.`);
     return;
   }
 
