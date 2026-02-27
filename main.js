@@ -313,7 +313,11 @@ let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
 const ASK_AI_OPENED_LINKS_KEY = "mcq_ask_ai_opened_links";
+const ASK_AI_TARGET_NAME = "mcq-ask-ai-shared";
 const askAiOpenedLinkKeys = new Set();
+const askAiRuntime = {
+  windowByTarget: new Map(),
+};
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -10128,38 +10132,45 @@ async function handleSessionClick(event) {
     const copyPromise = copyTextToClipboard(promptText);
     const linkKey = getAskAiLinkKey(notebookUrl) || String(notebookUrl).trim().toLowerCase();
     const hasOpenedBefore = askAiOpenedLinkKeys.has(linkKey);
-    let openedThisClick = false;
+    const targetName = getAskAiTargetNameForLink(notebookUrl);
+    const previousWindow = askAiRuntime.windowByTarget.get(targetName);
+    const hadLiveWindow = Boolean(previousWindow && !previousWindow.closed);
     let popupBlocked = false;
-    if (!hasOpenedBefore) {
-      const opened = window.open(notebookUrl, getAskAiTargetNameForLink(notebookUrl));
-      if (!opened) {
-        popupBlocked = true;
-      } else {
+    const opened = window.open(notebookUrl, targetName);
+    if (!opened) {
+      popupBlocked = true;
+    } else {
+      askAiRuntime.windowByTarget.set(targetName, opened);
+      try {
+        opened.focus();
+      } catch {
+        // Ignore focus errors for restricted popup contexts.
+      }
+      if (!hasOpenedBefore) {
         askAiOpenedLinkKeys.add(linkKey);
         persistAskAiOpenedLinkKeys();
-        openedThisClick = true;
       }
     }
 
     const copied = await copyPromise;
 
-    if (openedThisClick) {
+    if (popupBlocked) {
       toast(copied
-        ? "Opened Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
-        : "Opened Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
+        ? "Question copied. Popup blocked, so Ask AI tab did not open. Allow popups and try again."
+        : "Popup blocked and auto-copy failed. Allow popups, then try again.");
       return;
     }
 
-    if (popupBlocked) {
+    if (hasOpenedBefore || hadLiveWindow) {
       toast(copied
-        ? "Question copied. Popup blocked, so Ask AI tab did not open. Allow popups and click Ask AI once."
-        : "Popup blocked and auto-copy failed. Allow popups, then click Ask AI once.");
+        ? "Question copied. Reused your existing Ask AI tab."
+        : "Could not auto-copy. Reused your existing Ask AI tab.");
       return;
     }
 
     toast(copied
-      ? "Question copied. Ask AI tab is opened once per session, so no new tab was opened."
-      : "Could not auto-copy. Ask AI tab is opened once per session; copy/paste manually.");
+      ? "Opened Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
+      : "Opened Ask AI tab. Could not auto-copy, please copy/paste manually.");
     return;
   }
 
@@ -13479,7 +13490,8 @@ function wireAdmin() {
 
       const role = users[idx].role;
       const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
-      let shouldClearAnalyticsForYearChange = false;
+      const previousSemester = role === "student" ? normalizeAcademicSemesterOrNull(users[idx].academicSemester) : null;
+      let shouldClearAnalyticsForEnrollmentChange = false;
       if (role === "student") {
         const yearSelect = row.querySelector("select[data-field='academicYear']");
         const semesterSelect = row.querySelector("select[data-field='academicSemester']");
@@ -13495,7 +13507,7 @@ function wireAdmin() {
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
-        shouldClearAnalyticsForYearChange = previousYear !== null && previousYear !== year;
+        shouldClearAnalyticsForEnrollmentChange = previousYear !== year || previousSemester !== semester;
         if (!hasCompleteStudentProfile(users[idx])) {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
@@ -13515,13 +13527,13 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      if (shouldClearAnalyticsForYearChange) {
+      if (shouldClearAnalyticsForEnrollmentChange) {
         await clearUserAnalyticsHistory(users[idx].id, getUserProfileId(users[idx]));
       }
       await flushPendingSyncNow();
       if (mode === "manual") {
-        toast(shouldClearAnalyticsForYearChange
-          ? "Enrollment saved. Previous analytics were cleared for the new year."
+        toast(shouldClearAnalyticsForEnrollmentChange
+          ? "Enrollment saved. Previous analytics were cleared for the new year/semester."
           : "Enrollment saved.");
       }
       state.skipNextRouteAnimation = true;
@@ -16735,13 +16747,7 @@ function getAskAiLinkKey(link) {
 }
 
 function getAskAiTargetNameForLink(link) {
-  const normalized = getAskAiLinkKey(link)
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-  const suffix = normalized || "default";
-  return `mcq-ask-ai-${suffix}`;
+  return ASK_AI_TARGET_NAME;
 }
 
 function persistAskAiOpenedLinkKeys() {
