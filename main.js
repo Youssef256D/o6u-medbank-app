@@ -311,6 +311,8 @@ let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
 const askAiTabsByCourse = new Map();
+const ASK_AI_OPENED_COURSES_KEY = "mcq_ask_ai_opened_courses";
+const askAiOpenedCourseKeys = new Set();
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -327,6 +329,19 @@ const analyticsRuntime = {
   cache: new Map(),
   questionMetaById: new Map(),
 };
+
+try {
+  const raw = readSessionStorageKey(ASK_AI_OPENED_COURSES_KEY);
+  const parsed = raw ? JSON.parse(raw) : [];
+  if (Array.isArray(parsed)) {
+    parsed
+      .map((entry) => String(entry || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => askAiOpenedCourseKeys.add(key));
+  }
+} catch {
+  // Ignore malformed session data.
+}
 
 const DEFAULT_O6U_CURRICULUM = {
   1: {
@@ -9954,32 +9969,48 @@ async function handleSessionClick(event) {
     const copyPromise = copyTextToClipboard(promptText);
     const courseKey = String(course || "default").trim().toLowerCase() || "default";
     const targetName = getAskAiTargetNameForCourse(course);
-    let opened = null;
+    const hasOpenedBefore = askAiOpenedCourseKeys.has(courseKey);
+    let mode = "copied-only";
     const existingTab = askAiTabsByCourse.get(courseKey);
     if (existingTab && !existingTab.closed) {
-      opened = existingTab;
+      mode = "focused";
       try {
-        opened.location.href = notebookUrl;
+        existingTab.location.href = notebookUrl;
       } catch {
         // Ignore cross-origin access errors.
       }
       try {
-        opened.focus();
+        existingTab.focus();
       } catch {
         // Ignore focus errors.
       }
-    } else {
-      opened = window.open(notebookUrl, targetName);
+    } else if (!hasOpenedBefore) {
+      const opened = window.open(notebookUrl, targetName);
       if (!opened) {
         toast("Popup blocked. Allow popups, then try Ask AI again.");
         return;
       }
       askAiTabsByCourse.set(courseKey, opened);
+      askAiOpenedCourseKeys.add(courseKey);
+      persistAskAiOpenedCourseKeys();
+      mode = "opened";
     }
     const copied = await copyPromise;
+    if (mode === "opened") {
+      toast(copied
+        ? "Opened Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
+        : "Opened Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
+      return;
+    }
+    if (mode === "focused") {
+      toast(copied
+        ? "Focused Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
+        : "Focused Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
+      return;
+    }
     toast(copied
-      ? "Opened/focused Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
-      : "Opened/focused Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
+      ? "Question copied. Switch to your Ask AI tab and paste with Ctrl/Cmd+V."
+      : "Could not auto-copy. Copy/paste manually in your Ask AI tab.");
     return;
   }
 
@@ -16323,6 +16354,10 @@ function getAskAiTargetNameForCourse(courseName) {
     .slice(0, 48);
   const suffix = normalized || "default";
   return `mcq-ask-ai-${suffix}`;
+}
+
+function persistAskAiOpenedCourseKeys() {
+  writeSessionStorageKey(ASK_AI_OPENED_COURSES_KEY, JSON.stringify([...askAiOpenedCourseKeys]));
 }
 
 function rebuildCurriculumCatalog() {
