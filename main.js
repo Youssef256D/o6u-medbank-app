@@ -15670,12 +15670,17 @@ function getSystemLogs() {
   const list = Array.isArray(raw) ? raw : [];
   return list
     .map((entry) => normalizeSystemLogEntry(entry))
-    .filter(Boolean)
+    .filter((entry) => entry && String(entry.actorRole || "").trim().toLowerCase() === "admin")
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 }
 
 function appendSystemLog(kind, message, details = {}, options = {}) {
   if (systemLogRuntime.suspend) {
+    return null;
+  }
+  const actor = getCurrentUser();
+  const actorRole = String(actor?.role || "").trim().toLowerCase();
+  if (actorRole !== "admin") {
     return null;
   }
   const safeKind = String(kind || "event").trim() || "event";
@@ -15695,7 +15700,6 @@ function appendSystemLog(kind, message, details = {}, options = {}) {
   systemLogRuntime.lastSignature = signature;
   systemLogRuntime.lastAt = nowMs;
 
-  const actor = getCurrentUser();
   const entry = normalizeSystemLogEntry({
     id: makeId("log"),
     createdAt: nowISO(),
