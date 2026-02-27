@@ -9908,6 +9908,13 @@ function renderSession() {
                     <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
                     <span>Ask AI</span>
                   </button>
+                  <button
+                    class="exam-copy-question-btn"
+                    data-action="copy-course-ai-question"
+                    title="Copy this question for Ask AI"
+                  >
+                    Copy question
+                  </button>
                 </div>
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
@@ -10128,49 +10135,87 @@ async function handleSessionClick(event) {
       toast("No Ask AI link configured for this course yet.");
       return;
     }
-    const promptText = buildAskAiPromptText(question);
-    const copyPromise = copyTextToClipboard(promptText);
     const linkKey = getAskAiLinkKey(notebookUrl) || String(notebookUrl).trim().toLowerCase();
     const hasOpenedBefore = askAiOpenedLinkKeys.has(linkKey);
     const targetName = getAskAiTargetNameForLink(notebookUrl);
     const previousWindow = askAiRuntime.windowByTarget.get(targetName);
-    const hadLiveWindow = Boolean(previousWindow && !previousWindow.closed);
+    const hasLiveWindow = Boolean(previousWindow && !previousWindow.closed);
     let popupBlocked = false;
-    const opened = window.open(notebookUrl, targetName);
-    if (!opened) {
-      popupBlocked = true;
-    } else {
-      askAiRuntime.windowByTarget.set(targetName, opened);
+    let openedThisClick = false;
+    let focusedExisting = false;
+
+    if (!hasOpenedBefore) {
+      if (hasLiveWindow) {
+        try {
+          previousWindow.location = notebookUrl;
+        } catch {
+          // Ignore cross-origin navigation assignment errors.
+        }
+        try {
+          previousWindow.focus();
+          focusedExisting = true;
+        } catch {
+          // Ignore focus errors for restricted popup contexts.
+        }
+        askAiOpenedLinkKeys.add(linkKey);
+        persistAskAiOpenedLinkKeys();
+        openedThisClick = true;
+      } else {
+        const opened = window.open(notebookUrl, targetName);
+        if (!opened) {
+          popupBlocked = true;
+        } else {
+          askAiRuntime.windowByTarget.set(targetName, opened);
+          try {
+            opened.focus();
+          } catch {
+            // Ignore focus errors for restricted popup contexts.
+          }
+          askAiOpenedLinkKeys.add(linkKey);
+          persistAskAiOpenedLinkKeys();
+          openedThisClick = true;
+        }
+      }
+    } else if (hasLiveWindow) {
       try {
-        opened.focus();
+        previousWindow.focus();
+        focusedExisting = true;
       } catch {
         // Ignore focus errors for restricted popup contexts.
       }
-      if (!hasOpenedBefore) {
-        askAiOpenedLinkKeys.add(linkKey);
-        persistAskAiOpenedLinkKeys();
-      }
     }
-
-    const copied = await copyPromise;
 
     if (popupBlocked) {
-      toast(copied
-        ? "Question copied. Popup blocked, so Ask AI tab did not open. Allow popups and try again."
-        : "Popup blocked and auto-copy failed. Allow popups, then try again.");
+      toast("Popup blocked, so Ask AI tab did not open. Allow popups and try again.");
       return;
     }
 
-    if (hasOpenedBefore || hadLiveWindow) {
-      toast(copied
-        ? "Question copied. Reused your existing Ask AI tab."
-        : "Could not auto-copy. Reused your existing Ask AI tab.");
+    if (openedThisClick) {
+      toast("Opened Ask AI tab.");
       return;
     }
 
+    if (focusedExisting) {
+      toast("Reused your existing Ask AI tab.");
+      return;
+    }
+
+    toast("Ask AI was already opened in this session, so no new tab was created.");
+    return;
+  }
+
+  if (action === "copy-course-ai-question") {
+    const qid = session.questionIds[session.currentIndex];
+    const question = getQuestions().find((entry) => entry.id === qid);
+    if (!question) {
+      toast("Current question could not be loaded.");
+      return;
+    }
+    const promptText = buildAskAiPromptText(question);
+    const copied = await copyTextToClipboard(promptText);
     toast(copied
-      ? "Opened Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
-      : "Opened Ask AI tab. Could not auto-copy, please copy/paste manually.");
+      ? "Question copied. Paste in Ask AI with Ctrl/Cmd+V."
+      : "Could not auto-copy. Please copy and paste manually.");
     return;
   }
 

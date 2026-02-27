@@ -2659,6 +2659,8 @@ th {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
   margin: -0.15rem 0 0.4rem;
 }
 
@@ -2703,6 +2705,29 @@ th {
 .exam-ask-ai-spark {
   font-size: 0.9rem;
   line-height: 1;
+}
+
+.exam-copy-question-btn {
+  border: 1px solid #9db5d1;
+  background: #ffffff;
+  color: #0f3f67;
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 0.36rem 0.88rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.exam-copy-question-btn:hover {
+  transform: translateY(-1px);
+  border-color: #6f97be;
+  box-shadow: 0 8px 20px rgba(29, 86, 138, 0.15);
+}
+
+.exam-copy-question-btn:active {
+  transform: translateY(0);
 }
 
 .exam-nav-grid {
