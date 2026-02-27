@@ -30,7 +30,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-23.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -290,7 +290,6 @@ let timerHandle = null;
 let lastRenderedRoute = null;
 let routeTransitionHandle = null;
 let sessionQuestionTransitionHandle = null;
-let askAiTabHandle = null;
 let lastRenderedSessionPointer = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
@@ -9952,30 +9951,15 @@ async function handleSessionClick(event) {
     }
     const promptText = buildAskAiPromptText(question);
     const copyPromise = copyTextToClipboard(promptText);
-    const canReuseAskAiTab = askAiTabHandle && !askAiTabHandle.closed;
-    if (canReuseAskAiTab) {
-      try {
-        askAiTabHandle.location.href = notebookUrl;
-      } catch {
-        // Ignore cross-origin access errors.
-      }
-      try {
-        askAiTabHandle.focus();
-      } catch {
-        // Ignore focus errors.
-      }
-    } else {
-      const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
-      if (!opened) {
-        toast("Popup blocked. Allow popups, then try Ask AI again.");
-        return;
-      }
-      askAiTabHandle = opened;
+    const opened = window.open(notebookUrl, "mcq-ask-ai-tab");
+    if (!opened) {
+      toast("Popup blocked. Allow popups, then try Ask AI again.");
+      return;
     }
     const copied = await copyPromise;
     toast(copied
-      ? `${canReuseAskAiTab ? "Focused Ask AI tab." : "Opened Ask AI."} Question copied, now paste with Ctrl/Cmd+V.`
-      : `${canReuseAskAiTab ? "Focused Ask AI tab." : "Opened Ask AI."} Could not auto-copy, please copy/paste manually.`);
+      ? "Opened/focused Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
+      : "Opened/focused Ask AI tab. Could not auto-copy, please copy/paste manually.");
     return;
   }
 
