@@ -9822,6 +9822,8 @@ function renderSession() {
   const isTimedMode = session.mode === "timed";
   const currentCourse = getQbankCourseTopicMeta(question).course;
   const askAiLink = getCourseNotebookLinkForCourse(currentCourse);
+  const askAiLinkKey = getAskAiLinkKey(askAiLink) || String(askAiLink || "").trim().toLowerCase();
+  const askAiOpenedForCourse = Boolean(askAiLinkKey && askAiOpenedLinkKeys.has(askAiLinkKey));
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -9900,20 +9902,23 @@ function renderSession() {
               <article class="exam-question-block exam-question-card">
                 <div class="exam-question-topbar">
                   <button
-                    class="exam-ask-ai-btn"
+                    class="exam-ask-ai-btn ${askAiOpenedForCourse ? "is-opened" : ""}"
                     data-action="open-course-ai"
-                    ${askAiLink ? "" : "disabled"}
-                    title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
+                    ${askAiLink && !askAiOpenedForCourse ? "" : "disabled"}
+                    title="${!askAiLink
+      ? "No Ask AI link configured for this course"
+      : askAiOpenedForCourse
+        ? "Ask AI tab already opened for this course."
+        : `Open Ask AI for ${escapeHtml(currentCourse || "course")}`}"
                   >
-                    <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
-                    <span>Ask AI</span>
+                    ${askAiOpenedForCourse ? "Ask AI Opened" : "Open Ask AI"}
                   </button>
                   <button
                     class="exam-copy-question-btn"
                     data-action="copy-course-ai-question"
                     title="Copy this question for Ask AI"
                   >
-                    Copy question
+                    Copy
                   </button>
                 </div>
                 ${renderQuestionStemVisual(question)}
@@ -10192,6 +10197,7 @@ async function handleSessionClick(event) {
 
     if (openedThisClick) {
       toast("Opened Ask AI tab.");
+      render();
       return;
     }
 
@@ -10200,7 +10206,10 @@ async function handleSessionClick(event) {
       return;
     }
 
-    toast("Ask AI was already opened in this session, so no new tab was created.");
+    if (hasOpenedBefore) {
+      render();
+      return;
+    }
     return;
   }
 
