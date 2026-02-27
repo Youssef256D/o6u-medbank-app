@@ -30,7 +30,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -310,9 +310,11 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
-const askAiTabsByCourse = new Map();
-const ASK_AI_OPENED_COURSES_KEY = "mcq_ask_ai_opened_courses";
-const askAiOpenedCourseKeys = new Set();
+const askAiTabsByLink = new Map();
+const ASK_AI_OPENED_LINKS_KEY = "mcq_ask_ai_opened_links";
+const askAiOpenedLinkKeys = new Set();
+const ASK_AI_REOPEN_ARM_WINDOW_MS = 10000;
+const askAiReopenArmedUntilByLink = new Map();
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -331,13 +333,13 @@ const analyticsRuntime = {
 };
 
 try {
-  const raw = readSessionStorageKey(ASK_AI_OPENED_COURSES_KEY);
+  const raw = readSessionStorageKey(ASK_AI_OPENED_LINKS_KEY);
   const parsed = raw ? JSON.parse(raw) : [];
   if (Array.isArray(parsed)) {
     parsed
       .map((entry) => String(entry || "").trim().toLowerCase())
       .filter(Boolean)
-      .forEach((key) => askAiOpenedCourseKeys.add(key));
+      .forEach((key) => askAiOpenedLinkKeys.add(key));
   }
 } catch {
   // Ignore malformed session data.
@@ -4161,6 +4163,60 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
   return payload;
 }
 
+function mergeHydratedSessionsWithLocal(remotePayload) {
+  const remoteSessions = Array.isArray(remotePayload) ? remotePayload : [];
+  const localSessions = getSessions();
+  const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
+  const mergedSessionById = new Map();
+  const parseUpdatedAtMs = (value) => {
+    const ms = new Date(value || 0).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
+
+  remoteSessions.forEach((remoteSession) => {
+    const sessionId = String(remoteSession?.id || "");
+    if (!sessionId) {
+      return;
+    }
+
+    const localSession = localSessionById.get(sessionId);
+    if (!localSession) {
+      mergedSessionById.set(sessionId, remoteSession);
+      return;
+    }
+
+    const localUpdatedAtMs = parseUpdatedAtMs(localSession.updatedAt);
+    const remoteUpdatedAtMs = parseUpdatedAtMs(remoteSession.updatedAt);
+    const localIsActiveSession = (
+      state.route === "session"
+      && String(state.sessionId || "") === sessionId
+      && String(localSession.status || "") === "in_progress"
+    );
+    const preferLocal = localIsActiveSession
+      || localUpdatedAtMs > remoteUpdatedAtMs
+      || (
+        localUpdatedAtMs === remoteUpdatedAtMs
+        && String(localSession.status || "") === "in_progress"
+        && String(remoteSession.status || "") === "in_progress"
+      );
+
+    mergedSessionById.set(
+      sessionId,
+      preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession },
+    );
+  });
+
+  localSessions.forEach((localSession) => {
+    const sessionId = String(localSession?.id || "");
+    if (!sessionId || mergedSessionById.has(sessionId)) {
+      return;
+    }
+    mergedSessionById.set(sessionId, localSession);
+  });
+
+  return [...mergedSessionById.values()];
+}
+
 async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
   if (
     !supabaseSync.enabled ||
@@ -4208,8 +4264,14 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
       return;
     }
     hadRemoteData = true;
+    if (storageKey === STORAGE_KEYS.sessions && (state.route === "session" || state.route === "review")) {
+      return;
+    }
     try {
-      const payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
+      let payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
+      if (storageKey === STORAGE_KEYS.sessions) {
+        payload = mergeHydratedSessionsWithLocal(payload);
+      }
       writeStorageKey(storageKey, payload);
     } catch {
       // Ignore malformed remote payloads and keep local fallback.
@@ -7010,7 +7072,10 @@ async function refreshStudentDataFromSupabaseState(user) {
     return false;
   }
 
-  const userRefreshResult = await hydrateSupabaseSyncKeys(USER_SCOPED_SYNC_KEYS, scope).catch((error) => ({ error }));
+  const userScopedKeys = (state.route === "session" || state.route === "review")
+    ? USER_SCOPED_SYNC_KEYS.filter((key) => key !== STORAGE_KEYS.sessions)
+    : USER_SCOPED_SYNC_KEYS;
+  const userRefreshResult = await hydrateSupabaseSyncKeys(userScopedKeys, scope).catch((error) => ({ error }));
   if (userRefreshResult?.error) {
     return false;
   }
@@ -9967,13 +10032,14 @@ async function handleSessionClick(event) {
     }
     const promptText = buildAskAiPromptText(question);
     const copyPromise = copyTextToClipboard(promptText);
-    const courseKey = String(course || "default").trim().toLowerCase() || "default";
-    const targetName = getAskAiTargetNameForCourse(course);
-    const hasOpenedBefore = askAiOpenedCourseKeys.has(courseKey);
+    const linkKey = getAskAiLinkKey(notebookUrl) || String(notebookUrl).trim().toLowerCase();
+    const targetName = getAskAiTargetNameForLink(notebookUrl);
+    const hasOpenedBefore = askAiOpenedLinkKeys.has(linkKey);
     let mode = "copied-only";
-    const existingTab = askAiTabsByCourse.get(courseKey);
+    const existingTab = askAiTabsByLink.get(linkKey);
     if (existingTab && !existingTab.closed) {
       mode = "focused";
+      askAiReopenArmedUntilByLink.delete(linkKey);
       try {
         existingTab.location.href = notebookUrl;
       } catch {
@@ -9990,10 +10056,27 @@ async function handleSessionClick(event) {
         toast("Popup blocked. Allow popups, then try Ask AI again.");
         return;
       }
-      askAiTabsByCourse.set(courseKey, opened);
-      askAiOpenedCourseKeys.add(courseKey);
-      persistAskAiOpenedCourseKeys();
+      askAiTabsByLink.set(linkKey, opened);
+      askAiOpenedLinkKeys.add(linkKey);
+      persistAskAiOpenedLinkKeys();
+      askAiReopenArmedUntilByLink.delete(linkKey);
       mode = "opened";
+    } else if (hasOpenedBefore) {
+      const nowMs = Date.now();
+      const armedUntil = Number(askAiReopenArmedUntilByLink.get(linkKey) || 0);
+      if (nowMs <= armedUntil) {
+        const reopened = window.open(notebookUrl, targetName);
+        if (!reopened) {
+          toast("Popup blocked. Allow popups, then click Ask AI again.");
+          return;
+        }
+        askAiTabsByLink.set(linkKey, reopened);
+        askAiReopenArmedUntilByLink.delete(linkKey);
+        mode = "reopened";
+      } else {
+        askAiReopenArmedUntilByLink.set(linkKey, nowMs + ASK_AI_REOPEN_ARM_WINDOW_MS);
+        mode = "arm-reopen";
+      }
     }
     const copied = await copyPromise;
     if (mode === "opened") {
@@ -10002,10 +10085,22 @@ async function handleSessionClick(event) {
         : "Opened Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
       return;
     }
+    if (mode === "reopened") {
+      toast(copied
+        ? "Reopened Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
+        : "Reopened Ask AI tab. Could not auto-copy, please copy/paste manually.");
+      return;
+    }
     if (mode === "focused") {
       toast(copied
         ? "Focused Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
         : "Focused Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
+      return;
+    }
+    if (mode === "arm-reopen") {
+      toast(copied
+        ? "Question copied. Ask AI tab seems closed, click Ask AI again to reopen it."
+        : "Ask AI tab seems closed. Click Ask AI again to reopen it.");
       return;
     }
     toast(copied
@@ -16345,10 +16440,15 @@ function getCourseNotebookLinkForCourse(courseName) {
   return String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
 }
 
-function getAskAiTargetNameForCourse(courseName) {
-  const normalized = String(courseName || "")
+function getAskAiLinkKey(link) {
+  return String(normalizeCourseNotebookLink(link) || "")
     .trim()
-    .toLowerCase()
+    .toLowerCase();
+}
+
+function getAskAiTargetNameForLink(link) {
+  const normalized = getAskAiLinkKey(link)
+    .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
@@ -16356,8 +16456,8 @@ function getAskAiTargetNameForCourse(courseName) {
   return `mcq-ask-ai-${suffix}`;
 }
 
-function persistAskAiOpenedCourseKeys() {
-  writeSessionStorageKey(ASK_AI_OPENED_COURSES_KEY, JSON.stringify([...askAiOpenedCourseKeys]));
+function persistAskAiOpenedLinkKeys() {
+  writeSessionStorageKey(ASK_AI_OPENED_LINKS_KEY, JSON.stringify([...askAiOpenedLinkKeys]));
 }
 
 function rebuildCurriculumCatalog() {
