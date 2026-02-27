@@ -12,6 +12,7 @@ const STORAGE_KEYS = {
   sessionUi: "mcq_session_ui_settings",
   feedback: "mcq_feedback",
   flashcards: "mcq_flashcards",
+  systemLogs: "mcq_system_logs",
   curriculum: "mcq_curriculum",
   courseTopics: "mcq_course_topics",
   courseNotebookLinks: "mcq_course_notebook_links",
@@ -30,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.8").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -59,7 +60,7 @@ const KNOWN_ROUTES = new Set([
   "profile",
   "admin",
 ]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
@@ -221,6 +222,7 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.invites,
   STORAGE_KEYS.feedback,
   STORAGE_KEYS.flashcards,
+  STORAGE_KEYS.systemLogs,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
   STORAGE_KEYS.courseNotebookLinks,
@@ -310,11 +312,8 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
-const askAiTabsByLink = new Map();
 const ASK_AI_OPENED_LINKS_KEY = "mcq_ask_ai_opened_links";
 const askAiOpenedLinkKeys = new Set();
-const ASK_AI_REOPEN_ARM_WINDOW_MS = 10000;
-const askAiReopenArmedUntilByLink = new Map();
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -331,6 +330,29 @@ const analyticsRuntime = {
   cache: new Map(),
   questionMetaById: new Map(),
 };
+
+const SYSTEM_LOG_MAX_ENTRIES = 2500;
+const SYSTEM_LOG_RECENT_DEDUP_MS = 1200;
+const systemLogRuntime = {
+  suspend: false,
+  lastSignature: "",
+  lastAt: 0,
+};
+const SYSTEM_LOG_AUDITED_STORAGE_KEYS = new Set([
+  STORAGE_KEYS.users,
+  STORAGE_KEYS.questions,
+  STORAGE_KEYS.curriculum,
+  STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.courseNotebookLinks,
+  STORAGE_KEYS.autoApproveStudentAccess,
+  STORAGE_KEYS.invites,
+  STORAGE_KEYS.feedback,
+  STORAGE_KEYS.notifications,
+  STORAGE_KEYS.studentRefreshTrigger,
+  STORAGE_KEYS.filterPresets,
+  STORAGE_KEYS.incorrectQueue,
+  STORAGE_KEYS.flashcards,
+]);
 
 try {
   const raw = readSessionStorageKey(ASK_AI_OPENED_LINKS_KEY);
@@ -935,6 +957,7 @@ async function init() {
   }
   hydrateSessionUiPreferences();
   bindGlobalEvents();
+  appendSystemLog("system.boot", "Application initialized.", { appVersion: APP_VERSION }, { force: true });
   syncGoogleOAuthLoadingUi();
   document.body.classList.add("is-routing");
   render();
@@ -2382,6 +2405,7 @@ function invalidateAnalyticsCacheForStorageKey(storageKey) {
 function saveLocalOnly(key, value) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
+  appendStorageMutationLog("save_local", key, value);
 }
 
 function getPendingCloudWriteCount() {
@@ -2922,6 +2946,60 @@ async function syncUsersBackupState(usersPayload) {
   } catch (error) {
     console.warn("Users backup sync failed.", error?.message || error);
   }
+}
+
+async function clearUserAnalyticsHistory(userId, profileId = "") {
+  const targetUserId = String(userId || "").trim();
+  if (!targetUserId) {
+    return { localCleared: false, remoteCleared: false };
+  }
+
+  let localCleared = false;
+
+  const sessions = getSessions();
+  const nextSessions = sessions.filter((entry) => String(entry?.userId || "").trim() !== targetUserId);
+  if (nextSessions.length !== sessions.length) {
+    save(STORAGE_KEYS.sessions, nextSessions);
+    localCleared = true;
+  }
+
+  const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
+  if (Object.prototype.hasOwnProperty.call(incorrectQueue, targetUserId)) {
+    delete incorrectQueue[targetUserId];
+    save(STORAGE_KEYS.incorrectQueue, incorrectQueue);
+    localCleared = true;
+  }
+
+  const flashcards = load(STORAGE_KEYS.flashcards, {});
+  if (Object.prototype.hasOwnProperty.call(flashcards, targetUserId)) {
+    delete flashcards[targetUserId];
+    save(STORAGE_KEYS.flashcards, flashcards);
+    localCleared = true;
+  }
+
+  const targetProfileId = String(profileId || "").trim();
+  if (!isUuidValue(targetProfileId)) {
+    return { localCleared, remoteCleared: false };
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    throw new Error("Relational database sync is unavailable.");
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    throw new Error("Supabase relational client is not available.");
+  }
+
+  const { error } = await client
+    .from("test_blocks")
+    .delete()
+    .eq("user_id", targetProfileId);
+  if (error) {
+    throw error;
+  }
+
+  return { localCleared, remoteCleared: true };
 }
 
 async function deleteRelationalProfile(profileId) {
@@ -6412,6 +6490,10 @@ function seedData() {
   if (!load(STORAGE_KEYS.flashcards, null)) {
     save(STORAGE_KEYS.flashcards, {});
   }
+
+  if (!load(STORAGE_KEYS.systemLogs, null)) {
+    save(STORAGE_KEYS.systemLogs, []);
+  }
 }
 
 function bindGlobalEvents() {
@@ -6425,6 +6507,11 @@ function bindGlobalEvents() {
     const clickedInsideNotificationMenu = Boolean(event.target.closest(".notification-menu"));
     const actionTarget = event.target.closest("[data-action]");
     const action = actionTarget?.getAttribute("data-action") || "";
+    if (action && !["toggle-user-menu", "toggle-notification-menu"].includes(action)) {
+      appendSystemLog("ui.action", `Action: ${action}`, {
+        route: String(state.route || "").trim(),
+      });
+    }
 
     if (action === "toggle-user-menu") {
       state.userMenuOpen = !state.userMenuOpen;
@@ -6568,6 +6655,13 @@ function bindGlobalEvents() {
 function navigate(route, extras = {}) {
   const nextRoute = String(route || "").trim().toLowerCase();
   const targetRoute = nextRoute || "landing";
+  const fromRoute = String(state.route || "").trim().toLowerCase();
+  if (fromRoute !== targetRoute) {
+    appendSystemLog("route.change", `Route changed: ${fromRoute || "unknown"} -> ${targetRoute}`, {
+      from: fromRoute || "",
+      to: targetRoute,
+    });
+  }
   const canUseViewTransition = typeof document.startViewTransition === "function";
   const shouldUseViewTransition = canUseViewTransition && targetRoute !== state.route;
 
@@ -10033,79 +10127,39 @@ async function handleSessionClick(event) {
     const promptText = buildAskAiPromptText(question);
     const copyPromise = copyTextToClipboard(promptText);
     const linkKey = getAskAiLinkKey(notebookUrl) || String(notebookUrl).trim().toLowerCase();
-    const targetName = getAskAiTargetNameForLink(notebookUrl);
     const hasOpenedBefore = askAiOpenedLinkKeys.has(linkKey);
-    let mode = "copied-only";
-    const existingTab = askAiTabsByLink.get(linkKey);
-    if (existingTab && !existingTab.closed) {
-      mode = "focused";
-      askAiReopenArmedUntilByLink.delete(linkKey);
-      try {
-        existingTab.location.href = notebookUrl;
-      } catch {
-        // Ignore cross-origin access errors.
-      }
-      try {
-        existingTab.focus();
-      } catch {
-        // Ignore focus errors.
-      }
-    } else if (!hasOpenedBefore) {
-      const opened = window.open(notebookUrl, targetName);
+    let openedThisClick = false;
+    let popupBlocked = false;
+    if (!hasOpenedBefore) {
+      const opened = window.open(notebookUrl, getAskAiTargetNameForLink(notebookUrl));
       if (!opened) {
-        toast("Popup blocked. Allow popups, then try Ask AI again.");
-        return;
-      }
-      askAiTabsByLink.set(linkKey, opened);
-      askAiOpenedLinkKeys.add(linkKey);
-      persistAskAiOpenedLinkKeys();
-      askAiReopenArmedUntilByLink.delete(linkKey);
-      mode = "opened";
-    } else if (hasOpenedBefore) {
-      const nowMs = Date.now();
-      const armedUntil = Number(askAiReopenArmedUntilByLink.get(linkKey) || 0);
-      if (nowMs <= armedUntil) {
-        const reopened = window.open(notebookUrl, targetName);
-        if (!reopened) {
-          toast("Popup blocked. Allow popups, then click Ask AI again.");
-          return;
-        }
-        askAiTabsByLink.set(linkKey, reopened);
-        askAiReopenArmedUntilByLink.delete(linkKey);
-        mode = "reopened";
+        popupBlocked = true;
       } else {
-        askAiReopenArmedUntilByLink.set(linkKey, nowMs + ASK_AI_REOPEN_ARM_WINDOW_MS);
-        mode = "arm-reopen";
+        askAiOpenedLinkKeys.add(linkKey);
+        persistAskAiOpenedLinkKeys();
+        openedThisClick = true;
       }
     }
+
     const copied = await copyPromise;
-    if (mode === "opened") {
+
+    if (openedThisClick) {
       toast(copied
         ? "Opened Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
         : "Opened Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
       return;
     }
-    if (mode === "reopened") {
+
+    if (popupBlocked) {
       toast(copied
-        ? "Reopened Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
-        : "Reopened Ask AI tab. Could not auto-copy, please copy/paste manually.");
+        ? "Question copied. Popup blocked, so Ask AI tab did not open. Allow popups and click Ask AI once."
+        : "Popup blocked and auto-copy failed. Allow popups, then click Ask AI once.");
       return;
     }
-    if (mode === "focused") {
-      toast(copied
-        ? "Focused Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
-        : "Focused Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
-      return;
-    }
-    if (mode === "arm-reopen") {
-      toast(copied
-        ? "Question copied. Ask AI tab seems closed, click Ask AI again to reopen it."
-        : "Ask AI tab seems closed. Click Ask AI again to reopen it.");
-      return;
-    }
+
     toast(copied
-      ? "Question copied. Switch to your Ask AI tab and paste with Ctrl/Cmd+V."
-      : "Could not auto-copy. Copy/paste manually in your Ask AI tab.");
+      ? "Question copied. Ask AI tab is opened once per session, so no new tab was opened."
+      : "Could not auto-copy. Ask AI tab is opened once per session; copy/paste manually.");
     return;
   }
 
@@ -11256,7 +11310,7 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"].includes(state.adminPage)
+  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"].includes(state.adminPage)
     ? state.adminPage
     : "dashboard";
   if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
@@ -12068,6 +12122,71 @@ function renderAdmin() {
     `;
   }
 
+  if (activeAdminPage === "logs") {
+    const logs = getSystemLogs().slice(0, 800);
+    const logRows = logs
+      .map((entry) => {
+        const actorLabel = entry.actorName || entry.actorId || "System";
+        const actorRole = entry.actorRole ? ` (${entry.actorRole})` : "";
+        const routeLabel = entry.route || "-";
+        const detailsText = (() => {
+          const keys = Object.keys(entry.details || {});
+          if (!keys.length) {
+            return "-";
+          }
+          const serialized = JSON.stringify(entry.details);
+          return serialized.length > 280 ? `${serialized.slice(0, 277)}...` : serialized;
+        })();
+        return `
+          <tr>
+            <td><small>${escapeHtml(new Date(entry.createdAt).toLocaleString())}</small></td>
+            <td><small>${escapeHtml(actorLabel + actorRole)}</small></td>
+            <td><small>${escapeHtml(routeLabel)}</small></td>
+            <td><small>${escapeHtml(entry.kind)}</small></td>
+            <td>${escapeHtml(entry.message)}</td>
+            <td><small>${escapeHtml(detailsText)}</small></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    pageContent = `
+      <section class="card admin-section" id="admin-logs-section">
+        <div class="flex-between" style="gap: 1rem;">
+          <div>
+            <h3 style="margin: 0;">System Logs</h3>
+            <p class="subtle">Readable audit trail of navigation, actions, and system changes.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <p class="subtle" style="margin: 0;">Showing latest <b>${logs.length}</b> record(s)</p>
+            <div class="stack">
+              <button class="btn ghost admin-btn-sm" type="button" data-action="admin-export-logs">Export JSON</button>
+              <button class="btn ghost admin-btn-sm" type="button" data-action="admin-logs-refresh">Refresh</button>
+              <button class="btn danger admin-btn-sm" type="button" data-action="admin-clear-logs">Clear logs</button>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table class="admin-users-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Actor</th>
+                <th>Route</th>
+                <th>Type</th>
+                <th>Message</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${logRows || `<tr><td colspan="6" class="subtle">No system logs yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   if (activeAdminPage === "activity") {
     const rows = Array.isArray(state.adminPresenceRows) ? state.adminPresenceRows : [];
     const nowMs = Date.now();
@@ -12229,6 +12348,7 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
           <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
           <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
+          <button class="btn ghost ${activeAdminPage === "logs" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="logs">Logs</button>
         </div>
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
@@ -12298,13 +12418,18 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity"].includes(page)) {
+      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
         return;
       }
+      const previousPage = String(state.adminPage || "").trim() || "dashboard";
       state.adminPage = page;
+      appendSystemLog("admin.page", `Admin page changed: ${previousPage} -> ${page}`, {
+        from: previousPage,
+        to: page,
+      });
       if (page !== "questions") {
         state.adminQuestionModalOpen = false;
         state.adminSelectedQuestionIds = [];
@@ -12341,6 +12466,43 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
     });
+  });
+
+  appEl.querySelector("[data-action='admin-logs-refresh']")?.addEventListener("click", () => {
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelector("[data-action='admin-export-logs']")?.addEventListener("click", () => {
+    const logs = getSystemLogs();
+    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json;charset=utf-8" });
+    const exportUrl = URL.createObjectURL(blob);
+    const downloadLink = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadLink.href = exportUrl;
+    downloadLink.download = `system-logs-${stamp}.json`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    downloadLink.remove();
+    window.setTimeout(() => URL.revokeObjectURL(exportUrl), 1200);
+    appendSystemLog("system.logs", "System logs exported from admin panel.", {
+      count: logs.length,
+    });
+    toast("Logs exported.");
+  });
+
+  appEl.querySelector("[data-action='admin-clear-logs']")?.addEventListener("click", async () => {
+    if (!window.confirm("Clear all system logs?")) {
+      return;
+    }
+    systemLogRuntime.suspend = true;
+    save(STORAGE_KEYS.systemLogs, []);
+    systemLogRuntime.suspend = false;
+    appendSystemLog("system.logs", "System logs cleared from admin panel.", {}, { force: true });
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    toast("System logs cleared.");
+    state.skipNextRouteAnimation = true;
+    render();
   });
 
   appEl.querySelector("[data-action='refresh-admin-data']")?.addEventListener("click", async () => {
@@ -13316,6 +13478,8 @@ function wireAdmin() {
       }
 
       const role = users[idx].role;
+      const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
+      let shouldClearAnalyticsForYearChange = false;
       if (role === "student") {
         const yearSelect = row.querySelector("select[data-field='academicYear']");
         const semesterSelect = row.querySelector("select[data-field='academicSemester']");
@@ -13331,6 +13495,7 @@ function wireAdmin() {
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
+        shouldClearAnalyticsForYearChange = previousYear !== null && previousYear !== year;
         if (!hasCompleteStudentProfile(users[idx])) {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
@@ -13350,9 +13515,14 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
+      if (shouldClearAnalyticsForYearChange) {
+        await clearUserAnalyticsHistory(users[idx].id, getUserProfileId(users[idx]));
+      }
       await flushPendingSyncNow();
       if (mode === "manual") {
-        toast("Enrollment saved.");
+        toast(shouldClearAnalyticsForYearChange
+          ? "Enrollment saved. Previous analytics were cleared for the new year."
+          : "Enrollment saved.");
       }
       state.skipNextRouteAnimation = true;
       render();
@@ -15494,6 +15664,124 @@ function getQuestions() {
 function getSessions() {
   const sessions = load(STORAGE_KEYS.sessions, []);
   return Array.isArray(sessions) ? sessions : [];
+}
+
+function normalizeSystemLogEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const createdAt = String(entry.createdAt || "").trim() || nowISO();
+  const kind = String(entry.kind || "event").trim() || "event";
+  const message = String(entry.message || kind).trim() || kind;
+  const details = entry.details && typeof entry.details === "object" && !Array.isArray(entry.details)
+    ? entry.details
+    : {};
+  return {
+    id: String(entry.id || makeId("log")).trim(),
+    createdAt,
+    kind,
+    message,
+    route: String(entry.route || "").trim(),
+    actorId: String(entry.actorId || "").trim(),
+    actorName: String(entry.actorName || "").trim(),
+    actorRole: String(entry.actorRole || "").trim(),
+    details,
+  };
+}
+
+function getSystemLogs() {
+  const raw = load(STORAGE_KEYS.systemLogs, []);
+  const list = Array.isArray(raw) ? raw : [];
+  return list
+    .map((entry) => normalizeSystemLogEntry(entry))
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+}
+
+function appendSystemLog(kind, message, details = {}, options = {}) {
+  if (systemLogRuntime.suspend) {
+    return null;
+  }
+  const safeKind = String(kind || "event").trim() || "event";
+  const safeMessage = String(message || safeKind).trim() || safeKind;
+  const safeDetails = details && typeof details === "object" && !Array.isArray(details)
+    ? details
+    : {};
+  const signature = `${safeKind}|${safeMessage}|${JSON.stringify(safeDetails)}`;
+  const nowMs = Date.now();
+  if (
+    !options.force
+    && signature === systemLogRuntime.lastSignature
+    && (nowMs - systemLogRuntime.lastAt) < SYSTEM_LOG_RECENT_DEDUP_MS
+  ) {
+    return null;
+  }
+  systemLogRuntime.lastSignature = signature;
+  systemLogRuntime.lastAt = nowMs;
+
+  const actor = getCurrentUser();
+  const entry = normalizeSystemLogEntry({
+    id: makeId("log"),
+    createdAt: nowISO(),
+    kind: safeKind,
+    message: safeMessage,
+    route: String(state.route || "").trim(),
+    actorId: String(actor?.id || "").trim(),
+    actorName: String(actor?.name || actor?.email || "").trim(),
+    actorRole: String(actor?.role || "").trim(),
+    details: safeDetails,
+  });
+  if (!entry) {
+    return null;
+  }
+
+  const existing = load(STORAGE_KEYS.systemLogs, []);
+  const nextLogs = Array.isArray(existing) ? existing : [];
+  nextLogs.push(entry);
+  if (nextLogs.length > SYSTEM_LOG_MAX_ENTRIES) {
+    nextLogs.splice(0, nextLogs.length - SYSTEM_LOG_MAX_ENTRIES);
+  }
+
+  systemLogRuntime.suspend = true;
+  try {
+    save(STORAGE_KEYS.systemLogs, nextLogs);
+  } finally {
+    systemLogRuntime.suspend = false;
+  }
+  return entry;
+}
+
+function summarizeStorageValueForLog(value) {
+  if (Array.isArray(value)) {
+    return { type: "array", length: value.length };
+  }
+  if (value && typeof value === "object") {
+    return { type: "object", keys: Object.keys(value).length };
+  }
+  if (typeof value === "string") {
+    return { type: "string", length: value.length };
+  }
+  if (value == null) {
+    return { type: "null" };
+  }
+  if (typeof value === "boolean" || typeof value === "number") {
+    return { type: typeof value, value };
+  }
+  return { type: typeof value };
+}
+
+function appendStorageMutationLog(operation, key, value) {
+  const storageKey = String(key || "").trim();
+  if (!storageKey || !SYSTEM_LOG_AUDITED_STORAGE_KEYS.has(storageKey)) {
+    return;
+  }
+  const operationType = String(operation || "save").trim() || "save";
+  const verb = operationType === "remove" ? "deleted" : "updated";
+  appendSystemLog("storage.mutation", `Storage ${verb}: ${storageKey}`, {
+    operation: operationType,
+    key: storageKey,
+    summary: summarizeStorageValueForLog(value),
+  });
 }
 
 function getCurrentUser() {
@@ -18209,6 +18497,7 @@ function save(key, value) {
   invalidateAnalyticsCacheForStorageKey(key);
   scheduleRelationalWrite(key, value);
   scheduleSupabaseWrite(key, value);
+  appendStorageMutationLog("save", key, value);
 }
 
 function readStorageKey(key) {
@@ -18245,6 +18534,7 @@ function removeStorageKey(key) {
   } catch (error) {
     warnStorageFallback(error);
   }
+  appendStorageMutationLog("remove", key, null);
 }
 
 function readSessionStorageKey(key) {
@@ -18286,10 +18576,20 @@ async function loginAsDemo(email, password) {
   }
 
   save(STORAGE_KEYS.currentUserId, user.id);
+  appendSystemLog("auth.login", `Logged in as ${user.email}`, {
+    userId: user.id,
+    role: user.role,
+    auth: "demo",
+  }, { force: true });
   navigate(user.role === "admin" ? "admin" : "dashboard");
 }
 
 async function logout() {
+  const actor = getCurrentUser();
+  appendSystemLog("auth.logout", `User logged out: ${String(actor?.email || actor?.id || "unknown")}`, {
+    userId: String(actor?.id || ""),
+    role: String(actor?.role || ""),
+  }, { force: true });
   const offlinePromise = markCurrentUserOffline().catch(() => { });
   const authClient = getSupabaseAuthClient();
   const signOutPromise = authClient
