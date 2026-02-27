@@ -2659,51 +2659,75 @@ th {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 0.34rem;
+  gap: 0.45rem;
   flex-wrap: wrap;
-  margin: -0.08rem 0 0.48rem;
+  margin: -0.15rem 0 0.4rem;
 }
 
-.exam-ask-ai-btn,
-.exam-copy-question-btn {
+.exam-ask-ai-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(43, 66, 89, 0.24);
+  gap: 0.36rem;
+  border: 0;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.52);
-  color: #21405e;
+  background: linear-gradient(135deg, #0d5ea8 0%, #1d8cd8 52%, #2ea6c8 100%);
+  color: #ffffff;
   width: auto;
-  min-height: 30px;
-  padding: 0.28rem 0.7rem;
-  font-size: 0.76rem;
-  font-weight: 600;
+  min-height: 36px;
+  padding: 0.36rem 0.92rem;
+  font-size: 0.86rem;
+  font-weight: 700;
   letter-spacing: 0.01em;
   cursor: pointer;
-  box-shadow: none;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+  box-shadow: 0 8px 20px rgba(13, 94, 168, 0.28);
+  transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease;
 }
 
-.exam-ask-ai-btn:hover,
-.exam-copy-question-btn:hover {
-  background: rgba(255, 255, 255, 0.74);
-  border-color: rgba(33, 64, 94, 0.36);
-  color: #183651;
+.exam-ask-ai-btn:hover {
+  transform: translateY(-1px);
+  filter: saturate(1.06);
+  box-shadow: 0 10px 24px rgba(13, 94, 168, 0.34);
 }
 
-.exam-ask-ai-btn:active,
-.exam-copy-question-btn:active {
-  background: rgba(255, 255, 255, 0.86);
+.exam-ask-ai-btn:active {
+  transform: translateY(0);
 }
 
-.exam-ask-ai-btn:disabled,
-.exam-copy-question-btn:disabled {
-  background: rgba(233, 238, 244, 0.94);
-  border-color: rgba(111, 129, 148, 0.3);
+.exam-ask-ai-btn:disabled {
+  background: #d5dae1;
   color: #6b7482;
   box-shadow: none;
   cursor: not-allowed;
   opacity: 0.92;
+}
+
+.exam-ask-ai-spark {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.exam-copy-question-btn {
+  border: 1px solid #9db5d1;
+  background: #ffffff;
+  color: #0f3f67;
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 0.36rem 0.88rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.exam-copy-question-btn:hover {
+  transform: translateY(-1px);
+  border-color: #6f97be;
+  box-shadow: 0 8px 20px rgba(29, 86, 138, 0.15);
+}
+
+.exam-copy-question-btn:active {
+  transform: translateY(0);
 }
 
 .exam-nav-grid {
@@ -3982,18 +4006,6 @@ hr {
   .exam-stem {
     font-size: 0.96rem;
     line-height: 1.55;
-  }
-
-  .exam-question-topbar {
-    justify-content: flex-start;
-    margin-bottom: 0.55rem;
-  }
-
-  .exam-ask-ai-btn,
-  .exam-copy-question-btn {
-    min-height: 28px;
-    padding: 0.24rem 0.58rem;
-    font-size: 0.72rem;
   }
 
   .exam-answers {

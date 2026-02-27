@@ -312,12 +312,6 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
-const ASK_AI_OPENED_LINKS_KEY = "mcq_ask_ai_opened_links";
-const ASK_AI_TARGET_NAME = "mcq-ask-ai-shared";
-const askAiOpenedLinkKeys = new Set();
-const askAiRuntime = {
-  windowByTarget: new Map(),
-};
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -357,19 +351,6 @@ const SYSTEM_LOG_AUDITED_STORAGE_KEYS = new Set([
   STORAGE_KEYS.incorrectQueue,
   STORAGE_KEYS.flashcards,
 ]);
-
-try {
-  const raw = readSessionStorageKey(ASK_AI_OPENED_LINKS_KEY);
-  const parsed = raw ? JSON.parse(raw) : [];
-  if (Array.isArray(parsed)) {
-    parsed
-      .map((entry) => String(entry || "").trim().toLowerCase())
-      .filter(Boolean)
-      .forEach((key) => askAiOpenedLinkKeys.add(key));
-  }
-} catch {
-  // Ignore malformed session data.
-}
 
 const DEFAULT_O6U_CURRICULUM = {
   1: {
@@ -9822,8 +9803,6 @@ function renderSession() {
   const isTimedMode = session.mode === "timed";
   const currentCourse = getQbankCourseTopicMeta(question).course;
   const askAiLink = getCourseNotebookLinkForCourse(currentCourse);
-  const askAiLinkKey = getAskAiLinkKey(askAiLink) || String(askAiLink || "").trim().toLowerCase();
-  const askAiOpenedForCourse = Boolean(askAiLinkKey && askAiOpenedLinkKeys.has(askAiLinkKey));
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -9902,23 +9881,20 @@ function renderSession() {
               <article class="exam-question-block exam-question-card">
                 <div class="exam-question-topbar">
                   <button
-                    class="exam-ask-ai-btn ${askAiOpenedForCourse ? "is-opened" : ""}"
+                    class="exam-ask-ai-btn"
                     data-action="open-course-ai"
-                    ${askAiLink && !askAiOpenedForCourse ? "" : "disabled"}
-                    title="${!askAiLink
-      ? "No Ask AI link configured for this course"
-      : askAiOpenedForCourse
-        ? "Ask AI tab already opened for this course."
-        : `Open Ask AI for ${escapeHtml(currentCourse || "course")}`}"
+                    ${askAiLink ? "" : "disabled"}
+                    title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
                   >
-                    ${askAiOpenedForCourse ? "Ask AI Opened" : "Open Ask AI"}
+                    <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
+                    <span>Ask AI</span>
                   </button>
                   <button
                     class="exam-copy-question-btn"
                     data-action="copy-course-ai-question"
                     title="Copy this question for Ask AI"
                   >
-                    Copy
+                    Copy question
                   </button>
                 </div>
                 ${renderQuestionStemVisual(question)}
@@ -10140,75 +10116,9 @@ async function handleSessionClick(event) {
       toast("No Ask AI link configured for this course yet.");
       return;
     }
-    const linkKey = getAskAiLinkKey(notebookUrl) || String(notebookUrl).trim().toLowerCase();
-    const hasOpenedBefore = askAiOpenedLinkKeys.has(linkKey);
-    const targetName = getAskAiTargetNameForLink(notebookUrl);
-    const previousWindow = askAiRuntime.windowByTarget.get(targetName);
-    const hasLiveWindow = Boolean(previousWindow && !previousWindow.closed);
-    let popupBlocked = false;
-    let openedThisClick = false;
-    let focusedExisting = false;
-
-    if (!hasOpenedBefore) {
-      if (hasLiveWindow) {
-        try {
-          previousWindow.location = notebookUrl;
-        } catch {
-          // Ignore cross-origin navigation assignment errors.
-        }
-        try {
-          previousWindow.focus();
-          focusedExisting = true;
-        } catch {
-          // Ignore focus errors for restricted popup contexts.
-        }
-        askAiOpenedLinkKeys.add(linkKey);
-        persistAskAiOpenedLinkKeys();
-        openedThisClick = true;
-      } else {
-        const opened = window.open(notebookUrl, targetName);
-        if (!opened) {
-          popupBlocked = true;
-        } else {
-          askAiRuntime.windowByTarget.set(targetName, opened);
-          try {
-            opened.focus();
-          } catch {
-            // Ignore focus errors for restricted popup contexts.
-          }
-          askAiOpenedLinkKeys.add(linkKey);
-          persistAskAiOpenedLinkKeys();
-          openedThisClick = true;
-        }
-      }
-    } else if (hasLiveWindow) {
-      try {
-        previousWindow.focus();
-        focusedExisting = true;
-      } catch {
-        // Ignore focus errors for restricted popup contexts.
-      }
-    }
-
-    if (popupBlocked) {
+    const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
+    if (!opened) {
       toast("Popup blocked, so Ask AI tab did not open. Allow popups and try again.");
-      return;
-    }
-
-    if (openedThisClick) {
-      toast("Opened Ask AI tab.");
-      render();
-      return;
-    }
-
-    if (focusedExisting) {
-      toast("Reused your existing Ask AI tab.");
-      return;
-    }
-
-    if (hasOpenedBefore) {
-      render();
-      return;
     }
     return;
   }
@@ -16792,20 +16702,6 @@ function getCourseNotebookLinkForCourse(courseName) {
     return "";
   }
   return String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
-}
-
-function getAskAiLinkKey(link) {
-  return String(normalizeCourseNotebookLink(link) || "")
-    .trim()
-    .toLowerCase();
-}
-
-function getAskAiTargetNameForLink(link) {
-  return ASK_AI_TARGET_NAME;
-}
-
-function persistAskAiOpenedLinkKeys() {
-  writeSessionStorageKey(ASK_AI_OPENED_LINKS_KEY, JSON.stringify([...askAiOpenedLinkKeys]));
 }
 
 function rebuildCurriculumCatalog() {
