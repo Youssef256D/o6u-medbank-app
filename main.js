@@ -310,6 +310,7 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
+const askAiTabsByCourse = new Map();
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -9951,15 +9952,34 @@ async function handleSessionClick(event) {
     }
     const promptText = buildAskAiPromptText(question);
     const copyPromise = copyTextToClipboard(promptText);
-    const opened = window.open(notebookUrl, "mcq-ask-ai-tab");
-    if (!opened) {
-      toast("Popup blocked. Allow popups, then try Ask AI again.");
-      return;
+    const courseKey = String(course || "default").trim().toLowerCase() || "default";
+    const targetName = getAskAiTargetNameForCourse(course);
+    let opened = null;
+    const existingTab = askAiTabsByCourse.get(courseKey);
+    if (existingTab && !existingTab.closed) {
+      opened = existingTab;
+      try {
+        opened.location.href = notebookUrl;
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+      try {
+        opened.focus();
+      } catch {
+        // Ignore focus errors.
+      }
+    } else {
+      opened = window.open(notebookUrl, targetName);
+      if (!opened) {
+        toast("Popup blocked. Allow popups, then try Ask AI again.");
+        return;
+      }
+      askAiTabsByCourse.set(courseKey, opened);
     }
     const copied = await copyPromise;
     toast(copied
-      ? "Opened/focused Ask AI tab. Question copied, now paste with Ctrl/Cmd+V."
-      : "Opened/focused Ask AI tab. Could not auto-copy, please copy/paste manually.");
+      ? "Opened/focused Ask AI tab for this course. Question copied, now paste with Ctrl/Cmd+V."
+      : "Opened/focused Ask AI tab for this course. Could not auto-copy, please copy/paste manually.");
     return;
   }
 
@@ -16292,6 +16312,17 @@ function getCourseNotebookLinkForCourse(courseName) {
     return "";
   }
   return String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
+}
+
+function getAskAiTargetNameForCourse(courseName) {
+  const normalized = String(courseName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  const suffix = normalized || "default";
+  return `mcq-ask-ai-${suffix}`;
 }
 
 function rebuildCurriculumCatalog() {
