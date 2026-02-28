@@ -9801,8 +9801,10 @@ function renderSession() {
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
   const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
   const isTimedMode = session.mode === "timed";
-  const currentCourse = getQbankCourseTopicMeta(question).course;
-  const askAiLink = getCourseNotebookLinkForCourse(currentCourse);
+  const mappedCourse = getQbankCourseTopicMeta(question).course;
+  const questionCourse = String(question.qbankCourse || question.course || "").trim();
+  const currentCourse = mappedCourse || questionCourse;
+  const askAiLink = getCourseNotebookLinkForCourse(currentCourse) || getCourseNotebookLinkForCourse(questionCourse);
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -10110,8 +10112,10 @@ async function handleSessionClick(event) {
       toast("Current question could not be loaded.");
       return;
     }
-    const course = getQbankCourseTopicMeta(question).course;
-    const notebookUrl = getCourseNotebookLinkForCourse(course);
+    const mappedCourse = getQbankCourseTopicMeta(question).course;
+    const questionCourse = String(question.qbankCourse || question.course || "").trim();
+    const course = mappedCourse || questionCourse;
+    const notebookUrl = getCourseNotebookLinkForCourse(course) || getCourseNotebookLinkForCourse(questionCourse);
     if (!notebookUrl) {
       toast("No Ask AI link configured for this course yet.");
       return;
@@ -16700,12 +16704,59 @@ function normalizeCourseNotebookLinkMap(rawMap) {
   return normalized;
 }
 
+function normalizeCourseLookupKey(courseName) {
+  return String(courseName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function extractCourseCodeKey(courseName) {
+  const match = String(courseName || "").match(/\(([A-Za-z]{2,10}\s*\d{2,4})\)/);
+  if (!match || !match[1]) {
+    return "";
+  }
+  return match[1].toLowerCase().replace(/\s+/g, "");
+}
+
 function getCourseNotebookLinkForCourse(courseName) {
   const course = String(courseName || "").trim();
   if (!course) {
     return "";
   }
-  return String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
+  const direct = String(COURSE_NOTEBOOK_LINKS[course] || "").trim();
+  if (direct) {
+    return direct;
+  }
+
+  const requestedLower = course.toLowerCase();
+  const requestedLookupKey = normalizeCourseLookupKey(course);
+  const requestedCourseCode = extractCourseCodeKey(course);
+
+  for (const [configuredCourse, configuredLinkRaw] of Object.entries(COURSE_NOTEBOOK_LINKS)) {
+    const configuredLink = String(configuredLinkRaw || "").trim();
+    if (!configuredLink) {
+      continue;
+    }
+    const configuredName = String(configuredCourse || "").trim();
+    if (!configuredName) {
+      continue;
+    }
+    if (configuredName.toLowerCase() === requestedLower) {
+      return configuredLink;
+    }
+    if (requestedLookupKey && normalizeCourseLookupKey(configuredName) === requestedLookupKey) {
+      return configuredLink;
+    }
+    if (requestedCourseCode && extractCourseCodeKey(configuredName) === requestedCourseCode) {
+      return configuredLink;
+    }
+  }
+
+  return "";
 }
 
 function rebuildCurriculumCatalog() {
