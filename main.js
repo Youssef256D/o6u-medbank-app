@@ -975,6 +975,7 @@ function persistRouteState() {
 async function init() {
   seedData();
   syncUsersWithCurriculum();
+  sanitizeSystemLogsToAdminOnly();
   initVersionTracking();
   if (await shouldForceRefreshAfterSignIn()) {
     return;
@@ -12183,7 +12184,7 @@ function renderAdmin() {
         <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">System Logs</h3>
-            <p class="subtle">Readable audit trail of navigation, actions, and system changes.</p>
+            <p class="subtle">Readable audit trail of admin-only interactions and system changes.</p>
           </div>
           <div class="stack" style="align-items: flex-end;">
             <p class="subtle" style="margin: 0;">Showing latest <b>${logs.length}</b> record(s)</p>
@@ -12207,7 +12208,7 @@ function renderAdmin() {
               </tr>
             </thead>
             <tbody>
-              ${logRows || `<tr><td colspan="6" class="subtle">No system logs yet.</td></tr>`}
+              ${logRows || `<tr><td colspan="6" class="subtle">No admin interaction logs yet.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -15718,12 +15719,71 @@ function normalizeSystemLogEntry(entry) {
   };
 }
 
+function buildAdminLogActorIdSet() {
+  const users = getUsers();
+  const ids = new Set();
+  users.forEach((entry) => {
+    if (String(entry?.role || "").trim().toLowerCase() !== "admin") {
+      return;
+    }
+    const localId = String(entry?.id || "").trim();
+    const authId = String(entry?.supabaseAuthId || "").trim();
+    if (localId) {
+      ids.add(localId);
+    }
+    if (authId) {
+      ids.add(authId);
+    }
+  });
+  return ids;
+}
+
+function isAdminSystemLogEntry(entry, adminActorIds = null) {
+  if (!entry) {
+    return false;
+  }
+  const actorRole = String(entry.actorRole || "").trim().toLowerCase();
+  if (actorRole) {
+    return actorRole === "admin";
+  }
+  const actorId = String(entry.actorId || "").trim();
+  if (!actorId) {
+    return false;
+  }
+  const adminIds = adminActorIds || buildAdminLogActorIdSet();
+  return adminIds.has(actorId);
+}
+
+function sanitizeSystemLogsToAdminOnly() {
+  const raw = load(STORAGE_KEYS.systemLogs, []);
+  const list = Array.isArray(raw) ? raw : [];
+  if (!list.length) {
+    return;
+  }
+  const adminActorIds = buildAdminLogActorIdSet();
+  const normalizedAdminLogs = list
+    .map((entry) => normalizeSystemLogEntry(entry))
+    .filter((entry) => isAdminSystemLogEntry(entry, adminActorIds));
+
+  if (normalizedAdminLogs.length === list.length) {
+    return;
+  }
+
+  systemLogRuntime.suspend = true;
+  try {
+    save(STORAGE_KEYS.systemLogs, normalizedAdminLogs);
+  } finally {
+    systemLogRuntime.suspend = false;
+  }
+}
+
 function getSystemLogs() {
   const raw = load(STORAGE_KEYS.systemLogs, []);
   const list = Array.isArray(raw) ? raw : [];
+  const adminActorIds = buildAdminLogActorIdSet();
   return list
     .map((entry) => normalizeSystemLogEntry(entry))
-    .filter((entry) => entry && String(entry.actorRole || "").trim().toLowerCase() === "admin")
+    .filter((entry) => isAdminSystemLogEntry(entry, adminActorIds))
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 }
 
