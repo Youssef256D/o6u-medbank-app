@@ -885,7 +885,44 @@ async function shouldForceRefreshForUpdates(user = null) {
   return shouldForceStudentRefreshFromAdminTrigger(user);
 }
 
+function readRouteFromHash(hashValue = window.location.hash) {
+  const rawHash = String(hashValue || "").replace(/^#/, "").trim().toLowerCase();
+  if (!rawHash || rawHash.includes("=")) {
+    return "";
+  }
+  return KNOWN_ROUTES.has(rawHash) ? rawHash : "";
+}
+
+function syncRouteHash(route) {
+  let currentUrl;
+  try {
+    currentUrl = new URL(window.location.href);
+  } catch {
+    return;
+  }
+
+  const safeRoute = String(route || "").trim().toLowerCase();
+  if (!KNOWN_ROUTES.has(safeRoute)) {
+    return;
+  }
+  const currentHashPayload = String(currentUrl.hash || "").replace(/^#/, "").trim();
+  if (currentHashPayload && currentHashPayload.includes("=")) {
+    return;
+  }
+  const nextHash = safeRoute === "landing" ? "" : `#${safeRoute}`;
+  if ((currentUrl.hash || "") === nextHash) {
+    return;
+  }
+  const query = currentUrl.searchParams.toString();
+  const nextUrl = `${currentUrl.pathname}${query ? `?${query}` : ""}${nextHash}`;
+  window.history.replaceState(window.history.state, document.title, nextUrl);
+}
+
 function resolveInitialRoute() {
+  const hashRoute = readRouteFromHash();
+  if (KNOWN_ROUTES.has(hashRoute)) {
+    return hashRoute;
+  }
   const persisted = String(readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
   if (KNOWN_ROUTES.has(persisted)) {
     return persisted;
@@ -931,6 +968,8 @@ function persistRouteState() {
     removeSessionStorageKey(ROUTE_STATE_ADMIN_PAGE_KEY);
     removeStorageKey(ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY);
   }
+
+  syncRouteHash(route);
 }
 
 async function init() {
@@ -6634,6 +6673,16 @@ function bindGlobalEvents() {
 
   window.addEventListener("online", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  });
+
+  window.addEventListener("hashchange", () => {
+    const hashRoute = readRouteFromHash();
+    if (!hashRoute || hashRoute === state.route) {
+      return;
+    }
+    state.userMenuOpen = false;
+    state.notificationMenuOpen = false;
+    navigate(hashRoute);
   });
 }
 
