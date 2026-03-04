@@ -333,9 +333,43 @@
       return;
     }
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register(`./sw.js${versionSuffix}`).catch((error) => {
-        console.error("Service worker registration failed.", error);
-      });
+      const currentSwUrl = new URL(`./sw.js${versionSuffix}`, window.location.href).href;
+      const currentCacheName = `o6u-medbank-static-v${appVersion.replaceAll(".", "-") || "runtime"}`;
+
+      navigator.serviceWorker.getRegistrations()
+        .then((registrations) => Promise.all(registrations.map(async (registration) => {
+          const scriptUrl = registration.active?.scriptURL
+            || registration.waiting?.scriptURL
+            || registration.installing?.scriptURL
+            || "";
+          if (scriptUrl && scriptUrl !== currentSwUrl) {
+            await registration.unregister();
+          }
+        })))
+        .catch((error) => {
+          console.warn("Could not clean old service worker registrations.", error);
+        })
+        .finally(() => {
+          if ("caches" in window) {
+            caches.keys()
+              .then((keys) => Promise.all(
+                keys
+                  .filter((key) => key.startsWith("o6u-medbank-static-v") && key !== currentCacheName)
+                  .map((key) => caches.delete(key)),
+              ))
+              .catch((error) => {
+                console.warn("Could not clean old static caches.", error);
+              });
+          }
+
+          navigator.serviceWorker.register(`./sw.js${versionSuffix}`)
+            .then((registration) => {
+              registration.update().catch(() => {});
+            })
+            .catch((error) => {
+              console.error("Service worker registration failed.", error);
+            });
+        });
     });
   }
 

@@ -1,12 +1,10 @@
-const CACHE_NAME = "o6u-medbank-static-v2026-03-04-1";
+const CACHE_NAME = "o6u-medbank-static-v2026-03-04-2";
 
 const PRECACHE_URLS = [
-  "./",
-  "./index.html",
-  "./styles.css?v=2026-03-04.1",
-  "./bootstrap.js?v=2026-03-04.1",
-  "./main.js?v=2026-03-04.1",
-  "./supabase.config.js?v=2026-03-04.1",
+  "./styles.css?v=2026-03-04.2",
+  "./bootstrap.js?v=2026-03-04.2",
+  "./main.js?v=2026-03-04.2",
+  "./supabase.config.js?v=2026-03-04.2",
   "./manifest.webmanifest",
   "./robots.txt",
   "./sitemap.xml",
@@ -45,8 +43,21 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
+    event.respondWith(fetch(request, { cache: "no-store" }));
+    return;
+  }
+
+  const isVersioned = requestUrl.searchParams.has("v");
+  if (!isVersioned) {
     event.respondWith(
-      fetch(request).catch(() => caches.match("./index.html")),
+      fetch(request).then((response) => {
+        if (!response || response.status !== 200 || response.type !== "basic") {
+          return response;
+        }
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+        return response;
+      }).catch(() => caches.match(request)),
     );
     return;
   }
