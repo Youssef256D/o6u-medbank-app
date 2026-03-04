@@ -10104,14 +10104,24 @@ function renderSession() {
       const inlineFeedback = isSubmitted && isCorrect && selected && correctChoice
         ? `<span class="exam-choice-inline-note">Excellent! This is the correct answer.</span>`
         : "";
+      const choiceInputId = `session-answer-${currentQid}-${choice.id}`;
       return `
         <div class="exam-choice ${selected ? "is-selected" : ""} ${struck ? "is-struck" : ""} ${statusClass}">
-          <label class="exam-choice-hit">
+          <div class="exam-choice-hit">
             ${statusIndicator}
-            <input type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
-            <span class="exam-choice-radio"></span>
-            <span class="exam-choice-text"><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</span>
-          </label>
+            <label class="exam-choice-radio-hit" for="${escapeHtml(choiceInputId)}" aria-label="Select answer ${choice.id}">
+              <input id="${escapeHtml(choiceInputId)}" type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
+              <span class="exam-choice-radio"></span>
+            </label>
+            <button
+              type="button"
+              class="exam-choice-text exam-choice-text-hit"
+              data-action="toggle-strike"
+              data-choice-id="${choice.id}"
+              ${isSubmitted ? "disabled" : ""}
+              aria-label="Strike or unstrike choice ${choice.id}"
+            ><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</button>
+          </div>
         </div>
       `;
     })
@@ -10506,7 +10516,10 @@ async function handleSessionClick(event) {
   }
 
   if (action === "toggle-strike") {
-    const choiceId = target.getAttribute("data-choice-id");
+    const choiceId = String(target.getAttribute("data-choice-id") || "").trim().toUpperCase();
+    if (!choiceId) {
+      return;
+    }
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
     if (response.struck.includes(choiceId)) {
