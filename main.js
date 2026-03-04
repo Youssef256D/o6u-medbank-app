@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-02-27.8").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-04.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -97,7 +97,7 @@ const THEME_PREFERENCE_KEY = "mcq_theme_preference";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
 const THEME_META_COLOR_LIGHT = "#177e89";
-const THEME_META_COLOR_DARK = "#05080f";
+const THEME_META_COLOR_DARK = "#0d1117";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -6536,31 +6536,43 @@ function getStoredThemePreference() {
   return THEME_LIGHT;
 }
 
+function renderThemeToggleIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M15.2 3.4a8.9 8.9 0 1 0 5.4 12.3 8.3 8.3 0 0 1-3.4.7A8.9 8.9 0 0 1 11 4.6c0-.4 0-.8.1-1.2.5-.1 1-.1 1.5-.1.9 0 1.8.1 2.6.1z" />
+    </svg>
+  `;
+}
+
 function renderThemeToggleButton() {
   const isDark = activeTheme === THEME_DARK;
+  const actionLabel = isDark ? "Switch to light mode" : "Switch to dark mode";
   return `
     <button
       class="theme-toggle-btn ${isDark ? "is-active" : ""}"
       type="button"
       data-action="toggle-theme"
       aria-pressed="${isDark ? "true" : "false"}"
-      title="${isDark ? "Switch to light mode" : "Switch to dark mode"}"
+      aria-label="${actionLabel}"
+      title="${actionLabel}"
     >
-      ${isDark ? "Light mode" : "Dark mode"}
+      ${renderThemeToggleIcon()}
     </button>
   `;
 }
 
 function syncThemeToggleButtons() {
   const isDark = activeTheme === THEME_DARK;
+  const actionLabel = isDark ? "Switch to light mode" : "Switch to dark mode";
   document.querySelectorAll("[data-action='toggle-theme']").forEach((node) => {
     if (!(node instanceof HTMLButtonElement)) {
       return;
     }
     node.classList.toggle("is-active", isDark);
     node.setAttribute("aria-pressed", isDark ? "true" : "false");
-    node.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
-    node.textContent = isDark ? "Light mode" : "Dark mode";
+    node.setAttribute("aria-label", actionLabel);
+    node.setAttribute("title", actionLabel);
+    node.innerHTML = renderThemeToggleIcon();
   });
 }
 
@@ -7926,8 +7938,8 @@ function syncTopbar() {
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       ${isAdmin ? `<div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>` : ""}
-      ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       ${renderThemeToggleButton()}
+      ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
