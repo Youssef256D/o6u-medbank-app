@@ -93,6 +93,11 @@ const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
+const THEME_PREFERENCE_KEY = "mcq_theme_preference";
+const THEME_LIGHT = "light";
+const THEME_DARK = "dark";
+const THEME_META_COLOR_LIGHT = "#177e89";
+const THEME_META_COLOR_DARK = "#05080f";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -123,6 +128,7 @@ const PHONE_COUNTRY_CODES_DESC = PHONE_COUNTRY_RULES
   .sort((a, b) => b.length - a.length);
 const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
+let activeTheme = THEME_LIGHT;
 
 const state = {
   route: INITIAL_ROUTE,
@@ -977,6 +983,7 @@ async function init() {
   syncUsersWithCurriculum();
   sanitizeSystemLogsToAdminOnly();
   initVersionTracking();
+  hydrateThemePreference();
   if (await shouldForceRefreshAfterSignIn()) {
     return;
   }
@@ -6521,6 +6528,65 @@ function seedData() {
   }
 }
 
+function getStoredThemePreference() {
+  const stored = String(load(THEME_PREFERENCE_KEY, "") || "").trim().toLowerCase();
+  if (stored === THEME_DARK || stored === THEME_LIGHT) {
+    return stored;
+  }
+  return THEME_LIGHT;
+}
+
+function renderThemeToggleButton() {
+  const isDark = activeTheme === THEME_DARK;
+  return `
+    <button
+      class="theme-toggle-btn ${isDark ? "is-active" : ""}"
+      type="button"
+      data-action="toggle-theme"
+      aria-pressed="${isDark ? "true" : "false"}"
+      title="${isDark ? "Switch to light mode" : "Switch to dark mode"}"
+    >
+      ${isDark ? "Light mode" : "Dark mode"}
+    </button>
+  `;
+}
+
+function syncThemeToggleButtons() {
+  const isDark = activeTheme === THEME_DARK;
+  document.querySelectorAll("[data-action='toggle-theme']").forEach((node) => {
+    if (!(node instanceof HTMLButtonElement)) {
+      return;
+    }
+    node.classList.toggle("is-active", isDark);
+    node.setAttribute("aria-pressed", isDark ? "true" : "false");
+    node.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
+    node.textContent = isDark ? "Light mode" : "Dark mode";
+  });
+}
+
+function updateThemeMetaColor() {
+  const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+  if (!metaThemeColor) {
+    return;
+  }
+  metaThemeColor.setAttribute("content", activeTheme === THEME_DARK ? THEME_META_COLOR_DARK : THEME_META_COLOR_LIGHT);
+}
+
+function applyTheme(theme, options = {}) {
+  const nextTheme = String(theme || "").trim().toLowerCase() === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  activeTheme = nextTheme;
+  document.body.classList.toggle("theme-dark", nextTheme === THEME_DARK);
+  updateThemeMetaColor();
+  if (options.persist) {
+    saveLocalOnly(THEME_PREFERENCE_KEY, nextTheme);
+  }
+  syncThemeToggleButtons();
+}
+
+function hydrateThemePreference() {
+  applyTheme(getStoredThemePreference());
+}
+
 function bindGlobalEvents() {
   if (globalEventsBound) {
     return;
@@ -6552,6 +6618,14 @@ function bindGlobalEvents() {
       if (state.notificationMenuOpen) {
         state.userMenuOpen = false;
       }
+      syncTopbar();
+      return;
+    }
+
+    if (action === "toggle-theme") {
+      state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
+      applyTheme(activeTheme === THEME_DARK ? THEME_LIGHT : THEME_DARK, { persist: true });
       syncTopbar();
       return;
     }
@@ -7834,6 +7908,7 @@ function syncTopbar() {
     state.notificationMenuOpen = false;
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
+      ${renderThemeToggleButton()}
       <button data-nav="login">Login</button>
       <button class="btn" data-nav="signup">Sign up</button>
     `;
@@ -7852,6 +7927,7 @@ function syncTopbar() {
     authActionsEl.innerHTML = `
       ${isAdmin ? `<div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>` : ""}
       ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
+      ${renderThemeToggleButton()}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
@@ -18834,6 +18910,7 @@ function renderBootstrapFallback() {
     authActionsEl?.classList.remove("hidden");
     if (authActionsEl) {
       authActionsEl.innerHTML = `
+        ${renderThemeToggleButton()}
         <button data-nav="login">Login</button>
         <button class="btn" data-nav="signup">Sign up</button>
       `;

@@ -44,8 +44,34 @@ body {
   letter-spacing: 0.005em;
   color: var(--ink);
   background: radial-gradient(circle at 10% 20%, #d7ece3 0%, #f2f7f5 35%, #ecf0f7 100%);
-  transition: background 320ms ease;
+  transition: background 320ms ease, color 220ms ease;
   overflow-x: hidden;
+}
+
+body.theme-dark {
+  color-scheme: dark;
+  --bg: #05080f;
+  --surface: rgba(10, 15, 30, 0.88);
+  --surface-strong: #0c1426;
+  --surface-soft: rgba(10, 15, 30, 0.76);
+  --ink: #e7efff;
+  --muted: #9fb3d8;
+  --line: rgba(118, 155, 235, 0.28);
+  --line-strong: rgba(134, 174, 255, 0.46);
+  --brand: #2f76ff;
+  --brand-strong: #9ac3ff;
+  --brand-soft: rgba(47, 118, 255, 0.24);
+  --accent: #53a5ff;
+  --danger: #ff7a7a;
+  --good: #5ecc8f;
+  --shadow: 0 18px 38px rgba(1, 5, 14, 0.66);
+  --shadow-soft: 0 10px 24px rgba(1, 5, 14, 0.52);
+  --exam-blue: #2959bf;
+  --exam-blue-2: #1f4495;
+  --exam-side: #0a1224;
+  --exam-surface: #0e1a32;
+  --exam-ink: #e6efff;
+  background: radial-gradient(circle at 12% 14%, #101a33 0%, #05080f 40%, #04070d 100%);
 }
 
 body.is-admin-question-modal-open {
@@ -60,6 +86,12 @@ body.is-admin-question-modal-open {
     radial-gradient(600px 300px at 90% 15%, rgba(244, 162, 89, 0.22), transparent 70%),
     radial-gradient(500px 260px at 8% 85%, rgba(23, 126, 137, 0.2), transparent 72%);
   z-index: -1;
+}
+
+body.theme-dark .background-glow {
+  background:
+    radial-gradient(620px 320px at 88% 12%, rgba(67, 122, 255, 0.28), transparent 70%),
+    radial-gradient(520px 280px at 10% 84%, rgba(26, 70, 180, 0.28), transparent 72%);
 }
 
 body.is-google-auth-loading {
@@ -245,6 +277,30 @@ button {
   justify-content: flex-end;
   flex-wrap: nowrap;
   position: relative;
+}
+
+.auth-actions .theme-toggle-btn {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--ink);
+  min-height: 36px;
+  padding: 0.38rem 0.72rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+
+.auth-actions .theme-toggle-btn.is-active {
+  background: rgba(47, 118, 255, 0.18);
+  border-color: rgba(47, 118, 255, 0.5);
+  color: var(--brand-strong);
+}
+
+.auth-actions .theme-toggle-btn:hover {
+  background: var(--brand-soft);
+  border-color: rgba(47, 118, 255, 0.42);
 }
 
 #topbar-cloud-sync-slot {
@@ -3597,6 +3653,125 @@ hr {
     transform: scale(1.02);
     opacity: 1;
   }
+}
+
+body.theme-dark .topbar {
+  background: rgba(4, 9, 18, 0.9);
+}
+
+body.theme-dark .top-nav button:hover,
+body.theme-dark .auth-actions button:hover {
+  background: rgba(111, 153, 236, 0.18);
+}
+
+body.theme-dark .google-auth-loading {
+  background: rgba(2, 6, 14, 0.62);
+}
+
+body.theme-dark .google-auth-loading-card {
+  border-color: rgba(118, 155, 235, 0.5);
+  background: rgba(9, 16, 33, 0.96);
+}
+
+body.theme-dark .panel {
+  border-color: rgba(118, 155, 235, 0.22);
+}
+
+body.theme-dark .home-hero {
+  background:
+    radial-gradient(380px 200px at 86% 12%, rgba(89, 157, 255, 0.24), transparent 72%),
+    radial-gradient(500px 240px at 8% 85%, rgba(47, 118, 255, 0.2), transparent 72%),
+    linear-gradient(145deg, rgba(7, 13, 28, 0.97), rgba(9, 18, 38, 0.9));
+}
+
+body.theme-dark .home-hero::before {
+  background-image:
+    linear-gradient(rgba(120, 158, 236, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 158, 236, 0.08) 1px, transparent 1px);
+}
+
+body.theme-dark .simple-home-wrap {
+  background:
+    radial-gradient(420px 220px at 12% 22%, rgba(47, 118, 255, 0.22), transparent 70%),
+    radial-gradient(420px 220px at 88% 78%, rgba(86, 141, 255, 0.2), transparent 70%),
+    rgba(8, 15, 30, 0.92);
+}
+
+body.theme-dark .simple-home-chips span,
+body.theme-dark .home-badge,
+body.theme-dark .demo-panel,
+body.theme-dark .value-item {
+  background: rgba(10, 18, 34, 0.88);
+  border-color: var(--line);
+}
+
+body.theme-dark .cloud-sync-pill,
+body.theme-dark .notification-menu-panel,
+body.theme-dark .user-menu-panel,
+body.theme-dark .auth-actions .notification-bell-btn,
+body.theme-dark .auth-actions .notification-menu-mark-all,
+body.theme-dark .auth-actions .notification-menu-read-btn,
+body.theme-dark .admin-course-check,
+body.theme-dark .admin-na,
+body.theme-dark .admin-topic-chip,
+body.theme-dark .admin-user-suggestions,
+body.theme-dark .admin-question-bulk-bar,
+body.theme-dark .admin-import-report,
+body.theme-dark .admin-question-image-preview,
+body.theme-dark .create-test-randomize,
+body.theme-dark .create-test-filter-card,
+body.theme-dark .choice,
+body.theme-dark .btn.ghost,
+body.theme-dark input,
+body.theme-dark textarea,
+body.theme-dark select {
+  background: #0c162b;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+body.theme-dark .notification-bell-badge {
+  border-color: #0c162b;
+}
+
+body.theme-dark .exam-shell-moodle {
+  background: #0e1a32;
+}
+
+body.theme-dark .exam-back,
+body.theme-dark .exam-question-meta,
+body.theme-dark .exam-nav-panel,
+body.theme-dark .exam-question-card,
+body.theme-dark .exam-copy-question-btn,
+body.theme-dark .exam-nav-item,
+body.theme-dark .exam-feedback-block,
+body.theme-dark .exam-review-pane,
+body.theme-dark .exam-review-visual,
+body.theme-dark .exam-review-list li,
+body.theme-dark .exam-panel,
+body.theme-dark .exam-calc-key,
+body.theme-dark .exam-note-list article,
+body.theme-dark .exam-question-media,
+body.theme-dark .exam-question-media img {
+  background: #0e1931;
+  border-color: rgba(118, 155, 235, 0.32);
+  color: var(--exam-ink);
+}
+
+body.theme-dark .exam-choice-inline-note {
+  background: rgba(244, 186, 94, 0.2);
+  color: #ffd99f;
+}
+
+body.theme-dark .exam-nav-item.is-answered {
+  background: #18294a;
+  border-color: rgba(118, 155, 235, 0.5);
+}
+
+body.theme-dark .exam-nav-link,
+body.theme-dark .exam-meta-link,
+body.theme-dark .exam-meta-link.muted {
+  color: #8bb8ff;
 }
 
 @media (max-width: 960px) {
