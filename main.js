@@ -314,6 +314,7 @@ let notificationRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
+let studentQuestionRefreshBroadcastHandle = null;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -864,20 +865,36 @@ function getStudentRefreshTriggerToken() {
   return String(payload.token || "").trim();
 }
 
-function shouldForceStudentRefreshFromAdminTrigger(user = null) {
+function getUnseenStudentRefreshTriggerToken(user = null) {
   const current = user || getCurrentUser();
   if (!current || current.role !== "student") {
-    return false;
+    return "";
   }
   const token = getStudentRefreshTriggerToken();
   if (!token) {
-    return false;
+    return "";
   }
   const seenToken = String(load(STORAGE_KEYS.studentRefreshTriggerSeen, "") || "").trim();
   if (seenToken === token) {
+    return "";
+  }
+  return token;
+}
+
+function markStudentRefreshTriggerSeen(token) {
+  const safeToken = String(token || "").trim();
+  if (!safeToken) {
+    return;
+  }
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, safeToken);
+}
+
+function shouldForceStudentRefreshFromAdminTrigger(user = null) {
+  const token = getUnseenStudentRefreshTriggerToken(user);
+  if (!token) {
     return false;
   }
-  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, token);
+  markStudentRefreshTriggerSeen(token);
   const nextUrl = new URL(window.location.href);
   nextUrl.searchParams.set("student_refresh", token);
   window.location.replace(nextUrl.toString());
@@ -6752,6 +6769,8 @@ function bindGlobalEvents() {
   window.addEventListener("pagehide", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
+    clearStudentDataAutoRefreshPolling();
+    clearStudentQuestionRefreshBroadcast();
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
@@ -6906,6 +6925,101 @@ function ensureStudentNotificationPolling(user = null) {
     }
     scheduleNotificationRealtimeHydration(0);
   }, NOTIFICATION_FALLBACK_POLL_MS);
+}
+
+function clearStudentDataAutoRefreshPolling() {
+  if (studentDataAutoRefreshPollHandle) {
+    window.clearInterval(studentDataAutoRefreshPollHandle);
+    studentDataAutoRefreshPollHandle = null;
+  }
+  studentDataAutoRefreshInFlight = false;
+}
+
+function ensureStudentDataAutoRefreshPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    clearStudentDataAutoRefreshPolling();
+    return;
+  }
+  if (studentDataAutoRefreshPollHandle) {
+    return;
+  }
+
+  studentDataAutoRefreshPollHandle = window.setInterval(() => {
+    const activeUser = getCurrentUser();
+    if (!activeUser || activeUser.role !== "student") {
+      clearStudentDataAutoRefreshPolling();
+      return;
+    }
+    if (studentDataAutoRefreshInFlight || state.studentDataRefreshing) {
+      return;
+    }
+
+    const pendingRefreshToken = getUnseenStudentRefreshTriggerToken(activeUser);
+    const isExamRoute = state.route === "session" || state.route === "review";
+    if (pendingRefreshToken) {
+      if (isExamRoute) {
+        return;
+      }
+      markStudentRefreshTriggerSeen(pendingRefreshToken);
+      studentDataAutoRefreshInFlight = true;
+      refreshStudentDataSnapshot(activeUser, { force: true, rerender: true })
+        .catch((error) => {
+          console.warn("Student refresh signal sync failed.", error?.message || error);
+        })
+        .finally(() => {
+          studentDataAutoRefreshInFlight = false;
+        });
+      return;
+    }
+
+    if (!shouldRefreshStudentData(activeUser)) {
+      return;
+    }
+    studentDataAutoRefreshInFlight = true;
+    refreshStudentDataSnapshot(activeUser, { force: false, rerender: true })
+      .catch((error) => {
+        console.warn("Student auto-refresh failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentDataAutoRefreshInFlight = false;
+      });
+  }, STUDENT_FORCE_REFRESH_POLL_MS);
+}
+
+function clearStudentQuestionRefreshBroadcast() {
+  if (studentQuestionRefreshBroadcastHandle) {
+    window.clearTimeout(studentQuestionRefreshBroadcastHandle);
+    studentQuestionRefreshBroadcastHandle = null;
+  }
+}
+
+function scheduleStudentQuestionRefreshBroadcast() {
+  const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    clearStudentQuestionRefreshBroadcast();
+    return;
+  }
+  if (studentQuestionRefreshBroadcastHandle) {
+    return;
+  }
+  studentQuestionRefreshBroadcastHandle = window.setTimeout(() => {
+    studentQuestionRefreshBroadcastHandle = null;
+    const activeAdmin = getCurrentUser();
+    if (!activeAdmin || activeAdmin.role !== "admin") {
+      return;
+    }
+    const actorProfileId = String(getUserProfileId(activeAdmin) || "").trim();
+    const triggerPayload = {
+      token: makeId("student_refresh"),
+      requestedAt: nowISO(),
+      requestedById: isUuidValue(actorProfileId) ? actorProfileId : null,
+      requestedBy: String(activeAdmin.name || activeAdmin.email || "Admin").trim() || "Admin",
+      reason: "questions-updated",
+    };
+    save(STORAGE_KEYS.studentRefreshTrigger, triggerPayload);
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  }, 650);
 }
 
 function clearNotificationRealtimeSubscription() {
@@ -7549,11 +7663,13 @@ function render() {
     state.adminPresenceLastSyncAt = 0;
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
+    clearStudentQuestionRefreshBroadcast();
   }
   if (!user || user.role !== "student") {
     state.studentDataRefreshing = false;
     state.studentDataLastSyncAt = 0;
     state.studentDataLastFullSyncAt = 0;
+    clearStudentDataAutoRefreshPolling();
   }
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
@@ -7892,6 +8008,7 @@ function syncTopbar() {
   const user = getCurrentUser();
   ensureNotificationsRealtimeSubscription(user);
   ensureStudentNotificationPolling(user);
+  ensureStudentDataAutoRefreshPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const unreadNotificationCount = user?.role === "student"
@@ -12712,7 +12829,7 @@ function wireAdmin() {
       if (deferred) {
         toast("Refresh signal queued locally and will sync to cloud automatically.");
       } else {
-        toast("Refresh signal sent. Students will reload once on their next open/sign-in.");
+        toast("Refresh signal sent. Active students will sync updates within a few seconds.");
       }
     } catch (error) {
       const message = getErrorMessage(error, "Could not send refresh signal.");
@@ -18703,6 +18820,9 @@ function load(key, fallback) {
 function save(key, value) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
+  if (key === STORAGE_KEYS.questions) {
+    scheduleStudentQuestionRefreshBroadcast();
+  }
   scheduleRelationalWrite(key, value);
   scheduleSupabaseWrite(key, value);
   appendStorageMutationLog("save", key, value);
@@ -18808,6 +18928,8 @@ async function logout() {
 
   syncPresenceRuntime(null);
   clearNotificationRealtimeSubscription();
+  clearStudentDataAutoRefreshPolling();
+  clearStudentQuestionRefreshBroadcast();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   resetRelationalSyncState();
