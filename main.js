@@ -10738,7 +10738,10 @@ function renderSession() {
                 </div>
 
                 <div class="exam-answer-actions">
-                  <button class="btn exam-submit-btn" data-action="next-question">Next</button>
+                  <button
+                    class="btn exam-submit-btn"
+                    data-action="${isSubmitted ? "next-question" : "submit-answer"}"
+                  >${isSubmitted ? "Next" : "Check"}</button>
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
@@ -11167,6 +11170,14 @@ async function handleSessionClick(event) {
   if (action === "submit-answer") {
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
+    if (response.submitted) {
+      captureElapsedForCurrentQuestion(session);
+      session.currentIndex = Math.min(maxIndex, session.currentIndex + 1);
+      session.updatedAt = nowISO();
+      upsertSession(session);
+      render();
+      return;
+    }
     if (!response.selected.length) {
       toast("Select an answer before submitting.");
       return;
@@ -11300,7 +11311,7 @@ function handleSessionKeydown(event) {
     c: "open-calculator",
     k: "open-shortcuts",
     m: "toggle-marker-mode",
-    s: "next-question",
+    s: "submit-answer",
   };
 
   if (event.key === "Escape") {
@@ -19764,7 +19775,7 @@ function renderSessionPanel(session, question, response) {
         <li><b>L</b><span>Open Lab Values</span></li>
         <li><b>C</b><span>Open Calculator</span></li>
         <li><b>M</b><span>Toggle Marker mode</span></li>
-        <li><b>S</b><span>Go to next question</span></li>
+        <li><b>S</b><span>Check answer / Next</span></li>
         <li><b>Esc</b><span>Close open tool panel</span></li>
       </ul>
     `;
