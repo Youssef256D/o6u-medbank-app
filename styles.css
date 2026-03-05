@@ -2861,6 +2861,71 @@ th {
   background: rgba(255, 255, 255, 0.88);
 }
 
+.exam-nav-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: rgba(12, 18, 30, 0.38);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+  z-index: 140;
+}
+
+.exam-nav-settings-backdrop.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.exam-nav-settings-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(380px, 94vw);
+  height: 100vh;
+  padding: 1rem 1rem 1.1rem;
+  border-left: 1px solid rgba(16, 42, 67, 0.22);
+  background: #f8fbff;
+  box-shadow: -20px 0 42px rgba(14, 23, 36, 0.26);
+  transform: translateX(108%);
+  transition: transform 290ms cubic-bezier(0.22, 0.78, 0.2, 1);
+  z-index: 160;
+  overflow-y: auto;
+}
+
+.exam-nav-settings-drawer.is-open {
+  transform: translateX(0);
+}
+
+.exam-nav-settings-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.exam-nav-settings-drawer-head h4 {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 800;
+  color: #1c3048;
+}
+
+.exam-nav-settings-close {
+  min-height: 32px;
+  padding: 0.22rem 0.72rem;
+  font-size: 0.82rem;
+}
+
+.exam-nav-settings-drawer .exam-nav-settings {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
 .exam-nav-setting-row {
   display: grid;
   gap: 0.4rem;
@@ -3284,17 +3349,20 @@ th {
 }
 
 .exam-line.is-highlight-yellow,
-.exam-choice-text-hit.is-highlight-yellow {
+.exam-choice-text-hit.is-highlight-yellow,
+.exam-inline-highlight.is-highlight-yellow {
   background: rgba(246, 225, 135, 0.66);
 }
 
 .exam-line.is-highlight-red,
-.exam-choice-text-hit.is-highlight-red {
+.exam-choice-text-hit.is-highlight-red,
+.exam-inline-highlight.is-highlight-red {
   background: rgba(243, 151, 151, 0.58);
 }
 
 .exam-line.is-highlight-green,
-.exam-choice-text-hit.is-highlight-green {
+.exam-choice-text-hit.is-highlight-green,
+.exam-inline-highlight.is-highlight-green {
   background: rgba(164, 223, 168, 0.6);
 }
 
@@ -3406,12 +3474,26 @@ th {
   width: 100%;
   text-align: left;
   font: inherit;
+  font-size: calc(0.97rem * var(--exam-font-scale));
+  line-height: 1.52;
   cursor: pointer;
 }
 
 .exam-choice-text-hit.is-text-highlighted {
   border-radius: 8px;
   padding: 0.08rem 0.2rem;
+}
+
+.exam-choice-text-body {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.exam-inline-highlight {
+  border-radius: 6px;
+  padding: 0.03rem 0.1rem;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .exam-choice-text-hit:disabled {
@@ -4473,6 +4555,23 @@ body.theme-dark .exam-nav-settings {
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+body.theme-dark .exam-nav-settings-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+body.theme-dark .exam-nav-settings-drawer {
+  background: #0f0f0f;
+  border-left-color: rgba(255, 255, 255, 0.22);
+}
+
+body.theme-dark .exam-nav-settings-drawer-head h4 {
+  color: #e5edf8;
+}
+
+body.theme-dark .exam-nav-settings-drawer .exam-nav-settings {
+  background: transparent;
+}
+
 body.theme-dark .exam-nav-setting-label {
   color: #b9c6d8;
 }
@@ -4549,6 +4648,23 @@ body.theme-comfort .exam-nav-settings-toggle.is-open {
 body.theme-comfort .exam-nav-settings {
   background: rgba(243, 236, 225, 0.95);
   border-color: rgba(118, 90, 67, 0.22);
+}
+
+body.theme-comfort .exam-nav-settings-backdrop {
+  background: rgba(63, 44, 30, 0.34);
+}
+
+body.theme-comfort .exam-nav-settings-drawer {
+  background: #ede4d8;
+  border-left-color: rgba(118, 90, 67, 0.3);
+}
+
+body.theme-comfort .exam-nav-settings-drawer-head h4 {
+  color: #5d4534;
+}
+
+body.theme-comfort .exam-nav-settings-drawer .exam-nav-settings {
+  background: transparent;
 }
 
 body.theme-comfort .exam-nav-setting-label {
@@ -5035,9 +5151,14 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
     min-width: 0;
   }
 
-  .exam-choice-text {
-    font-size: 0.9rem;
+  .exam-choice-text,
+  .exam-choice-text-hit {
+    font-size: calc(0.9rem * var(--exam-font-scale));
     overflow-wrap: anywhere;
+  }
+
+  .exam-nav-settings-drawer {
+    width: min(420px, 100vw);
   }
 
   .exam-choice-inline-note {

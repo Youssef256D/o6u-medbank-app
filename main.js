@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.11").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.12").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -4158,6 +4158,7 @@ async function hydrateRelationalSessions(currentUser) {
         highlightedLines: [],
         highlightedLineColors: {},
         highlightedChoices: {},
+        textHighlights: buildEmptyTextHighlightStore(),
         submitted: Boolean(response?.submitted),
       };
     });
@@ -10143,6 +10144,226 @@ function syncSessionUiControlsInDom() {
   }
 }
 
+function buildEmptyTextHighlightStore() {
+  return {
+    lines: {},
+    choices: {},
+  };
+}
+
+function ensureResponseTextHighlightStore(response) {
+  if (!response || typeof response !== "object") {
+    return buildEmptyTextHighlightStore();
+  }
+  if (!response.textHighlights || typeof response.textHighlights !== "object" || Array.isArray(response.textHighlights)) {
+    response.textHighlights = buildEmptyTextHighlightStore();
+    return response.textHighlights;
+  }
+  if (!response.textHighlights.lines || typeof response.textHighlights.lines !== "object" || Array.isArray(response.textHighlights.lines)) {
+    response.textHighlights.lines = {};
+  }
+  if (!response.textHighlights.choices || typeof response.textHighlights.choices !== "object" || Array.isArray(response.textHighlights.choices)) {
+    response.textHighlights.choices = {};
+  }
+  return response.textHighlights;
+}
+
+function normalizeTextHighlightRanges(ranges, maxLength = null) {
+  if (!Array.isArray(ranges)) {
+    return [];
+  }
+  const hasBound = Number.isFinite(maxLength);
+  const lengthBound = hasBound ? Math.max(0, Math.floor(Number(maxLength))) : null;
+  const normalized = [];
+  ranges.forEach((entry) => {
+    const color = normalizeSessionHighlightColor(entry?.color, "");
+    if (!color) {
+      return;
+    }
+    let start = Math.floor(Number(entry?.start));
+    let end = Math.floor(Number(entry?.end));
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return;
+    }
+    if (hasBound) {
+      start = Math.min(lengthBound, Math.max(0, start));
+      end = Math.min(lengthBound, Math.max(0, end));
+    } else {
+      start = Math.max(0, start);
+      end = Math.max(0, end);
+    }
+    if (end <= start) {
+      return;
+    }
+    normalized.push({ start, end, color });
+  });
+  normalized.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged = [];
+  normalized.forEach((range) => {
+    const previous = merged[merged.length - 1];
+    if (previous && previous.color === range.color && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+      return;
+    }
+    merged.push({ ...range });
+  });
+  return merged;
+}
+
+function resolveTextHighlightRanges(ranges, textLength) {
+  const safeLength = Math.max(0, Math.floor(Number(textLength) || 0));
+  if (!safeLength) {
+    return [];
+  }
+  const resolvedRanges = normalizeTextHighlightRanges(ranges, safeLength);
+  if (!resolvedRanges.length) {
+    return [];
+  }
+  const charColors = new Array(safeLength).fill("");
+  resolvedRanges.forEach((range) => {
+    for (let index = range.start; index < range.end; index += 1) {
+      charColors[index] = range.color;
+    }
+  });
+  const compressed = [];
+  let activeColor = "";
+  let activeStart = -1;
+  for (let index = 0; index <= safeLength; index += 1) {
+    const current = index < safeLength ? charColors[index] : "";
+    if (current === activeColor) {
+      continue;
+    }
+    if (activeColor) {
+      compressed.push({ start: activeStart, end: index, color: activeColor });
+    }
+    activeColor = current;
+    activeStart = current ? index : -1;
+  }
+  return compressed;
+}
+
+function getPrimaryHighlightColorFromRanges(ranges) {
+  if (!Array.isArray(ranges) || !ranges.length) {
+    return "";
+  }
+  const firstColor = normalizeSessionHighlightColor(ranges[0]?.color, "");
+  return firstColor || "";
+}
+
+function renderTextWithInlineHighlights(text, ranges) {
+  const content = String(text || "");
+  if (!content) {
+    return "";
+  }
+  const resolvedRanges = resolveTextHighlightRanges(ranges, content.length);
+  if (!resolvedRanges.length) {
+    return escapeHtml(content);
+  }
+  const parts = [];
+  let cursor = 0;
+  resolvedRanges.forEach((range) => {
+    if (range.start > cursor) {
+      parts.push(escapeHtml(content.slice(cursor, range.start)));
+    }
+    const highlightedChunk = escapeHtml(content.slice(range.start, range.end));
+    parts.push(`<span class="exam-inline-highlight is-text-highlighted is-highlight-${range.color}">${highlightedChunk}</span>`);
+    cursor = range.end;
+  });
+  if (cursor < content.length) {
+    parts.push(escapeHtml(content.slice(cursor)));
+  }
+  return parts.join("");
+}
+
+function updateHighlightRangesWithSelection(ranges, selectionStart, selectionEnd, color, textLength) {
+  const safeLength = Math.max(0, Math.floor(Number(textLength) || 0));
+  if (!safeLength) {
+    return [];
+  }
+  const normalizedColor = normalizeSessionHighlightColor(color);
+  const start = Math.max(0, Math.min(safeLength, Math.floor(Number(selectionStart) || 0)));
+  const end = Math.max(0, Math.min(safeLength, Math.floor(Number(selectionEnd) || 0)));
+  if (end <= start) {
+    return resolveTextHighlightRanges(ranges, safeLength);
+  }
+  const charColors = new Array(safeLength).fill("");
+  resolveTextHighlightRanges(ranges, safeLength).forEach((range) => {
+    for (let index = range.start; index < range.end; index += 1) {
+      charColors[index] = range.color;
+    }
+  });
+  let alreadyHighlighted = true;
+  for (let index = start; index < end; index += 1) {
+    if (charColors[index] !== normalizedColor) {
+      alreadyHighlighted = false;
+      break;
+    }
+  }
+  const nextColor = alreadyHighlighted ? "" : normalizedColor;
+  for (let index = start; index < end; index += 1) {
+    charColors[index] = nextColor;
+  }
+  const compressed = [];
+  let activeColor = "";
+  let activeStart = -1;
+  for (let index = 0; index <= safeLength; index += 1) {
+    const current = index < safeLength ? charColors[index] : "";
+    if (current === activeColor) {
+      continue;
+    }
+    if (activeColor) {
+      compressed.push({ start: activeStart, end: index, color: activeColor });
+    }
+    activeColor = current;
+    activeStart = current ? index : -1;
+  }
+  return compressed;
+}
+
+function getHighlightTargetFromNode(node) {
+  const sourceElement = node && node.nodeType === 1 ? node : node?.parentElement;
+  const target = sourceElement?.closest?.("[data-highlight-kind]");
+  if (!target) {
+    return null;
+  }
+  const kind = String(target.getAttribute("data-highlight-kind") || "").trim().toLowerCase();
+  if (kind === "line") {
+    const lineIndex = Math.floor(Number(target.getAttribute("data-line-index")));
+    if (!Number.isFinite(lineIndex) || lineIndex < 0) {
+      return null;
+    }
+    return { kind: "line", key: String(lineIndex), element: target };
+  }
+  if (kind === "choice") {
+    const choiceId = normalizeQuestionChoiceLabel(target.getAttribute("data-choice-id"));
+    if (!choiceId) {
+      return null;
+    }
+    return { kind: "choice", key: choiceId, element: target };
+  }
+  return null;
+}
+
+function getSelectionOffsetsWithinElement(range, element) {
+  if (!range || !element) {
+    return null;
+  }
+  try {
+    const beforeRange = range.cloneRange();
+    beforeRange.selectNodeContents(element);
+    beforeRange.setEnd(range.startContainer, range.startOffset);
+    const start = beforeRange.toString().length;
+    const length = range.toString().length;
+    const end = start + length;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return null;
+    }
+    return { start, end };
+  } catch {
+    return null;
+  }
+}
+
 function renderSession() {
   const user = getCurrentUser();
   const session = getActiveSession(user.id, state.sessionId);
@@ -10254,8 +10475,13 @@ function renderSession() {
     .map((choice) => {
       const selected = response.selected.includes(choice.id);
       const struck = response.struck.includes(choice.id);
-      const choiceHighlightColor = normalizeSessionHighlightColor(response.highlightedChoices?.[choice.id], "");
-      const choiceHighlightClass = choiceHighlightColor ? `is-text-highlighted is-highlight-${choiceHighlightColor}` : "";
+      const choiceText = String(choice.text || "");
+      const choiceLegacyHighlightColor = normalizeSessionHighlightColor(response.highlightedChoices?.[choice.id], "");
+      let choiceHighlightRanges = resolveTextHighlightRanges(response.textHighlights?.choices?.[choice.id], choiceText.length);
+      if (!choiceHighlightRanges.length && choiceLegacyHighlightColor && choiceText.length) {
+        choiceHighlightRanges = [{ start: 0, end: choiceText.length, color: choiceLegacyHighlightColor }];
+      }
+      const renderedChoiceText = renderTextWithInlineHighlights(choiceText, choiceHighlightRanges);
       const correctChoice = correctChoiceIds.includes(choice.id);
       const wrongSelected = isSubmitted && selected && !correctChoice;
       const showCorrect = isSubmitted && correctChoice;
@@ -10279,12 +10505,12 @@ function renderSession() {
             </label>
             <button
               type="button"
-              class="exam-choice-text exam-choice-text-hit ${choiceHighlightClass}"
+              class="exam-choice-text exam-choice-text-hit"
               data-action="toggle-strike"
               data-choice-id="${choice.id}"
               ${isSubmitted ? "disabled" : ""}
               aria-label="Strike or unstrike choice ${choice.id}"
-            ><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</button>
+            ><b>${choice.id}.</b> <span class="exam-choice-text-body" data-highlight-kind="choice" data-choice-id="${choice.id}">${renderedChoiceText}</span> ${inlineFeedback}</button>
           </div>
         </div>
       `;
@@ -10332,9 +10558,13 @@ function renderSession() {
                 <div class="exam-stem">
                   ${stemLines
       .map((line, index) => {
+        const lineText = String(line || "");
         const lineHighlightColor = normalizeSessionHighlightColor(response.highlightedLineColors?.[index], "");
-        const highlighted = lineHighlightColor ? `is-highlighted is-highlight-${lineHighlightColor}` : "";
-        return `<p class="exam-line ${highlighted}" data-action="toggle-line-highlight" data-line-index="${index}" title="Toggle highlight">${escapeHtml(line)}</p>`;
+        let lineHighlightRanges = resolveTextHighlightRanges(response.textHighlights?.lines?.[index], lineText.length);
+        if (!lineHighlightRanges.length && lineHighlightColor && lineText.length) {
+          lineHighlightRanges = [{ start: 0, end: lineText.length, color: lineHighlightColor }];
+        }
+        return `<p class="exam-line" data-highlight-kind="line" data-line-index="${index}" title="Select text to highlight">${renderTextWithInlineHighlights(lineText, lineHighlightRanges)}</p>`;
       })
       .join("")}
                 </div>
@@ -10359,6 +10589,7 @@ function renderSession() {
                   data-action="toggle-nav-settings"
                   aria-label="Open block settings"
                   aria-expanded="${state.sessionNavSettingsOpen ? "true" : "false"}"
+                  aria-controls="session-settings-drawer"
                   title="Block settings"
                 >
                   <span class="bar" aria-hidden="true"></span>
@@ -10366,10 +10597,32 @@ function renderSession() {
                   <span class="bar" aria-hidden="true"></span>
                 </button>
               </div>
-              ${state.sessionNavSettingsOpen ? renderSessionNavSettings() : ""}
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
+            </aside>
+            <button
+              type="button"
+              class="exam-nav-settings-backdrop ${state.sessionNavSettingsOpen ? "is-open" : ""}"
+              data-action="toggle-nav-settings"
+              aria-label="Close block settings"
+              aria-hidden="${state.sessionNavSettingsOpen ? "false" : "true"}"
+            ></button>
+            <aside
+              id="session-settings-drawer"
+              class="exam-nav-settings-drawer ${state.sessionNavSettingsOpen ? "is-open" : ""}"
+              aria-hidden="${state.sessionNavSettingsOpen ? "false" : "true"}"
+            >
+              <div class="exam-nav-settings-drawer-head">
+                <h4>Block settings</h4>
+                <button
+                  type="button"
+                  class="btn ghost exam-nav-settings-close"
+                  data-action="toggle-nav-settings"
+                  aria-label="Close block settings"
+                >Close</button>
+              </div>
+              ${renderSessionNavSettings()}
             </aside>
           </div>
         </section>
@@ -10694,36 +10947,6 @@ async function handleSessionClick(event) {
   }
 
   if (action === "toggle-line-highlight") {
-    if (!state.sessionMarkerEnabled) {
-      toast("Enable highlighter first.");
-      return;
-    }
-    const lineIndex = Math.floor(Number(target.getAttribute("data-line-index")));
-    if (!Number.isFinite(lineIndex) || lineIndex < 0) {
-      return;
-    }
-    const qid = session.questionIds[session.currentIndex];
-    const response = session.responses[qid];
-    if (!response.highlightedLineColors || typeof response.highlightedLineColors !== "object" || Array.isArray(response.highlightedLineColors)) {
-      response.highlightedLineColors = {};
-    }
-    if (!Array.isArray(response.highlightedLines)) {
-      response.highlightedLines = [];
-    }
-    const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
-    const existingColor = normalizeSessionHighlightColor(response.highlightedLineColors[lineIndex], "");
-    if (existingColor === activeColor) {
-      delete response.highlightedLineColors[lineIndex];
-      response.highlightedLines = response.highlightedLines.filter((entry) => entry !== lineIndex);
-    } else {
-      response.highlightedLineColors[lineIndex] = activeColor;
-      if (!response.highlightedLines.includes(lineIndex)) {
-        response.highlightedLines.push(lineIndex);
-      }
-    }
-    session.updatedAt = nowISO();
-    upsertSession(session);
-    render();
     return;
   }
 
@@ -10763,19 +10986,6 @@ async function handleSessionClick(event) {
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
     if (state.sessionMarkerEnabled) {
-      if (!response.highlightedChoices || typeof response.highlightedChoices !== "object" || Array.isArray(response.highlightedChoices)) {
-        response.highlightedChoices = {};
-      }
-      const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
-      const existingColor = normalizeSessionHighlightColor(response.highlightedChoices[choiceId], "");
-      if (existingColor === activeColor) {
-        delete response.highlightedChoices[choiceId];
-      } else {
-        response.highlightedChoices[choiceId] = activeColor;
-      }
-      session.updatedAt = nowISO();
-      upsertSession(session);
-      render();
       return;
     }
     if (response.struck.includes(choiceId)) {
@@ -10927,24 +11137,100 @@ function handleSessionHighlighterMouseup() {
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
     return;
   }
-  const selectedText = String(selection.toString() || "").trim();
-  if (!selectedText) {
+  const selectedText = String(selection.toString() || "");
+  if (!selectedText.trim()) {
     selection.removeAllRanges();
     return;
   }
   const range = selection.getRangeAt(0);
-  const container = range.commonAncestorContainer;
-  const sourceEl = container && container.nodeType === 1 ? container : container?.parentElement;
-  const lineEl = sourceEl?.closest?.('[data-action="toggle-line-highlight"]');
-  const choiceEl = sourceEl?.closest?.('[data-action="toggle-strike"]');
-  selection.removeAllRanges();
-  if (lineEl) {
-    lineEl.click();
+  const startTarget = getHighlightTargetFromNode(range.startContainer);
+  const endTarget = getHighlightTargetFromNode(range.endContainer);
+  if (
+    !startTarget
+    || !endTarget
+    || startTarget.kind !== endTarget.kind
+    || startTarget.key !== endTarget.key
+  ) {
+    selection.removeAllRanges();
     return;
   }
-  if (choiceEl) {
-    choiceEl.click();
+  const offsets = getSelectionOffsetsWithinElement(range, startTarget.element);
+  selection.removeAllRanges();
+  if (!offsets) {
+    return;
   }
+  const user = getCurrentUser();
+  if (!user) {
+    return;
+  }
+  const session = getActiveSession(user.id, state.sessionId);
+  if (!session || session.status !== "in_progress") {
+    return;
+  }
+  normalizeSession(session);
+  const qid = session.questionIds[session.currentIndex];
+  const response = session.responses[qid];
+  if (!response) {
+    return;
+  }
+  const textLength = Math.max(0, String(startTarget.element.textContent || "").length);
+  if (!textLength) {
+    return;
+  }
+  const highlightStore = ensureResponseTextHighlightStore(response);
+  const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+  if (startTarget.kind === "line") {
+    const lineKey = startTarget.key;
+    const lineRanges = updateHighlightRangesWithSelection(
+      highlightStore.lines[lineKey],
+      offsets.start,
+      offsets.end,
+      activeColor,
+      textLength,
+    );
+    const lineIndex = Math.floor(Number(lineKey));
+    if (!Array.isArray(response.highlightedLines)) {
+      response.highlightedLines = [];
+    }
+    if (!response.highlightedLineColors || typeof response.highlightedLineColors !== "object" || Array.isArray(response.highlightedLineColors)) {
+      response.highlightedLineColors = {};
+    }
+    if (lineRanges.length) {
+      highlightStore.lines[lineKey] = lineRanges;
+      if (!response.highlightedLines.includes(lineIndex)) {
+        response.highlightedLines.push(lineIndex);
+      }
+      const primaryColor = getPrimaryHighlightColorFromRanges(lineRanges) || activeColor;
+      response.highlightedLineColors[lineIndex] = primaryColor;
+    } else {
+      delete highlightStore.lines[lineKey];
+      response.highlightedLines = response.highlightedLines.filter((entry) => entry !== lineIndex);
+      delete response.highlightedLineColors[lineIndex];
+    }
+  } else if (startTarget.kind === "choice") {
+    const choiceKey = startTarget.key;
+    const choiceRanges = updateHighlightRangesWithSelection(
+      highlightStore.choices[choiceKey],
+      offsets.start,
+      offsets.end,
+      activeColor,
+      textLength,
+    );
+    if (!response.highlightedChoices || typeof response.highlightedChoices !== "object" || Array.isArray(response.highlightedChoices)) {
+      response.highlightedChoices = {};
+    }
+    if (choiceRanges.length) {
+      highlightStore.choices[choiceKey] = choiceRanges;
+      const primaryColor = getPrimaryHighlightColorFromRanges(choiceRanges) || activeColor;
+      response.highlightedChoices[choiceKey] = primaryColor;
+    } else {
+      delete highlightStore.choices[choiceKey];
+      delete response.highlightedChoices[choiceKey];
+    }
+  }
+  session.updatedAt = nowISO();
+  upsertSession(session);
+  render();
 }
 
 function startSessionTicker(sessionId) {
@@ -11091,6 +11377,7 @@ function renderReview() {
       highlightedLines: [],
       highlightedLineColors: {},
       highlightedChoices: {},
+      textHighlights: buildEmptyTextHighlightStore(),
       submitted: true,
     };
     const hasAnswer = response.selected.length > 0;
@@ -11169,6 +11456,13 @@ function renderReview() {
     ? questionChoices
       .map((choice) => {
         const selectedChoice = response.selected.includes(choice.id);
+        const choiceText = String(choice.text || "");
+        const choiceLegacyHighlightColor = normalizeSessionHighlightColor(response.highlightedChoices?.[choice.id], "");
+        let choiceHighlightRanges = resolveTextHighlightRanges(response.textHighlights?.choices?.[choice.id], choiceText.length);
+        if (!choiceHighlightRanges.length && choiceLegacyHighlightColor && choiceText.length) {
+          choiceHighlightRanges = [{ start: 0, end: choiceText.length, color: choiceLegacyHighlightColor }];
+        }
+        const renderedChoiceText = renderTextWithInlineHighlights(choiceText, choiceHighlightRanges);
         const correctChoice = correctChoiceIds.includes(choice.id);
         const wrongSelected = selectedChoice && !correctChoice;
         const showCorrect = correctChoice;
@@ -11187,7 +11481,7 @@ function renderReview() {
                 ${statusIndicator}
                 <input type="${choiceType}" name="review-answer" value="${choice.id}" ${selectedChoice ? "checked" : ""} disabled />
                 <span class="exam-choice-radio"></span>
-                <span class="exam-choice-text"><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</span>
+                <span class="exam-choice-text"><b>${choice.id}.</b> <span class="exam-choice-text-body">${renderedChoiceText}</span> ${inlineFeedback}</span>
               </label>
             </div>
           `;
@@ -11216,7 +11510,17 @@ function renderReview() {
               <article class="exam-question-block exam-question-card">
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
-                  ${stemLines.map((line) => `<p class="exam-line">${escapeHtml(line)}</p>`).join("")}
+                  ${stemLines
+      .map((line, index) => {
+        const lineText = String(line || "");
+        const lineHighlightColor = normalizeSessionHighlightColor(response.highlightedLineColors?.[index], "");
+        let lineHighlightRanges = resolveTextHighlightRanges(response.textHighlights?.lines?.[index], lineText.length);
+        if (!lineHighlightRanges.length && lineHighlightColor && lineText.length) {
+          lineHighlightRanges = [{ start: 0, end: lineText.length, color: lineHighlightColor }];
+        }
+        return `<p class="exam-line">${renderTextWithInlineHighlights(lineText, lineHighlightRanges)}</p>`;
+      })
+      .join("")}
                 </div>
 
                 <div class="exam-answers">
@@ -16993,6 +17297,7 @@ function createSessionFromQuestions(questions, config = {}) {
       highlightedLines: [],
       highlightedLineColors: {},
       highlightedChoices: {},
+      textHighlights: buildEmptyTextHighlightStore(),
       submitted: false,
     };
     const mappedCourse = String(getQbankCourseTopicMeta(question).course || "").trim();
@@ -18928,6 +19233,7 @@ function normalizeSession(session) {
         highlightedLines: [],
         highlightedLineColors: {},
         highlightedChoices: {},
+        textHighlights: buildEmptyTextHighlightStore(),
         submitted: false,
       };
       changed = true;
@@ -19010,6 +19316,52 @@ function normalizeSession(session) {
       });
       if (JSON.stringify(response.highlightedChoices) !== JSON.stringify(normalizedChoiceColors)) {
         response.highlightedChoices = normalizedChoiceColors;
+        changed = true;
+      }
+    }
+    if (!response.textHighlights || typeof response.textHighlights !== "object" || Array.isArray(response.textHighlights)) {
+      response.textHighlights = buildEmptyTextHighlightStore();
+      changed = true;
+    }
+    if (!response.textHighlights.lines || typeof response.textHighlights.lines !== "object" || Array.isArray(response.textHighlights.lines)) {
+      response.textHighlights.lines = {};
+      changed = true;
+    } else {
+      const normalizedLineRanges = {};
+      Object.entries(response.textHighlights.lines).forEach(([lineKey, ranges]) => {
+        const lineIndex = Math.floor(Number(lineKey));
+        if (!Number.isFinite(lineIndex) || lineIndex < 0) {
+          return;
+        }
+        const normalizedRanges = normalizeTextHighlightRanges(ranges);
+        if (!normalizedRanges.length) {
+          return;
+        }
+        normalizedLineRanges[lineIndex] = normalizedRanges;
+      });
+      if (JSON.stringify(response.textHighlights.lines) !== JSON.stringify(normalizedLineRanges)) {
+        response.textHighlights.lines = normalizedLineRanges;
+        changed = true;
+      }
+    }
+    if (!response.textHighlights.choices || typeof response.textHighlights.choices !== "object" || Array.isArray(response.textHighlights.choices)) {
+      response.textHighlights.choices = {};
+      changed = true;
+    } else {
+      const normalizedChoiceRanges = {};
+      Object.entries(response.textHighlights.choices).forEach(([choiceKey, ranges]) => {
+        const choiceId = normalizeQuestionChoiceLabel(choiceKey);
+        if (!choiceId) {
+          return;
+        }
+        const normalizedRanges = normalizeTextHighlightRanges(ranges);
+        if (!normalizedRanges.length) {
+          return;
+        }
+        normalizedChoiceRanges[choiceId] = normalizedRanges;
+      });
+      if (JSON.stringify(response.textHighlights.choices) !== JSON.stringify(normalizedChoiceRanges)) {
+        response.textHighlights.choices = normalizedChoiceRanges;
         changed = true;
       }
     }
