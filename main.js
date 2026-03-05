@@ -3101,17 +3101,32 @@ async function hydrateRelationalState(user) {
   }
   if (relationalSync.pendingWrites.size || relationalSync.flushing) {
     await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-    if (relationalSync.pendingWrites.size || relationalSync.flushing) {
-      // Avoid pulling older remote data over unsynced local edits.
-      return;
-    }
   }
 
-  await hydrateRelationalCoursesAndTopics();
-  await hydrateRelationalProfiles(current);
-  await hydrateRelationalQuestions();
-  await hydrateRelationalNotifications(current);
-  await hydrateRelationalSessions(current);
+  const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
+    || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
+    || relationalSync.flushing;
+  const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
+  const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
+  const hasPendingNotificationWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.notifications) || relationalSync.flushing;
+  const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions) || relationalSync.flushing;
+
+  // Avoid overwriting unsynced local edits per storage key while still allowing safe keys to hydrate.
+  if (!hasPendingCourseWrites) {
+    await hydrateRelationalCoursesAndTopics();
+  }
+  if (!hasPendingUserWrites) {
+    await hydrateRelationalProfiles(current);
+  }
+  if (!hasPendingQuestionWrites) {
+    await hydrateRelationalQuestions();
+  }
+  if (!hasPendingNotificationWrites) {
+    await hydrateRelationalNotifications(current);
+  }
+  if (!hasPendingSessionWrites) {
+    await hydrateRelationalSessions(current);
+  }
 }
 
 async function hydrateRelationalCoursesAndTopics() {
@@ -10022,9 +10037,10 @@ function renderSession() {
   }
 
   const stemLines = splitStemLines(question.stem);
-  const choiceType = question.correct.length > 1 ? "checkbox" : "radio";
+  const correctChoiceIds = getNormalizedQuestionCorrectChoiceIds(question);
+  const choiceType = correctChoiceIds.length > 1 ? "checkbox" : "radio";
   const isSubmitted = response.submitted;
-  const isCorrect = arraysEqual([...response.selected].sort(), [...question.correct].sort());
+  const isCorrect = isSubmittedResponseCorrect(question, response);
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
   const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
   const isTimedMode = session.mode === "timed";
@@ -10064,7 +10080,7 @@ function renderSession() {
     .map((choice) => {
       const selected = response.selected.includes(choice.id);
       const struck = response.struck.includes(choice.id);
-      const correctChoice = question.correct.includes(choice.id);
+      const correctChoice = correctChoiceIds.includes(choice.id);
       const wrongSelected = isSubmitted && selected && !correctChoice;
       const showCorrect = isSubmitted && correctChoice;
       const statusClass = `${showCorrect ? "is-correct" : ""} ${wrongSelected ? "is-user-wrong" : ""}`;
@@ -10512,7 +10528,7 @@ async function handleSessionClick(event) {
     }
     response.submitted = true;
     const question = getQuestions().find((entry) => entry.id === qid);
-    const correct = question ? arraysEqual([...response.selected].sort(), [...question.correct].sort()) : false;
+    const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
       addQuestionToIncorrectQueue(session.userId, qid);
     }
@@ -18536,10 +18552,30 @@ function normalizeSession(session) {
     if (!Array.isArray(response.selected)) {
       response.selected = [];
       changed = true;
+    } else {
+      const normalizedSelected = [...new Set(
+        response.selected
+          .map((entry) => normalizeQuestionChoiceLabel(entry))
+          .filter(Boolean),
+      )];
+      if (response.selected.join("|") !== normalizedSelected.join("|")) {
+        response.selected = normalizedSelected;
+        changed = true;
+      }
     }
     if (!Array.isArray(response.struck)) {
       response.struck = [];
       changed = true;
+    } else {
+      const normalizedStruck = [...new Set(
+        response.struck
+          .map((entry) => normalizeQuestionChoiceLabel(entry))
+          .filter(Boolean),
+      )];
+      if (response.struck.join("|") !== normalizedStruck.join("|")) {
+        response.struck = normalizedStruck;
+        changed = true;
+      }
     }
     if (!Array.isArray(response.highlightedLines)) {
       response.highlightedLines = [];
@@ -19112,16 +19148,49 @@ function arraysEqual(a, b) {
   return a.length === b.length && a.every((entry, idx) => entry === b[idx]);
 }
 
+function getNormalizedQuestionCorrectChoiceIds(question) {
+  const choices = normalizeQuestionChoiceEntries(question?.choices);
+  if (!choices.length) {
+    return [];
+  }
+  const choiceIds = new Set(choices.map((choice) => choice.id));
+  return [...new Set(
+    (Array.isArray(question?.correct) ? question.correct : [])
+      .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => choiceIds.has(entry)),
+  )].sort();
+}
+
+function getNormalizedResponseSelectedChoiceIds(response, allowedChoiceIds = null) {
+  const allowed = allowedChoiceIds instanceof Set ? allowedChoiceIds : null;
+  return [...new Set(
+    (Array.isArray(response?.selected) ? response.selected : [])
+      .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => Boolean(entry) && (!allowed || allowed.has(entry))),
+  )].sort();
+}
+
+function isResponseSelectionCorrect(question, response) {
+  if (!question || !response) {
+    return false;
+  }
+  const choiceIds = new Set(normalizeQuestionChoiceEntries(question?.choices).map((choice) => choice.id));
+  const correct = getNormalizedQuestionCorrectChoiceIds(question);
+  if (!correct.length) {
+    return false;
+  }
+  const selected = getNormalizedResponseSelectedChoiceIds(response, choiceIds);
+  if (!selected.length) {
+    return false;
+  }
+  return arraysEqual(selected, correct);
+}
+
 function isSubmittedResponseCorrect(question, response) {
   if (!question || !response || !response.submitted) {
     return false;
   }
-  const selected = Array.isArray(response.selected) ? [...response.selected].sort() : [];
-  const correct = Array.isArray(question.correct) ? [...question.correct].sort() : [];
-  if (!selected.length || !correct.length) {
-    return false;
-  }
-  return arraysEqual(selected, correct);
+  return isResponseSelectionCorrect(question, response);
 }
 
 function shuffle(list) {
