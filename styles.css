@@ -234,6 +234,13 @@ body.is-routing .topbar::after {
   font-weight: 600;
 }
 
+body.theme-dark .topbar .pill,
+body.theme-comfort .topbar .pill {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.15);
+}
+
 .top-nav {
   display: flex;
   align-items: center;
@@ -285,9 +292,22 @@ button {
     transform 180ms ease;
 }
 
+body.theme-dark .top-nav button,
+body.theme-dark .auth-actions button,
+body.theme-comfort .top-nav button,
+body.theme-comfort .auth-actions button {
+  color: #e5e5e5;
+}
+
 .top-nav button.is-active {
   background: var(--brand-soft);
   color: var(--brand-strong);
+}
+
+body.theme-dark .top-nav button.is-active,
+body.theme-comfort .top-nav button.is-active {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
 }
 
 .top-nav button:hover,
@@ -323,6 +343,13 @@ button {
   line-height: 1;
 }
 
+body.theme-dark .auth-actions .theme-toggle-btn,
+body.theme-comfort .auth-actions .theme-toggle-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+}
+
 .auth-actions .theme-toggle-btn.is-active {
   background: rgba(59, 130, 246, 0.18);
   border-color: rgba(59, 130, 246, 0.5);
@@ -335,9 +362,24 @@ button {
   color: var(--brand-strong);
 }
 
+body.theme-dark .auth-actions .theme-toggle-btn.is-active,
+body.theme-comfort .auth-actions .theme-toggle-btn.is-active,
+body.theme-dark .auth-actions .theme-toggle-btn.is-comfort,
+body.theme-comfort .auth-actions .theme-toggle-btn.is-comfort {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #ffffff;
+}
+
 .auth-actions .theme-toggle-btn:hover {
   background: var(--brand-soft);
   border-color: rgba(47, 118, 255, 0.42);
+}
+
+body.theme-dark .auth-actions .theme-toggle-btn:hover,
+body.theme-comfort .auth-actions .theme-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .auth-actions .theme-toggle-btn svg {
@@ -1316,6 +1358,15 @@ body.is-routing .card {
 
 .btn:active {
   transform: translateY(0);
+}
+
+body.theme-dark .btn {
+  color: #0a0a0a;
+  font-weight: 700;
+}
+
+body.theme-comfort .btn {
+  color: #ffffff;
 }
 
 .btn.ghost {
@@ -3733,11 +3784,18 @@ hr {
 }
 
 body.theme-dark .topbar {
-  background: rgba(15, 23, 42, 0.9);
+  background: rgba(10, 10, 10, 0.9);
 }
 
 body.theme-comfort .topbar {
-  background: rgba(43, 38, 34, 0.9);
+  background: rgba(51, 39, 34, 0.9);
+}
+
+body.theme-dark .topbar .brand,
+body.theme-dark .topbar button,
+body.theme-comfort .topbar .brand,
+body.theme-comfort .topbar button {
+  color: #ffffff;
 }
 
 body.theme-dark .top-nav button:hover,

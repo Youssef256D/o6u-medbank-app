@@ -2428,11 +2428,17 @@ function invalidateAnalyticsCacheForStorageKey(storageKey) {
     && storageKey !== STORAGE_KEYS.questions
     && storageKey !== STORAGE_KEYS.curriculum
     && storageKey !== STORAGE_KEYS.courseTopics
+    && storageKey !== STORAGE_KEYS.users
   ) {
     return;
   }
+  const shouldResetQuestionMeta = (
+    storageKey === STORAGE_KEYS.questions
+    || storageKey === STORAGE_KEYS.curriculum
+    || storageKey === STORAGE_KEYS.courseTopics
+  );
   invalidateAnalyticsCache({
-    resetQuestionMeta: storageKey !== STORAGE_KEYS.sessions,
+    resetQuestionMeta: shouldResetQuestionMeta,
   });
 }
 
@@ -9423,9 +9429,8 @@ function wireNotifications() {
 function renderDashboard() {
   const user = getCurrentUser();
   const questions = getPublishedQuestionsForUser(user);
-  const sessions = getSessionsForUser(user.id);
-  const completed = sessions.filter((session) => session.status === "completed");
   const analytics = getStudentAnalyticsSnapshot(user.id);
+  const completedCount = Array.isArray(analytics.sessionRollups) ? analytics.sessionRollups.length : 0;
   const stats = analytics.stats;
   const syncStatusText = getStudentDataSyncStatusText();
 
@@ -9445,7 +9450,7 @@ function renderDashboard() {
       <div class="stats-grid" style="margin-top: 0.9rem;">
         <article class="card"><p class="metric">${stats.accuracy}%<small>Overall accuracy</small></p></article>
         <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Avg time / question</small></p></article>
-        <article class="card"><p class="metric">${completed.length}<small>Completed blocks</small></p></article>
+        <article class="card"><p class="metric">${completedCount}<small>Completed blocks</small></p></article>
         <article class="card"><p class="metric">${questions.length}<small>Total questions in bank</small></p></article>
       </div>
     </section>
@@ -9463,7 +9468,7 @@ function renderDashboard() {
       </article>
     </section>
 
-    ${renderPreviousTestsSection(user.id)}
+    ${renderPreviousTestsSection(user)}
   `;
 }
 
@@ -9529,13 +9534,18 @@ function renderDashboardCoach(snapshot) {
   `;
 }
 
-function renderPreviousTestsSection(userId) {
-  const completed = getCompletedSessionsForUser(userId);
+function renderPreviousTestsSection(userOrId) {
+  const user = userOrId && typeof userOrId === "object" ? userOrId : null;
+  const userId = String((user?.id) || userOrId || "").trim();
+  const questionMetaById = getAnalyticsQuestionMetaById();
+  const completed = getCompletedSessionsForUser(userId).filter((session) => (
+    isSessionWithinUserAcademicTerm(session, user, questionMetaById)
+  ));
   if (!completed.length) {
     return `
       <section class="panel">
         <h3 style="margin-top: 0;">Previous Tests</h3>
-        <p class="subtle">No completed tests yet.</p>
+        <p class="subtle">No completed tests yet for this year/semester.</p>
       </section>
     `;
   }
@@ -9708,6 +9718,7 @@ function renderCreateTest() {
   }
   const filtered = applyQbankFilters(questions, { course: selectedCourse, topics: selectedTopics });
   const inProgress = getSessionsForUser(user.id).find((session) => session.status === "in_progress");
+  const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = selectedTopics.length === 0;
   const selectedTopicLabel = allTopicsSelected ? "All topics" : selectedTopics.join(" + ");
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
@@ -9728,7 +9739,15 @@ function renderCreateTest() {
       <h2 class="title">Create a Test</h2>
       <p class="subtle">Choose course and topics, then generate a test block.</p>
       ${inProgress
-      ? `<div class="card" style="margin-top: 0.7rem;"><b>Active block detected</b> (${inProgress.questionIds.length} questions) <button class="btn" data-nav="session">Resume</button></div>`
+      ? `
+        <div class="card" style="margin-top: 0.7rem; display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap;">
+          <span><b>Active block detected</b> (${inProgressCount} questions)</span>
+          <div style="display: flex; gap: 0.55rem; flex-wrap: wrap;">
+            <button class="btn" data-nav="session">Resume</button>
+            <button class="btn ghost" type="button" data-action="end-active-block" data-session-id="${escapeHtml(inProgress.id)}">End block</button>
+          </div>
+        </div>
+      `
       : ""
     }
 
@@ -9812,6 +9831,7 @@ function renderCreateTest() {
 function wireCreateTest() {
   const courseSelect = document.getElementById("create-test-course-select");
   const sourceSelect = document.getElementById("create-test-source-select");
+  const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
   const allTopicsInput = document.querySelector("input[data-role='create-test-all-topics']");
   const summaryEl = document.getElementById("create-test-filter-summary");
@@ -9884,6 +9904,30 @@ function wireCreateTest() {
   sourceSelect?.addEventListener("change", () => {
     state.createTestSource = String(sourceSelect.value || "all");
     updateCreateTestSummary();
+  });
+
+  endActiveBlockBtn?.addEventListener("click", () => {
+    const user = getCurrentUser();
+    const sessionId = String(endActiveBlockBtn.getAttribute("data-session-id") || "").trim();
+    if (!user || !sessionId) {
+      return;
+    }
+
+    const session = getSessionById(sessionId);
+    if (!session || session.userId !== user.id || session.status !== "in_progress") {
+      toast("Active block not found.");
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+
+    finalizeSession(session.id);
+    if (state.sessionId === session.id) {
+      state.sessionId = null;
+    }
+    toast("Block ended and moved to previous tests.");
+    state.skipNextRouteAnimation = true;
+    render();
   });
 
   blockForm?.addEventListener("submit", (event) => {
@@ -16606,6 +16650,10 @@ function createSessionFromQuestions(questions, config = {}) {
   const durationValue = Number(config.duration ?? 20);
   const duration = Math.max(5, Number.isFinite(durationValue) ? durationValue : 20);
   const source = String(config.source || "all");
+  const sessionAcademicYear = user.role === "student" ? normalizeAcademicYearOrNull(user.academicYear) : null;
+  const sessionAcademicSemester = user.role === "student" ? normalizeAcademicSemesterOrNull(user.academicSemester) : null;
+  const sessionCourses = [];
+  const seenSessionCourses = new Set();
 
   const responses = {};
   selected.forEach((question) => {
@@ -16618,6 +16666,11 @@ function createSessionFromQuestions(questions, config = {}) {
       highlightedLines: [],
       submitted: false,
     };
+    const mappedCourse = String(getQbankCourseTopicMeta(question).course || "").trim();
+    if (mappedCourse && !seenSessionCourses.has(mappedCourse)) {
+      seenSessionCourses.add(mappedCourse);
+      sessionCourses.push(mappedCourse);
+    }
   });
 
   const session = {
@@ -16628,6 +16681,9 @@ function createSessionFromQuestions(questions, config = {}) {
     durationMin: duration,
     timeRemainingSec: mode === "timed" ? duration * 60 : null,
     paused: false,
+    courses: sessionCourses,
+    academicYear: sessionAcademicYear,
+    academicSemester: sessionAcademicSemester,
     questionIds: selected.map((question) => question.id),
     responses,
     currentIndex: 0,
@@ -17995,6 +18051,94 @@ function getAnalyticsQuestionMetaById() {
   return analyticsRuntime.questionMetaById;
 }
 
+function findUserForAnalytics(userId) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+  return getUsers().find((entry) => (
+    String(entry?.id || "").trim() === normalizedUserId
+    || String(entry?.supabaseAuthId || "").trim() === normalizedUserId
+  )) || null;
+}
+
+function getSessionCourseList(session, questionMetaById = null) {
+  if (!session || typeof session !== "object") {
+    return [];
+  }
+
+  const courses = [];
+  const seenCourses = new Set();
+  const storedCourses = Array.isArray(session.courses) ? session.courses : [];
+  storedCourses.forEach((course) => {
+    const normalizedCourse = String(course || "").trim();
+    if (!normalizedCourse || seenCourses.has(normalizedCourse)) {
+      return;
+    }
+    seenCourses.add(normalizedCourse);
+    courses.push(normalizedCourse);
+  });
+  if (courses.length) {
+    return courses;
+  }
+
+  const map = questionMetaById instanceof Map ? questionMetaById : getAnalyticsQuestionMetaById();
+  (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
+    if (qid == null || qid === "") {
+      return;
+    }
+    const questionMeta = map.get(qid) || map.get(String(qid || "").trim());
+    const mappedCourse = String(questionMeta?.course || "").trim();
+    if (!mappedCourse || seenCourses.has(mappedCourse)) {
+      return;
+    }
+    seenCourses.add(mappedCourse);
+    courses.push(mappedCourse);
+  });
+  return courses;
+}
+
+function getSessionAcademicTerm(session, questionMetaById = null) {
+  const explicitYear = normalizeAcademicYearOrNull(session?.academicYear);
+  const explicitSemester = normalizeAcademicSemesterOrNull(session?.academicSemester);
+  if (explicitYear !== null && explicitSemester !== null) {
+    return { year: explicitYear, semester: explicitSemester };
+  }
+
+  const inferred = inferAcademicTermFromCourses(getSessionCourseList(session, questionMetaById));
+  return {
+    year: explicitYear ?? inferred.year,
+    semester: explicitSemester ?? inferred.semester,
+  };
+}
+
+function isSessionWithinUserAcademicTerm(session, user, questionMetaById = null) {
+  if (!session || !user || user.role !== "student") {
+    return true;
+  }
+
+  const targetYear = normalizeAcademicYearOrNull(user.academicYear);
+  const targetSemester = normalizeAcademicSemesterOrNull(user.academicSemester);
+  if (targetYear === null || targetSemester === null) {
+    return true;
+  }
+
+  const sessionTerm = getSessionAcademicTerm(session, questionMetaById);
+  if (sessionTerm.year === null || sessionTerm.semester === null) {
+    return false;
+  }
+  return sessionTerm.year === targetYear && sessionTerm.semester === targetSemester;
+}
+
+function getAnalyticsEnrollmentCacheToken(user) {
+  if (!user || user.role !== "student") {
+    return "__all_terms__";
+  }
+  const year = normalizeAcademicYearOrNull(user.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
+  return `${year ?? "na"}-${semester ?? "na"}`;
+}
+
 function summarizeSessionRollups(rollups = []) {
   const summary = (Array.isArray(rollups) ? rollups : []).reduce((acc, entry) => {
     acc.total += Number(entry?.total || 0);
@@ -18113,13 +18257,15 @@ function buildStudentAnalyticsInsights(snapshot, courseFilter = "") {
   };
 }
 
-function buildStudentAnalyticsSnapshot(userId, courseFilter = "") {
+function buildStudentAnalyticsSnapshot(userId, courseFilter = "", userOverride = null) {
   const normalizedFilter = String(courseFilter || "").trim();
+  const targetUser = userOverride || findUserForAnalytics(userId);
+  const questionMetaById = getAnalyticsQuestionMetaById();
   const sessions = getSessionsForUser(userId)
     .filter((session) => session.status === "completed")
+    .filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, questionMetaById))
     .slice()
     .sort((a, b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt));
-  const questionMetaById = getAnalyticsQuestionMetaById();
   const byTopic = new Map();
 
   let totalAnswered = 0;
@@ -18228,11 +18374,13 @@ function getStudentAnalyticsSnapshot(userId, courseFilter = "") {
     return buildStudentAnalyticsSnapshot("", courseFilter);
   }
   const normalizedFilter = String(courseFilter || "").trim();
-  const key = `${userId}::${normalizedFilter || "__all__"}`;
+  const targetUser = findUserForAnalytics(userId);
+  const enrollmentToken = getAnalyticsEnrollmentCacheToken(targetUser);
+  const key = `${userId}::${normalizedFilter || "__all__"}::${enrollmentToken}`;
   if (analyticsRuntime.cache.has(key)) {
     return analyticsRuntime.cache.get(key);
   }
-  const snapshot = buildStudentAnalyticsSnapshot(userId, normalizedFilter);
+  const snapshot = buildStudentAnalyticsSnapshot(userId, normalizedFilter, targetUser);
   analyticsRuntime.cache.set(key, snapshot);
   return snapshot;
 }
@@ -18277,6 +18425,26 @@ function normalizeSession(session) {
     changed = true;
   }
 
+  const currentSessionCourses = Array.isArray(session.courses)
+    ? session.courses.map((course) => String(course || "").trim()).filter(Boolean)
+    : [];
+  const normalizedSessionCourses = [...new Set(currentSessionCourses)];
+  if (!Array.isArray(session.courses) || currentSessionCourses.join("|") !== normalizedSessionCourses.join("|")) {
+    session.courses = normalizedSessionCourses;
+    changed = true;
+  }
+
+  const normalizedSessionYear = normalizeAcademicYearOrNull(session.academicYear);
+  const normalizedSessionSemester = normalizeAcademicSemesterOrNull(session.academicSemester);
+  if (session.academicYear !== normalizedSessionYear) {
+    session.academicYear = normalizedSessionYear;
+    changed = true;
+  }
+  if (session.academicSemester !== normalizedSessionSemester) {
+    session.academicSemester = normalizedSessionSemester;
+    changed = true;
+  }
+
   if (session.status === "in_progress") {
     const availableQuestionIds = new Set(getQuestions().map((question) => question.id));
     const sanitizedQuestionIds = session.questionIds.filter((qid) => availableQuestionIds.has(qid));
@@ -18292,6 +18460,42 @@ function normalizeSession(session) {
         changed = true;
       }
     });
+  }
+
+  if (!session.courses.length || session.academicYear === null || session.academicSemester === null) {
+    const questionsById = new Map(getQuestions().map((question) => [question.id, question]));
+    const inferredCourses = [];
+    const seenCourses = new Set(session.courses);
+
+    session.questionIds.forEach((qid) => {
+      const question = questionsById.get(qid);
+      if (!question) {
+        return;
+      }
+      const mappedCourse = String(getQbankCourseTopicMeta(question).course || "").trim();
+      if (!mappedCourse || seenCourses.has(mappedCourse)) {
+        return;
+      }
+      seenCourses.add(mappedCourse);
+      inferredCourses.push(mappedCourse);
+    });
+
+    if (inferredCourses.length) {
+      session.courses = [...session.courses, ...inferredCourses];
+      changed = true;
+    }
+
+    if (session.academicYear === null || session.academicSemester === null) {
+      const inferredTerm = inferAcademicTermFromCourses(session.courses);
+      if (session.academicYear === null && inferredTerm.year !== null) {
+        session.academicYear = inferredTerm.year;
+        changed = true;
+      }
+      if (session.academicSemester === null && inferredTerm.semester !== null) {
+        session.academicSemester = inferredTerm.semester;
+        changed = true;
+      }
+    }
   }
 
   if (!session.questionIds.length && session.status === "in_progress") {
