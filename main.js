@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.9").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.11").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -100,6 +100,12 @@ const THEME_COMFORT = "comfort";
 const THEME_META_COLOR_LIGHT = "#177e89";
 const THEME_META_COLOR_DARK = "#0f172a";
 const THEME_META_COLOR_COMFORT = "#2b2826";
+const SESSION_FONT_SCALE_MIN = 80;
+const SESSION_FONT_SCALE_MAX = 140;
+const SESSION_FONT_SCALE_STEP = 2;
+const SESSION_FONT_SCALE_DEFAULT = 100;
+const SESSION_HIGHLIGHTER_DEFAULT = "yellow";
+const SESSION_HIGHLIGHTER_COLORS = new Set(["yellow", "red", "green"]);
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -155,7 +161,10 @@ const state = {
   createTestSource: "all",
   analyticsCourse: "",
   sessionPanel: null,
+  sessionNavSettingsOpen: false,
   sessionMarkerEnabled: false,
+  sessionHighlighterColor: SESSION_HIGHLIGHTER_DEFAULT,
+  sessionFontScalePercent: SESSION_FONT_SCALE_DEFAULT,
   sessionFontScale: "normal",
   sessionHighContrast: false,
   calcExpression: "",
@@ -4147,6 +4156,8 @@ async function hydrateRelationalSessions(currentUser) {
         notes: String(response?.notes || ""),
         timeSpentSec: 0,
         highlightedLines: [],
+        highlightedLineColors: {},
+        highlightedChoices: {},
         submitted: Boolean(response?.submitted),
       };
     });
@@ -6882,7 +6893,6 @@ function navigate(route, extras = {}) {
   const applyNavigation = () => {
     if (targetRoute !== "session") {
       state.sessionPanel = null;
-      state.sessionMarkerEnabled = false;
       state.calcExpression = "";
     }
     state.route = targetRoute;
@@ -6900,7 +6910,6 @@ function navigate(route, extras = {}) {
 
   if (targetRoute !== "session") {
     state.sessionPanel = null;
-    state.sessionMarkerEnabled = false;
     state.calcExpression = "";
   }
   state.route = targetRoute;
@@ -7628,6 +7637,7 @@ function render() {
   appEl.removeEventListener("click", handleSessionClick);
   appEl.removeEventListener("click", handleReviewClick);
   document.removeEventListener("keydown", handleSessionKeydown);
+  document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
   document.removeEventListener("keydown", handleReviewKeydown);
 
   const user = getCurrentUser();
@@ -7759,6 +7769,9 @@ function render() {
   }
   if (!(state.route === "admin" && state.adminPage === "activity")) {
     clearAdminPresencePolling();
+  }
+  if (state.route !== "session") {
+    state.sessionNavSettingsOpen = false;
   }
 
   switch (state.route) {
@@ -9515,13 +9528,18 @@ function renderDashboard() {
 }
 
 function renderResumeCard(userId) {
-  const sessions = getSessionsForUser(userId);
-  const inProgress = sessions.find((session) => session.status === "in_progress");
+  const inProgress = getNormalizedActiveSessionForDisplay(userId, state.sessionId);
   if (!inProgress) {
     return `<p class="subtle">No active block.</p>`;
   }
 
-  const progress = `${inProgress.currentIndex + 1}/${inProgress.questionIds.length}`;
+  const totalQuestions = Array.isArray(inProgress.questionIds) ? inProgress.questionIds.length : 0;
+  if (!totalQuestions) {
+    return `<p class="subtle">No active block.</p>`;
+  }
+
+  const currentQuestion = Math.max(1, Math.min(totalQuestions, Number(inProgress.currentIndex || 0) + 1));
+  const progress = `${currentQuestion}/${totalQuestions}`;
   return `
     <p>Mode: <b>${escapeHtml(inProgress.mode)}</b> | Progress: <b>${progress}</b></p>
     <button class="btn" data-nav="session">Resume session</button>
@@ -9759,7 +9777,7 @@ function renderCreateTest() {
     state.qbankFilters.topics = selectedTopics;
   }
   const filtered = applyQbankFilters(questions, { course: selectedCourse, topics: selectedTopics });
-  const inProgress = getSessionsForUser(user.id).find((session) => session.status === "in_progress");
+  const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = selectedTopics.length === 0;
   const selectedTopicLabel = allTopicsSelected ? "All topics" : selectedTopics.join(" + ");
@@ -10019,6 +10037,112 @@ function wireCreateTest() {
   });
 }
 
+function getSessionFontScaleCssValue() {
+  const normalized = normalizeSessionFontScalePercent(state.sessionFontScalePercent, SESSION_FONT_SCALE_DEFAULT);
+  return (normalized / 100).toFixed(2);
+}
+
+function setSessionFontScalePercent(nextPercent, options = {}) {
+  const normalized = normalizeSessionFontScalePercent(nextPercent, state.sessionFontScalePercent);
+  if (state.sessionFontScalePercent === normalized && !options.force) {
+    return false;
+  }
+  state.sessionFontScalePercent = normalized;
+  state.sessionFontScale = getSessionFontScaleBucket(normalized);
+  persistSessionUiPreferences();
+  return true;
+}
+
+function renderSessionNavSettings() {
+  const markerToneClass = state.sessionMarkerEnabled ? "is-active" : "";
+  const markerLabel = state.sessionMarkerEnabled ? "Highlighter on" : "Highlighter off";
+  const markerButtonText = state.sessionMarkerEnabled ? "Disable highlighter" : "Enable highlighter";
+  const fontPercent = normalizeSessionFontScalePercent(state.sessionFontScalePercent, SESSION_FONT_SCALE_DEFAULT);
+
+  return `
+    <div class="exam-nav-settings">
+      <div class="exam-nav-setting-row">
+        <span class="exam-nav-setting-label">Font size</span>
+        <div class="exam-nav-font-controls">
+          <button
+            type="button"
+            class="btn ghost exam-nav-step-btn"
+            data-action="decrease-session-font"
+            aria-label="Decrease font size"
+            title="Decrease font size"
+          >−</button>
+          <input
+            id="session-font-scale-slider"
+            class="exam-nav-font-slider"
+            type="range"
+            min="${SESSION_FONT_SCALE_MIN}"
+            max="${SESSION_FONT_SCALE_MAX}"
+            step="${SESSION_FONT_SCALE_STEP}"
+            value="${fontPercent}"
+            aria-label="Session font size"
+          />
+          <button
+            type="button"
+            class="btn ghost exam-nav-step-btn"
+            data-action="increase-session-font"
+            aria-label="Increase font size"
+            title="Increase font size"
+          >+</button>
+          <span class="exam-nav-font-value" data-role="session-font-scale-value">${fontPercent}%</span>
+        </div>
+      </div>
+      <div class="exam-nav-setting-row">
+        <span class="exam-nav-setting-label">Highlighter</span>
+        <button
+          type="button"
+          class="btn ghost exam-nav-marker-toggle ${markerToneClass}"
+          data-action="toggle-marker-mode"
+          aria-pressed="${state.sessionMarkerEnabled ? "true" : "false"}"
+        >${markerButtonText}</button>
+      </div>
+      <div class="exam-nav-setting-row">
+        <span class="exam-nav-setting-label">${markerLabel}</span>
+        <div class="exam-nav-highlight-palette" role="group" aria-label="Highlighter colors">
+          ${["yellow", "red", "green"]
+      .map((color) => `
+              <button
+                type="button"
+                class="exam-nav-color-btn ${state.sessionHighlighterColor === color ? "is-selected" : ""}"
+                data-action="set-highlighter-color"
+                data-color="${color}"
+                aria-label="${color[0].toUpperCase()}${color.slice(1)} highlighter"
+                aria-pressed="${state.sessionHighlighterColor === color ? "true" : "false"}"
+              ><span class="swatch is-${color}" aria-hidden="true"></span></button>
+            `)
+      .join("")}
+        </div>
+      </div>
+      <button type="button" class="btn ghost exam-nav-reset-btn" data-action="reset-session-ui-settings">Reset settings</button>
+    </div>
+  `;
+}
+
+function syncSessionUiControlsInDom() {
+  const shell = appEl.querySelector(".exam-shell");
+  if (shell) {
+    shell.style.setProperty("--exam-font-scale", getSessionFontScaleCssValue());
+    shell.classList.toggle("marker-on", Boolean(state.sessionMarkerEnabled));
+    const normalizedColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+    shell.classList.remove("marker-yellow", "marker-red", "marker-green");
+    shell.classList.add(`marker-${normalizedColor}`);
+  }
+
+  const slider = document.getElementById("session-font-scale-slider");
+  const fontPercent = normalizeSessionFontScalePercent(state.sessionFontScalePercent, SESSION_FONT_SCALE_DEFAULT);
+  if (slider && String(slider.value) !== String(fontPercent)) {
+    slider.value = String(fontPercent);
+  }
+  const valueEl = appEl.querySelector("[data-role='session-font-scale-value']");
+  if (valueEl) {
+    valueEl.textContent = `${fontPercent}%`;
+  }
+}
+
 function renderSession() {
   const user = getCurrentUser();
   const session = getActiveSession(user.id, state.sessionId);
@@ -10071,6 +10195,16 @@ function renderSession() {
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
   const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
   const isTimedMode = session.mode === "timed";
+  const normalizedHighlighterColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+  const shellClassNames = [
+    "exam-shell",
+    "exam-shell-moodle",
+    `font-${state.sessionFontScale}`,
+    state.sessionHighContrast ? "high-contrast" : "",
+    state.sessionMarkerEnabled ? "marker-on" : "",
+    `marker-${normalizedHighlighterColor}`,
+  ].filter(Boolean).join(" ");
+  const shellStyleAttr = `--exam-font-scale:${getSessionFontScaleCssValue()};`;
   const mappedCourse = getQbankCourseTopicMeta(question).course;
   const questionCourse = String(question.qbankCourse || question.course || "").trim();
   const currentCourse = mappedCourse || questionCourse;
@@ -10120,6 +10254,8 @@ function renderSession() {
     .map((choice) => {
       const selected = response.selected.includes(choice.id);
       const struck = response.struck.includes(choice.id);
+      const choiceHighlightColor = normalizeSessionHighlightColor(response.highlightedChoices?.[choice.id], "");
+      const choiceHighlightClass = choiceHighlightColor ? `is-text-highlighted is-highlight-${choiceHighlightColor}` : "";
       const correctChoice = correctChoiceIds.includes(choice.id);
       const wrongSelected = isSubmitted && selected && !correctChoice;
       const showCorrect = isSubmitted && correctChoice;
@@ -10143,7 +10279,7 @@ function renderSession() {
             </label>
             <button
               type="button"
-              class="exam-choice-text exam-choice-text-hit"
+              class="exam-choice-text exam-choice-text-hit ${choiceHighlightClass}"
               data-action="toggle-strike"
               data-choice-id="${choice.id}"
               ${isSubmitted ? "disabled" : ""}
@@ -10157,7 +10293,7 @@ function renderSession() {
 
   return `
     <section class="exam-shell-wrap">
-      <div class="exam-shell exam-shell-moodle font-${escapeHtml(state.sessionFontScale)} ${state.sessionHighContrast ? "high-contrast" : ""}">
+      <div class="${shellClassNames}" style="${shellStyleAttr}">
         <section class="exam-main exam-main-simple">
           <div class="exam-content exam-content-moodle">
             <aside class="exam-question-meta">
@@ -10196,8 +10332,9 @@ function renderSession() {
                 <div class="exam-stem">
                   ${stemLines
       .map((line, index) => {
-        const highlighted = response.highlightedLines.includes(index) ? "is-highlighted" : "";
-        return `<p class="exam-line ${highlighted}">${escapeHtml(line)}</p>`;
+        const lineHighlightColor = normalizeSessionHighlightColor(response.highlightedLineColors?.[index], "");
+        const highlighted = lineHighlightColor ? `is-highlighted is-highlight-${lineHighlightColor}` : "";
+        return `<p class="exam-line ${highlighted}" data-action="toggle-line-highlight" data-line-index="${index}" title="Toggle highlight">${escapeHtml(line)}</p>`;
       })
       .join("")}
                 </div>
@@ -10214,7 +10351,22 @@ function renderSession() {
             </section>
 
             <aside class="exam-nav-panel">
-              <h3>Quiz navigation</h3>
+              <div class="exam-nav-panel-head">
+                <h3>Quiz navigation</h3>
+                <button
+                  type="button"
+                  class="exam-nav-settings-toggle ${state.sessionNavSettingsOpen ? "is-open" : ""}"
+                  data-action="toggle-nav-settings"
+                  aria-label="Open block settings"
+                  aria-expanded="${state.sessionNavSettingsOpen ? "true" : "false"}"
+                  title="Block settings"
+                >
+                  <span class="bar" aria-hidden="true"></span>
+                  <span class="bar" aria-hidden="true"></span>
+                  <span class="bar" aria-hidden="true"></span>
+                </button>
+              </div>
+              ${state.sessionNavSettingsOpen ? renderSessionNavSettings() : ""}
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
@@ -10256,6 +10408,14 @@ function wireSession() {
   }
 
   startSessionTicker(session.id);
+  syncSessionUiControlsInDom();
+
+  const fontScaleSlider = document.getElementById("session-font-scale-slider");
+  fontScaleSlider?.addEventListener("input", () => {
+    const nextPercent = normalizeSessionFontScalePercent(fontScaleSlider.value, state.sessionFontScalePercent);
+    setSessionFontScalePercent(nextPercent);
+    syncSessionUiControlsInDom();
+  });
 
   const answerInputs = appEl.querySelectorAll("input[name='answer']");
   answerInputs.forEach((input) => {
@@ -10280,6 +10440,8 @@ function wireSession() {
   appEl.addEventListener("click", handleSessionClick);
   document.removeEventListener("keydown", handleSessionKeydown);
   document.addEventListener("keydown", handleSessionKeydown);
+  document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
+  document.addEventListener("mouseup", handleSessionHighlighterMouseup);
 
   const noteInput = document.getElementById("session-note-panel");
   noteInput?.addEventListener("input", () => {
@@ -10378,6 +10540,40 @@ async function handleSessionClick(event) {
     return;
   }
 
+  if (action === "toggle-nav-settings") {
+    state.sessionNavSettingsOpen = !state.sessionNavSettingsOpen;
+    render();
+    return;
+  }
+
+  if (action === "decrease-session-font" || action === "increase-session-font") {
+    const delta = action === "increase-session-font" ? SESSION_FONT_SCALE_STEP : -SESSION_FONT_SCALE_STEP;
+    setSessionFontScalePercent(state.sessionFontScalePercent + delta);
+    syncSessionUiControlsInDom();
+    return;
+  }
+
+  if (action === "set-highlighter-color") {
+    const requested = normalizeSessionHighlightColor(target.getAttribute("data-color"), state.sessionHighlighterColor);
+    if (state.sessionHighlighterColor !== requested) {
+      state.sessionHighlighterColor = requested;
+      persistSessionUiPreferences();
+      render();
+      return;
+    }
+    return;
+  }
+
+  if (action === "reset-session-ui-settings") {
+    state.sessionMarkerEnabled = false;
+    state.sessionHighlighterColor = SESSION_HIGHLIGHTER_DEFAULT;
+    state.sessionHighContrast = false;
+    setSessionFontScalePercent(SESSION_FONT_SCALE_DEFAULT, { force: true });
+    toast("Block settings reset.");
+    render();
+    return;
+  }
+
   if (action === "open-library") {
     toggleSessionPanel("library");
     return;
@@ -10443,7 +10639,8 @@ async function handleSessionClick(event) {
 
   if (action === "toggle-marker-mode") {
     state.sessionMarkerEnabled = !state.sessionMarkerEnabled;
-    toast(state.sessionMarkerEnabled ? "Marker mode enabled." : "Marker mode disabled.");
+    persistSessionUiPreferences();
+    toast(state.sessionMarkerEnabled ? "Highlighter enabled." : "Highlighter disabled.");
     render();
     return;
   }
@@ -10451,9 +10648,9 @@ async function handleSessionClick(event) {
   if (action === "set-font-scale") {
     const scale = target.getAttribute("data-scale");
     if (["compact", "normal", "large"].includes(scale)) {
-      state.sessionFontScale = scale;
-      persistSessionUiPreferences();
-      render();
+      const mappedPercent = scale === "compact" ? 90 : scale === "large" ? 112 : SESSION_FONT_SCALE_DEFAULT;
+      setSessionFontScalePercent(mappedPercent);
+      syncSessionUiControlsInDom();
     }
     return;
   }
@@ -10498,16 +10695,31 @@ async function handleSessionClick(event) {
 
   if (action === "toggle-line-highlight") {
     if (!state.sessionMarkerEnabled) {
-      toast("Enable marker first.");
+      toast("Enable highlighter first.");
       return;
     }
-    const lineIndex = Number(target.getAttribute("data-line-index"));
+    const lineIndex = Math.floor(Number(target.getAttribute("data-line-index")));
+    if (!Number.isFinite(lineIndex) || lineIndex < 0) {
+      return;
+    }
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
-    if (response.highlightedLines.includes(lineIndex)) {
+    if (!response.highlightedLineColors || typeof response.highlightedLineColors !== "object" || Array.isArray(response.highlightedLineColors)) {
+      response.highlightedLineColors = {};
+    }
+    if (!Array.isArray(response.highlightedLines)) {
+      response.highlightedLines = [];
+    }
+    const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+    const existingColor = normalizeSessionHighlightColor(response.highlightedLineColors[lineIndex], "");
+    if (existingColor === activeColor) {
+      delete response.highlightedLineColors[lineIndex];
       response.highlightedLines = response.highlightedLines.filter((entry) => entry !== lineIndex);
     } else {
-      response.highlightedLines.push(lineIndex);
+      response.highlightedLineColors[lineIndex] = activeColor;
+      if (!response.highlightedLines.includes(lineIndex)) {
+        response.highlightedLines.push(lineIndex);
+      }
     }
     session.updatedAt = nowISO();
     upsertSession(session);
@@ -10544,9 +10756,28 @@ async function handleSessionClick(event) {
   }
 
   if (action === "toggle-strike") {
-    const choiceId = target.getAttribute("data-choice-id");
+    const choiceId = normalizeQuestionChoiceLabel(target.getAttribute("data-choice-id"));
+    if (!choiceId) {
+      return;
+    }
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
+    if (state.sessionMarkerEnabled) {
+      if (!response.highlightedChoices || typeof response.highlightedChoices !== "object" || Array.isArray(response.highlightedChoices)) {
+        response.highlightedChoices = {};
+      }
+      const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+      const existingColor = normalizeSessionHighlightColor(response.highlightedChoices[choiceId], "");
+      if (existingColor === activeColor) {
+        delete response.highlightedChoices[choiceId];
+      } else {
+        response.highlightedChoices[choiceId] = activeColor;
+      }
+      session.updatedAt = nowISO();
+      upsertSession(session);
+      render();
+      return;
+    }
     if (response.struck.includes(choiceId)) {
       response.struck = response.struck.filter((entry) => entry !== choiceId);
     } else {
@@ -10587,6 +10818,7 @@ async function handleSessionClick(event) {
     upsertSession(session);
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
+    document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
     state.sessionPanel = null;
     navigate("create-test");
     toast("Session suspended.");
@@ -10619,6 +10851,7 @@ async function handleSessionClick(event) {
     finalizeSession(session.id);
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
+    document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
     state.sessionPanel = null;
     state.reviewSessionId = session.id;
     state.reviewIndex = 0;
@@ -10684,6 +10917,34 @@ function handleSessionKeydown(event) {
 
   event.preventDefault();
   appEl.querySelector(`[data-action="${action}"]`)?.click();
+}
+
+function handleSessionHighlighterMouseup() {
+  if (state.route !== "session" || !state.sessionMarkerEnabled) {
+    return;
+  }
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return;
+  }
+  const selectedText = String(selection.toString() || "").trim();
+  if (!selectedText) {
+    selection.removeAllRanges();
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer;
+  const sourceEl = container && container.nodeType === 1 ? container : container?.parentElement;
+  const lineEl = sourceEl?.closest?.('[data-action="toggle-line-highlight"]');
+  const choiceEl = sourceEl?.closest?.('[data-action="toggle-strike"]');
+  selection.removeAllRanges();
+  if (lineEl) {
+    lineEl.click();
+    return;
+  }
+  if (choiceEl) {
+    choiceEl.click();
+  }
 }
 
 function startSessionTicker(sessionId) {
@@ -10828,6 +11089,8 @@ function renderReview() {
       notes: "",
       timeSpentSec: 0,
       highlightedLines: [],
+      highlightedLineColors: {},
+      highlightedChoices: {},
       submitted: true,
     };
     const hasAnswer = response.selected.length > 0;
@@ -10864,6 +11127,14 @@ function renderReview() {
   const correctChoiceIds = Array.isArray(question?.correct) ? question.correct : [];
   const questionChoices = Array.isArray(question?.choices) ? question.choices : [];
   const choiceType = question && correctChoiceIds.length > 1 ? "checkbox" : "radio";
+  const reviewShellClassNames = [
+    "exam-shell",
+    "exam-shell-moodle",
+    `font-${state.sessionFontScale}`,
+    state.sessionHighContrast ? "high-contrast" : "",
+    `marker-${normalizeSessionHighlightColor(state.sessionHighlighterColor)}`,
+  ].filter(Boolean).join(" ");
+  const reviewShellStyleAttr = `--exam-font-scale:${getSessionFontScaleCssValue()};`;
 
   const sideRows = reviewedEntries
     .map((entry, index) => {
@@ -10928,7 +11199,7 @@ function renderReview() {
 
   return `
     <section class="exam-shell-wrap">
-      <div class="exam-shell exam-shell-moodle font-${escapeHtml(state.sessionFontScale)} ${state.sessionHighContrast ? "high-contrast" : ""}">
+      <div class="${reviewShellClassNames}" style="${reviewShellStyleAttr}">
         <section class="exam-main exam-main-simple">
           <div class="exam-content exam-content-moodle">
             <aside class="exam-question-meta">
@@ -16720,6 +16991,8 @@ function createSessionFromQuestions(questions, config = {}) {
       notes: "",
       timeSpentSec: 0,
       highlightedLines: [],
+      highlightedLineColors: {},
+      highlightedChoices: {},
       submitted: false,
     };
     const mappedCourse = String(getQbankCourseTopicMeta(question).course || "").trim();
@@ -16765,6 +17038,31 @@ function getActiveSession(userId, preferredId = null) {
   }
 
   return sessions.find((session) => session.id === preferredId) || sessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+}
+
+function getNormalizedActiveSessionForDisplay(userId, preferredId = null) {
+  if (!userId) {
+    return null;
+  }
+
+  const active = getActiveSession(userId, preferredId);
+  if (!active) {
+    return null;
+  }
+  normalizeSession(active);
+  if (active.status === "in_progress" && Array.isArray(active.questionIds) && active.questionIds.length) {
+    return active;
+  }
+
+  const fallback = getActiveSession(userId, preferredId);
+  if (!fallback) {
+    return null;
+  }
+  normalizeSession(fallback);
+  if (fallback.status === "in_progress" && Array.isArray(fallback.questionIds) && fallback.questionIds.length) {
+    return fallback;
+  }
+  return null;
 }
 
 function getSessionById(sessionId) {
@@ -18453,18 +18751,64 @@ function getWeakAreas(userId, courseFilter = "") {
   return getStudentAnalyticsSnapshot(userId, courseFilter).weakAreas;
 }
 
+function normalizeSessionFontScalePercent(value, fallback = SESSION_FONT_SCALE_DEFAULT) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  const roundedToStep = Math.round(numeric / SESSION_FONT_SCALE_STEP) * SESSION_FONT_SCALE_STEP;
+  return Math.min(SESSION_FONT_SCALE_MAX, Math.max(SESSION_FONT_SCALE_MIN, roundedToStep));
+}
+
+function getSessionFontScalePercentFromLegacyScale(scale) {
+  if (scale === "compact") {
+    return 90;
+  }
+  if (scale === "large") {
+    return 112;
+  }
+  return SESSION_FONT_SCALE_DEFAULT;
+}
+
+function getSessionFontScaleBucket(percent) {
+  if (percent <= 92) {
+    return "compact";
+  }
+  if (percent >= 108) {
+    return "large";
+  }
+  return "normal";
+}
+
+function normalizeSessionHighlightColor(value, fallback = SESSION_HIGHLIGHTER_DEFAULT) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (SESSION_HIGHLIGHTER_COLORS.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
 function hydrateSessionUiPreferences() {
   const ui = load(STORAGE_KEYS.sessionUi, {});
-  state.sessionFontScale = ["compact", "normal", "large"].includes(ui.sessionFontScale)
+  const legacyScale = ["compact", "normal", "large"].includes(ui.sessionFontScale)
     ? ui.sessionFontScale
     : "normal";
+  const fallbackPercent = getSessionFontScalePercentFromLegacyScale(legacyScale);
+  state.sessionFontScalePercent = normalizeSessionFontScalePercent(ui.sessionFontScalePercent, fallbackPercent);
+  state.sessionFontScale = getSessionFontScaleBucket(state.sessionFontScalePercent);
   state.sessionHighContrast = Boolean(ui.sessionHighContrast);
+  state.sessionMarkerEnabled = Boolean(ui.sessionMarkerEnabled);
+  state.sessionHighlighterColor = normalizeSessionHighlightColor(ui.sessionHighlighterColor);
+  state.sessionNavSettingsOpen = false;
 }
 
 function persistSessionUiPreferences() {
   save(STORAGE_KEYS.sessionUi, {
+    sessionFontScalePercent: state.sessionFontScalePercent,
     sessionFontScale: state.sessionFontScale,
     sessionHighContrast: state.sessionHighContrast,
+    sessionMarkerEnabled: state.sessionMarkerEnabled,
+    sessionHighlighterColor: state.sessionHighlighterColor,
   });
 }
 
@@ -18582,6 +18926,8 @@ function normalizeSession(session) {
         notes: "",
         timeSpentSec: 0,
         highlightedLines: [],
+        highlightedLineColors: {},
+        highlightedChoices: {},
         submitted: false,
       };
       changed = true;
@@ -18619,6 +18965,73 @@ function normalizeSession(session) {
     }
     if (!Array.isArray(response.highlightedLines)) {
       response.highlightedLines = [];
+      changed = true;
+    } else {
+      const normalizedHighlightedLines = [...new Set(
+        response.highlightedLines
+          .map((entry) => Math.floor(Number(entry)))
+          .filter((entry) => Number.isFinite(entry) && entry >= 0),
+      )];
+      if (response.highlightedLines.join("|") !== normalizedHighlightedLines.join("|")) {
+        response.highlightedLines = normalizedHighlightedLines;
+        changed = true;
+      }
+    }
+    if (!response.highlightedLineColors || typeof response.highlightedLineColors !== "object" || Array.isArray(response.highlightedLineColors)) {
+      response.highlightedLineColors = {};
+      changed = true;
+    } else {
+      const normalizedLineColors = {};
+      Object.entries(response.highlightedLineColors).forEach(([lineKey, color]) => {
+        const lineIndex = Math.floor(Number(lineKey));
+        const normalizedColor = normalizeSessionHighlightColor(color, "");
+        if (!Number.isFinite(lineIndex) || lineIndex < 0 || !normalizedColor) {
+          return;
+        }
+        normalizedLineColors[lineIndex] = normalizedColor;
+      });
+      if (JSON.stringify(response.highlightedLineColors) !== JSON.stringify(normalizedLineColors)) {
+        response.highlightedLineColors = normalizedLineColors;
+        changed = true;
+      }
+    }
+    if (!response.highlightedChoices || typeof response.highlightedChoices !== "object" || Array.isArray(response.highlightedChoices)) {
+      response.highlightedChoices = {};
+      changed = true;
+    } else {
+      const normalizedChoiceColors = {};
+      Object.entries(response.highlightedChoices).forEach(([choiceKey, color]) => {
+        const choiceId = normalizeQuestionChoiceLabel(choiceKey);
+        const normalizedColor = normalizeSessionHighlightColor(color, "");
+        if (!choiceId || !normalizedColor) {
+          return;
+        }
+        normalizedChoiceColors[choiceId] = normalizedColor;
+      });
+      if (JSON.stringify(response.highlightedChoices) !== JSON.stringify(normalizedChoiceColors)) {
+        response.highlightedChoices = normalizedChoiceColors;
+        changed = true;
+      }
+    }
+    response.highlightedLines.forEach((lineIndex) => {
+      if (!response.highlightedLineColors[lineIndex]) {
+        response.highlightedLineColors[lineIndex] = SESSION_HIGHLIGHTER_DEFAULT;
+        changed = true;
+      }
+    });
+    Object.keys(response.highlightedLineColors).forEach((lineKey) => {
+      const lineIndex = Math.floor(Number(lineKey));
+      if (!Number.isFinite(lineIndex) || lineIndex < 0) {
+        return;
+      }
+      if (!response.highlightedLines.includes(lineIndex)) {
+        response.highlightedLines.push(lineIndex);
+        changed = true;
+      }
+    });
+    const dedupedLineIndexes = [...new Set(response.highlightedLines)].sort((a, b) => a - b);
+    if (response.highlightedLines.join("|") !== dedupedLineIndexes.join("|")) {
+      response.highlightedLines = dedupedLineIndexes;
       changed = true;
     }
     if (typeof response.flagged !== "boolean") {
