@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.9").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -10102,11 +10102,6 @@ function renderSession() {
             : entry.selected.length > 0
               ? "answered"
               : "unanswered";
-      const statusIndicator = isCorrectEntry
-        ? `<span class="state is-correct" aria-hidden="true">✓</span>`
-        : isWrongEntry
-          ? `<span class="state is-wrong" aria-hidden="true">✕</span>`
-          : "";
       return `
         <button
           type="button"
@@ -10116,7 +10111,6 @@ function renderSession() {
           aria-label="Go to question ${index + 1}, ${statusLabel}"
         >
           <span class="num">${index + 1}</span>
-          ${statusIndicator}
         </button>
       `;
     })
