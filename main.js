@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.3").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -7938,8 +7938,8 @@ function syncTopbar() {
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       ${isAdmin ? `<div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>` : ""}
-      ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       ${renderThemeToggleButton()}
+      ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
