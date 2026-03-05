@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.2").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -96,10 +96,8 @@ const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const THEME_PREFERENCE_KEY = "mcq_theme_preference";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
-const THEME_EYE_COMFORT = "eye-comfort";
 const THEME_META_COLOR_LIGHT = "#177e89";
-const THEME_META_COLOR_DARK = "#1e2128";
-const THEME_META_COLOR_EYE_COMFORT = "#fdf6e3";
+const THEME_META_COLOR_DARK = "#05080f";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -316,7 +314,6 @@ let notificationRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
-let studentQuestionRefreshBroadcastHandle = null;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -867,36 +864,20 @@ function getStudentRefreshTriggerToken() {
   return String(payload.token || "").trim();
 }
 
-function getUnseenStudentRefreshTriggerToken(user = null) {
+function shouldForceStudentRefreshFromAdminTrigger(user = null) {
   const current = user || getCurrentUser();
   if (!current || current.role !== "student") {
-    return "";
+    return false;
   }
   const token = getStudentRefreshTriggerToken();
   if (!token) {
-    return "";
+    return false;
   }
   const seenToken = String(load(STORAGE_KEYS.studentRefreshTriggerSeen, "") || "").trim();
   if (seenToken === token) {
-    return "";
-  }
-  return token;
-}
-
-function markStudentRefreshTriggerSeen(token) {
-  const safeToken = String(token || "").trim();
-  if (!safeToken) {
-    return;
-  }
-  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, safeToken);
-}
-
-function shouldForceStudentRefreshFromAdminTrigger(user = null) {
-  const token = getUnseenStudentRefreshTriggerToken(user);
-  if (!token) {
     return false;
   }
-  markStudentRefreshTriggerSeen(token);
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, token);
   const nextUrl = new URL(window.location.href);
   nextUrl.searchParams.set("student_refresh", token);
   window.location.replace(nextUrl.toString());
@@ -6549,85 +6530,37 @@ function seedData() {
 
 function getStoredThemePreference() {
   const stored = String(load(THEME_PREFERENCE_KEY, "") || "").trim().toLowerCase();
-  if (stored === THEME_DARK || stored === THEME_LIGHT || stored === THEME_EYE_COMFORT) {
+  if (stored === THEME_DARK || stored === THEME_LIGHT) {
     return stored;
   }
   return THEME_LIGHT;
 }
 
-function renderThemeToggleIcon() {
-  if (activeTheme === THEME_DARK) {
-    return `
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-      </svg>
-    `;
-  } else if (activeTheme === THEME_EYE_COMFORT) {
-    return `
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-        <circle cx="12" cy="12" r="3"></circle>
-      </svg>
-    `;
-  }
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="5"></circle>
-      <line x1="12" y1="1" x2="12" y2="3"></line>
-      <line x1="12" y1="21" x2="12" y2="23"></line>
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-      <line x1="1" y1="12" x2="3" y2="12"></line>
-      <line x1="21" y1="12" x2="23" y2="12"></line>
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-    </svg>
-  `;
-}
-
 function renderThemeToggleButton() {
-  let actionLabel = "Switch to dark mode";
-  let isActive = false;
-  if (activeTheme === THEME_DARK) {
-    actionLabel = "Switch to eye comfort mode";
-    isActive = true;
-  } else if (activeTheme === THEME_EYE_COMFORT) {
-    actionLabel = "Switch to light mode";
-    isActive = true;
-  }
+  const isDark = activeTheme === THEME_DARK;
   return `
     <button
-      class="theme-toggle-btn ${isActive ? "is-active" : ""}"
+      class="theme-toggle-btn ${isDark ? "is-active" : ""}"
       type="button"
       data-action="toggle-theme"
-      aria-pressed="${isActive ? "true" : "false"}"
-      aria-label="${actionLabel}"
-      title="${actionLabel}"
+      aria-pressed="${isDark ? "true" : "false"}"
+      title="${isDark ? "Switch to light mode" : "Switch to dark mode"}"
     >
-      ${renderThemeToggleIcon()}
+      ${isDark ? "Light mode" : "Dark mode"}
     </button>
   `;
 }
 
 function syncThemeToggleButtons() {
-  let actionLabel = "Switch to dark mode";
-  let isActive = false;
-  if (activeTheme === THEME_DARK) {
-    actionLabel = "Switch to eye comfort mode";
-    isActive = true;
-  } else if (activeTheme === THEME_EYE_COMFORT) {
-    actionLabel = "Switch to light mode";
-    isActive = true;
-  }
+  const isDark = activeTheme === THEME_DARK;
   document.querySelectorAll("[data-action='toggle-theme']").forEach((node) => {
     if (!(node instanceof HTMLButtonElement)) {
       return;
     }
-    node.classList.toggle("is-active", isActive);
-    node.setAttribute("aria-pressed", isActive ? "true" : "false");
-    node.setAttribute("aria-label", actionLabel);
-    node.setAttribute("title", actionLabel);
-    node.innerHTML = renderThemeToggleIcon();
+    node.classList.toggle("is-active", isDark);
+    node.setAttribute("aria-pressed", isDark ? "true" : "false");
+    node.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
+    node.textContent = isDark ? "Light mode" : "Dark mode";
   });
 }
 
@@ -6636,22 +6569,13 @@ function updateThemeMetaColor() {
   if (!metaThemeColor) {
     return;
   }
-  let color = THEME_META_COLOR_LIGHT;
-  if (activeTheme === THEME_DARK) color = THEME_META_COLOR_DARK;
-  else if (activeTheme === THEME_EYE_COMFORT) color = THEME_META_COLOR_EYE_COMFORT;
-  metaThemeColor.setAttribute("content", color);
+  metaThemeColor.setAttribute("content", activeTheme === THEME_DARK ? THEME_META_COLOR_DARK : THEME_META_COLOR_LIGHT);
 }
 
 function applyTheme(theme, options = {}) {
-  let nextTheme = THEME_LIGHT;
-  const normalizedTheme = String(theme || "").trim().toLowerCase();
-  if (normalizedTheme === THEME_DARK) nextTheme = THEME_DARK;
-  else if (normalizedTheme === THEME_EYE_COMFORT) nextTheme = THEME_EYE_COMFORT;
-
+  const nextTheme = String(theme || "").trim().toLowerCase() === THEME_DARK ? THEME_DARK : THEME_LIGHT;
   activeTheme = nextTheme;
   document.body.classList.toggle("theme-dark", nextTheme === THEME_DARK);
-  document.body.classList.toggle("theme-eye-comfort", nextTheme === THEME_EYE_COMFORT);
-
   updateThemeMetaColor();
   if (options.persist) {
     saveLocalOnly(THEME_PREFERENCE_KEY, nextTheme);
@@ -6701,12 +6625,7 @@ function bindGlobalEvents() {
     if (action === "toggle-theme") {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
-      let next = THEME_DARK;
-      if (activeTheme === THEME_LIGHT) next = THEME_DARK;
-      else if (activeTheme === THEME_DARK) next = THEME_EYE_COMFORT;
-      else if (activeTheme === THEME_EYE_COMFORT) next = THEME_LIGHT;
-
-      applyTheme(next, { persist: true });
+      applyTheme(activeTheme === THEME_DARK ? THEME_LIGHT : THEME_DARK, { persist: true });
       syncTopbar();
       return;
     }
@@ -6821,8 +6740,6 @@ function bindGlobalEvents() {
   window.addEventListener("pagehide", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
-    clearStudentDataAutoRefreshPolling();
-    clearStudentQuestionRefreshBroadcast();
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
@@ -6977,101 +6894,6 @@ function ensureStudentNotificationPolling(user = null) {
     }
     scheduleNotificationRealtimeHydration(0);
   }, NOTIFICATION_FALLBACK_POLL_MS);
-}
-
-function clearStudentDataAutoRefreshPolling() {
-  if (studentDataAutoRefreshPollHandle) {
-    window.clearInterval(studentDataAutoRefreshPollHandle);
-    studentDataAutoRefreshPollHandle = null;
-  }
-  studentDataAutoRefreshInFlight = false;
-}
-
-function ensureStudentDataAutoRefreshPolling(user = null) {
-  const currentUser = user || getCurrentUser();
-  if (!currentUser || currentUser.role !== "student") {
-    clearStudentDataAutoRefreshPolling();
-    return;
-  }
-  if (studentDataAutoRefreshPollHandle) {
-    return;
-  }
-
-  studentDataAutoRefreshPollHandle = window.setInterval(() => {
-    const activeUser = getCurrentUser();
-    if (!activeUser || activeUser.role !== "student") {
-      clearStudentDataAutoRefreshPolling();
-      return;
-    }
-    if (studentDataAutoRefreshInFlight || state.studentDataRefreshing) {
-      return;
-    }
-
-    const pendingRefreshToken = getUnseenStudentRefreshTriggerToken(activeUser);
-    const isExamRoute = state.route === "session" || state.route === "review";
-    if (pendingRefreshToken) {
-      if (isExamRoute) {
-        return;
-      }
-      markStudentRefreshTriggerSeen(pendingRefreshToken);
-      studentDataAutoRefreshInFlight = true;
-      refreshStudentDataSnapshot(activeUser, { force: true, rerender: true })
-        .catch((error) => {
-          console.warn("Student refresh signal sync failed.", error?.message || error);
-        })
-        .finally(() => {
-          studentDataAutoRefreshInFlight = false;
-        });
-      return;
-    }
-
-    if (!shouldRefreshStudentData(activeUser)) {
-      return;
-    }
-    studentDataAutoRefreshInFlight = true;
-    refreshStudentDataSnapshot(activeUser, { force: false, rerender: true })
-      .catch((error) => {
-        console.warn("Student auto-refresh failed.", error?.message || error);
-      })
-      .finally(() => {
-        studentDataAutoRefreshInFlight = false;
-      });
-  }, STUDENT_FORCE_REFRESH_POLL_MS);
-}
-
-function clearStudentQuestionRefreshBroadcast() {
-  if (studentQuestionRefreshBroadcastHandle) {
-    window.clearTimeout(studentQuestionRefreshBroadcastHandle);
-    studentQuestionRefreshBroadcastHandle = null;
-  }
-}
-
-function scheduleStudentQuestionRefreshBroadcast() {
-  const currentUser = getCurrentUser();
-  if (!currentUser || currentUser.role !== "admin") {
-    clearStudentQuestionRefreshBroadcast();
-    return;
-  }
-  if (studentQuestionRefreshBroadcastHandle) {
-    return;
-  }
-  studentQuestionRefreshBroadcastHandle = window.setTimeout(() => {
-    studentQuestionRefreshBroadcastHandle = null;
-    const activeAdmin = getCurrentUser();
-    if (!activeAdmin || activeAdmin.role !== "admin") {
-      return;
-    }
-    const actorProfileId = String(getUserProfileId(activeAdmin) || "").trim();
-    const triggerPayload = {
-      token: makeId("student_refresh"),
-      requestedAt: nowISO(),
-      requestedById: isUuidValue(actorProfileId) ? actorProfileId : null,
-      requestedBy: String(activeAdmin.name || activeAdmin.email || "Admin").trim() || "Admin",
-      reason: "questions-updated",
-    };
-    save(STORAGE_KEYS.studentRefreshTrigger, triggerPayload);
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-  }, 650);
 }
 
 function clearNotificationRealtimeSubscription() {
@@ -7715,13 +7537,11 @@ function render() {
     state.adminPresenceLastSyncAt = 0;
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
-    clearStudentQuestionRefreshBroadcast();
   }
   if (!user || user.role !== "student") {
     state.studentDataRefreshing = false;
     state.studentDataLastSyncAt = 0;
     state.studentDataLastFullSyncAt = 0;
-    clearStudentDataAutoRefreshPolling();
   }
   syncPresenceRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
@@ -8060,7 +7880,6 @@ function syncTopbar() {
   const user = getCurrentUser();
   ensureNotificationsRealtimeSubscription(user);
   ensureStudentNotificationPolling(user);
-  ensureStudentDataAutoRefreshPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const unreadNotificationCount = user?.role === "student"
@@ -8107,8 +7926,8 @@ function syncTopbar() {
     authActionsEl.classList.remove("hidden");
     authActionsEl.innerHTML = `
       ${isAdmin ? `<div id="topbar-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: true })}</div>` : ""}
-      ${renderThemeToggleButton()}
       ${isStudent ? renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) : ""}
+      ${renderThemeToggleButton()}
       <div class="user-menu ${menuOpen ? "is-open" : ""}">
         <button
           class="user-menu-trigger"
@@ -10156,24 +9975,14 @@ function renderSession() {
       const inlineFeedback = isSubmitted && isCorrect && selected && correctChoice
         ? `<span class="exam-choice-inline-note">Excellent! This is the correct answer.</span>`
         : "";
-      const choiceInputId = `session-answer-${currentQid}-${choice.id}`;
       return `
         <div class="exam-choice ${selected ? "is-selected" : ""} ${struck ? "is-struck" : ""} ${statusClass}">
-          <div class="exam-choice-hit">
+          <label class="exam-choice-hit">
             ${statusIndicator}
-            <label class="exam-choice-radio-hit" for="${escapeHtml(choiceInputId)}" aria-label="Select answer ${choice.id}">
-              <input id="${escapeHtml(choiceInputId)}" type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
-              <span class="exam-choice-radio"></span>
-            </label>
-            <button
-              type="button"
-              class="exam-choice-text exam-choice-text-hit"
-              data-action="toggle-strike"
-              data-choice-id="${choice.id}"
-              ${isSubmitted ? "disabled" : ""}
-              aria-label="Strike or unstrike choice ${choice.id}"
-            ><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</button>
-          </div>
+            <input type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
+            <span class="exam-choice-radio"></span>
+            <span class="exam-choice-text"><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</span>
+          </label>
         </div>
       `;
     })
@@ -10231,9 +10040,7 @@ function renderSession() {
                 </div>
 
                 <div class="exam-answer-actions">
-                  ${isSubmitted
-      ? `<button class="btn exam-submit-btn" data-action="next-question">Next</button>`
-      : `<button class="btn exam-submit-btn" data-action="submit-answer">Check</button>`}
+                  ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Check</button>`}
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
@@ -10570,10 +10377,7 @@ async function handleSessionClick(event) {
   }
 
   if (action === "toggle-strike") {
-    const choiceId = String(target.getAttribute("data-choice-id") || "").trim().toUpperCase();
-    if (!choiceId) {
-      return;
-    }
+    const choiceId = target.getAttribute("data-choice-id");
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
     if (response.struck.includes(choiceId)) {
@@ -12896,7 +12700,7 @@ function wireAdmin() {
       if (deferred) {
         toast("Refresh signal queued locally and will sync to cloud automatically.");
       } else {
-        toast("Refresh signal sent. Active students will sync updates within a few seconds.");
+        toast("Refresh signal sent. Students will reload once on their next open/sign-in.");
       }
     } catch (error) {
       const message = getErrorMessage(error, "Could not send refresh signal.");
@@ -18887,9 +18691,6 @@ function load(key, fallback) {
 function save(key, value) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
-  if (key === STORAGE_KEYS.questions) {
-    scheduleStudentQuestionRefreshBroadcast();
-  }
   scheduleRelationalWrite(key, value);
   scheduleSupabaseWrite(key, value);
   appendStorageMutationLog("save", key, value);
@@ -18995,8 +18796,6 @@ async function logout() {
 
   syncPresenceRuntime(null);
   clearNotificationRealtimeSubscription();
-  clearStudentDataAutoRefreshPolling();
-  clearStudentQuestionRefreshBroadcast();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   resetRelationalSyncState();
