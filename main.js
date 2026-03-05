@@ -163,6 +163,7 @@ const state = {
   sessionPanel: null,
   sessionNavSettingsOpen: false,
   sessionHighlightUndo: {},
+  sessionPendingHighlightSelection: null,
   sessionMarkerEnabled: false,
   sessionHighlighterColor: SESSION_HIGHLIGHTER_DEFAULT,
   sessionFontScalePercent: SESSION_FONT_SCALE_DEFAULT,
@@ -6897,6 +6898,7 @@ function navigate(route, extras = {}) {
       state.sessionPanel = null;
       state.calcExpression = "";
       state.sessionHighlightUndo = {};
+      state.sessionPendingHighlightSelection = null;
     }
     state.route = targetRoute;
     Object.assign(state, extras);
@@ -6915,6 +6917,7 @@ function navigate(route, extras = {}) {
     state.sessionPanel = null;
     state.calcExpression = "";
     state.sessionHighlightUndo = {};
+    state.sessionPendingHighlightSelection = null;
   }
   state.route = targetRoute;
   Object.assign(state, extras);
@@ -10371,6 +10374,26 @@ function getSessionHighlightUndoKey(sessionId, questionId) {
   return `${String(sessionId || "").trim()}::${String(questionId || "").trim()}`;
 }
 
+function shouldSuppressStrikeClick(sessionId, questionId, choiceId) {
+  const pending = state.sessionPendingHighlightSelection;
+  if (!pending) {
+    return false;
+  }
+  const expired = Number(pending.expiresAt || 0) < Date.now();
+  const matches = pending.kind === "choice"
+    && pending.sessionId === sessionId
+    && pending.questionId === questionId
+    && pending.choiceId === choiceId;
+  if (!matches || expired) {
+    if (expired) {
+      state.sessionPendingHighlightSelection = null;
+    }
+    return false;
+  }
+  state.sessionPendingHighlightSelection = null;
+  return true;
+}
+
 function normalizeResponseHighlightSnapshot(snapshot) {
   const safeSnapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
   const normalizedLineColors = {};
@@ -11126,7 +11149,7 @@ async function handleSessionClick(event) {
     }
     const qid = session.questionIds[session.currentIndex];
     const response = session.responses[qid];
-    if (state.sessionMarkerEnabled) {
+    if (shouldSuppressStrikeClick(session.id, qid, choiceId)) {
       return;
     }
     if (response.struck.includes(choiceId)) {
@@ -11349,6 +11372,7 @@ function handleSessionHighlighterMouseup() {
   const highlightStore = ensureResponseTextHighlightStore(response);
   const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
   pushSessionHighlightUndoSnapshot(session.id, qid, response);
+  state.sessionPendingHighlightSelection = null;
   if (startTarget.kind === "line") {
     const lineKey = startTarget.key;
     const lineRanges = updateHighlightRangesWithSelection(
@@ -11379,6 +11403,13 @@ function handleSessionHighlighterMouseup() {
     }
   } else if (startTarget.kind === "choice") {
     const choiceKey = startTarget.key;
+    state.sessionPendingHighlightSelection = {
+      kind: "choice",
+      sessionId: session.id,
+      questionId: qid,
+      choiceId: choiceKey,
+      expiresAt: Date.now() + 400,
+    };
     const choiceRanges = updateHighlightRangesWithSelection(
       highlightStore.choices[choiceKey],
       offsets.start,
