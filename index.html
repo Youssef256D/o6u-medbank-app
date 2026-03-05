@@ -1,117 +1,108 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="O6U MedBank helps October 6 University medical students build focused MCQ tests, solve in exam mode, and review detailed explanations."
-    />
-    <meta name="robots" content="index, follow, max-image-preview:large" />
-    <meta name="googlebot" content="index, follow, max-image-preview:large" />
-    <meta name="app-version" content="2026-03-04.2" />
-    <title>O6U MedBank</title>
-    <link rel="canonical" href="https://youssef256d.github.io/o6u-medbank-app/" />
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="O6U MedBank" />
-    <meta property="og:title" content="O6U MedBank" />
-    <meta
-      property="og:description"
-      content="MCQ practice platform for October 6 University Faculty of Medicine students."
-    />
-    <meta property="og:url" content="https://youssef256d.github.io/o6u-medbank-app/" />
-    <meta
-      property="og:image"
-      content="https://youssef256d.github.io/o6u-medbank-app/Assets/web%20Logo.png"
-    />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="O6U MedBank" />
-    <meta
-      name="twitter:description"
-      content="MCQ practice platform for October 6 University Faculty of Medicine students."
-    />
-    <meta
-      name="twitter:image"
-      content="https://youssef256d.github.io/o6u-medbank-app/Assets/web%20Logo.png"
-    />
-    <meta
-      name="google-site-verification"
-      content="hv033079gwABq906LsyGqfAvTRgpvuk2cruZBRNuAz4"
-    />
-    <meta name="theme-color" content="#177e89" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="O6U MedBank" />
-    <link rel="manifest" href="manifest.webmanifest" />
-    <link rel="apple-touch-icon" href="Assets/branding/apple-touch-icon.png" />
-    <link rel="icon" type="image/png" href="Assets/Fav%20icon.png" />
-    <link rel="stylesheet" href="styles.css?v=2026-03-04.2" />
-  </head>
-  <body>
-    <div class="background-glow"></div>
-    <div id="google-auth-loading" class="google-auth-loading hidden" role="status" aria-live="polite" aria-hidden="true">
-      <div class="google-auth-loading-card">
-        <span class="inline-loader" aria-hidden="true"></span>
-        <span>Signing in with Google...</span>
-      </div>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description"
+    content="O6U MedBank helps October 6 University medical students build focused MCQ tests, solve in exam mode, and review detailed explanations." />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+  <meta name="googlebot" content="index, follow, max-image-preview:large" />
+  <meta name="app-version" content="2026-03-05.1" />
+  <title>O6U MedBank</title>
+  <link rel="canonical" href="https://youssef256d.github.io/o6u-medbank-app/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="O6U MedBank" />
+  <meta property="og:title" content="O6U MedBank" />
+  <meta property="og:description"
+    content="MCQ practice platform for October 6 University Faculty of Medicine students." />
+  <meta property="og:url" content="https://youssef256d.github.io/o6u-medbank-app/" />
+  <meta property="og:image" content="https://youssef256d.github.io/o6u-medbank-app/Assets/web%20Logo.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="O6U MedBank" />
+  <meta name="twitter:description"
+    content="MCQ practice platform for October 6 University Faculty of Medicine students." />
+  <meta name="twitter:image" content="https://youssef256d.github.io/o6u-medbank-app/Assets/web%20Logo.png" />
+  <meta name="google-site-verification" content="hv033079gwABq906LsyGqfAvTRgpvuk2cruZBRNuAz4" />
+  <meta name="theme-color" content="#177e89" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="O6U MedBank" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="Assets/branding/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" href="Assets/Fav%20icon.png" />
+  <link rel="stylesheet" href="styles.css?v=2026-03-05.1" />
+</head>
+
+<body>
+  <div class="background-glow"></div>
+  <div id="google-auth-loading" class="google-auth-loading hidden" role="status" aria-live="polite" aria-hidden="true">
+    <div class="google-auth-loading-card">
+      <span class="inline-loader" aria-hidden="true"></span>
+      <span>Signing in with Google...</span>
     </div>
-    <header class="topbar">
-      <div class="brand-wrap">
-        <button class="brand" data-nav="landing">O6U MedBank</button>
-        <span class="pill">Faculty of Medicine</span>
-      </div>
-      <nav id="public-nav" class="top-nav">
-        <button class="is-active" data-nav="landing">Home</button>
-        <button data-nav="features">Features</button>
-        <button data-nav="pricing">Pricing</button>
-        <button data-nav="about">About</button>
-        <button data-nav="contact">Contact</button>
-      </nav>
-      <nav id="private-nav" class="top-nav hidden">
-        <button data-nav="dashboard">Dashboard</button>
-        <button data-nav="create-test">Create a Test</button>
-        <button data-nav="analytics">Analytics</button>
-        <button id="admin-link" class="hidden" data-nav="admin">Admin Dashboard</button>
-      </nav>
-      <div class="auth-actions" id="auth-actions">
-        <button class="theme-toggle-btn" type="button" data-action="toggle-theme" aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M15.2 3.4a8.9 8.9 0 1 0 5.4 12.3 8.3 8.3 0 0 1-3.4.7A8.9 8.9 0 0 1 11 4.6c0-.4 0-.8.1-1.2.5-.1 1-.1 1.5-.1.9 0 1.8.1 2.6.1z" />
-          </svg>
-        </button>
-        <button data-nav="login">Login</button>
-        <button class="btn" data-nav="signup">Sign up</button>
-      </div>
-    </header>
+  </div>
+  <header class="topbar">
+    <div class="brand-wrap">
+      <button class="brand" data-nav="landing">O6U MedBank</button>
+      <span class="pill">Faculty of Medicine</span>
+    </div>
+    <nav id="public-nav" class="top-nav">
+      <button class="is-active" data-nav="landing">Home</button>
+      <button data-nav="features">Features</button>
+      <button data-nav="pricing">Pricing</button>
+      <button data-nav="about">About</button>
+      <button data-nav="contact">Contact</button>
+    </nav>
+    <nav id="private-nav" class="top-nav hidden">
+      <button data-nav="dashboard">Dashboard</button>
+      <button data-nav="create-test">Create a Test</button>
+      <button data-nav="analytics">Analytics</button>
+      <button id="admin-link" class="hidden" data-nav="admin">Admin Dashboard</button>
+    </nav>
+    <div class="auth-actions" id="auth-actions">
+      <button class="theme-toggle-btn" type="button" data-action="toggle-theme" aria-pressed="false"
+        aria-label="Switch to dark mode" title="Switch to dark mode">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path
+            d="M15.2 3.4a8.9 8.9 0 1 0 5.4 12.3 8.3 8.3 0 0 1-3.4.7A8.9 8.9 0 0 1 11 4.6c0-.4 0-.8.1-1.2.5-.1 1-.1 1.5-.1.9 0 1.8.1 2.6.1z" />
+        </svg>
+      </button>
+      <button data-nav="login">Login</button>
+      <button class="btn" data-nav="signup">Sign up</button>
+    </div>
+  </header>
 
-    <main id="app" class="app-shell">
-      <section class="panel simple-home-wrap">
-        <div class="simple-home-inner">
-          <p class="kicker simple-home-kicker">O6U MedBank</p>
-          <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
-          <div class="simple-home-logo-wrap" aria-hidden="true">
-            <img class="simple-home-logo" src="Assets/web%20Logo.png" alt="" />
-          </div>
-          <p class="simple-home-sub">
-            Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after every question.
-          </p>
-          <div class="simple-home-chips">
-            <span>O6U course tracks</span>
-            <span>Exam-style testing</span>
-            <span>Progress tracking</span>
-          </div>
-          <div class="stack simple-home-actions">
-            <button class="btn" data-nav="login">Log in</button>
-            <button class="btn ghost" data-nav="signup">Sign up</button>
-          </div>
+  <main id="app" class="app-shell">
+    <section class="panel simple-home-wrap">
+      <div class="simple-home-inner">
+        <p class="kicker simple-home-kicker">O6U MedBank</p>
+        <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
+        <div class="simple-home-logo-wrap" aria-hidden="true">
+          <img class="simple-home-logo" src="Assets/web%20Logo.png" alt="" />
         </div>
-      </section>
-    </main>
+        <p class="simple-home-sub">
+          Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after
+          every question.
+        </p>
+        <div class="simple-home-chips">
+          <span>O6U course tracks</span>
+          <span>Exam-style testing</span>
+          <span>Progress tracking</span>
+        </div>
+        <div class="stack simple-home-actions">
+          <button class="btn" data-nav="login">Log in</button>
+          <button class="btn ghost" data-nav="signup">Sign up</button>
+        </div>
+      </div>
+    </section>
+  </main>
 
-    <template id="toast-template">
-      <div class="toast"></div>
-    </template>
+  <template id="toast-template">
+    <div class="toast"></div>
+  </template>
 
-    <script defer src="bootstrap.js?v=2026-03-04.2"></script>
-  </body>
+  <script defer src="bootstrap.js?v=2026-03-05.1"></script>
+</body>
+
 </html>
