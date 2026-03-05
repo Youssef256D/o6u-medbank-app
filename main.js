@@ -9859,7 +9859,7 @@ function renderCreateTest() {
             <input name="count" type="number" min="1" max="500" step="1" value="${defaultQuestionCount}" />
           </label>
           <label class="create-test-setup-field">Mode
-            <select name="mode">
+            <select name="mode" id="create-test-mode-select">
               <option value="tutor">Tutor</option>
               <option value="timed">Timed</option>
             </select>
@@ -9873,7 +9873,7 @@ function renderCreateTest() {
             </select>
           </label>
           <label class="create-test-setup-field">Timer (minutes, timed mode)
-            <input name="duration" type="number" min="5" max="180" value="20" />
+            <input name="duration" id="create-test-duration-input" type="number" min="5" max="180" value="20" disabled />
           </label>
         </div>
 
@@ -9904,6 +9904,17 @@ function wireCreateTest() {
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
+  const modeSelect = document.getElementById("create-test-mode-select");
+  const durationInput = document.getElementById("create-test-duration-input");
+
+  const syncDurationInputState = () => {
+    if (!(modeSelect instanceof HTMLSelectElement) || !(durationInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const isTimed = String(modeSelect.value || "tutor") === "timed";
+    durationInput.disabled = !isTimed;
+  };
+  syncDurationInputState();
 
   const updateCreateTestSummary = () => {
     const user = getCurrentUser();
@@ -9971,6 +9982,10 @@ function wireCreateTest() {
   sourceSelect?.addEventListener("change", () => {
     state.createTestSource = String(sourceSelect.value || "all");
     updateCreateTestSummary();
+  });
+
+  modeSelect?.addEventListener("change", () => {
+    syncDurationInputState();
   });
 
   endActiveBlockBtn?.addEventListener("click", () => {
