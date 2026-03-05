@@ -10738,7 +10738,7 @@ function renderSession() {
                 </div>
 
                 <div class="exam-answer-actions">
-                  ${isSubmitted ? "" : `<button class="btn exam-submit-btn" data-action="submit-answer">Check</button>`}
+                  <button class="btn exam-submit-btn" data-action="next-question">Next</button>
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
@@ -11300,7 +11300,7 @@ function handleSessionKeydown(event) {
     c: "open-calculator",
     k: "open-shortcuts",
     m: "toggle-marker-mode",
-    s: "submit-answer",
+    s: "next-question",
   };
 
   if (event.key === "Escape") {
@@ -19764,7 +19764,7 @@ function renderSessionPanel(session, question, response) {
         <li><b>L</b><span>Open Lab Values</span></li>
         <li><b>C</b><span>Open Calculator</span></li>
         <li><b>M</b><span>Toggle Marker mode</span></li>
-        <li><b>S</b><span>Submit current answer</span></li>
+        <li><b>S</b><span>Go to next question</span></li>
         <li><b>Esc</b><span>Close open tool panel</span></li>
       </ul>
     `;
