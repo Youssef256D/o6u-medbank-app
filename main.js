@@ -162,6 +162,7 @@ const state = {
   analyticsCourse: "",
   sessionPanel: null,
   sessionNavSettingsOpen: false,
+  sessionHighlightUndo: {},
   sessionMarkerEnabled: false,
   sessionHighlighterColor: SESSION_HIGHLIGHTER_DEFAULT,
   sessionFontScalePercent: SESSION_FONT_SCALE_DEFAULT,
@@ -6895,6 +6896,7 @@ function navigate(route, extras = {}) {
     if (targetRoute !== "session") {
       state.sessionPanel = null;
       state.calcExpression = "";
+      state.sessionHighlightUndo = {};
     }
     state.route = targetRoute;
     Object.assign(state, extras);
@@ -6912,6 +6914,7 @@ function navigate(route, extras = {}) {
   if (targetRoute !== "session") {
     state.sessionPanel = null;
     state.calcExpression = "";
+    state.sessionHighlightUndo = {};
   }
   state.route = targetRoute;
   Object.assign(state, extras);
@@ -10364,6 +10367,144 @@ function getSelectionOffsetsWithinElement(range, element) {
   }
 }
 
+function getSessionHighlightUndoKey(sessionId, questionId) {
+  return `${String(sessionId || "").trim()}::${String(questionId || "").trim()}`;
+}
+
+function normalizeResponseHighlightSnapshot(snapshot) {
+  const safeSnapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const normalizedLineColors = {};
+  if (safeSnapshot.highlightedLineColors && typeof safeSnapshot.highlightedLineColors === "object") {
+    Object.entries(safeSnapshot.highlightedLineColors).forEach(([lineKey, color]) => {
+      const lineIndex = Math.floor(Number(lineKey));
+      const normalizedColor = normalizeSessionHighlightColor(color, "");
+      if (!Number.isFinite(lineIndex) || lineIndex < 0 || !normalizedColor) {
+        return;
+      }
+      normalizedLineColors[lineIndex] = normalizedColor;
+    });
+  }
+  const normalizedChoiceColors = {};
+  if (safeSnapshot.highlightedChoices && typeof safeSnapshot.highlightedChoices === "object") {
+    Object.entries(safeSnapshot.highlightedChoices).forEach(([choiceKey, color]) => {
+      const choiceId = normalizeQuestionChoiceLabel(choiceKey);
+      const normalizedColor = normalizeSessionHighlightColor(color, "");
+      if (!choiceId || !normalizedColor) {
+        return;
+      }
+      normalizedChoiceColors[choiceId] = normalizedColor;
+    });
+  }
+  const textHighlights = buildEmptyTextHighlightStore();
+  if (safeSnapshot.textHighlights && typeof safeSnapshot.textHighlights === "object") {
+    if (safeSnapshot.textHighlights.lines && typeof safeSnapshot.textHighlights.lines === "object") {
+      Object.entries(safeSnapshot.textHighlights.lines).forEach(([lineKey, ranges]) => {
+        const lineIndex = Math.floor(Number(lineKey));
+        if (!Number.isFinite(lineIndex) || lineIndex < 0) {
+          return;
+        }
+        const normalizedRanges = normalizeTextHighlightRanges(ranges);
+        if (normalizedRanges.length) {
+          textHighlights.lines[lineIndex] = normalizedRanges;
+        }
+      });
+    }
+    if (safeSnapshot.textHighlights.choices && typeof safeSnapshot.textHighlights.choices === "object") {
+      Object.entries(safeSnapshot.textHighlights.choices).forEach(([choiceKey, ranges]) => {
+        const choiceId = normalizeQuestionChoiceLabel(choiceKey);
+        if (!choiceId) {
+          return;
+        }
+        const normalizedRanges = normalizeTextHighlightRanges(ranges);
+        if (normalizedRanges.length) {
+          textHighlights.choices[choiceId] = normalizedRanges;
+        }
+      });
+    }
+  }
+  const normalizedLines = Array.isArray(safeSnapshot.highlightedLines)
+    ? [...new Set(safeSnapshot.highlightedLines
+      .map((entry) => Math.floor(Number(entry)))
+      .filter((entry) => Number.isFinite(entry) && entry >= 0))]
+      .sort((a, b) => a - b)
+    : [];
+  Object.keys(normalizedLineColors).forEach((lineKey) => {
+    const lineIndex = Math.floor(Number(lineKey));
+    if (Number.isFinite(lineIndex) && lineIndex >= 0 && !normalizedLines.includes(lineIndex)) {
+      normalizedLines.push(lineIndex);
+    }
+  });
+  normalizedLines.sort((a, b) => a - b);
+  return {
+    highlightedLines: normalizedLines,
+    highlightedLineColors: normalizedLineColors,
+    highlightedChoices: normalizedChoiceColors,
+    textHighlights,
+  };
+}
+
+function captureResponseHighlightSnapshot(response) {
+  ensureResponseTextHighlightStore(response);
+  return normalizeResponseHighlightSnapshot({
+    highlightedLines: response.highlightedLines,
+    highlightedLineColors: response.highlightedLineColors,
+    highlightedChoices: response.highlightedChoices,
+    textHighlights: response.textHighlights,
+  });
+}
+
+function applyResponseHighlightSnapshot(response, snapshot) {
+  const normalized = normalizeResponseHighlightSnapshot(snapshot);
+  response.highlightedLines = [...normalized.highlightedLines];
+  response.highlightedLineColors = { ...normalized.highlightedLineColors };
+  response.highlightedChoices = { ...normalized.highlightedChoices };
+  response.textHighlights = {
+    lines: { ...normalized.textHighlights.lines },
+    choices: { ...normalized.textHighlights.choices },
+  };
+}
+
+function pushSessionHighlightUndoSnapshot(sessionId, questionId, response) {
+  const key = getSessionHighlightUndoKey(sessionId, questionId);
+  if (!key || key === "::") {
+    return;
+  }
+  const snapshot = captureResponseHighlightSnapshot(response);
+  if (!state.sessionHighlightUndo[key]) {
+    state.sessionHighlightUndo[key] = [];
+  }
+  const stack = state.sessionHighlightUndo[key];
+  const lastSnapshot = stack[stack.length - 1];
+  if (lastSnapshot && JSON.stringify(lastSnapshot) === JSON.stringify(snapshot)) {
+    return;
+  }
+  stack.push(snapshot);
+  const MAX_HIGHLIGHT_UNDO_STEPS = 60;
+  if (stack.length > MAX_HIGHLIGHT_UNDO_STEPS) {
+    stack.splice(0, stack.length - MAX_HIGHLIGHT_UNDO_STEPS);
+  }
+}
+
+function undoSessionHighlightChange(session, questionId) {
+  const key = getSessionHighlightUndoKey(session?.id, questionId);
+  const stack = state.sessionHighlightUndo[key];
+  if (!stack || !stack.length) {
+    return false;
+  }
+  const response = session.responses?.[questionId];
+  if (!response) {
+    return false;
+  }
+  const snapshot = stack.pop();
+  if (!stack.length) {
+    delete state.sessionHighlightUndo[key];
+  }
+  applyResponseHighlightSnapshot(response, snapshot);
+  session.updatedAt = nowISO();
+  upsertSession(session);
+  return true;
+}
+
 function renderSession() {
   const user = getCurrentUser();
   const session = getActiveSession(user.id, state.sessionId);
@@ -11081,6 +11222,34 @@ function handleSessionKeydown(event) {
   }
 
   const activeTag = document.activeElement?.tagName;
+  const isUndoShortcut = (event.key === "z" || event.key === "Z") && (event.metaKey || event.ctrlKey) && !event.altKey;
+  if (isUndoShortcut) {
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag)) {
+      return;
+    }
+    event.preventDefault();
+    const user = getCurrentUser();
+    if (!user) {
+      return;
+    }
+    const session = getActiveSession(user.id, state.sessionId);
+    if (!session || session.status !== "in_progress") {
+      return;
+    }
+    normalizeSession(session);
+    const questionId = session.questionIds[session.currentIndex];
+    if (!questionId) {
+      return;
+    }
+    const undone = undoSessionHighlightChange(session, questionId);
+    if (!undone) {
+      toast("No highlight step to undo.");
+      return;
+    }
+    toast("Highlight undone.");
+    render();
+    return;
+  }
   if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag) && event.key !== "Escape") {
     return;
   }
@@ -11179,6 +11348,7 @@ function handleSessionHighlighterMouseup() {
   }
   const highlightStore = ensureResponseTextHighlightStore(response);
   const activeColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
+  pushSessionHighlightUndoSnapshot(session.id, qid, response);
   if (startTarget.kind === "line") {
     const lineKey = startTarget.key;
     const lineRanges = updateHighlightRangesWithSelection(
