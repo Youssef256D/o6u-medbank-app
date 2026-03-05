@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.6").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -10084,20 +10084,39 @@ function renderSession() {
   const sideRows = session.questionIds
     .map((qid, index) => {
       const entry = session.responses[qid];
+      const navQuestion = questionsById.get(qid) || null;
+      const isSubmittedEntry = Boolean(entry?.submitted);
+      const isCorrectEntry = isSubmittedEntry && isSubmittedResponseCorrect(navQuestion, entry);
+      const isWrongEntry = isSubmittedEntry && !isCorrectEntry;
       const currentClass = index === session.currentIndex ? "is-current" : "";
       const flaggedClass = entry.flagged ? "is-flagged" : "";
       const answeredClass = entry.selected.length > 0 ? "is-answered" : "";
       const unansweredClass = entry.selected.length === 0 ? "is-unanswered" : "";
-      const statusLabel = entry.flagged ? "flagged" : entry.selected.length > 0 ? "answered" : "unanswered";
+      const correctnessClass = isCorrectEntry ? "is-correct" : (isWrongEntry ? "is-wrong" : "");
+      const statusLabel = entry.flagged
+        ? "flagged"
+        : isCorrectEntry
+          ? "correct"
+          : isWrongEntry
+            ? "incorrect"
+            : entry.selected.length > 0
+              ? "answered"
+              : "unanswered";
+      const statusIndicator = isCorrectEntry
+        ? `<span class="state is-correct" aria-hidden="true">✓</span>`
+        : isWrongEntry
+          ? `<span class="state is-wrong" aria-hidden="true">✕</span>`
+          : "";
       return `
         <button
           type="button"
-          class="exam-nav-item ${currentClass} ${flaggedClass} ${answeredClass} ${unansweredClass}"
+          class="exam-nav-item ${currentClass} ${flaggedClass} ${answeredClass} ${unansweredClass} ${correctnessClass}"
           data-action="jump-question"
           data-index="${index}"
           aria-label="Go to question ${index + 1}, ${statusLabel}"
         >
           <span class="num">${index + 1}</span>
+          ${statusIndicator}
         </button>
       `;
     })

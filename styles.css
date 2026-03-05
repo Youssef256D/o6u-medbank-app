@@ -2897,20 +2897,37 @@ th {
   border-radius: 6px;
   width: 42px;
   min-height: 42px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
   cursor: pointer;
   color: #16243a;
   font-weight: 700;
+  overflow: visible;
   transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .exam-nav-item .num {
   font-size: 0.96rem;
+  color: currentColor;
 }
 
 .exam-nav-item .state {
   display: none;
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  border: 1px solid transparent;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18);
 }
 
 .exam-nav-item.is-unanswered {
@@ -2941,11 +2958,20 @@ th {
 }
 
 .exam-nav-item .state.is-correct {
-  color: #2e8f45;
+  border-color: rgba(31, 93, 44, 0.28);
+  background: #dff1d8;
+  color: #1f5d2c;
 }
 
 .exam-nav-item .state.is-wrong {
-  color: #a43232;
+  border-color: rgba(143, 40, 40, 0.25);
+  background: #f6dedb;
+  color: #8f2828;
+}
+
+.exam-nav-item.is-correct .state.is-correct,
+.exam-nav-item.is-wrong .state.is-wrong {
+  display: inline-flex;
 }
 
 .exam-nav-item.is-current {
@@ -2963,6 +2989,15 @@ th {
 .exam-nav-item.is-flagged .num {
   color: #ffffff;
   font-weight: 700;
+}
+
+.exam-question-meta .exam-meta-link {
+  transition: color 140ms ease, transform 140ms ease, opacity 140ms ease;
+}
+
+.exam-question-meta .exam-meta-link:hover {
+  transform: translateY(-1px);
+  opacity: 0.92;
 }
 
 .exam-nav-link {
@@ -4196,25 +4231,111 @@ body.theme-comfort .exam-choice-inline-note {
 }
 
 body.theme-dark .exam-nav-item.is-answered {
-  background: #2a2a2a;
-  border-color: rgba(255, 255, 255, 0.4);
+  background: #2c3440;
+  border-color: rgba(197, 217, 244, 0.38);
+  color: #f1f6fe;
+}
+
+body.theme-dark .exam-nav-item.is-correct {
+  background: rgba(58, 116, 75, 0.34);
+  border-color: rgba(138, 201, 157, 0.62);
+  color: #dff6e5;
+}
+
+body.theme-dark .exam-nav-item.is-wrong {
+  background: rgba(136, 65, 65, 0.38);
+  border-color: rgba(238, 154, 154, 0.62);
+  color: #ffe5e5;
+}
+
+body.theme-dark .exam-nav-item.is-flagged {
+  background: #7c2b2b;
+  border-color: #dc7777;
+  color: #fff1f1;
+}
+
+body.theme-dark .exam-nav-item.is-flagged .num {
+  color: #fff1f1;
+}
+
+body.theme-dark .exam-nav-item .state.is-correct {
+  background: #d7efd8;
+  border-color: rgba(33, 95, 44, 0.3);
+  color: #215f2c;
+}
+
+body.theme-dark .exam-nav-item .state.is-wrong {
+  background: #f6ddda;
+  border-color: rgba(148, 39, 39, 0.28);
+  color: #942727;
 }
 
 body.theme-comfort .exam-nav-item.is-answered {
-  background: #ebe1d4;
+  background: #e5dacb;
   border-color: rgba(117, 89, 66, 0.44);
+  color: #5e4633;
+}
+
+body.theme-comfort .exam-nav-item.is-correct {
+  background: #d8e6d2;
+  border-color: rgba(106, 143, 99, 0.54);
+  color: #31553a;
+}
+
+body.theme-comfort .exam-nav-item.is-wrong {
+  background: #f1d8d3;
+  border-color: rgba(161, 106, 103, 0.5);
+  color: #7a3737;
+}
+
+body.theme-comfort .exam-nav-item.is-flagged {
+  background: #8a4f43;
+  border-color: #b07a6f;
+  color: #fff3ea;
+}
+
+body.theme-comfort .exam-nav-item.is-flagged .num {
+  color: #fff3ea;
+}
+
+body.theme-comfort .exam-nav-item .state.is-correct {
+  background: #edf7e7;
+  border-color: rgba(78, 116, 71, 0.3);
+  color: #335238;
+}
+
+body.theme-comfort .exam-nav-item .state.is-wrong {
+  background: #f9e6e1;
+  border-color: rgba(150, 78, 74, 0.3);
+  color: #803737;
 }
 
 body.theme-dark .exam-nav-link,
 body.theme-dark .exam-meta-link,
 body.theme-dark .exam-meta-link.muted {
-  color: #a0a0a0;
+  color: #cbd6e6;
+}
+
+body.theme-dark .exam-question-meta .exam-meta-link {
+  color: #ffcccc;
+}
+
+body.theme-dark .exam-question-meta .exam-meta-link:hover {
+  color: #ffe2e2;
 }
 
 body.theme-comfort .exam-nav-link,
 body.theme-comfort .exam-meta-link,
 body.theme-comfort .exam-meta-link.muted {
   color: #715640;
+}
+
+body.theme-comfort .exam-question-meta .exam-meta-link {
+  color: #7f4638;
+}
+
+body.theme-comfort .exam-question-meta .exam-meta-link:hover {
+  color: #66372b;
 }
 
 @media (max-width: 960px) {
