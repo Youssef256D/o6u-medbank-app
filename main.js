@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.6").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -6552,9 +6552,34 @@ function seedData() {
 }
 
 function getStoredThemePreference() {
-  const stored = String(load(THEME_PREFERENCE_KEY, "") || "").trim().toLowerCase();
-  if (stored === THEME_DARK || stored === THEME_LIGHT || stored === THEME_COMFORT) {
-    return stored;
+  const normalizeTheme = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === THEME_DARK || normalized === THEME_LIGHT || normalized === THEME_COMFORT) {
+      return normalized;
+    }
+    return "";
+  };
+
+  const fromLoad = normalizeTheme(load(THEME_PREFERENCE_KEY, ""));
+  if (fromLoad) {
+    return fromLoad;
+  }
+
+  // Backward compatibility for older/plain localStorage values.
+  const raw = readStorageKey(THEME_PREFERENCE_KEY);
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      const fromParsed = normalizeTheme(parsed);
+      if (fromParsed) {
+        return fromParsed;
+      }
+    } catch {
+      const fromRaw = normalizeTheme(raw);
+      if (fromRaw) {
+        return fromRaw;
+      }
+    }
   }
   return THEME_LIGHT;
 }
@@ -6649,6 +6674,8 @@ function applyTheme(theme, options = {}) {
     nextTheme = THEME_LIGHT;
   }
   activeTheme = nextTheme;
+  document.documentElement.classList.toggle("theme-dark", nextTheme === THEME_DARK);
+  document.documentElement.classList.toggle("theme-comfort", nextTheme === THEME_COMFORT);
   document.body.classList.toggle("theme-dark", nextTheme === THEME_DARK);
   document.body.classList.toggle("theme-comfort", nextTheme === THEME_COMFORT);
   updateThemeMetaColor();
