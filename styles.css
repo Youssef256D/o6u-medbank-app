@@ -284,11 +284,14 @@ button {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.88);
   color: var(--ink);
-  min-height: 36px;
-  padding: 0.38rem 0.72rem;
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
 }
 
@@ -301,6 +304,12 @@ button {
 .auth-actions .theme-toggle-btn:hover {
   background: var(--brand-soft);
   border-color: rgba(47, 118, 255, 0.42);
+}
+
+.auth-actions .theme-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
 #topbar-cloud-sync-slot {
