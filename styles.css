@@ -296,8 +296,14 @@ button {
 }
 
 .auth-actions .theme-toggle-btn.is-active {
-  background: rgba(47, 118, 255, 0.18);
-  border-color: rgba(47, 118, 255, 0.5);
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: var(--brand-strong);
+}
+
+.auth-actions .theme-toggle-btn.is-comfort {
+  background: rgba(210, 140, 70, 0.18);
+  border-color: rgba(210, 140, 70, 0.5);
   color: var(--brand-strong);
 }
 
@@ -739,6 +745,7 @@ button {
 }
 
 @supports (view-transition-name: root) {
+
   ::view-transition-old(root),
   ::view-transition-new(root) {
     animation-duration: 380ms;
@@ -1064,33 +1071,33 @@ img {
   max-width: 640px;
 }
 
-.simple-home-inner > * {
+.simple-home-inner>* {
   opacity: 0;
   transform: translateY(14px);
   animation: hero-fade-up 560ms ease forwards;
 }
 
-.simple-home-inner > :nth-child(1) {
+.simple-home-inner> :nth-child(1) {
   animation-delay: 80ms;
 }
 
-.simple-home-inner > :nth-child(2) {
+.simple-home-inner> :nth-child(2) {
   animation-delay: 150ms;
 }
 
-.simple-home-inner > :nth-child(3) {
+.simple-home-inner> :nth-child(3) {
   animation-delay: 220ms;
 }
 
-.simple-home-inner > :nth-child(4) {
+.simple-home-inner> :nth-child(4) {
   animation-delay: 300ms;
 }
 
-.simple-home-inner > :nth-child(5) {
+.simple-home-inner> :nth-child(5) {
   animation-delay: 370ms;
 }
 
-.simple-home-inner > :nth-child(6) {
+.simple-home-inner> :nth-child(6) {
   animation-delay: 450ms;
 }
 
@@ -1353,16 +1360,16 @@ body.is-routing .card {
   transition: transform 220ms cubic-bezier(0.4, 0.0, 0.2, 1);
 }
 
-.toggle-switch-input:checked + .toggle-switch-track {
+.toggle-switch-input:checked+.toggle-switch-track {
   background: var(--brand);
   box-shadow: 0 0 0 2px rgba(23, 126, 137, 0.18);
 }
 
-.toggle-switch-input:checked + .toggle-switch-track .toggle-switch-thumb {
+.toggle-switch-input:checked+.toggle-switch-track .toggle-switch-thumb {
   transform: translateX(20px);
 }
 
-.toggle-switch-input:focus-visible + .toggle-switch-track {
+.toggle-switch-input:focus-visible+.toggle-switch-track {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
@@ -2104,12 +2111,12 @@ body.is-routing .card {
   transition: transform 180ms ease;
 }
 
-.create-test-randomize input:checked + .create-test-randomize-switch {
+.create-test-randomize input:checked+.create-test-randomize-switch {
   background: rgba(23, 126, 137, 0.82);
   border-color: rgba(23, 126, 137, 0.95);
 }
 
-.create-test-randomize input:checked + .create-test-randomize-switch::after {
+.create-test-randomize input:checked+.create-test-randomize-switch::after {
   transform: translateX(20px);
 }
 
@@ -2134,10 +2141,10 @@ form {
   gap: 0.82rem;
 }
 
-form > .stack,
-form > .auth-inline,
-form > button,
-form > .btn {
+form>.stack,
+form>.auth-inline,
+form>button,
+form>.btn {
   margin-top: 0.2rem;
 }
 
@@ -3569,6 +3576,7 @@ hr {
     opacity: 0;
     transform: translateY(12px) scale(0.99);
   }
+
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
@@ -3581,6 +3589,7 @@ hr {
     transform: translateX(var(--question-shift-x, 14px)) scale(0.995);
     filter: saturate(0.96);
   }
+
   to {
     opacity: 1;
     transform: translateX(0) scale(1);
@@ -3594,6 +3603,7 @@ hr {
     transform: translateY(0);
     filter: blur(0);
   }
+
   to {
     opacity: 0;
     transform: translateY(-8px);
@@ -3607,6 +3617,7 @@ hr {
     transform: translateY(10px);
     filter: blur(2px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -3619,6 +3630,7 @@ hr {
     opacity: 0;
     transform: translateY(10px) scale(0.98);
   }
+
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
@@ -3636,6 +3648,7 @@ hr {
     opacity: 0;
     transform: translateY(14px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -3643,21 +3656,25 @@ hr {
 }
 
 @keyframes float-orb {
+
   0%,
   100% {
     transform: translateY(0) scale(1);
   }
+
   50% {
     transform: translateY(-12px) scale(1.03);
   }
 }
 
 @keyframes hero-logo-breathe {
+
   0%,
   100% {
     transform: scale(0.97);
     opacity: 0.92;
   }
+
   50% {
     transform: scale(1.02);
     opacity: 1;
@@ -3665,52 +3682,102 @@ hr {
 }
 
 body.theme-dark .topbar {
-  background: rgba(4, 9, 18, 0.9);
+  background: rgba(15, 23, 42, 0.9);
+}
+
+body.theme-comfort .topbar {
+  background: rgba(43, 38, 34, 0.9);
 }
 
 body.theme-dark .top-nav button:hover,
 body.theme-dark .auth-actions button:hover {
-  background: rgba(111, 153, 236, 0.18);
+  background: rgba(59, 130, 246, 0.18);
+}
+
+body.theme-comfort .top-nav button:hover,
+body.theme-comfort .auth-actions button:hover {
+  background: rgba(210, 140, 70, 0.18);
 }
 
 body.theme-dark .google-auth-loading {
-  background: rgba(2, 6, 14, 0.62);
+  background: rgba(15, 23, 42, 0.62);
+}
+
+body.theme-comfort .google-auth-loading {
+  background: rgba(30, 27, 25, 0.62);
 }
 
 body.theme-dark .google-auth-loading-card {
-  border-color: rgba(118, 155, 235, 0.5);
-  background: rgba(9, 16, 33, 0.96);
+  border-color: rgba(59, 130, 246, 0.5);
+  background: rgba(30, 41, 59, 0.96);
+}
+
+body.theme-comfort .google-auth-loading-card {
+  border-color: rgba(210, 140, 70, 0.5);
+  background: rgba(56, 49, 44, 0.96);
 }
 
 body.theme-dark .panel {
-  border-color: rgba(118, 155, 235, 0.22);
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
+body.theme-comfort .panel {
+  border-color: rgba(210, 140, 70, 0.22);
 }
 
 body.theme-dark .home-hero {
   background:
-    radial-gradient(380px 200px at 86% 12%, rgba(89, 157, 255, 0.24), transparent 72%),
-    radial-gradient(500px 240px at 8% 85%, rgba(47, 118, 255, 0.2), transparent 72%),
-    linear-gradient(145deg, rgba(7, 13, 28, 0.97), rgba(9, 18, 38, 0.9));
+    radial-gradient(380px 200px at 86% 12%, rgba(59, 130, 246, 0.24), transparent 72%),
+    radial-gradient(500px 240px at 8% 85%, rgba(37, 99, 235, 0.2), transparent 72%),
+    linear-gradient(145deg, rgba(30, 41, 59, 0.97), rgba(15, 23, 42, 0.9));
+}
+
+body.theme-comfort .home-hero {
+  background:
+    radial-gradient(380px 200px at 86% 12%, rgba(210, 140, 70, 0.24), transparent 72%),
+    radial-gradient(500px 240px at 8% 85%, rgba(210, 140, 70, 0.2), transparent 72%),
+    linear-gradient(145deg, rgba(56, 49, 44, 0.97), rgba(43, 38, 34, 0.9));
 }
 
 body.theme-dark .home-hero::before {
   background-image:
-    linear-gradient(rgba(120, 158, 236, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120, 158, 236, 0.08) 1px, transparent 1px);
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+}
+
+body.theme-comfort .home-hero::before {
+  background-image:
+    linear-gradient(rgba(220, 211, 203, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(220, 211, 203, 0.08) 1px, transparent 1px);
 }
 
 body.theme-dark .simple-home-wrap {
   background:
-    radial-gradient(420px 220px at 12% 22%, rgba(47, 118, 255, 0.22), transparent 70%),
-    radial-gradient(420px 220px at 88% 78%, rgba(86, 141, 255, 0.2), transparent 70%),
-    rgba(8, 15, 30, 0.92);
+    radial-gradient(420px 220px at 12% 22%, rgba(59, 130, 246, 0.22), transparent 70%),
+    radial-gradient(420px 220px at 88% 78%, rgba(96, 165, 250, 0.2), transparent 70%),
+    rgba(15, 23, 42, 0.92);
+}
+
+body.theme-comfort .simple-home-wrap {
+  background:
+    radial-gradient(420px 220px at 12% 22%, rgba(210, 140, 70, 0.22), transparent 70%),
+    radial-gradient(420px 220px at 88% 78%, rgba(244, 185, 117, 0.2), transparent 70%),
+    rgba(43, 38, 34, 0.92);
 }
 
 body.theme-dark .simple-home-chips span,
 body.theme-dark .home-badge,
 body.theme-dark .demo-panel,
 body.theme-dark .value-item {
-  background: rgba(10, 18, 34, 0.88);
+  background: rgba(30, 41, 59, 0.88);
+  border-color: var(--line);
+}
+
+body.theme-comfort .simple-home-chips span,
+body.theme-comfort .home-badge,
+body.theme-comfort .demo-panel,
+body.theme-comfort .value-item {
+  background: rgba(56, 49, 44, 0.88);
   border-color: var(--line);
 }
 
@@ -3734,17 +3801,50 @@ body.theme-dark .btn.ghost,
 body.theme-dark input,
 body.theme-dark textarea,
 body.theme-dark select {
-  background: #0c162b;
+  background: #1e293b;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+body.theme-comfort .cloud-sync-pill,
+body.theme-comfort .notification-menu-panel,
+body.theme-comfort .user-menu-panel,
+body.theme-comfort .auth-actions .notification-bell-btn,
+body.theme-comfort .auth-actions .notification-menu-mark-all,
+body.theme-comfort .auth-actions .notification-menu-read-btn,
+body.theme-comfort .admin-course-check,
+body.theme-comfort .admin-na,
+body.theme-comfort .admin-topic-chip,
+body.theme-comfort .admin-user-suggestions,
+body.theme-comfort .admin-question-bulk-bar,
+body.theme-comfort .admin-import-report,
+body.theme-comfort .admin-question-image-preview,
+body.theme-comfort .create-test-randomize,
+body.theme-comfort .create-test-filter-card,
+body.theme-comfort .choice,
+body.theme-comfort .btn.ghost,
+body.theme-comfort input,
+body.theme-comfort textarea,
+body.theme-comfort select {
+  background: #38312c;
   border-color: var(--line);
   color: var(--ink);
 }
 
 body.theme-dark .notification-bell-badge {
-  border-color: #0c162b;
+  border-color: #1e293b;
+}
+
+body.theme-comfort .notification-bell-badge {
+  border-color: #38312c;
 }
 
 body.theme-dark .exam-shell-moodle {
-  background: #0e1a32;
+  background: #0f172a;
+}
+
+body.theme-comfort .exam-shell-moodle {
+  background: #2b2826;
 }
 
 body.theme-dark .exam-back,
@@ -3762,8 +3862,28 @@ body.theme-dark .exam-calc-key,
 body.theme-dark .exam-note-list article,
 body.theme-dark .exam-question-media,
 body.theme-dark .exam-question-media img {
-  background: #0e1931;
-  border-color: rgba(118, 155, 235, 0.32);
+  background: #1e293b;
+  border-color: rgba(148, 163, 184, 0.32);
+  color: var(--exam-ink);
+}
+
+body.theme-comfort .exam-back,
+body.theme-comfort .exam-question-meta,
+body.theme-comfort .exam-nav-panel,
+body.theme-comfort .exam-question-card,
+body.theme-comfort .exam-copy-question-btn,
+body.theme-comfort .exam-nav-item,
+body.theme-comfort .exam-feedback-block,
+body.theme-comfort .exam-review-pane,
+body.theme-comfort .exam-review-visual,
+body.theme-comfort .exam-review-list li,
+body.theme-comfort .exam-panel,
+body.theme-comfort .exam-calc-key,
+body.theme-comfort .exam-note-list article,
+body.theme-comfort .exam-question-media,
+body.theme-comfort .exam-question-media img {
+  background: #38312c;
+  border-color: rgba(220, 211, 203, 0.32);
   color: var(--exam-ink);
 }
 
@@ -3772,15 +3892,31 @@ body.theme-dark .exam-choice-inline-note {
   color: #ffd99f;
 }
 
+body.theme-comfort .exam-choice-inline-note {
+  background: rgba(244, 186, 94, 0.2);
+  color: #ffd99f;
+}
+
 body.theme-dark .exam-nav-item.is-answered {
-  background: #18294a;
-  border-color: rgba(118, 155, 235, 0.5);
+  background: #334155;
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+body.theme-comfort .exam-nav-item.is-answered {
+  background: #544a42;
+  border-color: rgba(210, 140, 70, 0.5);
 }
 
 body.theme-dark .exam-nav-link,
 body.theme-dark .exam-meta-link,
 body.theme-dark .exam-meta-link.muted {
-  color: #8bb8ff;
+  color: #93c5fd;
+}
+
+body.theme-comfort .exam-nav-link,
+body.theme-comfort .exam-meta-link,
+body.theme-comfort .exam-meta-link.muted {
+  color: #d28c46;
 }
 
 @media (max-width: 960px) {
@@ -4305,6 +4441,7 @@ body.theme-dark .exam-meta-link.muted {
 }
 
 @media (hover: none) {
+
   .card:hover,
   .btn:hover,
   .top-nav button:hover,
@@ -4317,6 +4454,7 @@ body.theme-dark .exam-meta-link.muted {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   ::view-transition-old(root),
   ::view-transition-new(root) {
     animation-duration: 1ms !important;
@@ -4342,8 +4480,7 @@ html body :where(*, *::before, *::after) {
 }
 
 /* Medium emphasis for interactive and metric text. */
-html body :is(
-  .btn,
+html body :is(.btn,
   .top-nav button,
   .auth-actions button,
   .pill,
@@ -4352,8 +4489,7 @@ html body :is(
   .metric small,
   .exam-nav-link,
   .exam-nav-item .num,
-  .admin-user-account b
-) {
+  .admin-user-account b) {
   font-weight: 500 !important;
 }
 
@@ -4363,8 +4499,7 @@ html body .brand {
   font-weight: 600 !important;
 }
 
-html body :is(
-  .title,
+html body :is(.title,
   .hero h1,
   .home-copy h1,
   .card h3,
@@ -4378,8 +4513,7 @@ html body :is(
   .exam-nav-panel h3,
   .exam-feedback-head h4,
   .exam-review-head h4,
-  .exam-panel-head h4
-) {
+  .exam-panel-head h4) {
   font-family: var(--font-display) !important;
   font-weight: 600 !important;
 }

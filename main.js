@@ -96,8 +96,10 @@ const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const THEME_PREFERENCE_KEY = "mcq_theme_preference";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
+const THEME_COMFORT = "comfort";
 const THEME_META_COLOR_LIGHT = "#177e89";
-const THEME_META_COLOR_DARK = "#05080f";
+const THEME_META_COLOR_DARK = "#0f172a";
+const THEME_META_COLOR_COMFORT = "#2b2826";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -6530,29 +6532,57 @@ function seedData() {
 
 function getStoredThemePreference() {
   const stored = String(load(THEME_PREFERENCE_KEY, "") || "").trim().toLowerCase();
-  if (stored === THEME_DARK || stored === THEME_LIGHT) {
+  if (stored === THEME_DARK || stored === THEME_LIGHT || stored === THEME_COMFORT) {
     return stored;
   }
   return THEME_LIGHT;
 }
 
 function renderThemeToggleIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M15.2 3.4a8.9 8.9 0 1 0 5.4 12.3 8.3 8.3 0 0 1-3.4.7A8.9 8.9 0 0 1 11 4.6c0-.4 0-.8.1-1.2.5-.1 1-.1 1.5-.1.9 0 1.8.1 2.6.1z" />
-    </svg>
-  `;
+  if (activeTheme === THEME_DARK) {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="5"></circle>
+        <line x1="12" y1="1" x2="12" y2="3"></line>
+        <line x1="12" y1="21" x2="12" y2="23"></line>
+        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+        <line x1="1" y1="12" x2="3" y2="12"></line>
+        <line x1="21" y1="12" x2="23" y2="12"></line>
+        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+      </svg>
+    `;
+  } else if (activeTheme === THEME_COMFORT) {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+        <circle cx="12" cy="12" r="3"></circle>
+      </svg>
+    `;
+  } else {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M15.2 3.4a8.9 8.9 0 1 0 5.4 12.3 8.3 8.3 0 0 1-3.4.7A8.9 8.9 0 0 1 11 4.6c0-.4 0-.8.1-1.2.5-.1 1-.1 1.5-.1.9 0 1.8.1 2.6.1z" />
+      </svg>
+    `;
+  }
 }
 
 function renderThemeToggleButton() {
-  const isDark = activeTheme === THEME_DARK;
-  const actionLabel = isDark ? "Switch to light mode" : "Switch to dark mode";
+  let actionLabel = "Switch to dark mode";
+  if (activeTheme === THEME_DARK) actionLabel = "Switch to comfort mode";
+  else if (activeTheme === THEME_COMFORT) actionLabel = "Switch to light mode";
+
+  const isActive = activeTheme === THEME_DARK || activeTheme === THEME_COMFORT;
+  const activeClass = activeTheme === THEME_DARK ? "is-active" : (activeTheme === THEME_COMFORT ? "is-comfort" : "");
+
   return `
     <button
-      class="theme-toggle-btn ${isDark ? "is-active" : ""}"
+      class="theme-toggle-btn ${activeClass}"
       type="button"
       data-action="toggle-theme"
-      aria-pressed="${isDark ? "true" : "false"}"
+      aria-pressed="${isActive ? "true" : "false"}"
       aria-label="${actionLabel}"
       title="${actionLabel}"
     >
@@ -6562,14 +6592,19 @@ function renderThemeToggleButton() {
 }
 
 function syncThemeToggleButtons() {
-  const isDark = activeTheme === THEME_DARK;
-  const actionLabel = isDark ? "Switch to light mode" : "Switch to dark mode";
+  let actionLabel = "Switch to dark mode";
+  if (activeTheme === THEME_DARK) actionLabel = "Switch to comfort mode";
+  else if (activeTheme === THEME_COMFORT) actionLabel = "Switch to light mode";
+
+  const isActive = activeTheme === THEME_DARK || activeTheme === THEME_COMFORT;
+
   document.querySelectorAll("[data-action='toggle-theme']").forEach((node) => {
     if (!(node instanceof HTMLButtonElement)) {
       return;
     }
-    node.classList.toggle("is-active", isDark);
-    node.setAttribute("aria-pressed", isDark ? "true" : "false");
+    node.classList.toggle("is-active", activeTheme === THEME_DARK);
+    node.classList.toggle("is-comfort", activeTheme === THEME_COMFORT);
+    node.setAttribute("aria-pressed", isActive ? "true" : "false");
     node.setAttribute("aria-label", actionLabel);
     node.setAttribute("title", actionLabel);
     node.innerHTML = renderThemeToggleIcon();
@@ -6581,13 +6616,20 @@ function updateThemeMetaColor() {
   if (!metaThemeColor) {
     return;
   }
-  metaThemeColor.setAttribute("content", activeTheme === THEME_DARK ? THEME_META_COLOR_DARK : THEME_META_COLOR_LIGHT);
+  let color = THEME_META_COLOR_LIGHT;
+  if (activeTheme === THEME_DARK) color = THEME_META_COLOR_DARK;
+  else if (activeTheme === THEME_COMFORT) color = THEME_META_COLOR_COMFORT;
+  metaThemeColor.setAttribute("content", color);
 }
 
 function applyTheme(theme, options = {}) {
-  const nextTheme = String(theme || "").trim().toLowerCase() === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+  let nextTheme = String(theme || "").trim().toLowerCase();
+  if (nextTheme !== THEME_DARK && nextTheme !== THEME_COMFORT) {
+    nextTheme = THEME_LIGHT;
+  }
   activeTheme = nextTheme;
   document.body.classList.toggle("theme-dark", nextTheme === THEME_DARK);
+  document.body.classList.toggle("theme-comfort", nextTheme === THEME_COMFORT);
   updateThemeMetaColor();
   if (options.persist) {
     saveLocalOnly(THEME_PREFERENCE_KEY, nextTheme);
@@ -6637,7 +6679,10 @@ function bindGlobalEvents() {
     if (action === "toggle-theme") {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
-      applyTheme(activeTheme === THEME_DARK ? THEME_LIGHT : THEME_DARK, { persist: true });
+      let nextTheme = THEME_DARK;
+      if (activeTheme === THEME_DARK) nextTheme = THEME_COMFORT;
+      else if (activeTheme === THEME_COMFORT) nextTheme = THEME_LIGHT;
+      applyTheme(nextTheme, { persist: true });
       syncTopbar();
       return;
     }
