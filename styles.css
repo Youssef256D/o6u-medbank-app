@@ -3031,7 +3031,7 @@ th {
   gap: 0.6rem;
   align-items: start;
   flex: 1;
-  cursor: pointer;
+  cursor: default;
 }
 
 .exam-choice:last-child {
@@ -3097,6 +3097,29 @@ th {
 .exam-choice-text {
   color: var(--exam-ink);
   font-size: 0.97rem;
+}
+
+.exam-choice-radio-hit {
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.exam-choice-text-hit {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.exam-choice-text-hit:disabled {
+  cursor: default;
+  opacity: 1;
 }
 
 .exam-choice-rate {

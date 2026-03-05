@@ -31,7 +31,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -10032,14 +10032,24 @@ function renderSession() {
       const inlineFeedback = isSubmitted && isCorrect && selected && correctChoice
         ? `<span class="exam-choice-inline-note">Excellent! This is the correct answer.</span>`
         : "";
+      const choiceInputId = `session-answer-${currentQid}-${choice.id}`;
       return `
         <div class="exam-choice ${selected ? "is-selected" : ""} ${struck ? "is-struck" : ""} ${statusClass}">
-          <label class="exam-choice-hit">
+          <div class="exam-choice-hit">
             ${statusIndicator}
-            <input type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
-            <span class="exam-choice-radio"></span>
-            <span class="exam-choice-text"><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</span>
-          </label>
+            <label class="exam-choice-radio-hit" for="${escapeHtml(choiceInputId)}" aria-label="Select answer ${choice.id}">
+              <input id="${escapeHtml(choiceInputId)}" type="${choiceType}" name="answer" value="${choice.id}" ${selected ? "checked" : ""} ${isSubmitted ? "disabled" : ""} />
+              <span class="exam-choice-radio"></span>
+            </label>
+            <button
+              type="button"
+              class="exam-choice-text exam-choice-text-hit"
+              data-action="toggle-strike"
+              data-choice-id="${choice.id}"
+              ${isSubmitted ? "disabled" : ""}
+              aria-label="Strike or unstrike choice ${choice.id}"
+            ><b>${choice.id}.</b> ${escapeHtml(choice.text)} ${inlineFeedback}</button>
+          </div>
         </div>
       `;
     })
