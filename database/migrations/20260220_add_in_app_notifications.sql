@@ -43,8 +43,6 @@ alter table public.notifications
   alter column created_at set not null,
   alter column updated_at set not null;
 
-create unique index if not exists idx_notifications_external_id
-  on public.notifications (external_id);
 create index if not exists idx_notifications_created_at
   on public.notifications (created_at desc);
 create index if not exists idx_notifications_recipient_created_at
@@ -88,12 +86,12 @@ create policy notifications_select
   for select
   to authenticated
   using (
-    public.is_admin_user()
+    (select public.is_admin_user())
     or (
       is_active = true
       and (
         recipient_user_id is null
-        or recipient_user_id = auth.uid()
+        or recipient_user_id = (select auth.uid())
       )
     )
   );
@@ -102,20 +100,20 @@ create policy notifications_insert
   on public.notifications
   for insert
   to authenticated
-  with check (public.is_admin_user());
+  with check ((select public.is_admin_user()));
 
 create policy notifications_update
   on public.notifications
   for update
   to authenticated
-  using (public.is_admin_user())
-  with check (public.is_admin_user());
+  using ((select public.is_admin_user()))
+  with check ((select public.is_admin_user()));
 
 create policy notifications_delete
   on public.notifications
   for delete
   to authenticated
-  using (public.is_admin_user());
+  using ((select public.is_admin_user()));
 
 drop policy if exists notification_reads_select on public.notification_reads;
 drop policy if exists notification_reads_insert on public.notification_reads;
@@ -126,23 +124,23 @@ create policy notification_reads_select
   on public.notification_reads
   for select
   to authenticated
-  using (user_id = auth.uid() or public.is_admin_user());
+  using (user_id = (select auth.uid()) or (select public.is_admin_user()));
 
 create policy notification_reads_insert
   on public.notification_reads
   for insert
   to authenticated
-  with check (user_id = auth.uid() or public.is_admin_user());
+  with check (user_id = (select auth.uid()) or (select public.is_admin_user()));
 
 create policy notification_reads_update
   on public.notification_reads
   for update
   to authenticated
-  using (user_id = auth.uid() or public.is_admin_user())
-  with check (user_id = auth.uid() or public.is_admin_user());
+  using (user_id = (select auth.uid()) or (select public.is_admin_user()))
+  with check (user_id = (select auth.uid()) or (select public.is_admin_user()));
 
 create policy notification_reads_delete
   on public.notification_reads
   for delete
   to authenticated
-  using (user_id = auth.uid() or public.is_admin_user());
+  using (user_id = (select auth.uid()) or (select public.is_admin_user()));

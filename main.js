@@ -2120,10 +2120,16 @@ function isAutoApproveStudentAccessEnabled() {
 
 function normalizeSiteMaintenanceConfig(rawValue) {
   const value = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+  const allowedUserIds = [...new Set(
+    (Array.isArray(value.allowedUserIds) ? value.allowedUserIds : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )];
   return {
     enabled: Boolean(value.enabled),
     title: String(value.title || "").trim() || DEFAULT_SITE_MAINTENANCE_TITLE,
     message: String(value.message || "").trim() || DEFAULT_SITE_MAINTENANCE_MESSAGE,
+    allowedUserIds,
     updatedAt: String(value.updatedAt || "").trim(),
     updatedById: String(value.updatedById || "").trim(),
     updatedByName: String(value.updatedByName || "").trim(),
@@ -2138,9 +2144,30 @@ function isSiteMaintenanceEnabled() {
   return getSiteMaintenanceConfig().enabled;
 }
 
+function isUserAllowedDuringSiteMaintenance(user = null, config = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role === "admin") {
+    return currentUser?.role === "admin";
+  }
+  const settings = config || getSiteMaintenanceConfig();
+  const allowedIds = new Set(
+    (Array.isArray(settings?.allowedUserIds) ? settings.allowedUserIds : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  );
+  if (!allowedIds.size) {
+    return false;
+  }
+  const candidateIds = [
+    String(getUserProfileId(currentUser) || "").trim(),
+    String(currentUser.id || "").trim(),
+  ].filter(Boolean);
+  return candidateIds.some((entry) => allowedIds.has(entry));
+}
+
 function isSiteMaintenanceEnabledForUser(user = null) {
   const currentUser = user || getCurrentUser();
-  return isSiteMaintenanceEnabled() && currentUser?.role !== "admin";
+  return isSiteMaintenanceEnabled() && currentUser?.role !== "admin" && !isUserAllowedDuringSiteMaintenance(currentUser);
 }
 
 function canBypassSiteMaintenanceForRoute(route, user = null) {
@@ -13402,6 +13429,24 @@ function renderAdmin() {
 
   if (activeAdminPage === "site-access") {
     const config = getSiteMaintenanceConfig();
+    const maintenanceExceptionUsers = getUsers().filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
+    const maintenanceExceptions = config.allowedUserIds.map((userId) => {
+      const matchedUser = findUserByNotificationTargetId(userId, maintenanceExceptionUsers);
+      if (matchedUser) {
+        return {
+          id: userId,
+          label: getNotificationTargetSearchDisplayLabel(matchedUser),
+          email: String(matchedUser.email || "").trim(),
+          isUnknown: false,
+        };
+      }
+      return {
+        id: userId,
+        label: "Unknown user",
+        email: userId,
+        isUnknown: true,
+      };
+    });
     const updatedLabel = config.updatedAt ? new Date(config.updatedAt).toLocaleString() : "Not yet";
     const updatedByLabel = String(config.updatedByName || "").trim() || "System";
     pageContent = `
@@ -13435,6 +13480,56 @@ function renderAdmin() {
           <label>Public message
             <textarea name="message" rows="6" maxlength="1200" required>${escapeHtml(config.message)}</textarea>
           </label>
+
+          <div class="admin-site-maintenance-exceptions">
+            <div>
+              <h4 style="margin: 0;">Allowed users during closure</h4>
+              <p class="subtle" style="margin: 0.3rem 0 0;">Add specific non-admin accounts that should still be able to enter while the website is closed.</p>
+            </div>
+
+            <div id="admin-site-maintenance-exception-form" class="admin-site-maintenance-exception-form">
+              <input type="hidden" name="exceptionUserId" id="admin-site-maintenance-exception-user-id" value="" />
+              <label>Search user
+                <div class="admin-target-user-combobox">
+                  <input
+                    type="search"
+                    id="admin-site-maintenance-exception-search"
+                    name="exceptionUserQuery"
+                    placeholder="Type name or email..."
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <div
+                    class="admin-user-suggestions"
+                    id="admin-site-maintenance-exception-suggestions"
+                    hidden
+                    role="listbox"
+                    aria-label="Site maintenance exception suggestions"
+                  ></div>
+                </div>
+              </label>
+              <button class="btn ghost" type="button" data-action="admin-site-maintenance-add-exception">Add exception</button>
+            </div>
+
+            <div class="admin-site-maintenance-exception-list">
+              ${maintenanceExceptions.length
+          ? maintenanceExceptions
+            .map((entry) => `
+                      <span class="admin-site-maintenance-exception-chip${entry.isUnknown ? " is-unknown" : ""}">
+                        <span>
+                          <b>${escapeHtml(entry.label)}</b>
+                          <small>${escapeHtml(entry.email || entry.id)}</small>
+                        </span>
+                        <button type="button" data-action="admin-site-maintenance-remove-exception" data-user-id="${escapeHtml(entry.id)}" aria-label="Remove exception">
+                          x
+                        </button>
+                      </span>
+                    `)
+            .join("")
+          : '<p class="subtle" style="margin: 0;">No user exceptions added.</p>'
+        }
+            </div>
+          </div>
 
           <div class="admin-site-maintenance-actions">
             <button class="btn" type="submit">Save site status</button>
@@ -13942,6 +14037,183 @@ function wireAdmin() {
     }
   });
 
+  const persistSiteMaintenanceConfig = async (nextConfig, options = {}) => {
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin") {
+      return false;
+    }
+    save(STORAGE_KEYS.siteMaintenance, nextConfig);
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    if (options.logMessage) {
+      appendSystemLog("admin.site_maintenance", options.logMessage, options.logDetails || {});
+    }
+    if (options.toastMessage) {
+      toast(options.toastMessage);
+    }
+    state.adminDataLastSyncAt = Date.now();
+    state.adminDataSyncError = "";
+    state.skipNextRouteAnimation = true;
+    render();
+    return true;
+  };
+
+  const maintenanceExceptionUsers = getUsers().filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
+  const maintenanceExceptionSearchInput = appEl.querySelector("#admin-site-maintenance-exception-search");
+  const maintenanceExceptionHiddenInput = appEl.querySelector("#admin-site-maintenance-exception-user-id");
+  const maintenanceExceptionSuggestions = appEl.querySelector("#admin-site-maintenance-exception-suggestions");
+  const maintenanceExceptionAddButton = appEl.querySelector("[data-action='admin-site-maintenance-add-exception']");
+
+  const renderMaintenanceExceptionSuggestions = (query = "") => {
+    if (!(maintenanceExceptionSearchInput instanceof HTMLInputElement) || !(maintenanceExceptionSuggestions instanceof HTMLElement)) {
+      return;
+    }
+    const normalizedQuery = String(query || "").trim();
+    const matches = searchUsersForNotificationTarget(normalizedQuery, maintenanceExceptionUsers, 8);
+    if (!matches.length) {
+      maintenanceExceptionSuggestions.innerHTML = "";
+      maintenanceExceptionSuggestions.hidden = true;
+      return;
+    }
+    const activeId = maintenanceExceptionHiddenInput instanceof HTMLInputElement
+      ? String(maintenanceExceptionHiddenInput.value || "").trim()
+      : "";
+    maintenanceExceptionSuggestions.innerHTML = matches
+      .map((entry) => {
+        const userId = String(getUserProfileId(entry) || entry?.id || "").trim();
+        if (!userId) {
+          return "";
+        }
+        const isActive = activeId === userId;
+        return `
+          <button
+            type="button"
+            class="admin-user-suggestion${isActive ? " is-active" : ""}"
+            data-action="admin-site-maintenance-pick-user"
+            data-user-id="${escapeHtml(userId)}"
+            role="option"
+            aria-selected="${isActive ? "true" : "false"}"
+          >
+            <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
+            <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(String(entry?.role || "student").trim() || "student")}</span>
+          </button>
+        `;
+      })
+      .join("");
+    maintenanceExceptionSuggestions.hidden = false;
+  };
+
+  maintenanceExceptionSearchInput?.addEventListener("input", () => {
+    if (maintenanceExceptionHiddenInput instanceof HTMLInputElement) {
+      maintenanceExceptionHiddenInput.value = "";
+    }
+    renderMaintenanceExceptionSuggestions(maintenanceExceptionSearchInput.value);
+  });
+
+  maintenanceExceptionSearchInput?.addEventListener("focus", () => {
+    renderMaintenanceExceptionSuggestions(maintenanceExceptionSearchInput.value);
+  });
+
+  maintenanceExceptionSuggestions?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest("[data-action='admin-site-maintenance-pick-user']");
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    const userId = String(button.getAttribute("data-user-id") || "").trim();
+    const selectedUser = userId ? findUserByNotificationTargetId(userId, maintenanceExceptionUsers) : null;
+    if (!(maintenanceExceptionSearchInput instanceof HTMLInputElement) || !(maintenanceExceptionHiddenInput instanceof HTMLInputElement)) {
+      return;
+    }
+    maintenanceExceptionHiddenInput.value = userId;
+    maintenanceExceptionSearchInput.value = selectedUser ? getNotificationTargetSearchDisplayLabel(selectedUser) : "";
+    if (maintenanceExceptionSuggestions instanceof HTMLElement) {
+      maintenanceExceptionSuggestions.hidden = true;
+    }
+  });
+
+  maintenanceExceptionSearchInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    const firstSuggestion = appEl.querySelector("[data-action='admin-site-maintenance-pick-user']");
+    if (firstSuggestion instanceof HTMLButtonElement) {
+      firstSuggestion.click();
+      return;
+    }
+    if (maintenanceExceptionAddButton instanceof HTMLButtonElement) {
+      maintenanceExceptionAddButton.click();
+    }
+  });
+
+  maintenanceExceptionAddButton?.addEventListener("click", async () => {
+    if (!(maintenanceExceptionSearchInput instanceof HTMLInputElement) || !(maintenanceExceptionHiddenInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const config = getSiteMaintenanceConfig();
+    let selectedId = String(maintenanceExceptionHiddenInput.value || "").trim();
+    if (!selectedId) {
+      const selectedUser = findUserByNotificationTargetQuery(maintenanceExceptionSearchInput.value, maintenanceExceptionUsers);
+      selectedId = String(getUserProfileId(selectedUser) || selectedUser?.id || "").trim();
+    }
+    if (!selectedId) {
+      toast("Choose a valid user to add as an exception.");
+      return;
+    }
+    if (config.allowedUserIds.includes(selectedId)) {
+      toast("This user is already in the exception list.");
+      return;
+    }
+    const selectedUser = findUserByNotificationTargetId(selectedId, maintenanceExceptionUsers);
+    const nextConfig = normalizeSiteMaintenanceConfig({
+      ...config,
+      allowedUserIds: [...config.allowedUserIds, selectedId],
+      updatedAt: nowISO(),
+      updatedById: String(getCurrentUser()?.id || "").trim(),
+      updatedByName: String(getCurrentUser()?.name || getCurrentUser()?.email || "Admin").trim() || "Admin",
+    });
+    await persistSiteMaintenanceConfig(nextConfig, {
+      logMessage: "Site maintenance exception added.",
+      logDetails: {
+        exceptionUserId: selectedId,
+        exceptionUser: selectedUser ? getNotificationTargetSearchDisplayLabel(selectedUser) : "",
+      },
+      toastMessage: "User exception added.",
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='admin-site-maintenance-remove-exception']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = String(button.getAttribute("data-user-id") || "").trim();
+      if (!userId) {
+        return;
+      }
+      const config = getSiteMaintenanceConfig();
+      if (!config.allowedUserIds.includes(userId)) {
+        return;
+      }
+      const selectedUser = findUserByNotificationTargetId(userId, maintenanceExceptionUsers);
+      const nextConfig = normalizeSiteMaintenanceConfig({
+        ...config,
+        allowedUserIds: config.allowedUserIds.filter((entry) => entry !== userId),
+        updatedAt: nowISO(),
+        updatedById: String(getCurrentUser()?.id || "").trim(),
+        updatedByName: String(getCurrentUser()?.name || getCurrentUser()?.email || "Admin").trim() || "Admin",
+      });
+      await persistSiteMaintenanceConfig(nextConfig, {
+        logMessage: "Site maintenance exception removed.",
+        logDetails: {
+          exceptionUserId: userId,
+          exceptionUser: selectedUser ? getNotificationTargetSearchDisplayLabel(selectedUser) : "",
+        },
+        toastMessage: "User exception removed.",
+      });
+    });
+  });
+
   appEl.querySelector("[data-action='admin-site-maintenance-reset']")?.addEventListener("click", () => {
     const form = appEl.querySelector("#admin-site-maintenance-form");
     if (!(form instanceof HTMLFormElement)) {
@@ -13972,27 +14244,22 @@ function wireAdmin() {
       enabled: formData.get("enabled") === "on",
       title: formData.get("title"),
       message: formData.get("message"),
+      allowedUserIds: getSiteMaintenanceConfig().allowedUserIds,
       updatedAt: nowISO(),
       updatedById: String(currentUser.id || "").trim(),
       updatedByName: String(currentUser.name || currentUser.email || "Admin").trim() || "Admin",
     });
     const previousConfig = getSiteMaintenanceConfig();
-    save(STORAGE_KEYS.siteMaintenance, nextConfig);
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-    appendSystemLog(
-      "admin.site_maintenance",
-      nextConfig.enabled ? "Site maintenance mode enabled." : "Site maintenance mode disabled.",
-      {
+    await persistSiteMaintenanceConfig(nextConfig, {
+      logMessage: nextConfig.enabled ? "Site maintenance mode enabled." : "Site maintenance mode disabled.",
+      logDetails: {
         enabled: nextConfig.enabled,
         previousEnabled: previousConfig.enabled,
         title: nextConfig.title,
+        exceptionCount: nextConfig.allowedUserIds.length,
       },
-    );
-    toast(nextConfig.enabled ? "Website closed for users. Admin access remains available." : "Website reopened for users.");
-    state.adminDataLastSyncAt = Date.now();
-    state.adminDataSyncError = "";
-    state.skipNextRouteAnimation = true;
-    render();
+      toastMessage: nextConfig.enabled ? "Website closed for users. Admin access remains available." : "Website reopened for users.",
+    });
   });
 
   if (state.adminPage === "activity") {

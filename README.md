@@ -53,6 +53,31 @@ Notes:
   - global keys: `g:<storage_key>`
   - user-scoped keys: `u:<auth.uid>:<storage_key>`
 
+## Supabase connection method for this project
+
+This repo now follows the Supabase connection guidance by role:
+
+- Browser frontend (`index.html` + `bootstrap.js` + `main.js`):
+  - use Supabase Data APIs through `supabase-js`
+  - configured by `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
+  - required values: `SUPABASE_URL` and `SUPABASE_ANON_KEY`
+  - do not use Postgres connection strings in the browser
+- Server-side admin endpoints (`/api/*.js` and `supabase/functions/*`):
+  - current implementation uses Supabase Auth/Admin HTTP APIs with `SUPABASE_SERVICE_ROLE_KEY`
+  - no direct Postgres socket connection is opened by the current code
+  - if you later add direct SQL from serverless functions, use the Supabase transaction pooler connection string and disable prepared statements in that client
+- SQL tools / migrations / database GUIs:
+  - use the direct connection string when your machine/network supports IPv6
+  - otherwise use the session pooler as the fallback for long-lived GUI or backend sessions
+
+Optional environment placeholders were added to `/Users/youssefayoub/Documents/Apps/MCQs Website/.env.example`:
+
+- `SUPABASE_DB_DIRECT_URL`
+- `SUPABASE_DB_SESSION_POOLER_URL`
+- `SUPABASE_DB_TRANSACTION_POOLER_URL`
+
+These are for tooling or future backend workers. The current frontend does not read them.
+
 ## Supabase Auth setup checklist
 
 In Supabase Dashboard:
@@ -65,6 +90,41 @@ In Supabase Dashboard:
    - Redirect URLs: add your deployed URL and `http://localhost:5500` (or your local dev URL)
 3. Enable leaked-password protection (recommended for production).
 4. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
+
+## Supabase dashboard tasks still required
+
+You still need to confirm these values in the Supabase project UI:
+
+1. Project dashboard -> `Connect`
+   - copy the project URL
+   - copy the browser-safe publishable/anon key
+   - copy the connection strings you actually need for tooling:
+     - Direct connection
+     - Session pooler
+     - Transaction pooler
+2. Authentication -> `URL Configuration`
+   - set `Site URL` to your deployed frontend URL
+   - add all valid redirect URLs used by this app
+3. Authentication -> `Providers`
+   - enable Email
+   - enable Google only if you intend to keep Google sign-in active
+4. SQL Editor
+   - run `database/supabase_full_setup.sql` if the schema is not fully applied yet
+   - or run the listed migration/setup files in order
+5. Storage
+   - create the `question-images` bucket if you want image upload to work
+6. Edge Functions or hosting UI
+   - if you deploy `supabase/functions/admin-delete-user` and `supabase/functions/admin-set-user-password`, set:
+     - `SUPABASE_SERVICE_ROLE_KEY`
+     - `ALLOWED_ORIGIN`
+   - if you host your own `/api` backend instead, set the same server env vars there
+
+Recommended connection selection for your project UI choices:
+
+- Use `Project URL` + `publishable/anon key` for this website frontend
+- Use `Transaction pooler` only if you later add direct SQL inside serverless functions
+- Use `Session pooler` for long-lived IPv4-only app servers
+- Use `Direct connection` for SQL tools, migrations, pg_dump, and database GUIs when IPv6 works
 
 ## Publish to web
 

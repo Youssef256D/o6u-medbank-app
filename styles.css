@@ -1578,6 +1578,67 @@ body.theme-comfort .btn {
   margin-top: 1rem;
 }
 
+.admin-site-maintenance-exceptions {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.admin-site-maintenance-exception-form {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.admin-site-maintenance-exception-form .btn {
+  justify-self: start;
+}
+
+.admin-site-maintenance-exception-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.admin-site-maintenance-exception-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.42rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  max-width: 100%;
+}
+
+.admin-site-maintenance-exception-chip.is-unknown {
+  border-style: dashed;
+}
+
+.admin-site-maintenance-exception-chip span {
+  display: grid;
+  gap: 0.05rem;
+}
+
+.admin-site-maintenance-exception-chip small {
+  color: var(--muted);
+}
+
+.admin-site-maintenance-exception-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.admin-site-maintenance-exception-chip button:hover {
+  color: var(--danger);
+}
+
 .maintenance-shell {
   display: grid;
   place-items: center;
