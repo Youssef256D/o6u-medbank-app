@@ -61,6 +61,7 @@ create index if not exists idx_notification_reads_user_read_at
 create or replace function public.set_notifications_updated_at()
 returns trigger
 language plpgsql
+set search_path = public
 as $$
 begin
   new.updated_at = now();
