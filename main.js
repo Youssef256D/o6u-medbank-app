@@ -76,6 +76,7 @@ const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
+const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
@@ -334,6 +335,8 @@ let notificationRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
+let siteMaintenanceGateRefreshHandle = null;
+let siteMaintenanceGateRefreshInFlight = false;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -2181,6 +2184,36 @@ function canBypassSiteMaintenanceForRoute(route, user = null) {
 
 function shouldShowSiteMaintenanceGate(user = null, route = state.route) {
   return isSiteMaintenanceEnabledForUser(user) && !canBypassSiteMaintenanceForRoute(route, user);
+}
+
+function resolveHydratedSiteMaintenanceConfig(remotePayload, options = {}) {
+  const localConfig = getSiteMaintenanceConfig();
+  const remoteConfig = normalizeSiteMaintenanceConfig(remotePayload);
+  const localUpdatedAtMs = parseTimestampMs(localConfig.updatedAt);
+  const remoteUpdatedAtMs = parseTimestampMs(remoteConfig.updatedAt);
+  const hasPendingWrite = Boolean(options?.hasPendingWrite);
+  const localSignature = JSON.stringify(localConfig);
+  const remoteSignature = JSON.stringify(remoteConfig);
+  if (localSignature === remoteSignature) {
+    return { config: remoteConfig, shouldResync: false };
+  }
+  if (hasPendingWrite) {
+    return { config: localConfig, shouldResync: false };
+  }
+  if (remoteUpdatedAtMs > localUpdatedAtMs) {
+    return { config: remoteConfig, shouldResync: false };
+  }
+  if (localUpdatedAtMs > remoteUpdatedAtMs) {
+    return { config: localConfig, shouldResync: true };
+  }
+  if (!localUpdatedAtMs && !remoteUpdatedAtMs) {
+    const defaultSignature = JSON.stringify(normalizeSiteMaintenanceConfig(null));
+    return {
+      config: localSignature === defaultSignature ? remoteConfig : localConfig,
+      shouldResync: localSignature !== defaultSignature,
+    };
+  }
+  return { config: localConfig, shouldResync: false };
 }
 
 function shouldAutoApproveStudentAccess(user) {
@@ -4572,8 +4605,15 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
     }
     try {
       let payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
+      const hasPendingWrite = candidates.some((candidate) => supabaseSync.pendingWrites.has(candidate));
       if (storageKey === STORAGE_KEYS.sessions) {
         payload = mergeHydratedSessionsWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.siteMaintenance) {
+        const resolvedMaintenance = resolveHydratedSiteMaintenanceConfig(payload, { hasPendingWrite });
+        payload = resolvedMaintenance.config;
+        if (resolvedMaintenance.shouldResync) {
+          scheduleSupabaseWrite(storageKey, payload);
+        }
       }
       writeStorageKey(storageKey, payload);
     } catch {
@@ -7140,6 +7180,63 @@ function ensureAdminDashboardPolling() {
   }, ADMIN_DATA_REFRESH_MS);
 }
 
+function clearSiteMaintenanceGateRefreshPolling() {
+  if (siteMaintenanceGateRefreshHandle) {
+    window.clearInterval(siteMaintenanceGateRefreshHandle);
+    siteMaintenanceGateRefreshHandle = null;
+  }
+  siteMaintenanceGateRefreshInFlight = false;
+}
+
+async function refreshSiteMaintenanceGateState(user = null) {
+  if (siteMaintenanceGateRefreshInFlight) {
+    return;
+  }
+  const currentUser = user || getCurrentUser();
+  if (!shouldShowSiteMaintenanceGate(currentUser, state.route)) {
+    clearSiteMaintenanceGateRefreshPolling();
+    return;
+  }
+
+  siteMaintenanceGateRefreshInFlight = true;
+  const previousConfig = getSiteMaintenanceConfig();
+  try {
+    if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+      const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
+      if (!bootstrap?.enabled) {
+        return;
+      }
+    }
+    await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
+    const nextConfig = getSiteMaintenanceConfig();
+    if (
+      JSON.stringify(previousConfig) !== JSON.stringify(nextConfig)
+      || !shouldShowSiteMaintenanceGate(currentUser, state.route)
+    ) {
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+  } finally {
+    siteMaintenanceGateRefreshInFlight = false;
+  }
+}
+
+function ensureSiteMaintenanceGateRefreshPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!shouldShowSiteMaintenanceGate(currentUser, state.route)) {
+    clearSiteMaintenanceGateRefreshPolling();
+    return;
+  }
+  if (siteMaintenanceGateRefreshHandle) {
+    return;
+  }
+  siteMaintenanceGateRefreshHandle = window.setInterval(() => {
+    refreshSiteMaintenanceGateState(currentUser).catch((error) => {
+      console.warn("Site maintenance refresh failed.", error?.message || error);
+    });
+  }, SITE_MAINTENANCE_GATE_REFRESH_MS);
+}
+
 function clearNotificationRealtimeHydrateTimer() {
   if (notificationRealtimeHydrateTimer) {
     window.clearTimeout(notificationRealtimeHydrateTimer);
@@ -8006,8 +8103,10 @@ function render() {
   }
 
   if (shouldShowSiteMaintenanceGate(user, state.route)) {
+    ensureSiteMaintenanceGateRefreshPolling(user);
     appEl.innerHTML = renderSiteMaintenancePage(user);
   } else {
+    clearSiteMaintenanceGateRefreshPolling();
     switch (state.route) {
       case "landing":
         appEl.innerHTML = renderLanding();
