@@ -69,7 +69,9 @@ const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
 const RELATIONAL_FLUSH_DEBOUNCE_MS = 850;
 const RELATIONAL_RETRY_FLUSH_MS = 2200;
 const SUPABASE_RETRY_FLUSH_MS = 3000;
+const SESSION_SYNC_FLUSH_MS = 15000;
 const ADMIN_DATA_REFRESH_MS = 15000;
+const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
@@ -321,6 +323,7 @@ let supabaseBootstrapInFlight = false;
 let supabaseAuthStateUnsubscribe = null;
 let notificationRealtimeChannel = null;
 let notificationRealtimeSubscriptionKey = "";
+let notificationRealtimeSubscribed = false;
 let notificationRealtimeHydrateTimer = null;
 let notificationRealtimeHydrateInFlight = false;
 let notificationRealtimeHydrateQueued = false;
@@ -331,6 +334,7 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
+let adminQuestionsLastHydratedAt = 0;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -341,6 +345,11 @@ const presenceRuntime = {
   lastSolving: false,
   pushInFlight: false,
   nextRetryAt: 0,
+};
+const sessionSyncRuntime = {
+  timer: null,
+  dirty: false,
+  flushing: false,
 };
 
 const analyticsRuntime = {
@@ -2459,8 +2468,84 @@ function saveLocalOnly(key, value) {
   appendStorageMutationLog("save_local", key, value);
 }
 
+function clearSessionSyncTimer() {
+  if (sessionSyncRuntime.timer) {
+    window.clearTimeout(sessionSyncRuntime.timer);
+    sessionSyncRuntime.timer = null;
+  }
+}
+
+function resetSessionSyncRuntime() {
+  clearSessionSyncTimer();
+  sessionSyncRuntime.dirty = false;
+  sessionSyncRuntime.flushing = false;
+}
+
+function queueSessionStateForCloud() {
+  if (!sessionSyncRuntime.dirty) {
+    return false;
+  }
+
+  const sessions = getSessions();
+  const queuedRelational = scheduleRelationalWrite(STORAGE_KEYS.sessions, sessions);
+  const queuedSupabase = scheduleSupabaseWrite(STORAGE_KEYS.sessions, sessions);
+  if (!queuedRelational && !queuedSupabase) {
+    return false;
+  }
+  sessionSyncRuntime.dirty = false;
+  return true;
+}
+
+async function flushSessionStateSync() {
+  clearSessionSyncTimer();
+  if (sessionSyncRuntime.flushing || !queueSessionStateForCloud()) {
+    return;
+  }
+
+  sessionSyncRuntime.flushing = true;
+  try {
+    await flushRelationalWrites({ throwOnFailure: false }).catch(() => { });
+    if (supabaseSync.pendingWrites.size) {
+      await flushSupabaseWrites().catch(() => { });
+    }
+  } finally {
+    sessionSyncRuntime.flushing = false;
+    scheduleSyncStatusUiRefresh();
+    if (sessionSyncRuntime.dirty && !sessionSyncRuntime.timer) {
+      sessionSyncRuntime.timer = window.setTimeout(() => {
+        sessionSyncRuntime.timer = null;
+        flushSessionStateSync().catch((error) => {
+          console.warn("Deferred session sync failed.", error?.message || error);
+        });
+      }, SESSION_SYNC_FLUSH_MS);
+    }
+  }
+}
+
+function scheduleSessionStateSync(options = {}) {
+  sessionSyncRuntime.dirty = true;
+  scheduleSyncStatusUiRefresh();
+  if (options?.immediate) {
+    flushSessionStateSync().catch((error) => {
+      console.warn("Session sync failed.", error?.message || error);
+    });
+    return;
+  }
+  if (sessionSyncRuntime.timer || sessionSyncRuntime.flushing) {
+    return;
+  }
+  sessionSyncRuntime.timer = window.setTimeout(() => {
+    sessionSyncRuntime.timer = null;
+    flushSessionStateSync().catch((error) => {
+      console.warn("Deferred session sync failed.", error?.message || error);
+    });
+  }, SESSION_SYNC_FLUSH_MS);
+}
+
 function getPendingCloudWriteCount() {
-  return Number(relationalSync.pendingWrites.size || 0) + Number(supabaseSync.pendingWrites.size || 0);
+  return Number(relationalSync.pendingWrites.size || 0)
+    + Number(supabaseSync.pendingWrites.size || 0)
+    + Number(sessionSyncRuntime.dirty ? 1 : 0);
 }
 
 function formatRelativeSyncTime(timestamp) {
@@ -2637,6 +2722,7 @@ function resetRelationalSyncState() {
   relationalQuestionColumnSupport.explanationImageUrl = false;
   relationalQuestionColumnSupport.sortOrder = false;
   clearRelationalFlushTimer();
+  resetSessionSyncRuntime();
   scheduleSyncStatusUiRefresh();
 }
 
@@ -4472,21 +4558,21 @@ async function hydrateQuestionsFromSupabaseBackup() {
 
 function scheduleSupabaseWrite(storageKey, value) {
   if (!supabaseSync.enabled || !SYNCABLE_STORAGE_KEYS.includes(storageKey)) {
-    return;
+    return false;
   }
 
   const currentUser = getCurrentUser();
   const scope = getSyncScopeForUser(currentUser);
   const remoteKey = buildRemoteSyncKey(storageKey, scope);
   if (!remoteKey) {
-    return;
+    return false;
   }
 
   const payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
   supabaseSync.pendingWrites.set(remoteKey, { storageKey, payload });
   scheduleSyncStatusUiRefresh();
   if (supabaseSync.flushTimer) {
-    return;
+    return true;
   }
 
   supabaseSync.flushTimer = window.setTimeout(() => {
@@ -4494,6 +4580,7 @@ function scheduleSupabaseWrite(storageKey, value) {
       console.warn("Supabase write flush failed.", error);
     });
   }, 1200);
+  return true;
 }
 
 function scheduleFullSupabaseSync(options = {}) {
@@ -4687,6 +4774,8 @@ async function flushRelationalWrites(options = {}) {
 
 async function flushPendingSyncNow(options = {}) {
   const throwOnRelationalFailure = options?.throwOnRelationalFailure !== false;
+  clearSessionSyncTimer();
+  queueSessionStateForCloud();
   if (relationalSync.flushing) {
     for (let attempt = 0; attempt < 30 && relationalSync.flushing; attempt += 1) {
       // Wait briefly for an in-flight flush to finish before forcing another write-through.
@@ -6956,7 +7045,7 @@ function ensureAdminDashboardPolling() {
     if (state.adminDataRefreshing) {
       return;
     }
-    refreshAdminDataSnapshot(currentUser, { force: true, surfaceErrors: false })
+    refreshAdminDataSnapshot(currentUser, { force: true, surfaceErrors: false, includeHeavyData: false })
       .then((ok) => {
         if (!ok) {
           return;
@@ -6993,12 +7082,19 @@ function clearStudentNotificationPolling() {
 function ensureStudentNotificationPolling(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = getCurrentSessionProfileId(currentUser);
+  const realtimeHealthy = currentUser?.role === "student"
+    && notificationRealtimeSubscribed
+    && notificationRealtimeSubscriptionKey === `student:${profileId}`;
   if (
     !currentUser
     || currentUser.role !== "student"
     || !isUuidValue(profileId)
     || !getRelationalClient()
   ) {
+    clearStudentNotificationPolling();
+    return;
+  }
+  if (realtimeHealthy) {
     clearStudentNotificationPolling();
     return;
   }
@@ -7013,6 +7109,13 @@ function ensureStudentNotificationPolling(user = null) {
       clearStudentNotificationPolling();
       return;
     }
+    if (
+      notificationRealtimeSubscribed
+      && notificationRealtimeSubscriptionKey === `student:${activeProfileId}`
+    ) {
+      clearStudentNotificationPolling();
+      return;
+    }
     scheduleNotificationRealtimeHydration(0);
   }, NOTIFICATION_FALLBACK_POLL_MS);
 }
@@ -7023,6 +7126,7 @@ function clearNotificationRealtimeSubscription() {
   notificationRealtimeHydrateQueued = false;
   notificationRealtimeHydrateInFlight = false;
   notificationRealtimeSubscriptionKey = "";
+  notificationRealtimeSubscribed = false;
   const activeChannel = notificationRealtimeChannel;
   notificationRealtimeChannel = null;
   if (!activeChannel) {
@@ -7126,6 +7230,9 @@ function ensureNotificationsRealtimeSubscription(user = null) {
 
   const nextKey = `${role}:${profileId}`;
   if (notificationRealtimeChannel && notificationRealtimeSubscriptionKey === nextKey) {
+    if (role === "student") {
+      ensureStudentNotificationPolling(currentUser);
+    }
     return;
   }
 
@@ -7154,8 +7261,14 @@ function ensureNotificationsRealtimeSubscription(user = null) {
   }
 
   channel.subscribe((status) => {
+    notificationRealtimeSubscribed = status === "SUBSCRIBED";
     if (status === "SUBSCRIBED") {
+      clearStudentNotificationPolling();
       scheduleNotificationRealtimeHydration(0);
+      return;
+    }
+    if (role === "student") {
+      ensureStudentNotificationPolling(currentUser);
     }
   });
   notificationRealtimeChannel = channel;
@@ -7562,6 +7675,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
   }
   const force = Boolean(options?.force);
   const surfaceErrors = options?.surfaceErrors !== false;
+  const includeHeavyData = options?.includeHeavyData !== false;
   if (!force && !shouldRefreshAdminData(user)) {
     return true;
   }
@@ -7600,6 +7714,13 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions)
       || relationalSync.flushing
       || isQuestionSyncBusy();
+    const shouldHydrateQuestions = !hasPendingQuestionWrites && (
+      includeHeavyData
+      || state.adminPage === "questions"
+      || state.adminPage === "bulk-import"
+      || !adminQuestionsLastHydratedAt
+      || (Date.now() - adminQuestionsLastHydratedAt) > ADMIN_QUESTION_BACKGROUND_REFRESH_MS
+    );
 
     if (!hasPendingCourseWrites) {
       await hydrateRelationalCoursesAndTopics();
@@ -7607,8 +7728,9 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     if (!hasPendingUserWrites) {
       await hydrateRelationalProfiles(user);
     }
-    if (!hasPendingQuestionWrites) {
+    if (shouldHydrateQuestions) {
       await hydrateRelationalQuestions();
+      adminQuestionsLastHydratedAt = Date.now();
     }
     await hydrateRelationalNotifications(user);
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
@@ -7657,6 +7779,7 @@ function render() {
     state.adminPresenceError = "";
     state.adminPresenceRows = [];
     state.adminPresenceLastSyncAt = 0;
+    adminQuestionsLastHydratedAt = 0;
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
   }
@@ -11215,7 +11338,8 @@ async function handleSessionClick(event) {
 
   if (action === "save-exit") {
     session.updatedAt = nowISO();
-    upsertSession(session);
+    upsertSession(session, { immediate: true });
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
     document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
@@ -11249,6 +11373,7 @@ async function handleSessionClick(event) {
       }
     });
     finalizeSession(session.id);
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
     document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
@@ -11541,7 +11666,7 @@ function finalizeSession(sessionId) {
   session.completedAt = nowISO();
   session.paused = false;
   session.updatedAt = nowISO();
-  upsertSession(session);
+  upsertSession(session, { immediate: true });
 
   const incorrectMap = load(STORAGE_KEYS.incorrectQueue, {});
   const userQueue = new Set(incorrectMap[session.userId] || []);
@@ -17601,7 +17726,7 @@ function getSessionById(sessionId) {
   return getSessions().find((session) => session.id === sessionId) || null;
 }
 
-function upsertSession(updated) {
+function upsertSession(updated, options = {}) {
   const sessions = getSessions();
   const idx = sessions.findIndex((session) => session.id === updated.id);
   if (idx >= 0) {
@@ -17609,7 +17734,7 @@ function upsertSession(updated) {
   } else {
     sessions.push(updated);
   }
-  save(STORAGE_KEYS.sessions, sessions);
+  save(STORAGE_KEYS.sessions, sessions, options);
 }
 
 function getFilterOptions(questions) {
@@ -20027,11 +20152,15 @@ function load(key, fallback) {
   }
 }
 
-function save(key, value) {
+function save(key, value, options = {}) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
-  scheduleRelationalWrite(key, value);
-  scheduleSupabaseWrite(key, value);
+  if (key === STORAGE_KEYS.sessions) {
+    scheduleSessionStateSync(options);
+  } else {
+    scheduleRelationalWrite(key, value);
+    scheduleSupabaseWrite(key, value);
+  }
   appendStorageMutationLog("save", key, value);
 }
 
