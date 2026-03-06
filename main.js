@@ -13429,7 +13429,8 @@ function renderAdmin() {
 
   if (activeAdminPage === "site-access") {
     const config = getSiteMaintenanceConfig();
-    const maintenanceExceptionUsers = getUsers().filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
+    const maintenanceExceptionUsers = getCloudNotificationTargetUsers(getUsers())
+      .filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
     const maintenanceExceptions = config.allowedUserIds.map((userId) => {
       const matchedUser = findUserByNotificationTargetId(userId, maintenanceExceptionUsers);
       if (matchedUser) {
@@ -13495,7 +13496,7 @@ function renderAdmin() {
                     type="search"
                     id="admin-site-maintenance-exception-search"
                     name="exceptionUserQuery"
-                    placeholder="Type name or email..."
+                    placeholder="Type name, email, or phone..."
                     autocomplete="off"
                     spellcheck="false"
                   />
@@ -14057,7 +14058,8 @@ function wireAdmin() {
     return true;
   };
 
-  const maintenanceExceptionUsers = getUsers().filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
+  const maintenanceExceptionUsers = getCloudNotificationTargetUsers(getUsers())
+    .filter((entry) => String(entry?.role || "").trim().toLowerCase() !== "admin");
   const maintenanceExceptionSearchInput = appEl.querySelector("#admin-site-maintenance-exception-search");
   const maintenanceExceptionHiddenInput = appEl.querySelector("#admin-site-maintenance-exception-user-id");
   const maintenanceExceptionSuggestions = appEl.querySelector("#admin-site-maintenance-exception-suggestions");
@@ -14093,8 +14095,12 @@ function wireAdmin() {
             role="option"
             aria-selected="${isActive ? "true" : "false"}"
           >
-            <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || "").trim() || "User")}</span>
-            <span class="admin-user-suggestion-meta">${escapeHtml(String(entry?.email || "").trim() || "No email")} • ${escapeHtml(String(entry?.role || "student").trim() || "student")}</span>
+            <span class="admin-user-suggestion-name">${escapeHtml(String(entry?.name || entry?.full_name || "").trim() || "User")}</span>
+            <span class="admin-user-suggestion-meta">${escapeHtml([
+          String(entry?.email || "").trim() || "No email",
+          String(entry?.phone || "").trim() || "No phone",
+          String(entry?.role || "student").trim() || "student",
+        ].join(" • "))}</span>
           </button>
         `;
       })
@@ -17022,7 +17028,7 @@ function getNotificationTargetSearchDisplayLabel(user) {
   if (!user || typeof user !== "object") {
     return "";
   }
-  const name = String(user.name || "").trim() || "User";
+  const name = String(user.name || user.full_name || "").trim() || "User";
   const email = String(user.email || "").trim();
   if (email) {
     return `${name} <${email}>`;
@@ -17037,18 +17043,27 @@ function normalizeNotificationTargetSearchText(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeNotificationTargetPhoneSearchText(value) {
+  return String(value || "").replace(/\D+/g, "");
+}
+
 function scoreUserNotificationTargetMatch(user, query) {
   const q = normalizeNotificationTargetSearchText(query);
+  const phoneQuery = normalizeNotificationTargetPhoneSearchText(query);
   if (!q) {
     return 1;
   }
-  const name = normalizeNotificationTargetSearchText(user?.name);
+  const name = normalizeNotificationTargetSearchText(user?.name || user?.full_name);
   const email = normalizeNotificationTargetSearchText(user?.email);
+  const phone = normalizeNotificationTargetPhoneSearchText(user?.phone);
   const localId = normalizeNotificationTargetSearchText(user?.id);
   const profileId = normalizeNotificationTargetSearchText(getUserProfileId(user));
   const label = normalizeNotificationTargetSearchText(getNotificationTargetSearchDisplayLabel(user));
   if (email === q || localId === q || profileId === q) {
     return 100;
+  }
+  if (phoneQuery && phone === phoneQuery) {
+    return 95;
   }
   if (name === q || label === q) {
     return 90;
@@ -17056,8 +17071,14 @@ function scoreUserNotificationTargetMatch(user, query) {
   if (email.startsWith(q) || name.startsWith(q)) {
     return 70;
   }
+  if (phoneQuery && phone.startsWith(phoneQuery)) {
+    return 68;
+  }
   if (email.includes(q)) {
     return 60;
+  }
+  if (phoneQuery && phone.includes(phoneQuery)) {
+    return 58;
   }
   if (name.includes(q) || label.includes(q)) {
     return 50;
@@ -17068,6 +17089,13 @@ function scoreUserNotificationTargetMatch(user, query) {
 function searchUsersForNotificationTarget(query, users = null, limit = 8) {
   const list = Array.isArray(users) ? users : getUsers();
   const normalizedQuery = normalizeNotificationTargetSearchText(query);
+  const sortedList = [...list].sort((a, b) => {
+    const byName = String(a?.name || a?.full_name || "").localeCompare(String(b?.name || b?.full_name || ""));
+    if (byName !== 0) {
+      return byName;
+    }
+    return String(a?.email || "").localeCompare(String(b?.email || ""));
+  });
   const scored = list
     .map((entry) => ({ user: entry, score: scoreUserNotificationTargetMatch(entry, normalizedQuery) }))
     .filter((entry) => entry.score > 0)
@@ -17085,7 +17113,7 @@ function searchUsersForNotificationTarget(query, users = null, limit = 8) {
   if (normalizedQuery) {
     return scored.slice(0, Math.max(1, Number(limit) || 8));
   }
-  return list.slice(0, Math.max(1, Number(limit) || 8));
+  return sortedList.slice(0, Math.max(1, Number(limit) || 8));
 }
 
 function findUserByNotificationTargetQuery(query, users = null) {
