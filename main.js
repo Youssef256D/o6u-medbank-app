@@ -17,6 +17,7 @@ const STORAGE_KEYS = {
   courseTopics: "mcq_course_topics",
   courseNotebookLinks: "mcq_course_notebook_links",
   autoApproveStudentAccess: "mcq_auto_approve_student_access",
+  siteMaintenance: "mcq_site_maintenance",
   appVersionSeen: "mcq_app_version_seen",
   appVersionForced: "mcq_app_version_forced",
   studentRefreshTrigger: "mcq_student_refresh_trigger",
@@ -60,7 +61,7 @@ const KNOWN_ROUTES = new Set([
   "profile",
   "admin",
 ]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
@@ -93,6 +94,8 @@ const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
+const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
+const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
 const THEME_PREFERENCE_KEY = "mcq_theme_preference";
@@ -248,6 +251,7 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.courseTopics,
   STORAGE_KEYS.courseNotebookLinks,
   STORAGE_KEYS.autoApproveStudentAccess,
+  STORAGE_KEYS.siteMaintenance,
   STORAGE_KEYS.studentRefreshTrigger,
 ];
 
@@ -371,6 +375,7 @@ const SYSTEM_LOG_AUDITED_STORAGE_KEYS = new Set([
   STORAGE_KEYS.courseTopics,
   STORAGE_KEYS.courseNotebookLinks,
   STORAGE_KEYS.autoApproveStudentAccess,
+  STORAGE_KEYS.siteMaintenance,
   STORAGE_KEYS.invites,
   STORAGE_KEYS.feedback,
   STORAGE_KEYS.notifications,
@@ -2111,6 +2116,44 @@ function isAutoApproveStudentAccessEnabled() {
     return savedSetting;
   }
   return DEFAULT_AUTO_APPROVE_STUDENT_ACCESS;
+}
+
+function normalizeSiteMaintenanceConfig(rawValue) {
+  const value = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+  return {
+    enabled: Boolean(value.enabled),
+    title: String(value.title || "").trim() || DEFAULT_SITE_MAINTENANCE_TITLE,
+    message: String(value.message || "").trim() || DEFAULT_SITE_MAINTENANCE_MESSAGE,
+    updatedAt: String(value.updatedAt || "").trim(),
+    updatedById: String(value.updatedById || "").trim(),
+    updatedByName: String(value.updatedByName || "").trim(),
+  };
+}
+
+function getSiteMaintenanceConfig() {
+  return normalizeSiteMaintenanceConfig(load(STORAGE_KEYS.siteMaintenance, null));
+}
+
+function isSiteMaintenanceEnabled() {
+  return getSiteMaintenanceConfig().enabled;
+}
+
+function isSiteMaintenanceEnabledForUser(user = null) {
+  const currentUser = user || getCurrentUser();
+  return isSiteMaintenanceEnabled() && currentUser?.role !== "admin";
+}
+
+function canBypassSiteMaintenanceForRoute(route, user = null) {
+  const currentUser = user || getCurrentUser();
+  if (currentUser?.role === "admin") {
+    return true;
+  }
+  const normalizedRoute = String(route || "").trim().toLowerCase();
+  return normalizedRoute === "login" || normalizedRoute === "forgot" || normalizedRoute === "reset-password";
+}
+
+function shouldShowSiteMaintenanceGate(user = null, route = state.route) {
+  return isSiteMaintenanceEnabledForUser(user) && !canBypassSiteMaintenanceForRoute(route, user);
 }
 
 function shouldAutoApproveStudentAccess(user) {
@@ -6482,6 +6525,11 @@ function seedData() {
   if (typeof load(STORAGE_KEYS.autoApproveStudentAccess, null) !== "boolean") {
     save(STORAGE_KEYS.autoApproveStudentAccess, DEFAULT_AUTO_APPROVE_STUDENT_ACCESS);
   }
+  const savedSiteMaintenance = load(STORAGE_KEYS.siteMaintenance, null);
+  const normalizedSiteMaintenance = normalizeSiteMaintenanceConfig(savedSiteMaintenance);
+  if (!savedSiteMaintenance || JSON.stringify(savedSiteMaintenance) !== JSON.stringify(normalizedSiteMaintenance)) {
+    save(STORAGE_KEYS.siteMaintenance, normalizedSiteMaintenance);
+  }
 
   const allCourses = CURRICULUM_COURSE_LIST;
 
@@ -7504,6 +7552,7 @@ async function refreshStudentDataFromSupabaseState(user) {
     STORAGE_KEYS.curriculum,
     STORAGE_KEYS.courseTopics,
     STORAGE_KEYS.courseNotebookLinks,
+    STORAGE_KEYS.siteMaintenance,
   ]).catch((error) => ({ error }));
   if (globalRefreshResult?.error) {
     return false;
@@ -7548,12 +7597,8 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       }
       if (
         rerender
-        && (
-          routeBefore === "dashboard"
-          || routeBefore === "analytics"
-          || routeBefore === "notifications"
-          || routeBefore === "create-test"
-        )
+        && routeBefore !== "session"
+        && routeBefore !== "review"
         && state.route === routeBefore
       ) {
         shouldRerenderRoute = routeBefore;
@@ -7585,18 +7630,15 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       state.studentDataLastFullSyncAt = now;
     }
     await hydrateRelationalNotifications(user);
+    await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
     if (!hasPendingSessionWrites) {
       await hydrateRelationalSessions(user);
     }
     state.studentDataLastSyncAt = Date.now();
     if (
       rerender
-      && (
-        routeBefore === "dashboard"
-        || routeBefore === "analytics"
-        || routeBefore === "notifications"
-        || routeBefore === "create-test"
-      )
+      && routeBefore !== "session"
+      && routeBefore !== "review"
       && state.route === routeBefore
     ) {
       shouldRerenderRoute = routeBefore;
@@ -7733,6 +7775,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       adminQuestionsLastHydratedAt = Date.now();
     }
     await hydrateRelationalNotifications(user);
+    await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
       await refreshAdminPresenceSnapshot({ force: true, silent: true });
     }
@@ -7756,6 +7799,37 @@ function renderAdminLoading() {
     <section class="panel">
       <h2 class="title">Admin Dashboard</h2>
       <p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Syncing latest users and admin data...</span></p>
+    </section>
+  `;
+}
+
+function renderSiteMaintenancePage(user = null) {
+  const currentUser = user || getCurrentUser();
+  const config = getSiteMaintenanceConfig();
+  const updatedLabel = config.updatedAt ? new Date(config.updatedAt).toLocaleString() : "";
+  const updatedByLabel = String(config.updatedByName || "").trim();
+  const footerNote = currentUser?.role === "student"
+    ? "Your student access is paused until the admin reopens the website."
+    : "Admins can still sign in to manage the update and reopen the website.";
+
+  return `
+    <section class="panel maintenance-shell">
+      <article class="card maintenance-card">
+        <span class="maintenance-badge">Temporary closure</span>
+        <h1 class="maintenance-title">${escapeHtml(config.title)}</h1>
+        <p class="maintenance-message">${escapeHtml(config.message)}</p>
+        <div class="maintenance-actions">
+          ${currentUser
+      ? '<button class="btn ghost" type="button" data-action="logout">Log out</button>'
+      : '<button class="btn" type="button" data-nav="login">Admin login</button>'
+    }
+        </div>
+        <p class="maintenance-footnote">${escapeHtml(footerNote)}</p>
+        ${updatedLabel
+      ? `<p class="maintenance-updated">Last updated ${escapeHtml(updatedLabel)}${updatedByLabel ? ` by ${escapeHtml(updatedByLabel)}` : ""}.</p>`
+      : ""
+    }
+      </article>
     </section>
   `;
 }
@@ -7904,99 +7978,103 @@ function render() {
     state.sessionNavSettingsOpen = false;
   }
 
-  switch (state.route) {
-    case "landing":
-      appEl.innerHTML = renderLanding();
-      break;
-    case "features":
-      appEl.innerHTML = renderFeatures();
-      break;
-    case "pricing":
-      appEl.innerHTML = renderPricing();
-      break;
-    case "about":
-      appEl.innerHTML = renderAbout();
-      break;
-    case "contact":
-      appEl.innerHTML = renderContact();
-      wireContact();
-      break;
-    case "login":
-      appEl.innerHTML = renderAuth("login");
-      wireAuth("login");
-      break;
-    case "signup":
-      appEl.innerHTML = renderAuth("signup");
-      wireAuth("signup");
-      break;
-    case "forgot":
-      appEl.innerHTML = renderAuth("forgot");
-      wireAuth("forgot");
-      break;
-    case "reset-password":
-      appEl.innerHTML = renderPasswordReset();
-      wirePasswordReset();
-      break;
-    case "complete-profile":
-      appEl.innerHTML = renderCompleteProfile();
-      wireCompleteProfile();
-      break;
-    case "dashboard":
-      appEl.innerHTML = renderDashboard();
-      wireDashboard();
-      break;
-    case "notifications":
-      appEl.innerHTML = renderNotifications();
-      wireNotifications();
-      break;
-    case "create-test":
-      appEl.innerHTML = renderCreateTest();
-      wireCreateTest();
-      break;
-    case "session":
-      appEl.innerHTML = renderSession();
-      wireSession();
-      break;
-    case "review":
-      appEl.innerHTML = renderReview();
-      wireReview();
-      break;
-    case "analytics":
-      appEl.innerHTML = renderAnalytics();
-      wireAnalytics();
-      break;
-    case "profile":
-      appEl.innerHTML = renderProfile();
-      wireProfile();
-      break;
-    case "admin":
-      if (user?.role === "admin" && shouldRefreshAdminData(user)) {
-        const initialAdminHydration = !state.adminDataLastSyncAt;
-        const adminPageBeforeRefresh = String(state.adminPage || "").trim();
-        refreshAdminDataSnapshot(user, {
-          force: !state.adminDataLastSyncAt,
-          surfaceErrors: !state.adminDataLastSyncAt,
-        }).then((ok) => {
-          if (!ok || state.route !== "admin" || String(state.adminPage || "").trim() !== adminPageBeforeRefresh) {
-            return;
-          }
-          if (initialAdminHydration || ADMIN_AUTO_REFRESH_PAGES.has(adminPageBeforeRefresh)) {
-            state.skipNextRouteAnimation = true;
-            render();
-          }
-        }).catch((error) => {
-          console.warn("Admin data refresh failed.", error?.message || error);
-        });
-      }
-      if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
-        appEl.innerHTML = renderAdminLoading();
+  if (shouldShowSiteMaintenanceGate(user, state.route)) {
+    appEl.innerHTML = renderSiteMaintenancePage(user);
+  } else {
+    switch (state.route) {
+      case "landing":
+        appEl.innerHTML = renderLanding();
         break;
-      }
-      appEl.innerHTML = renderAdmin();
-      wireAdmin();
-      break;
-    default:
-      appEl.innerHTML = renderLanding();
+      case "features":
+        appEl.innerHTML = renderFeatures();
+        break;
+      case "pricing":
+        appEl.innerHTML = renderPricing();
+        break;
+      case "about":
+        appEl.innerHTML = renderAbout();
+        break;
+      case "contact":
+        appEl.innerHTML = renderContact();
+        wireContact();
+        break;
+      case "login":
+        appEl.innerHTML = renderAuth("login");
+        wireAuth("login");
+        break;
+      case "signup":
+        appEl.innerHTML = renderAuth("signup");
+        wireAuth("signup");
+        break;
+      case "forgot":
+        appEl.innerHTML = renderAuth("forgot");
+        wireAuth("forgot");
+        break;
+      case "reset-password":
+        appEl.innerHTML = renderPasswordReset();
+        wirePasswordReset();
+        break;
+      case "complete-profile":
+        appEl.innerHTML = renderCompleteProfile();
+        wireCompleteProfile();
+        break;
+      case "dashboard":
+        appEl.innerHTML = renderDashboard();
+        wireDashboard();
+        break;
+      case "notifications":
+        appEl.innerHTML = renderNotifications();
+        wireNotifications();
+        break;
+      case "create-test":
+        appEl.innerHTML = renderCreateTest();
+        wireCreateTest();
+        break;
+      case "session":
+        appEl.innerHTML = renderSession();
+        wireSession();
+        break;
+      case "review":
+        appEl.innerHTML = renderReview();
+        wireReview();
+        break;
+      case "analytics":
+        appEl.innerHTML = renderAnalytics();
+        wireAnalytics();
+        break;
+      case "profile":
+        appEl.innerHTML = renderProfile();
+        wireProfile();
+        break;
+      case "admin":
+        if (user?.role === "admin" && shouldRefreshAdminData(user)) {
+          const initialAdminHydration = !state.adminDataLastSyncAt;
+          const adminPageBeforeRefresh = String(state.adminPage || "").trim();
+          refreshAdminDataSnapshot(user, {
+            force: !state.adminDataLastSyncAt,
+            surfaceErrors: !state.adminDataLastSyncAt,
+          }).then((ok) => {
+            if (!ok || state.route !== "admin" || String(state.adminPage || "").trim() !== adminPageBeforeRefresh) {
+              return;
+            }
+            if (initialAdminHydration || ADMIN_AUTO_REFRESH_PAGES.has(adminPageBeforeRefresh)) {
+              state.skipNextRouteAnimation = true;
+              render();
+            }
+          }).catch((error) => {
+            console.warn("Admin data refresh failed.", error?.message || error);
+          });
+        }
+        if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
+          appEl.innerHTML = renderAdminLoading();
+          break;
+        }
+        appEl.innerHTML = renderAdmin();
+        wireAdmin();
+        break;
+      default:
+        appEl.innerHTML = renderLanding();
+    }
   }
 
   const isAdminQuestionModalOpen = state.route === "admin" && state.adminPage === "questions" && state.adminQuestionModalOpen;
@@ -8130,6 +8208,7 @@ function syncTopbar() {
   ensureStudentNotificationPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
+  const maintenanceRestricted = isSiteMaintenanceEnabledForUser(user);
   const unreadNotificationCount = user?.role === "student"
     ? getUnreadNotificationCountForUser(user)
     : 0;
@@ -8139,8 +8218,8 @@ function syncTopbar() {
   brandWrapEl?.classList.toggle("hidden", false);
   authActionsEl.classList.toggle("hidden", false);
 
-  publicNavEl.classList.toggle("hidden", Boolean(user));
-  privateNavEl.classList.toggle("hidden", !user);
+  publicNavEl.classList.toggle("hidden", Boolean(user) || maintenanceRestricted);
+  privateNavEl.classList.toggle("hidden", !user || maintenanceRestricted);
   adminLinkEl.classList.toggle("hidden", user?.role !== "admin");
   privateNavEl.querySelectorAll("[data-nav]").forEach((button) => {
     const route = button.getAttribute("data-nav");
@@ -8158,7 +8237,7 @@ function syncTopbar() {
     authActionsEl.innerHTML = `
       ${renderThemeToggleButton()}
       <button data-nav="login">Login</button>
-      <button class="btn" data-nav="signup">Sign up</button>
+      ${isSiteMaintenanceEnabled() ? "" : '<button class="btn" data-nav="signup">Sign up</button>'}
     `;
   } else {
     const safeName = String(user.name || "Student").trim() || "Student";
@@ -12509,7 +12588,7 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"].includes(state.adminPage)
+  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(state.adminPage)
     ? state.adminPage
     : "dashboard";
   if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
@@ -13321,6 +13400,61 @@ function renderAdmin() {
     `;
   }
 
+  if (activeAdminPage === "site-access") {
+    const config = getSiteMaintenanceConfig();
+    const updatedLabel = config.updatedAt ? new Date(config.updatedAt).toLocaleString() : "Not yet";
+    const updatedByLabel = String(config.updatedByName || "").trim() || "System";
+    pageContent = `
+      <section class="card admin-section" id="admin-site-access-section">
+        <div class="flex-between" style="gap: 1rem;">
+          <div>
+            <h3 style="margin: 0;">Temporary Website Closure</h3>
+            <p class="subtle">Close the website for non-admin users and leave a public message about updates or maintenance.</p>
+          </div>
+          <span class="badge ${config.enabled ? "bad" : "good"}">${config.enabled ? "Closed for users" : "Open to users"}</span>
+        </div>
+
+        <form id="admin-site-maintenance-form" class="admin-site-maintenance-form">
+          <label class="toggle-switch-label admin-site-maintenance-toggle">
+            <input name="enabled" type="checkbox" class="toggle-switch-input" ${config.enabled ? "checked" : ""} />
+            <span class="toggle-switch-track" aria-hidden="true">
+              <span class="toggle-switch-thumb"></span>
+            </span>
+            <span class="toggle-switch-text">
+              <b>${config.enabled ? "Website is currently closed for users" : "Leave website open"}</b><br />
+              <span class="subtle">Admins keep access to the dashboard even while closure mode is active.</span>
+            </span>
+          </label>
+
+          <div class="form-row">
+            <label>Public title
+              <input name="title" maxlength="120" value="${escapeHtml(config.title)}" required />
+            </label>
+          </div>
+
+          <label>Public message
+            <textarea name="message" rows="6" maxlength="1200" required>${escapeHtml(config.message)}</textarea>
+          </label>
+
+          <div class="admin-site-maintenance-actions">
+            <button class="btn" type="submit">Save site status</button>
+            <button class="btn ghost" type="button" data-action="admin-site-maintenance-reset">Reset default message</button>
+          </div>
+        </form>
+
+        <div class="admin-site-maintenance-preview">
+          <div class="maintenance-card is-inline-preview">
+            <span class="maintenance-badge">${config.enabled ? "Public preview" : "Preview"}</span>
+            <h4 class="maintenance-title">${escapeHtml(config.title)}</h4>
+            <p class="maintenance-message">${escapeHtml(config.message)}</p>
+            <p class="maintenance-updated">Last saved ${escapeHtml(updatedLabel)} by ${escapeHtml(updatedByLabel)}.</p>
+          </div>
+          <p class="subtle" style="margin: 0;">If you want signed-in students to reload and pick up the closure faster, use <b>Force student refresh</b> from the sidebar after saving.</p>
+        </div>
+      </section>
+    `;
+  }
+
   if (activeAdminPage === "logs") {
     const logs = getSystemLogs().slice(0, 800);
     const logRows = logs
@@ -13546,6 +13680,7 @@ function renderAdmin() {
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
           <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
           <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
+          <button class="btn ghost ${activeAdminPage === "site-access" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="site-access">Site Access</button>
           <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
           <button class="btn ghost ${activeAdminPage === "logs" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="logs">Logs</button>
         </div>
@@ -13617,7 +13752,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "activity", "logs"].includes(page)) {
+      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
@@ -13805,6 +13940,59 @@ function wireAdmin() {
       state.skipNextRouteAnimation = true;
       render();
     }
+  });
+
+  appEl.querySelector("[data-action='admin-site-maintenance-reset']")?.addEventListener("click", () => {
+    const form = appEl.querySelector("#admin-site-maintenance-form");
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const titleField = form.elements.namedItem("title");
+    const messageField = form.elements.namedItem("message");
+    if (titleField instanceof HTMLInputElement) {
+      titleField.value = DEFAULT_SITE_MAINTENANCE_TITLE;
+    }
+    if (messageField instanceof HTMLTextAreaElement) {
+      messageField.value = DEFAULT_SITE_MAINTENANCE_MESSAGE;
+    }
+  });
+
+  appEl.querySelector("#admin-site-maintenance-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const formData = new FormData(form);
+    const nextConfig = normalizeSiteMaintenanceConfig({
+      enabled: formData.get("enabled") === "on",
+      title: formData.get("title"),
+      message: formData.get("message"),
+      updatedAt: nowISO(),
+      updatedById: String(currentUser.id || "").trim(),
+      updatedByName: String(currentUser.name || currentUser.email || "Admin").trim() || "Admin",
+    });
+    const previousConfig = getSiteMaintenanceConfig();
+    save(STORAGE_KEYS.siteMaintenance, nextConfig);
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    appendSystemLog(
+      "admin.site_maintenance",
+      nextConfig.enabled ? "Site maintenance mode enabled." : "Site maintenance mode disabled.",
+      {
+        enabled: nextConfig.enabled,
+        previousEnabled: previousConfig.enabled,
+        title: nextConfig.title,
+      },
+    );
+    toast(nextConfig.enabled ? "Website closed for users. Admin access remains available." : "Website reopened for users.");
+    state.adminDataLastSyncAt = Date.now();
+    state.adminDataSyncError = "";
+    state.skipNextRouteAnimation = true;
+    render();
   });
 
   if (state.adminPage === "activity") {

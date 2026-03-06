@@ -1552,6 +1552,139 @@ body.theme-comfort .btn {
   gap: 0.9rem;
 }
 
+.admin-site-maintenance-form {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 0.9rem;
+}
+
+.admin-site-maintenance-toggle {
+  align-items: flex-start;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.admin-site-maintenance-actions {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.admin-site-maintenance-preview {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+.maintenance-shell {
+  display: grid;
+  place-items: center;
+  min-height: min(78vh, 820px);
+  padding: clamp(1rem, 3vw, 2.2rem);
+}
+
+.maintenance-card {
+  width: min(100%, 720px);
+  padding: clamp(1.3rem, 3.6vw, 2.4rem);
+  border: 1px solid rgba(23, 126, 137, 0.18);
+  border-radius: calc(var(--radius-lg) + 4px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.88)),
+    radial-gradient(circle at top right, rgba(244, 162, 89, 0.16), transparent 42%);
+  box-shadow: var(--shadow);
+}
+
+.maintenance-card.is-inline-preview {
+  width: 100%;
+  padding: 1.1rem 1.15rem;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-soft);
+}
+
+.maintenance-card:hover {
+  transform: none;
+}
+
+.maintenance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.85rem;
+  padding: 0.32rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(196, 58, 58, 0.1);
+  color: #8b2323;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.maintenance-title {
+  margin: 0;
+  font-family: var(--font-admin-display);
+  font-size: clamp(1.8rem, 4.4vw, 3rem);
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+}
+
+.maintenance-card.is-inline-preview .maintenance-title {
+  font-size: clamp(1.2rem, 2.3vw, 1.65rem);
+}
+
+.maintenance-message {
+  margin: 0.95rem 0 0;
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.maintenance-actions {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 1.2rem;
+}
+
+.maintenance-footnote,
+.maintenance-updated {
+  margin: 0.85rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.maintenance-updated {
+  margin-top: 0.55rem;
+}
+
+body.theme-dark .maintenance-card {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(20, 20, 20, 0.98), rgba(14, 14, 14, 0.94)),
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.08), transparent 44%);
+}
+
+body.theme-dark .maintenance-badge {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
+
+body.theme-comfort .maintenance-card {
+  border-color: rgba(118, 86, 63, 0.2);
+  background:
+    linear-gradient(180deg, rgba(245, 239, 228, 0.98), rgba(239, 234, 224, 0.94)),
+    radial-gradient(circle at top right, rgba(157, 121, 93, 0.14), transparent 44%);
+}
+
+body.theme-comfort .maintenance-badge {
+  background: rgba(157, 121, 93, 0.14);
+  color: #7a563c;
+}
+
 .notifications-list {
   display: grid;
   gap: 0.7rem;
