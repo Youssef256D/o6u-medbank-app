@@ -1555,6 +1555,67 @@ body.theme-comfort .btn {
   gap: 0.9rem;
 }
 
+.admin-dashboard-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.9rem;
+}
+
+.admin-dashboard-breakdown-card {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.admin-dashboard-breakdown-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.admin-dashboard-breakdown-list {
+  display: grid;
+  gap: 0.58rem;
+}
+
+.admin-dashboard-breakdown-row {
+  display: grid;
+  gap: 0.34rem;
+}
+
+.admin-dashboard-breakdown-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.admin-dashboard-breakdown-label {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.admin-dashboard-breakdown-value {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.admin-dashboard-breakdown-track {
+  display: block;
+  width: 100%;
+  height: 0.46rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(23, 126, 137, 0.15);
+}
+
+.admin-dashboard-breakdown-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(23, 126, 137, 0.92), rgba(23, 126, 137, 0.56));
+}
+
 .admin-site-maintenance-form {
   display: grid;
   gap: 0.9rem;
@@ -4979,6 +5040,10 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
     grid-template-columns: 1fr;
   }
 
+  .admin-dashboard-breakdowns {
+    grid-template-columns: 1fr;
+  }
+
   .admin-sidebar {
     position: static;
   }
@@ -5264,6 +5329,14 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
 
   .admin-question-bulk-bar .btn {
     flex: 1 1 180px;
+  }
+
+  .admin-dashboard-breakdown-head {
+    flex-wrap: wrap;
+  }
+
+  .admin-dashboard-breakdown-value {
+    white-space: normal;
   }
 
   .table-wrap table {

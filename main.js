@@ -2319,6 +2319,133 @@ function getUserCreatedAtMs(user) {
   return parseTimestampMs(user?.createdAt || user?.created_at || "");
 }
 
+function getRegistrationYearFromUser(user) {
+  const createdAtMs = getUserCreatedAtMs(user);
+  if (!Number.isFinite(createdAtMs) || createdAtMs <= 0) {
+    return null;
+  }
+  const year = new Date(createdAtMs).getUTCFullYear();
+  if (!Number.isFinite(year) || year < 1970 || year > 3000) {
+    return null;
+  }
+  return year;
+}
+
+function classifyAuthProviderForStats(user) {
+  const provider = normalizeAuthProvider(getAuthProviderFromUser(user));
+  if (!provider) {
+    return String(user?.email || "").trim() ? "email" : "unknown";
+  }
+  if (provider === "google" || provider.includes("google")) {
+    return "google";
+  }
+  if (
+    provider === "email"
+    || provider === "password"
+    || provider.includes("email")
+    || provider.includes("password")
+  ) {
+    return "email";
+  }
+  return provider;
+}
+
+function formatAuthProviderLabel(provider) {
+  const normalized = normalizeAuthProvider(provider);
+  if (!normalized || normalized === "unknown") {
+    return "Unknown";
+  }
+  if (normalized === "google") {
+    return "Google";
+  }
+  if (normalized === "email") {
+    return "Email";
+  }
+  return normalized
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function buildAdminUserStatistics(users = []) {
+  const accounts = Array.isArray(users) ? users : [];
+  const currentYear = new Date().getUTCFullYear();
+  const registrationByYearMap = new Map();
+  const providerCounts = new Map([
+    ["google", 0],
+    ["email", 0],
+    ["unknown", 0],
+  ]);
+  let thisYearRegistrations = 0;
+  let lastYearRegistrations = 0;
+
+  accounts.forEach((user) => {
+    const registrationYear = getRegistrationYearFromUser(user);
+    if (registrationYear !== null) {
+      registrationByYearMap.set(
+        registrationYear,
+        (registrationByYearMap.get(registrationYear) || 0) + 1,
+      );
+      if (registrationYear === currentYear) {
+        thisYearRegistrations += 1;
+      } else if (registrationYear === currentYear - 1) {
+        lastYearRegistrations += 1;
+      }
+    }
+
+    const providerKey = classifyAuthProviderForStats(user);
+    providerCounts.set(providerKey, (providerCounts.get(providerKey) || 0) + 1);
+  });
+
+  const registrationByYear = [...registrationByYearMap.entries()]
+    .map(([year, count]) => ({
+      year: Number(year),
+      count: Number(count) || 0,
+    }))
+    .sort((a, b) => b.year - a.year);
+  const maxRegistrationYearCount = registrationByYear.reduce(
+    (max, entry) => Math.max(max, Number(entry?.count) || 0),
+    0,
+  );
+
+  const providerBreakdown = [...providerCounts.entries()]
+    .map(([provider, count]) => ({
+      provider,
+      count: Number(count) || 0,
+      label: formatAuthProviderLabel(provider),
+    }))
+    .filter(
+      (entry) => entry.count > 0 || entry.provider === "google" || entry.provider === "email",
+    )
+    .sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label)));
+  const maxProviderCount = providerBreakdown.reduce(
+    (max, entry) => Math.max(max, Number(entry?.count) || 0),
+    0,
+  );
+
+  const googleCount = providerCounts.get("google") || 0;
+  const emailCount = providerCounts.get("email") || 0;
+  const unknownProviderCount = providerCounts.get("unknown") || 0;
+  const otherProviderCount = providerBreakdown
+    .filter((entry) => !["google", "email", "unknown"].includes(entry.provider))
+    .reduce((sum, entry) => sum + entry.count, 0);
+
+  return {
+    currentYear,
+    thisYearRegistrations,
+    lastYearRegistrations,
+    googleCount,
+    emailCount,
+    otherProviderCount,
+    unknownProviderCount,
+    registrationByYear,
+    providerBreakdown,
+    maxRegistrationYearCount,
+    maxProviderCount,
+  };
+}
+
 function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
@@ -13169,19 +13296,84 @@ function renderAdmin() {
         inProgressSessions += 1;
       }
     });
+    const userStats = buildAdminUserStatistics(users);
+    const registrationYearRows = userStats.registrationByYear
+      .map((entry) => {
+        const count = Number(entry?.count) || 0;
+        const share = users.length ? Math.round((count / users.length) * 100) : 0;
+        const width = userStats.maxRegistrationYearCount
+          ? Math.max((count / userStats.maxRegistrationYearCount) * 100, count ? 8 : 0)
+          : 0;
+        return `
+          <div class="admin-dashboard-breakdown-row" role="listitem">
+            <div class="admin-dashboard-breakdown-head">
+              <span class="admin-dashboard-breakdown-label">${entry.year}</span>
+              <span class="admin-dashboard-breakdown-value">${count} user${count === 1 ? "" : "s"} · ${share}%</span>
+            </div>
+            <span class="admin-dashboard-breakdown-track" aria-hidden="true">
+              <span class="admin-dashboard-breakdown-fill" style="width: ${width.toFixed(1)}%;"></span>
+            </span>
+          </div>
+        `;
+      })
+      .join("");
+    const providerRows = userStats.providerBreakdown
+      .map((entry) => {
+        const count = Number(entry?.count) || 0;
+        const share = users.length ? Math.round((count / users.length) * 100) : 0;
+        const width = userStats.maxProviderCount
+          ? Math.max((count / userStats.maxProviderCount) * 100, count ? 8 : 0)
+          : 0;
+        return `
+          <div class="admin-dashboard-breakdown-row" role="listitem">
+            <div class="admin-dashboard-breakdown-head">
+              <span class="admin-dashboard-breakdown-label">${escapeHtml(entry.label)}</span>
+              <span class="admin-dashboard-breakdown-value">${count} user${count === 1 ? "" : "s"} · ${share}%</span>
+            </div>
+            <span class="admin-dashboard-breakdown-track" aria-hidden="true">
+              <span class="admin-dashboard-breakdown-fill" style="width: ${width.toFixed(1)}%;"></span>
+            </span>
+          </div>
+        `;
+      })
+      .join("");
 
     pageContent = `
       <section class="card admin-section" id="admin-stats-section">
         <h2 class="title">O6U Admin Dashboard</h2>
-        <p class="subtle">Live statistics for users, questions, and activity across the website.</p>
+        <p class="subtle">Live statistics for users, questions, activity, registration year, and auth providers.</p>
         <div class="stats-grid" style="margin-top: 0.85rem;">
           <article class="card"><p class="metric">${users.length}<small>Total accounts</small></p></article>
           <article class="card"><p class="metric">${students}<small>Student accounts</small></p></article>
           <article class="card"><p class="metric">${admins}<small>Admin accounts</small></p></article>
+          <article class="card"><p class="metric">${userStats.thisYearRegistrations}<small>Registered in ${userStats.currentYear}</small></p></article>
+          <article class="card"><p class="metric">${userStats.lastYearRegistrations}<small>Registered in ${userStats.currentYear - 1}</small></p></article>
+          <article class="card"><p class="metric">${userStats.googleCount}<small>Google accounts</small></p></article>
+          <article class="card"><p class="metric">${userStats.emailCount}<small>Email accounts</small></p></article>
+          <article class="card"><p class="metric">${userStats.otherProviderCount}<small>Other providers</small></p></article>
+          <article class="card"><p class="metric">${userStats.unknownProviderCount}<small>Unknown provider</small></p></article>
           <article class="card"><p class="metric">${questions.length}<small>Total questions</small></p></article>
           <article class="card"><p class="metric">${publishedQuestions}<small>Published questions</small></p></article>
           <article class="card"><p class="metric">${completedSessions}<small>Completed tests</small></p></article>
           <article class="card"><p class="metric">${inProgressSessions}<small>Active tests</small></p></article>
+        </div>
+        <div class="admin-dashboard-breakdowns">
+          <article class="card admin-dashboard-breakdown-card">
+            <h3>Users by Registration Year</h3>
+            <p class="subtle">Calendar year from each account's registration date.</p>
+            ${registrationYearRows
+        ? `<div class="admin-dashboard-breakdown-list" role="list">${registrationYearRows}</div>`
+        : `<p class="subtle">No registration timestamps found yet.</p>`
+      }
+          </article>
+          <article class="card admin-dashboard-breakdown-card">
+            <h3>Auth Provider Mix</h3>
+            <p class="subtle">Google vs email plus any other connected providers.</p>
+            ${providerRows
+        ? `<div class="admin-dashboard-breakdown-list" role="list">${providerRows}</div>`
+        : `<p class="subtle">No auth provider data available yet.</p>`
+      }
+          </article>
         </div>
       </section>
     `;
