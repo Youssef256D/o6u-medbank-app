@@ -243,6 +243,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
 ]);
 const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
 const ASK_AI_WINDOW_NAME = "o6u-medbank-ask-ai";
+const ASK_AI_DEFAULT_URL = "https://notebooklm.google.com/";
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -11483,7 +11484,6 @@ function renderSession() {
   const mappedCourse = getQbankCourseTopicMeta(question).course;
   const questionCourse = String(question.qbankCourse || question.course || "").trim();
   const currentCourse = mappedCourse || questionCourse;
-  const askAiLink = getCourseNotebookLinkForCourse(currentCourse) || getCourseNotebookLinkForCourse(questionCourse);
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -11595,8 +11595,7 @@ function renderSession() {
                     type="button"
                     class="exam-ask-ai-btn"
                     data-action="open-course-ai"
-                    ${askAiLink ? "" : "disabled"}
-                    title="${askAiLink ? `Open Ask AI for ${escapeHtml(currentCourse || "course")}` : "No Ask AI link configured for this course"}"
+                    title="${currentCourse ? `Open Ask AI for ${escapeHtml(currentCourse)}` : "Open Ask AI"}"
                   >
                     <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
                     <span>Ask AI</span>
@@ -11913,14 +11912,7 @@ async function handleSessionClick(event) {
       toast("Current question could not be loaded.");
       return;
     }
-    const mappedCourse = getQbankCourseTopicMeta(question).course;
-    const questionCourse = String(question.qbankCourse || question.course || "").trim();
-    const course = mappedCourse || questionCourse;
-    const notebookUrl = getCourseNotebookLinkForCourse(course) || getCourseNotebookLinkForCourse(questionCourse);
-    if (!notebookUrl) {
-      toast("No Ask AI link configured for this course yet.");
-      return;
-    }
+    const notebookUrl = resolveAskAiNotebookUrlForQuestion(question);
     const opened = openAskAiNotebook(notebookUrl);
     if (!opened) {
       toast("Popup blocked, so Ask AI tab did not open. Allow popups and try again.");
@@ -19548,6 +19540,27 @@ function getCourseNotebookLinkForCourse(courseName) {
   }
 
   return "";
+}
+
+function getAnyCourseNotebookLink() {
+  for (const rawLink of Object.values(COURSE_NOTEBOOK_LINKS || {})) {
+    const normalized = normalizeCourseNotebookLink(rawLink);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function resolveAskAiNotebookUrlForQuestion(question) {
+  const mappedCourse = getQbankCourseTopicMeta(question).course;
+  const questionCourse = String(question?.qbankCourse || question?.course || "").trim();
+  const preferredCourse = String(mappedCourse || questionCourse || "").trim();
+  const resolvedUrl = getCourseNotebookLinkForCourse(preferredCourse)
+    || getCourseNotebookLinkForCourse(questionCourse)
+    || getAnyCourseNotebookLink()
+    || ASK_AI_DEFAULT_URL;
+  return normalizeCourseNotebookLink(resolvedUrl) || ASK_AI_DEFAULT_URL;
 }
 
 function rebuildCurriculumCatalog() {
