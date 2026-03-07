@@ -71,14 +71,16 @@ const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
 const RELATIONAL_FLUSH_DEBOUNCE_MS = 850;
 const RELATIONAL_RETRY_FLUSH_MS = 2200;
 const SUPABASE_RETRY_FLUSH_MS = 3000;
-const SESSION_SYNC_FLUSH_MS = 15000;
+const SESSION_SYNC_FLUSH_MS = 4000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 20000;
 const STUDENT_FULL_DATA_REFRESH_MS = 180000;
+const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
+const SESSION_REALTIME_DEBOUNCE_MS = 900;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
 const NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR = "::";
@@ -344,6 +346,12 @@ let notificationRealtimeSubscribed = false;
 let notificationRealtimeHydrateTimer = null;
 let notificationRealtimeHydrateInFlight = false;
 let notificationRealtimeHydrateQueued = false;
+let sessionRealtimeChannel = null;
+let sessionRealtimeSubscriptionKey = "";
+let sessionRealtimeSubscribed = false;
+let sessionRealtimeHydrateTimer = null;
+let sessionRealtimeHydrateInFlight = false;
+let sessionRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
@@ -1671,6 +1679,7 @@ async function initSupabaseAuth() {
           return;
         }
         clearNotificationRealtimeSubscription();
+        clearSessionRealtimeSubscription();
         resetRelationalSyncState();
         resetSupabaseSyncRuntimeState();
         clearAdminPresencePolling();
@@ -1714,6 +1723,7 @@ async function initSupabaseAuth() {
     setGoogleOAuthPendingState(false);
     setPasswordRecoveryPendingState(false);
     clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
     supabaseAuth.activeUserId = "";
@@ -4844,10 +4854,6 @@ async function hydrateRelationalSessions(currentUser) {
   const localSessions = getSessions();
   const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
   const mergedSessionById = new Map();
-  const parseUpdatedAtMs = (value) => {
-    const ms = new Date(value || 0).getTime();
-    return Number.isFinite(ms) ? ms : 0;
-  };
 
   mappedSessions.forEach((remoteSession) => {
     const sessionId = String(remoteSession?.id || "");
@@ -4860,26 +4866,7 @@ async function hydrateRelationalSessions(currentUser) {
       mergedSessionById.set(sessionId, remoteSession);
       return;
     }
-
-    const localUpdatedAtMs = parseUpdatedAtMs(localSession.updatedAt);
-    const remoteUpdatedAtMs = parseUpdatedAtMs(remoteSession.updatedAt);
-    const localIsActiveSession = (
-      state.route === "session"
-      && String(state.sessionId || "") === sessionId
-      && String(localSession.status || "") === "in_progress"
-    );
-    const preferLocal = localIsActiveSession
-      || localUpdatedAtMs > remoteUpdatedAtMs
-      || (
-        localUpdatedAtMs === remoteUpdatedAtMs
-        && String(localSession.status || "") === "in_progress"
-        && String(remoteSession.status || "") === "in_progress"
-      );
-
-    mergedSessionById.set(
-      sessionId,
-      preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession },
-    );
+    mergedSessionById.set(sessionId, mergeSessionSnapshots(localSession, remoteSession));
   });
 
   localSessions.forEach((localSession) => {
@@ -4968,15 +4955,132 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
   return payload;
 }
 
+function isRecordObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseSyncTimestampMs(value) {
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function cloneTextHighlightStore(value) {
+  if (!isRecordObject(value)) {
+    return buildEmptyTextHighlightStore();
+  }
+  try {
+    return deepClone(value);
+  } catch {
+    return {
+      lines: isRecordObject(value.lines) ? { ...value.lines } : {},
+      choices: isRecordObject(value.choices) ? { ...value.choices } : {},
+    };
+  }
+}
+
+function hasPendingSessionSyncForId(sessionId = "") {
+  const targetId = String(sessionId || "").trim();
+  const activeSessionId = String(state.sessionId || "").trim();
+  if (
+    targetId
+    && activeSessionId === targetId
+    && state.route === "session"
+    && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || relationalSync.flushing)
+  ) {
+    return true;
+  }
+
+  const pendingSessions = relationalSync.pendingWrites.get(STORAGE_KEYS.sessions);
+  if (!Array.isArray(pendingSessions) || !pendingSessions.length) {
+    return false;
+  }
+  if (!targetId) {
+    return true;
+  }
+  return pendingSessions.some((session) => String(session?.id || "").trim() === targetId);
+}
+
+function mergeSessionResponseSnapshots(localResponse, remoteResponse, preferLocal) {
+  const local = isRecordObject(localResponse) ? localResponse : {};
+  const remote = isRecordObject(remoteResponse) ? remoteResponse : {};
+  const merged = preferLocal ? { ...remote, ...local } : { ...local, ...remote };
+
+  merged.selected = preferLocal
+    ? (Array.isArray(local.selected) ? [...local.selected] : (Array.isArray(remote.selected) ? [...remote.selected] : []))
+    : (Array.isArray(remote.selected) ? [...remote.selected] : (Array.isArray(local.selected) ? [...local.selected] : []));
+  merged.flagged = preferLocal ? Boolean(local.flagged ?? remote.flagged) : Boolean(remote.flagged ?? local.flagged);
+  merged.notes = preferLocal
+    ? String(local.notes ?? remote.notes ?? "")
+    : String(remote.notes ?? local.notes ?? "");
+  merged.submitted = preferLocal ? Boolean(local.submitted ?? remote.submitted) : Boolean(remote.submitted ?? local.submitted);
+  merged.struck = Array.isArray(local.struck)
+    ? [...local.struck]
+    : (Array.isArray(remote.struck) ? [...remote.struck] : []);
+  merged.timeSpentSec = Number.isFinite(Number(local.timeSpentSec))
+    ? Number(local.timeSpentSec)
+    : (Number.isFinite(Number(remote.timeSpentSec)) ? Number(remote.timeSpentSec) : 0);
+  merged.highlightedLines = Array.isArray(local.highlightedLines)
+    ? [...local.highlightedLines]
+    : (Array.isArray(remote.highlightedLines) ? [...remote.highlightedLines] : []);
+  merged.highlightedLineColors = isRecordObject(local.highlightedLineColors)
+    ? { ...local.highlightedLineColors }
+    : (isRecordObject(remote.highlightedLineColors) ? { ...remote.highlightedLineColors } : {});
+  merged.highlightedChoices = isRecordObject(local.highlightedChoices)
+    ? { ...local.highlightedChoices }
+    : (isRecordObject(remote.highlightedChoices) ? { ...remote.highlightedChoices } : {});
+  merged.textHighlights = isRecordObject(local.textHighlights)
+    ? cloneTextHighlightStore(local.textHighlights)
+    : (isRecordObject(remote.textHighlights) ? cloneTextHighlightStore(remote.textHighlights) : buildEmptyTextHighlightStore());
+
+  return merged;
+}
+
+function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession) {
+  const localUpdatedAtMs = parseSyncTimestampMs(localSession?.updatedAt);
+  const remoteUpdatedAtMs = parseSyncTimestampMs(remoteSession?.updatedAt);
+  if (localUpdatedAtMs > remoteUpdatedAtMs) {
+    return true;
+  }
+  if (localUpdatedAtMs < remoteUpdatedAtMs) {
+    return false;
+  }
+  if (hasPendingSessionSyncForId(sessionId)) {
+    return true;
+  }
+  return String(localSession?.status || "") === "in_progress"
+    && String(remoteSession?.status || "") === "in_progress";
+}
+
+function mergeSessionSnapshots(localSession, remoteSession) {
+  const sessionId = String(remoteSession?.id || localSession?.id || "").trim();
+  const preferLocal = shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession);
+  const merged = preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession };
+  const localResponses = isRecordObject(localSession?.responses) ? localSession.responses : {};
+  const remoteResponses = isRecordObject(remoteSession?.responses) ? remoteSession.responses : {};
+  const responseQuestionIds = new Set([
+    ...Object.keys(localResponses),
+    ...Object.keys(remoteResponses),
+  ]);
+  const mergedResponses = {};
+  responseQuestionIds.forEach((questionId) => {
+    mergedResponses[questionId] = mergeSessionResponseSnapshots(
+      localResponses[questionId],
+      remoteResponses[questionId],
+      preferLocal,
+    );
+  });
+  merged.responses = mergedResponses;
+  merged.questionIds = preferLocal
+    ? [...(Array.isArray(localSession?.questionIds) ? localSession.questionIds : (Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : []))]
+    : [...(Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : (Array.isArray(localSession?.questionIds) ? localSession.questionIds : []))];
+  return merged;
+}
+
 function mergeHydratedSessionsWithLocal(remotePayload) {
   const remoteSessions = Array.isArray(remotePayload) ? remotePayload : [];
   const localSessions = getSessions();
   const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
   const mergedSessionById = new Map();
-  const parseUpdatedAtMs = (value) => {
-    const ms = new Date(value || 0).getTime();
-    return Number.isFinite(ms) ? ms : 0;
-  };
 
   remoteSessions.forEach((remoteSession) => {
     const sessionId = String(remoteSession?.id || "");
@@ -4989,26 +5093,7 @@ function mergeHydratedSessionsWithLocal(remotePayload) {
       mergedSessionById.set(sessionId, remoteSession);
       return;
     }
-
-    const localUpdatedAtMs = parseUpdatedAtMs(localSession.updatedAt);
-    const remoteUpdatedAtMs = parseUpdatedAtMs(remoteSession.updatedAt);
-    const localIsActiveSession = (
-      state.route === "session"
-      && String(state.sessionId || "") === sessionId
-      && String(localSession.status || "") === "in_progress"
-    );
-    const preferLocal = localIsActiveSession
-      || localUpdatedAtMs > remoteUpdatedAtMs
-      || (
-        localUpdatedAtMs === remoteUpdatedAtMs
-        && String(localSession.status || "") === "in_progress"
-        && String(remoteSession.status || "") === "in_progress"
-      );
-
-    mergedSessionById.set(
-      sessionId,
-      preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession },
-    );
+    mergedSessionById.set(sessionId, mergeSessionSnapshots(localSession, remoteSession));
   });
 
   localSessions.forEach((localSession) => {
@@ -7589,11 +7674,13 @@ function bindGlobalEvents() {
       return;
     }
     scheduleNotificationRealtimeHydration(0);
+    scheduleSessionRealtimeHydration(0);
   });
 
   window.addEventListener("pagehide", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
     clearAdminPresencePolling();
@@ -7602,6 +7689,7 @@ function bindGlobalEvents() {
 
   window.addEventListener("online", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    scheduleSessionRealtimeHydration(0);
   });
 
   window.addEventListener("hashchange", () => {
@@ -7775,11 +7863,26 @@ function clearNotificationRealtimeHydrateTimer() {
   }
 }
 
+function clearSessionRealtimeHydrateTimer() {
+  if (sessionRealtimeHydrateTimer) {
+    window.clearTimeout(sessionRealtimeHydrateTimer);
+    sessionRealtimeHydrateTimer = null;
+  }
+}
+
 function clearStudentNotificationPolling() {
   if (studentNotificationPollHandle) {
     window.clearInterval(studentNotificationPollHandle);
     studentNotificationPollHandle = null;
   }
+}
+
+function clearStudentSessionPolling() {
+  if (studentDataAutoRefreshPollHandle) {
+    window.clearInterval(studentDataAutoRefreshPollHandle);
+    studentDataAutoRefreshPollHandle = null;
+  }
+  studentDataAutoRefreshInFlight = false;
 }
 
 function ensureStudentNotificationPolling(user = null) {
@@ -7857,6 +7960,40 @@ function clearNotificationRealtimeSubscription() {
   }
 }
 
+function clearSessionRealtimeSubscription() {
+  clearSessionRealtimeHydrateTimer();
+  clearStudentSessionPolling();
+  sessionRealtimeHydrateQueued = false;
+  sessionRealtimeHydrateInFlight = false;
+  sessionRealtimeSubscriptionKey = "";
+  sessionRealtimeSubscribed = false;
+  const activeChannel = sessionRealtimeChannel;
+  sessionRealtimeChannel = null;
+  if (!activeChannel) {
+    return;
+  }
+  const client = getSupabaseAuthClient();
+  if (client && typeof client.removeChannel === "function") {
+    Promise.resolve(client.removeChannel(activeChannel)).catch(() => {
+      if (typeof activeChannel.unsubscribe === "function") {
+        try {
+          activeChannel.unsubscribe();
+        } catch {
+          // Ignore realtime unsubscribe errors.
+        }
+      }
+    });
+    return;
+  }
+  if (typeof activeChannel.unsubscribe === "function") {
+    try {
+      activeChannel.unsubscribe();
+    } catch {
+      // Ignore realtime unsubscribe errors.
+    }
+  }
+}
+
 function shouldRenderAfterNotificationHydration(user) {
   if (!user) {
     return false;
@@ -7865,6 +8002,49 @@ function shouldRenderAfterNotificationHydration(user) {
     return state.route === "admin" && state.adminPage === "notifications";
   }
   return state.route === "dashboard" || state.route === "analytics" || state.route === "notifications";
+}
+
+function shouldRenderAfterSessionHydration(user) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  return [
+    "dashboard",
+    "create-test",
+    "session",
+    "review",
+    "analytics",
+    "profile",
+  ].includes(String(state.route || "").trim());
+}
+
+async function hydrateStudentSessionsFromCloud(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!isUuidValue(profileId) || hasPendingSessionSyncForId()) {
+    return false;
+  }
+
+  const ready = await ensureRelationalSyncReady().catch(() => false);
+  if (ready) {
+    await hydrateRelationalSessions(currentUser);
+    state.studentDataLastSyncAt = Date.now();
+    return true;
+  }
+
+  const scope = getSyncScopeForUser(currentUser);
+  if (!scope) {
+    return false;
+  }
+  const result = await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
+  if (result?.hadRemoteData) {
+    state.studentDataLastSyncAt = Date.now();
+    return true;
+  }
+  return false;
 }
 
 async function runNotificationRealtimeHydration() {
@@ -7906,6 +8086,38 @@ async function runNotificationRealtimeHydration() {
   }
 }
 
+async function runSessionRealtimeHydration() {
+  if (sessionRealtimeHydrateInFlight) {
+    sessionRealtimeHydrateQueued = true;
+    return;
+  }
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+
+  sessionRealtimeHydrateInFlight = true;
+  try {
+    const refreshed = await hydrateStudentSessionsFromCloud(user);
+    if (!refreshed) {
+      return;
+    }
+    if (shouldRenderAfterSessionHydration(user)) {
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+  } catch (error) {
+    console.warn("Realtime session hydration failed.", error?.message || error);
+  } finally {
+    sessionRealtimeHydrateInFlight = false;
+    if (sessionRealtimeHydrateQueued) {
+      sessionRealtimeHydrateQueued = false;
+      scheduleSessionRealtimeHydration(120);
+    }
+  }
+}
+
 function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_DEBOUNCE_MS) {
   const user = getCurrentUser();
   const profileId = getCurrentSessionProfileId(user);
@@ -7917,6 +8129,21 @@ function scheduleNotificationRealtimeHydration(delayMs = NOTIFICATION_REALTIME_D
     notificationRealtimeHydrateTimer = null;
     runNotificationRealtimeHydration().catch((error) => {
       console.warn("Realtime notification refresh failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function scheduleSessionRealtimeHydration(delayMs = SESSION_REALTIME_DEBOUNCE_MS) {
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+  clearSessionRealtimeHydrateTimer();
+  sessionRealtimeHydrateTimer = window.setTimeout(() => {
+    sessionRealtimeHydrateTimer = null;
+    runSessionRealtimeHydration().catch((error) => {
+      console.warn("Realtime session refresh failed.", error?.message || error);
     });
   }, Math.max(0, Number(delayMs) || 0));
 }
@@ -7976,6 +8203,104 @@ function ensureNotificationsRealtimeSubscription(user = null) {
   });
   notificationRealtimeChannel = channel;
   notificationRealtimeSubscriptionKey = nextKey;
+}
+
+function ensureStudentSessionPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  const realtimeHealthy = currentUser?.role === "student"
+    && sessionRealtimeSubscribed
+    && sessionRealtimeSubscriptionKey === `student:${profileId}`;
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    clearStudentSessionPolling();
+    return;
+  }
+  if (realtimeHealthy) {
+    clearStudentSessionPolling();
+    return;
+  }
+  if (studentDataAutoRefreshPollHandle) {
+    return;
+  }
+
+  studentDataAutoRefreshPollHandle = window.setInterval(() => {
+    const activeUser = getCurrentUser();
+    const activeProfileId = getCurrentSessionProfileId(activeUser);
+    if (!activeUser || activeUser.role !== "student" || !isUuidValue(activeProfileId)) {
+      clearStudentSessionPolling();
+      return;
+    }
+    if (
+      sessionRealtimeSubscribed
+      && sessionRealtimeSubscriptionKey === `student:${activeProfileId}`
+    ) {
+      clearStudentSessionPolling();
+      return;
+    }
+    if (!shouldRenderAfterSessionHydration(activeUser) || studentDataAutoRefreshInFlight) {
+      return;
+    }
+    studentDataAutoRefreshInFlight = true;
+    hydrateStudentSessionsFromCloud(activeUser)
+      .then((refreshed) => {
+        if (!refreshed || !shouldRenderAfterSessionHydration(activeUser)) {
+          return;
+        }
+        state.skipNextRouteAnimation = true;
+        render();
+      })
+      .catch((error) => {
+        console.warn("Student session refresh failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentDataAutoRefreshInFlight = false;
+      });
+  }, STUDENT_SESSION_LIVE_REFRESH_MS);
+}
+
+function ensureSessionRealtimeSubscription(user = null) {
+  const currentUser = user || getCurrentUser();
+  const client = getSupabaseAuthClient();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+    clearSessionRealtimeSubscription();
+    clearStudentSessionPolling();
+    return;
+  }
+
+  const nextKey = `student:${profileId}`;
+  if (sessionRealtimeChannel && sessionRealtimeSubscriptionKey === nextKey) {
+    ensureStudentSessionPolling(currentUser);
+    return;
+  }
+
+  clearSessionRealtimeSubscription();
+  const channel = client.channel(`sessions-live:${nextKey}`);
+  channel.on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "test_blocks",
+      filter: `user_id=eq.${profileId}`,
+    },
+    () => {
+      scheduleSessionRealtimeHydration();
+    },
+  );
+
+  channel.subscribe((status) => {
+    sessionRealtimeSubscribed = status === "SUBSCRIBED";
+    if (status === "SUBSCRIBED") {
+      clearStudentSessionPolling();
+      scheduleSessionRealtimeHydration(SESSION_REALTIME_DEBOUNCE_MS);
+      return;
+    }
+    ensureStudentSessionPolling(currentUser);
+  });
+
+  sessionRealtimeChannel = channel;
+  sessionRealtimeSubscriptionKey = nextKey;
 }
 
 function shouldTreatPresenceAsOnline(row) {
@@ -8870,6 +9195,8 @@ function syncTopbar() {
   const user = getCurrentUser();
   ensureNotificationsRealtimeSubscription(user);
   ensureStudentNotificationPolling(user);
+  ensureSessionRealtimeSubscription(user);
+  ensureStudentSessionPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const maintenanceRestricted = isSiteMaintenanceEnabledForUser(user);
@@ -21819,6 +22146,7 @@ async function logout() {
 
   syncPresenceRuntime(null);
   clearNotificationRealtimeSubscription();
+  clearSessionRealtimeSubscription();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   resetRelationalSyncState();
@@ -21957,6 +22285,7 @@ function toast(message) {
 function renderBootstrapFallback() {
   try {
     clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
     setGoogleOAuthPendingState(false);
     clearAdminDashboardPolling();
     document.body.classList.remove("is-routing");
