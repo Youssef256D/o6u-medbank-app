@@ -273,6 +273,11 @@ const RELATIONAL_SYNC_KEYS = [
 const RELATIONAL_SYNC_KEY_SET = new Set(RELATIONAL_SYNC_KEYS);
 const GLOBAL_SYNC_BOOTSTRAP_KEYS = GLOBAL_SYNC_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
 const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics]);
+const LEGACY_SUPABASE_STATE_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
+const LEGACY_SUPABASE_STATE_SYNC_KEY_SET = new Set(LEGACY_SUPABASE_STATE_SYNC_KEYS);
+const LEGACY_SUPABASE_STATE_GLOBAL_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
+const LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => USER_SCOPED_SYNC_KEY_SET.has(key));
+const RELATIONAL_COMBINED_COURSE_SYNC_MARKER = "__relational_combined_course_topic_sync__";
 
 const supabaseSync = {
   enabled: false,
@@ -1131,21 +1136,40 @@ function scheduleSupabaseBootstrapRetry() {
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
 
+function getOrCreateSupabaseBrowserClient() {
+  if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
+    return null;
+  }
+  if (supabaseAuth.client) {
+    return supabaseAuth.client;
+  }
+  if (supabaseSync.client) {
+    return supabaseSync.client;
+  }
+  const client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: false,
+    },
+  });
+  supabaseSync.client = client;
+  return client;
+}
+
 async function initSupabaseSync() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     return { enabled: false, hadRemoteData: false };
   }
 
   try {
-    supabaseSync.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-      },
-    });
+    const client = getOrCreateSupabaseBrowserClient();
+    if (!client) {
+      return { enabled: false, hadRemoteData: false };
+    }
+    supabaseSync.client = client;
 
-    const syncShape = await detectSupabaseStorageShape(supabaseSync.client);
+    const syncShape = await detectSupabaseStorageShape(client);
     if (!syncShape) {
       console.warn("Supabase sync table was not found. Expected app_state/storage_key or appstate/storagekey.");
       return { enabled: false, hadRemoteData: false };
@@ -1442,19 +1466,19 @@ async function initSupabaseAuth() {
   }
 
   try {
-    supabaseAuth.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-      },
-    });
+    const client = getOrCreateSupabaseBrowserClient();
+    if (!client) {
+      setGoogleOAuthPendingState(false);
+      setPasswordRecoveryPendingState(false);
+      return;
+    }
+    supabaseAuth.client = client;
     supabaseAuth.enabled = true;
     if (supabaseSync.enabled) {
-      supabaseSync.client = supabaseAuth.client;
+      supabaseSync.client = client;
     }
 
-    const callbackStatus = await resolveSupabaseAuthCallback(supabaseAuth.client).catch((callbackError) => {
+    const callbackStatus = await resolveSupabaseAuthCallback(client).catch((callbackError) => {
       console.warn("Supabase auth callback handling failed.", callbackError?.message || callbackError);
       setGoogleOAuthPendingState(false);
       setPasswordRecoveryPendingState(false);
@@ -2653,8 +2677,7 @@ function queueSessionStateForCloud() {
 
   const sessions = getSessions();
   const queuedRelational = scheduleRelationalWrite(STORAGE_KEYS.sessions, sessions);
-  const queuedSupabase = scheduleSupabaseWrite(STORAGE_KEYS.sessions, sessions);
-  if (!queuedRelational && !queuedSupabase) {
+  if (!queuedRelational) {
     return false;
   }
   sessionSyncRuntime.dirty = false;
@@ -3182,14 +3205,8 @@ async function ensureRelationalSyncReady(options = {}) {
     }
 
     const checks = [
+      // Lightweight readiness gate: keep startup quick and let per-key sync handlers report table-level errors.
       { table: "profiles", select: "id" },
-      { table: "courses", select: "id" },
-      { table: "course_topics", select: "id" },
-      { table: "questions", select: "id" },
-      { table: "question_choices", select: "id" },
-      { table: "test_blocks", select: "id" },
-      { table: "test_block_items", select: "block_id" },
-      { table: "test_responses", select: "block_id" },
     ];
 
     for (const check of checks) {
@@ -3390,13 +3407,16 @@ async function updateRelationalProfileApproval(profileIds, approved) {
 }
 
 async function syncUsersBackupState(usersPayload) {
-  if (!supabaseSync.enabled) {
+  if (!supabaseSync.enabled || !isLegacySupabaseStateSyncKey(STORAGE_KEYS.users)) {
     return;
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : getUsers();
   try {
-    scheduleSupabaseWrite(STORAGE_KEYS.users, users);
+    const queued = scheduleSupabaseWrite(STORAGE_KEYS.users, users);
+    if (!queued) {
+      return;
+    }
     await flushSupabaseWrites();
   } catch (error) {
     console.warn("Users backup sync failed.", error?.message || error);
@@ -4753,6 +4773,10 @@ function isUserScopedSyncKey(storageKey) {
   return USER_SCOPED_SYNC_KEY_SET.has(storageKey);
 }
 
+function isLegacySupabaseStateSyncKey(storageKey) {
+  return LEGACY_SUPABASE_STATE_SYNC_KEY_SET.has(storageKey);
+}
+
 function buildRemoteSyncKey(storageKey, scope = "") {
   if (!SYNCABLE_STORAGE_KEYS.includes(storageKey)) {
     return "";
@@ -4986,7 +5010,7 @@ async function hydrateQuestionsFromSupabaseBackup() {
 }
 
 function scheduleSupabaseWrite(storageKey, value) {
-  if (!supabaseSync.enabled || !SYNCABLE_STORAGE_KEYS.includes(storageKey)) {
+  if (!supabaseSync.enabled || !isLegacySupabaseStateSyncKey(storageKey)) {
     return false;
   }
 
@@ -5016,7 +5040,9 @@ function scheduleFullSupabaseSync(options = {}) {
   const includeUserScoped = Boolean(options?.includeUserScoped);
   const currentUser = options?.user || getCurrentUser();
   const scope = options?.scope || getSyncScopeForUser(currentUser);
-  const keys = includeUserScoped ? [...GLOBAL_SYNC_KEYS, ...USER_SCOPED_SYNC_KEYS] : GLOBAL_SYNC_KEYS;
+  const keys = includeUserScoped
+    ? [...LEGACY_SUPABASE_STATE_GLOBAL_KEYS, ...LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS]
+    : LEGACY_SUPABASE_STATE_GLOBAL_KEYS;
 
   keys.forEach((storageKey) => {
     if (isUserScopedSyncKey(storageKey) && !scope) {
@@ -5039,6 +5065,20 @@ async function flushSupabaseWrites() {
     supabaseSync.flushing
   ) {
     clearSupabaseFlushTimer();
+    return;
+  }
+
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    clearSupabaseFlushTimer();
+    supabaseSync.lastFailureAt = Date.now();
+    supabaseSync.lastFailureMessage = "You are offline. Cloud backup sync is queued.";
+    supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+    supabaseSync.flushTimer = window.setTimeout(() => {
+      flushSupabaseWrites().catch((flushError) => {
+        console.warn("Supabase retry failed.", flushError);
+      });
+    }, SUPABASE_RETRY_FLUSH_MS);
+    scheduleSyncStatusUiRefresh();
     return;
   }
 
@@ -5158,11 +5198,34 @@ async function flushRelationalWrites(options = {}) {
     return;
   }
 
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    clearRelationalFlushTimer();
+    relationalSync.lastFailureAt = Date.now();
+    relationalSync.lastFailureMessage = "You are offline. Cloud sync is queued.";
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+    relationalSync.flushTimer = window.setTimeout(() => {
+      flushRelationalWrites().catch((error) => {
+        console.warn("Relational retry flush failed.", error);
+      });
+    }, RELATIONAL_RETRY_FLUSH_MS);
+    scheduleSyncStatusUiRefresh();
+    return;
+  }
+
   clearRelationalFlushTimer();
   relationalSync.flushing = true;
   scheduleSyncStatusUiRefresh();
-  const entries = Array.from(relationalSync.pendingWrites.entries());
+  const entryMap = new Map(relationalSync.pendingWrites.entries());
   relationalSync.pendingWrites.clear();
+  if (entryMap.has(STORAGE_KEYS.curriculum) && entryMap.has(STORAGE_KEYS.courseTopics)) {
+    entryMap.set(STORAGE_KEYS.curriculum, {
+      [RELATIONAL_COMBINED_COURSE_SYNC_MARKER]: true,
+      curriculum: entryMap.get(STORAGE_KEYS.curriculum),
+      courseTopics: entryMap.get(STORAGE_KEYS.courseTopics),
+    });
+    entryMap.delete(STORAGE_KEYS.courseTopics);
+  }
+  const entries = Array.from(entryMap.entries());
   let firstError = null;
   let succeededCount = 0;
 
@@ -5922,8 +5985,20 @@ async function syncRelationalKey(storageKey, payload) {
     return;
   }
   if (storageKey === STORAGE_KEYS.curriculum || storageKey === STORAGE_KEYS.courseTopics) {
-    const curriculum = storageKey === STORAGE_KEYS.curriculum ? payload : load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
-    const topics = storageKey === STORAGE_KEYS.courseTopics ? payload : load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    const bundledCourseSyncPayload = (
+      storageKey === STORAGE_KEYS.curriculum
+      && payload
+      && typeof payload === "object"
+      && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+    )
+      ? payload
+      : null;
+    const curriculum = storageKey === STORAGE_KEYS.curriculum
+      ? (bundledCourseSyncPayload ? bundledCourseSyncPayload.curriculum : payload)
+      : load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    const topics = storageKey === STORAGE_KEYS.courseTopics
+      ? payload
+      : (bundledCourseSyncPayload ? bundledCourseSyncPayload.courseTopics : load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES));
     await syncCoursesTopicsToRelational(curriculum, topics);
     return;
   }
@@ -6766,13 +6841,6 @@ async function persistImportedQuestionsNow(questionsPayload) {
     }
   } catch (error) {
     return { ok: false, message: error?.message || "Could not persist imported questions to database." };
-  }
-
-  scheduleSupabaseWrite(STORAGE_KEYS.questions, questions);
-  try {
-    await flushSupabaseWrites();
-  } catch (syncError) {
-    console.warn("Legacy sync backup failed for imported questions.", syncError?.message || syncError);
   }
 
   return { ok: true };
@@ -21367,7 +21435,9 @@ function save(key, value, options = {}) {
     scheduleSessionStateSync(options);
   } else {
     scheduleRelationalWrite(key, value);
-    scheduleSupabaseWrite(key, value);
+    if (!RELATIONAL_SYNC_KEY_SET.has(key)) {
+      scheduleSupabaseWrite(key, value);
+    }
   }
   appendStorageMutationLog("save", key, value);
 }

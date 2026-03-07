@@ -38,7 +38,7 @@ Keys used:
 - `mcq_curriculum`
 - `mcq_course_topics`
 
-Supabase sync is now wired (prototype mode) via:
+Supabase sync is now wired in a simplified two-layer model:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
 - table SQL: `/Users/youssefayoub/Documents/Apps/MCQs Website/database/supabase_app_state.sql`
@@ -49,6 +49,8 @@ Notes:
 - The frontend uses only `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
 - Do not put `SUPABASE_SERVICE_ROLE_KEY` in frontend files.
 - Supabase Auth is used for sign up/login/reset email. Local demo users still work for quick testing.
+- Primary sync path: relational tables (`profiles`, `courses`, `course_topics`, `questions`, `test_blocks`, etc.).
+- Legacy `app_state` sync path is now limited to non-relational settings/queues only (to avoid duplicate heavy writes and improve responsiveness).
 - Sync keys now support scale-safe namespacing:
   - global keys: `g:<storage_key>`
   - user-scoped keys: `u:<auth.uid>:<storage_key>`
