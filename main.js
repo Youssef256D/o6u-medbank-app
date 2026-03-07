@@ -21088,11 +21088,23 @@ function openAskAiNotebook(url) {
     return false;
   }
 
+  const focusAskAiWindow = (targetWindow) => {
+    try {
+      targetWindow?.focus?.();
+    } catch {
+      // Some browsers block programmatic focus even when the tab opened successfully.
+    }
+  };
+
   try {
     if (askAiWindowRef && !askAiWindowRef.closed) {
-      askAiWindowRef.location.href = normalizedUrl;
-      askAiWindowRef.focus?.();
-      return true;
+      try {
+        askAiWindowRef.location.href = normalizedUrl;
+        focusAskAiWindow(askAiWindowRef);
+        return true;
+      } catch {
+        askAiWindowRef = null;
+      }
     }
   } catch {
     askAiWindowRef = null;
@@ -21107,15 +21119,16 @@ function openAskAiNotebook(url) {
       } catch {
         // Ignore browsers that do not allow overriding opener.
       }
-      askAiWindowRef.focus?.();
+      focusAskAiWindow(askAiWindowRef);
       return true;
     }
   } catch {
     // Fall through to anchor click fallback.
   }
 
+  let clickAttempted = false;
+  const link = document.createElement("a");
   try {
-    const link = document.createElement("a");
     link.href = normalizedUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
@@ -21124,11 +21137,17 @@ function openAskAiNotebook(url) {
     link.style.left = "-9999px";
     document.body.appendChild(link);
     link.click();
-    link.remove();
-    return true;
+    clickAttempted = true;
   } catch {
-    return false;
+    clickAttempted = false;
+  } finally {
+    try {
+      link.remove();
+    } catch {
+      // Ignore cleanup errors.
+    }
   }
+  return clickAttempted;
 }
 
 async function copyTextToClipboard(text) {
