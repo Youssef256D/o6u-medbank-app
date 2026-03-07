@@ -2326,6 +2326,10 @@ function hasSupabaseManagedIdentity(user) {
   return Boolean(getUserProfileId(user));
 }
 
+function canUseLocalPasswordFallback(user) {
+  return Boolean(user) && !hasSupabaseManagedIdentity(user);
+}
+
 function isForcedAdminEmail(email) {
   return FORCED_ADMIN_EMAILS.has(String(email || "").trim().toLowerCase());
 }
@@ -8950,6 +8954,10 @@ function wireAuth(mode) {
             (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
           );
           if (localDemoUser) {
+            if (!canUseLocalPasswordFallback(localDemoUser)) {
+              toast(error?.message || "Supabase sign-in is required for this account. Check your credentials and try again.");
+              return;
+            }
             if (routeUserToProfileCompletion(localDemoUser)) {
               return;
             }
@@ -17766,7 +17774,7 @@ async function getValidSupabaseAccessToken(authClient) {
         token: "",
         refreshToken: refreshToken || "",
         sessionUserId,
-        message: "No active Supabase session for admin delete. Log in with your Supabase admin account.",
+        message: "No active Supabase session for this admin action. Log in with your Supabase admin account.",
       };
     }
     return {
@@ -17840,17 +17848,37 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
       };
     }
     const actingUser = getCurrentUser();
-    const actingProfileId = String(getUserProfileId(actingUser) || "").trim();
+    const activeSessionUserId = getActiveSupabaseAuthUserId();
+    const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!isUuidValue(activeSessionUserId)) {
+      return {
+        ok: false,
+        message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+    const actingProfileId = activeSessionUserId;
     if (!isUuidValue(actingProfileId)) {
       return {
         ok: false,
         message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
       };
     }
+    if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
+      return {
+        ok: false,
+        message: "Supabase session does not match the active admin account. Log out and sign in again.",
+      };
+    }
 
     const { data: sessionBeforeDelete } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
     const sessionUserId = String(sessionBeforeDelete?.session?.user?.id || "").trim();
-    if (sessionUserId && sessionUserId !== actingProfileId) {
+    if (!isUuidValue(sessionUserId)) {
+      return {
+        ok: false,
+        message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+    if (sessionUserId !== actingProfileId) {
       return {
         ok: false,
         message: "Supabase session does not match the active admin account. Log out and sign in again.",
@@ -17989,17 +18017,37 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
       };
     }
     const actingUser = getCurrentUser();
-    const actingProfileId = String(getUserProfileId(actingUser) || "").trim();
+    const activeSessionUserId = getActiveSupabaseAuthUserId();
+    const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!isUuidValue(activeSessionUserId)) {
+      return {
+        ok: false,
+        message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+    const actingProfileId = activeSessionUserId;
     if (!isUuidValue(actingProfileId)) {
       return {
         ok: false,
         message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
       };
     }
+    if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
+      return {
+        ok: false,
+        message: "Supabase session does not match the active admin account. Log out and sign in again.",
+      };
+    }
 
     const { data: sessionBeforeUpdate } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
     const sessionUserId = String(sessionBeforeUpdate?.session?.user?.id || "").trim();
-    if (sessionUserId && sessionUserId !== actingProfileId) {
+    if (!isUuidValue(sessionUserId)) {
+      return {
+        ok: false,
+        message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+    if (sessionUserId !== actingProfileId) {
       return {
         ok: false,
         message: "Supabase session does not match the active admin account. Log out and sign in again.",
