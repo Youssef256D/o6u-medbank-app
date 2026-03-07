@@ -88,6 +88,7 @@ const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 3500;
 const SUPABASE_SESSION_TIMEOUT_MS = 3500;
+const ADMIN_REQUEST_TIMEOUT_MS = 6000;
 const AUTH_SIGNIN_TIMEOUT_MS = 8000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3500;
@@ -1730,6 +1731,29 @@ function isTimeoutResultError(error) {
   return String(error?.code || "").trim().toUpperCase() === "TIMEOUT";
 }
 
+async function fetchWithTimeout(resource, options = {}, timeoutMs = ADMIN_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, Math.max(1, Number(timeoutMs) || 1));
+  try {
+    return await fetch(resource, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw {
+        code: "TIMEOUT",
+        message: "Request timed out.",
+      };
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
   const profileId = String(authUser?.id || "").trim();
   if (!isUuidValue(profileId)) {
@@ -2346,6 +2370,24 @@ function hasSupabaseManagedIdentity(user) {
 
 function canUseLocalPasswordFallback(user) {
   return Boolean(user) && !hasSupabaseManagedIdentity(user);
+}
+
+function shouldAllowSupabaseManagedLocalFallback(error) {
+  if (!error) {
+    return false;
+  }
+  if (isLikelyNetworkFetchError(error) || isTimeoutResultError(error)) {
+    return true;
+  }
+  const message = getErrorMessage(error, "").toLowerCase();
+  return message.includes("timed out")
+    || message.includes("unavailable")
+    || message.includes("failed to fetch")
+    || message.includes("network")
+    || message.includes("load failed")
+    || message.includes("could not verify supabase session")
+    || message.includes("no active supabase session")
+    || message.includes("session expired");
 }
 
 function isForcedAdminEmail(email) {
@@ -8244,7 +8286,8 @@ function render() {
             console.warn("Admin data refresh failed.", error?.message || error);
           });
         }
-        if (state.adminDataRefreshing && !state.adminDataLastSyncAt) {
+        const hasCachedAdminData = getUsers().length > 0 || getQuestions().length > 0;
+        if (state.adminDataRefreshing && !state.adminDataLastSyncAt && !hasCachedAdminData) {
           appEl.innerHTML = renderAdminLoading();
           break;
         }
@@ -9003,7 +9046,9 @@ function wireAuth(mode) {
             (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
           );
           if (localDemoUser) {
-            if (!canUseLocalPasswordFallback(localDemoUser)) {
+            const canUseCachedFallback = canUseLocalPasswordFallback(localDemoUser)
+              || shouldAllowSupabaseManagedLocalFallback(error);
+            if (!canUseCachedFallback) {
               toast(error?.message || "Supabase sign-in is required for this account. Check your credentials and try again.");
               return;
             }
@@ -9019,7 +9064,11 @@ function wireAuth(mode) {
             }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
             navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
-            toast(`Welcome back, ${localDemoUser.name}.`);
+            toast(
+              shouldAllowSupabaseManagedLocalFallback(error)
+                ? `Supabase is unavailable. Signed in with local access for ${localDemoUser.name}.`
+                : `Welcome back, ${localDemoUser.name}.`,
+            );
             return;
           }
 
@@ -15428,11 +15477,18 @@ function wireAdmin() {
         if (hasSupabaseIdentity) {
           const updateResult = await setSupabaseAuthUserPasswordAsAdmin(targetAuthId, nextPassword);
           if (!updateResult.ok) {
+            if (shouldAllowSupabaseManagedLocalFallback(updateResult.message) && users[idx]) {
+              users[idx].password = nextPassword;
+              save(STORAGE_KEYS.users, users);
+              await syncUsersBackupState(users).catch(() => { });
+              toast(`Supabase is unavailable. Saved a local fallback password for ${target.email}.`);
+              return;
+            }
             toast(`Could not update user password. ${updateResult.message || "Unknown error."}`);
             return;
           }
           if (users[idx]) {
-            users[idx].password = "";
+            users[idx].password = nextPassword;
             save(STORAGE_KEYS.users, users);
             await syncUsersBackupState(users).catch(() => { });
           }
@@ -17803,7 +17859,11 @@ async function getValidSupabaseAccessToken(authClient) {
   }
 
   const readToken = async () => {
-    const { data: sessionData, error: sessionError } = await authClient.auth.getSession();
+    const { data: sessionData, error: sessionError } = await runWithTimeoutResult(
+      authClient.auth.getSession(),
+      SUPABASE_SESSION_TIMEOUT_MS,
+      "Supabase session check timed out.",
+    );
     if (sessionError) {
       return {
         ok: false,
@@ -17841,7 +17901,11 @@ async function getValidSupabaseAccessToken(authClient) {
   }
 
   if (!isLikelyJwtToken(tokenResult.token) || isJwtTokenExpired(tokenResult.token, 60)) {
-    await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
+    await runWithTimeoutResult(
+      authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+      SUPABASE_SESSION_TIMEOUT_MS,
+      "Supabase session refresh timed out.",
+    );
     tokenResult = await readToken();
     if (!tokenResult.ok) {
       return tokenResult;
@@ -17850,7 +17914,11 @@ async function getValidSupabaseAccessToken(authClient) {
 
   const validateToken = async (token) => {
     try {
-      const { data, error } = await authClient.auth.getUser(token);
+      const { data, error } = await runWithTimeoutResult(
+        authClient.auth.getUser(token),
+        SUPABASE_SESSION_TIMEOUT_MS,
+        "Supabase user validation timed out.",
+      );
       return !error && Boolean(data?.user?.id);
     } catch {
       return false;
@@ -17861,7 +17929,11 @@ async function getValidSupabaseAccessToken(authClient) {
     return tokenResult;
   }
 
-  await authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { });
+  await runWithTimeoutResult(
+    authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+    SUPABASE_SESSION_TIMEOUT_MS,
+    "Supabase session refresh timed out.",
+  );
   tokenResult = await readToken();
   if (!tokenResult.ok) {
     return tokenResult;
@@ -17938,7 +18010,7 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
       if (serverDeleteUrl) {
         try {
-          response = await fetch(serverDeleteUrl, {
+          response = await fetchWithTimeout(serverDeleteUrl, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${tokenResult.token}`,
@@ -17978,7 +18050,7 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
             message: serverErrorMessage || "Admin delete API is unavailable. Configure serverApiBaseUrl and retry.",
           };
         }
-        response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
+        response = await fetchWithTimeout(`${SUPABASE_CONFIG.url}/functions/v1/admin-delete-user`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${tokenResult.token}`,
@@ -18092,7 +18164,7 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
 
       if (serverSetPasswordUrl) {
         try {
-          response = await fetch(serverSetPasswordUrl, {
+          response = await fetchWithTimeout(serverSetPasswordUrl, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${tokenResult.token}`,
@@ -18132,7 +18204,7 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
             message: serverErrorMessage || "Admin password API is unavailable. Configure serverApiBaseUrl and retry.",
           };
         }
-        response = await fetch(`${SUPABASE_CONFIG.url}/functions/v1/admin-set-user-password`, {
+        response = await fetchWithTimeout(`${SUPABASE_CONFIG.url}/functions/v1/admin-set-user-password`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${tokenResult.token}`,
