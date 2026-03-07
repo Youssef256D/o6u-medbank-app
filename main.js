@@ -86,6 +86,8 @@ const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
+const SUPABASE_QUERY_TIMEOUT_MS = 3500;
+const SUPABASE_SESSION_TIMEOUT_MS = 3500;
 const AUTH_SIGNIN_TIMEOUT_MS = 8000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3500;
@@ -1443,18 +1445,30 @@ async function initSupabaseAuth() {
       return "error";
     });
 
-    let sessionResult = await supabaseAuth.client.auth.getSession();
+    let sessionResult = await runWithTimeoutResult(
+      supabaseAuth.client.auth.getSession(),
+      SUPABASE_SESSION_TIMEOUT_MS,
+      "Supabase session bootstrap timed out.",
+    );
     if (!sessionResult?.error && callbackStatus === "processed" && !sessionResult?.data?.session?.user) {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 250));
-        sessionResult = await supabaseAuth.client.auth.getSession();
+        sessionResult = await runWithTimeoutResult(
+          supabaseAuth.client.auth.getSession(),
+          SUPABASE_SESSION_TIMEOUT_MS,
+          "Supabase session bootstrap timed out.",
+        );
         if (sessionResult?.data?.session?.user || sessionResult?.error) {
           break;
         }
       }
     }
     if (!sessionResult?.error && !sessionResult?.data?.session?.user) {
-      const refreshedSessionResult = await supabaseAuth.client.auth.refreshSession().catch(() => null);
+      const refreshedSessionResult = await runWithTimeoutResult(
+        supabaseAuth.client.auth.refreshSession().catch(() => null),
+        SUPABASE_SESSION_TIMEOUT_MS,
+        "Supabase session refresh timed out.",
+      );
       if (refreshedSessionResult?.data?.session?.user && !refreshedSessionResult?.error) {
         sessionResult = refreshedSessionResult;
       }
@@ -1710,6 +1724,10 @@ function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
       window.clearTimeout(timeoutId);
     }
   });
+}
+
+function isTimeoutResultError(error) {
+  return String(error?.code || "").trim().toUpperCase() === "TIMEOUT";
 }
 
 function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
@@ -2518,10 +2536,14 @@ async function detectSupabaseStorageShape(client) {
   ];
 
   for (const candidate of candidates) {
-    const { error } = await client
-      .from(candidate.tableName)
-      .select(candidate.storageKeyColumn)
-      .limit(1);
+    const { error } = await runWithTimeoutResult(
+      client
+        .from(candidate.tableName)
+        .select(candidate.storageKeyColumn)
+        .limit(1),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      "Supabase storage check timed out.",
+    );
     if (!error) {
       return candidate;
     }
@@ -2913,7 +2935,11 @@ async function ensureRelationalSyncReady(options = {}) {
   const readCurrentSession = async () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const { data, error } = await client.auth.getSession();
+        const { data, error } = await runWithTimeoutResult(
+          client.auth.getSession(),
+          SUPABASE_SESSION_TIMEOUT_MS,
+          "Supabase session check timed out.",
+        );
         if (error) {
           if (attempt === 0 && isLikelyNetworkFetchError(error)) {
             await new Promise((resolve) => window.setTimeout(resolve, 220));
@@ -2948,12 +2974,24 @@ async function ensureRelationalSyncReady(options = {}) {
   };
   const refreshCurrentSession = async () => {
     try {
-      const { data } = await client.auth.getSession().catch(() => ({ data: { session: null } }));
+      const { data } = await runWithTimeoutResult(
+        client.auth.getSession().catch(() => ({ data: { session: null } })),
+        SUPABASE_SESSION_TIMEOUT_MS,
+        "Supabase session refresh timed out.",
+      );
       const refreshToken = String(data?.session?.refresh_token || "").trim();
       if (refreshToken) {
-        await client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => { });
+        await runWithTimeoutResult(
+          client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => { }),
+          SUPABASE_SESSION_TIMEOUT_MS,
+          "Supabase session refresh timed out.",
+        );
       } else {
-        await client.auth.refreshSession().catch(() => { });
+        await runWithTimeoutResult(
+          client.auth.refreshSession().catch(() => { }),
+          SUPABASE_SESSION_TIMEOUT_MS,
+          "Supabase session refresh timed out.",
+        );
       }
       const sessionCheck = await readCurrentSession();
       return sessionCheck.ok;
@@ -3000,7 +3038,11 @@ async function ensureRelationalSyncReady(options = {}) {
     for (const check of checks) {
       let checkError = null;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const { error } = await client.from(check.table).select(check.select).limit(1);
+        const { error } = await runWithTimeoutResult(
+          client.from(check.table).select(check.select).limit(1),
+          SUPABASE_QUERY_TIMEOUT_MS,
+          `Supabase access check for ${check.table} timed out.`,
+        );
         if (!error) {
           checkError = null;
           break;
@@ -4578,10 +4620,14 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
     return { hadRemoteData: false };
   }
 
-  const { data, error } = await supabaseSync.client
-    .from(supabaseSync.tableName)
-    .select(`${supabaseSync.storageKeyColumn},payload,updated_at`)
-    .in(supabaseSync.storageKeyColumn, remoteKeys);
+  const { data, error } = await runWithTimeoutResult(
+    supabaseSync.client
+      .from(supabaseSync.tableName)
+      .select(`${supabaseSync.storageKeyColumn},payload,updated_at`)
+      .in(supabaseSync.storageKeyColumn, remoteKeys),
+    SUPABASE_QUERY_TIMEOUT_MS,
+    "Supabase sync fetch timed out.",
+  );
 
   if (error) {
     return { hadRemoteData: false, error };
@@ -5027,6 +5073,9 @@ function isStorageBucketMissingError(error) {
 
 function isLikelyNetworkFetchError(error) {
   if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return true;
+  }
+  if (isTimeoutResultError(error)) {
     return true;
   }
   const message = getErrorMessage(error, "").toLowerCase();
@@ -17848,40 +17897,11 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
       };
     }
     const actingUser = getCurrentUser();
-    const activeSessionUserId = getActiveSupabaseAuthUserId();
     const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
-    if (!isUuidValue(activeSessionUserId)) {
+    if (!actingUser || actingUser.role !== "admin") {
       return {
         ok: false,
         message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    const actingProfileId = activeSessionUserId;
-    if (!isUuidValue(actingProfileId)) {
-      return {
-        ok: false,
-        message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
-      return {
-        ok: false,
-        message: "Supabase session does not match the active admin account. Log out and sign in again.",
-      };
-    }
-
-    const { data: sessionBeforeDelete } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
-    const sessionUserId = String(sessionBeforeDelete?.session?.user?.id || "").trim();
-    if (!isUuidValue(sessionUserId)) {
-      return {
-        ok: false,
-        message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    if (sessionUserId !== actingProfileId) {
-      return {
-        ok: false,
-        message: "Supabase session does not match the active admin account. Log out and sign in again.",
       };
     }
 
@@ -17890,7 +17910,21 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
       if (!tokenResult.ok) {
         return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
       }
+      const actingProfileId = String(tokenResult.sessionUserId || "").trim();
+      if (!isUuidValue(actingProfileId)) {
+        return {
+          ok: false,
+          message: "Delete requires a signed-in Supabase admin account. Log out and sign in again.",
+        };
+      }
+      supabaseAuth.activeUserId = actingProfileId;
       if (tokenResult.sessionUserId && tokenResult.sessionUserId !== actingProfileId) {
+        return {
+          ok: false,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+      if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
         return {
           ok: false,
           message: "Supabase session does not match the active admin account. Log out and sign in again.",
@@ -18017,40 +18051,11 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
       };
     }
     const actingUser = getCurrentUser();
-    const activeSessionUserId = getActiveSupabaseAuthUserId();
     const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
-    if (!isUuidValue(activeSessionUserId)) {
+    if (!actingUser || actingUser.role !== "admin") {
       return {
         ok: false,
         message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    const actingProfileId = activeSessionUserId;
-    if (!isUuidValue(actingProfileId)) {
-      return {
-        ok: false,
-        message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
-      return {
-        ok: false,
-        message: "Supabase session does not match the active admin account. Log out and sign in again.",
-      };
-    }
-
-    const { data: sessionBeforeUpdate } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
-    const sessionUserId = String(sessionBeforeUpdate?.session?.user?.id || "").trim();
-    if (!isUuidValue(sessionUserId)) {
-      return {
-        ok: false,
-        message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
-      };
-    }
-    if (sessionUserId !== actingProfileId) {
-      return {
-        ok: false,
-        message: "Supabase session does not match the active admin account. Log out and sign in again.",
       };
     }
 
@@ -18059,7 +18064,21 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
       if (!tokenResult.ok) {
         return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
       }
+      const actingProfileId = String(tokenResult.sessionUserId || "").trim();
+      if (!isUuidValue(actingProfileId)) {
+        return {
+          ok: false,
+          message: "Password update requires a signed-in Supabase admin account. Log out and sign in again.",
+        };
+      }
+      supabaseAuth.activeUserId = actingProfileId;
       if (tokenResult.sessionUserId && tokenResult.sessionUserId !== actingProfileId) {
+        return {
+          ok: false,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+      if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
         return {
           ok: false,
           message: "Supabase session does not match the active admin account. Log out and sign in again.",
