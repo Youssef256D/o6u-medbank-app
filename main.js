@@ -92,7 +92,7 @@ const SUPABASE_SESSION_TIMEOUT_MS = 12000;
 const ADMIN_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
-const PROFILE_LOOKUP_TIMEOUT_MS = 12000;
+const PROFILE_LOOKUP_TIMEOUT_MS = 5000;
 const ROUTE_TRANSITION_MS = 420;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
@@ -369,6 +369,10 @@ const adminActionRuntime = {
   lastFailureAt: 0,
   lastFailureMessage: "",
   retryAt: 0,
+};
+const postAuthWarmupRuntime = {
+  key: "",
+  promise: null,
 };
 
 const analyticsRuntime = {
@@ -1036,12 +1040,10 @@ async function init() {
   document.body.classList.add("is-routing");
   render();
 
-  let syncBootstrap = { enabled: false, hadRemoteData: false };
-  try {
-    syncBootstrap = await initSupabaseSync();
-  } catch (error) {
+  const syncBootstrapPromise = initSupabaseSync().catch((error) => {
     console.warn("Supabase sync bootstrap failed.", error?.message || error);
-  }
+    return { enabled: false, hadRemoteData: false };
+  });
   if (shouldForceStudentRefreshFromAdminTrigger()) {
     return;
   }
@@ -1051,6 +1053,8 @@ async function init() {
   } catch (error) {
     console.warn("Supabase auth bootstrap failed.", error?.message || error);
   }
+
+  const syncBootstrap = await syncBootstrapPromise;
 
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
@@ -1081,18 +1085,18 @@ async function tryBootstrapSupabaseInBackground() {
 
   supabaseBootstrapInFlight = true;
   try {
-    let syncBootstrap = { enabled: false, hadRemoteData: false };
-    try {
-      syncBootstrap = await initSupabaseSync();
-    } catch (error) {
+    const syncBootstrapPromise = initSupabaseSync().catch((error) => {
       console.warn("Deferred Supabase sync bootstrap failed.", error?.message || error);
-    }
+      return { enabled: false, hadRemoteData: false };
+    });
 
     try {
       await initSupabaseAuth();
     } catch (error) {
       console.warn("Deferred Supabase auth bootstrap failed.", error?.message || error);
     }
+
+    const syncBootstrap = await syncBootstrapPromise;
 
     if (!syncBootstrap.enabled && !supabaseAuth.enabled) {
       return false;
@@ -1495,12 +1499,6 @@ async function initSupabaseAuth() {
       let localUser = upsertLocalUserFromAuth(data.session.user);
       const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
       localUser = profileSync.user;
-      await ensureRelationalSyncReady().catch((syncError) => {
-        console.warn("Relational sync initialization failed.", syncError?.message || syncError);
-      });
-      if (localUser?.role === "admin") {
-        flushPendingAdminActionQueue({ user: localUser }).catch(() => { });
-      }
       const hasRecoveryFlag = isPasswordRecoveryPendingState();
       const shouldHonorRecoveryRoute = hasRecoveryFlag && (callbackStatus === "processed" || state.route === "reset-password");
       if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
@@ -1543,15 +1541,8 @@ async function initSupabaseAuth() {
         if (await shouldForceRefreshForUpdates(localUser)) {
           return;
         }
-        await hydrateRelationalState(localUser).catch((hydrateError) => {
-          console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
-        });
-        if (localUser?.role === "admin") {
-          state.adminDataLastSyncAt = Date.now();
-          state.adminDataSyncError = "";
-        }
-        await hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
-          console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+        schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+          console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
         });
       }
     } else if (isGoogleOAuthPendingState()) {
@@ -1628,38 +1619,21 @@ async function initSupabaseAuth() {
         if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
           return;
         }
+        schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+          console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+        });
         if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
           const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
           navigate(postAuthRoute);
+          return;
         }
-        await ensureRelationalSyncReady().catch((syncError) => {
-          console.warn("Relational sync initialization failed.", syncError?.message || syncError);
-        });
-        await hydrateRelationalState(localUser).catch((hydrateError) => {
-          console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
-        });
-        if (localUser?.role === "admin") {
-          state.adminDataLastSyncAt = Date.now();
-          state.adminDataSyncError = "";
-          flushPendingAdminActionQueue({ user: localUser }).catch(() => { });
-        }
-        if (["login", "signup", "forgot", "landing"].includes(state.route)) {
-          const current = getCurrentUser();
-          if (current) {
-            const postAuthRoute = getStudentProfileCompletionRoute(current) || (current.role === "admin" ? "admin" : "dashboard");
-            navigate(postAuthRoute);
-            return;
-          }
-        }
-        hydrateUserScopedSupabaseState(localUser).catch((hydrateError) => {
-          console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-        });
         state.skipNextRouteAnimation = true;
         render();
         return;
       }
 
       if (event === "SIGNED_OUT") {
+        resetPostAuthWarmupRuntimeState();
         supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
         setPasswordRecoveryPendingState(false);
@@ -2763,6 +2737,84 @@ function schedulePendingAdminActionFlush(delayMs = SUPABASE_RETRY_FLUSH_MS) {
     });
   }, safeDelayMs);
   scheduleSyncStatusUiRefresh();
+}
+
+function resetPostAuthWarmupRuntimeState() {
+  postAuthWarmupRuntime.key = "";
+  postAuthWarmupRuntime.promise = null;
+}
+
+function isPostAuthDataWarmupActive(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || !isUuidValue(profileId) || !postAuthWarmupRuntime.promise) {
+    return false;
+  }
+  return postAuthWarmupRuntime.key === `${profileId}:${currentUser.role}`;
+}
+
+function schedulePostAuthDataWarmup(user) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || !isUuidValue(profileId)) {
+    return Promise.resolve(false);
+  }
+
+  const key = `${profileId}:${currentUser.role}`;
+  if (postAuthWarmupRuntime.promise && postAuthWarmupRuntime.key === key) {
+    return postAuthWarmupRuntime.promise;
+  }
+
+  const routeBefore = String(state.route || "").trim();
+  const adminPageBefore = String(state.adminPage || "").trim();
+  const hasCachedAdminData = getUsers().length > 0 || getQuestions().length > 0;
+  const hasCachedStudentData = getSessions().length > 0 || getNotifications().length > 0 || getQuestions().length > 0;
+  if (currentUser.role === "admin" && hasCachedAdminData) {
+    state.adminDataLastSyncAt = Date.now();
+    state.adminDataSyncError = "";
+  } else if (currentUser.role === "student" && hasCachedStudentData) {
+    state.studentDataLastSyncAt = Date.now();
+  }
+
+  postAuthWarmupRuntime.key = key;
+  postAuthWarmupRuntime.promise = Promise.resolve().then(async () => {
+    if (currentUser.role === "admin") {
+      flushPendingAdminActionQueue({ user: currentUser }).catch(() => { });
+    }
+    await hydrateRelationalState(currentUser).catch((hydrateError) => {
+      console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
+    });
+    await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+      console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+    });
+
+    if (currentUser.role === "admin") {
+      state.adminDataLastSyncAt = Date.now();
+      state.adminDataSyncError = "";
+    } else if (currentUser.role === "student") {
+      state.studentDataLastSyncAt = Date.now();
+    }
+
+    const latestUser = getCurrentUser();
+    if (!latestUser || String(getUserProfileId(latestUser) || "").trim() !== profileId) {
+      return false;
+    }
+    if (state.route !== routeBefore) {
+      return true;
+    }
+    if (currentUser.role === "admin" && String(state.adminPage || "").trim() !== adminPageBefore) {
+      return true;
+    }
+    state.skipNextRouteAnimation = true;
+    render();
+    return true;
+  }).finally(() => {
+    if (postAuthWarmupRuntime.key === key) {
+      postAuthWarmupRuntime.promise = null;
+    }
+  });
+
+  return postAuthWarmupRuntime.promise;
 }
 
 function getPendingCloudWriteCount() {
@@ -7921,6 +7973,9 @@ function shouldRefreshStudentData(user) {
   if (!user || user.role !== "student") {
     return false;
   }
+  if (isPostAuthDataWarmupActive(user)) {
+    return false;
+  }
   if (state.studentDataRefreshing) {
     return false;
   }
@@ -8103,6 +8158,9 @@ function ensureAdminPresencePolling() {
 
 function shouldRefreshAdminData(user) {
   if (!user || user.role !== "admin") {
+    return false;
+  }
+  if (isPostAuthDataWarmupActive(user)) {
     return false;
   }
   if (state.adminDataRefreshing) {
@@ -8473,7 +8531,7 @@ function render() {
           });
         }
         const hasCachedAdminData = getUsers().length > 0 || getQuestions().length > 0;
-        if (state.adminDataRefreshing && !state.adminDataLastSyncAt && !hasCachedAdminData) {
+        if ((state.adminDataRefreshing || isPostAuthDataWarmupActive(user)) && !state.adminDataLastSyncAt && !hasCachedAdminData) {
           appEl.innerHTML = renderAdminLoading();
           break;
         }
@@ -21419,6 +21477,7 @@ async function logout() {
   resetRelationalSyncState();
   resetSupabaseSyncRuntimeState();
   resetPendingAdminActionRuntimeState();
+  resetPostAuthWarmupRuntimeState();
   supabaseAuth.activeUserId = "";
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
