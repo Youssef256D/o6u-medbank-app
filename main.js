@@ -217,6 +217,7 @@ const state = {
 };
 
 let appVersionCheckPromise = null;
+let askAiWindowRef = null;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -241,6 +242,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/gif",
 ]);
 const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
+const ASK_AI_WINDOW_NAME = "o6u-medbank-ask-ai";
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -11463,6 +11465,7 @@ function renderSession() {
               <article class="exam-question-block exam-question-card">
                 <div class="exam-question-topbar">
                   <button
+                    type="button"
                     class="exam-ask-ai-btn"
                     data-action="open-course-ai"
                     ${askAiLink ? "" : "disabled"}
@@ -11472,6 +11475,7 @@ function renderSession() {
                     <span>Ask AI</span>
                   </button>
                   <button
+                    type="button"
                     class="exam-copy-question-btn"
                     data-action="copy-course-ai-question"
                     title="Copy this question for Ask AI"
@@ -11790,7 +11794,7 @@ async function handleSessionClick(event) {
       toast("No Ask AI link configured for this course yet.");
       return;
     }
-    const opened = window.open(notebookUrl, "_blank", "noopener,noreferrer");
+    const opened = openAskAiNotebook(notebookUrl);
     if (!opened) {
       toast("Popup blocked, so Ask AI tab did not open. Allow popups and try again.");
     }
@@ -21076,6 +21080,55 @@ function buildAskAiPromptText(question) {
     return true;
   });
   return lines.join("\n").trim();
+}
+
+function openAskAiNotebook(url) {
+  const normalizedUrl = normalizeCourseNotebookLink(url);
+  if (!normalizedUrl) {
+    return false;
+  }
+
+  try {
+    if (askAiWindowRef && !askAiWindowRef.closed) {
+      askAiWindowRef.location.href = normalizedUrl;
+      askAiWindowRef.focus?.();
+      return true;
+    }
+  } catch {
+    askAiWindowRef = null;
+  }
+
+  try {
+    const opened = window.open(normalizedUrl, ASK_AI_WINDOW_NAME);
+    if (opened) {
+      askAiWindowRef = opened;
+      try {
+        askAiWindowRef.opener = null;
+      } catch {
+        // Ignore browsers that do not allow overriding opener.
+      }
+      askAiWindowRef.focus?.();
+      return true;
+    }
+  } catch {
+    // Fall through to anchor click fallback.
+  }
+
+  try {
+    const link = document.createElement("a");
+    link.href = normalizedUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.style.position = "fixed";
+    link.style.top = "-9999px";
+    link.style.left = "-9999px";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function copyTextToClipboard(text) {
