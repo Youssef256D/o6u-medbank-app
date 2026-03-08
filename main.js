@@ -21131,12 +21131,15 @@ function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
 }
 
 function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
-  return getAvailableTopicSectionsForCourse(course, questions)
-    .filter((section) => section.kind === "group" && section.name && Array.isArray(section.topics) && section.topics.length)
-    .map((section) => ({
-      name: section.name,
-      topics: [...section.topics],
-    }));
+  const groups = getCourseTopicGroups(course);
+  return Object.entries(groups)
+    .map(([name, topics]) => ({
+      name: String(name || "").trim(),
+      topics: (Array.isArray(topics) ? topics : [])
+        .map((topic) => String(topic || "").trim())
+        .filter((topic) => topic && !isRemovedTopicName(topic)),
+    }))
+    .filter((entry) => entry.name && entry.topics.length);
 }
 
 function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
@@ -21144,6 +21147,17 @@ function getAvailableTopicSectionsForCourse(course, questions = [], options = {}
   const includeConfigured = Boolean(options?.includeConfigured) || Object.keys(groups).length > 0;
   const topicOptions = getAvailableTopicsForCourse(course, questions, { includeConfigured });
   const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
+  Object.values(groups).forEach((groupTopics) => {
+    (Array.isArray(groupTopics) ? groupTopics : []).forEach((topic) => {
+      const normalizedTopic = String(topic || "").trim();
+      const topicKey = normalizedTopic.toLowerCase();
+      if (!normalizedTopic || isRemovedTopicName(normalizedTopic) || topicByKey.has(topicKey)) {
+        return;
+      }
+      topicByKey.set(topicKey, normalizedTopic);
+    });
+  });
+  const allTopicOptions = [...topicByKey.values()];
   const groupedTopicKeys = new Set();
   const sections = [];
 
@@ -21162,7 +21176,7 @@ function getAvailableTopicSectionsForCourse(course, questions = [], options = {}
     });
   });
 
-  const ungroupedTopics = topicOptions.filter(
+  const ungroupedTopics = allTopicOptions.filter(
     (topic) => !groupedTopicKeys.has(String(topic || "").trim().toLowerCase()),
   );
   if (ungroupedTopics.length) {
