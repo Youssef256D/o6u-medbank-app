@@ -2209,12 +2209,56 @@ body.theme-comfort .maintenance-badge {
   align-items: start;
 }
 
+.admin-courses-minimal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.admin-courses-minimal-stats {
+  display: flex;
+  align-items: center;
+  gap: 0.46rem;
+  flex-wrap: wrap;
+}
+
+.admin-courses-minimal-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.36rem;
+  padding: 0.3rem 0.58rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.admin-courses-minimal-stat b {
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.admin-courses-minimal-stat small {
+  font-size: 0.72rem;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.admin-courses-minimal-controls {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+  align-items: start;
+}
+
 .admin-course-toolbar-card {
   margin: 0;
-  padding: 0.86rem;
+  padding: 0.72rem;
   border: 1px solid var(--line);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.78);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.64);
 }
 
 .admin-course-toolbar-card .form-row {
@@ -2231,77 +2275,82 @@ body.theme-comfort .maintenance-badge {
 
 .admin-course-grid {
   display: grid;
-  gap: 0.8rem;
+  gap: 0.62rem;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .admin-course-picker-card {
-  display: grid;
-  gap: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.54rem;
   width: 100%;
   margin: 0;
-  padding: 0.9rem;
+  padding: 0.72rem;
   border: 1px solid var(--line);
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.78);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
   font: inherit;
   text-align: left;
   color: var(--ink);
   cursor: pointer;
   transition:
     border-color 180ms ease,
-    transform 180ms ease,
-    box-shadow 180ms ease,
     background 180ms ease;
 }
 
 .admin-course-picker-card:hover {
-  border-color: rgba(23, 126, 137, 0.34);
-  transform: translateY(-1px);
-  box-shadow: 0 12px 24px rgba(18, 38, 63, 0.08);
+  border-color: rgba(23, 126, 137, 0.3);
 }
 
 .admin-course-picker-card.is-active {
-  border-color: rgba(23, 126, 137, 0.48);
-  background: rgba(23, 126, 137, 0.08);
-  box-shadow: 0 12px 24px rgba(18, 38, 63, 0.08);
+  border-color: rgba(23, 126, 137, 0.56);
+  background: rgba(23, 126, 137, 0.06);
 }
 
 .admin-course-picker-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 0.6rem;
+  gap: 0.54rem;
 }
 
 .admin-course-picker-card-status {
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   color: var(--muted);
-}
-
-.admin-course-picker-card-body {
-  display: grid;
-  gap: 0.28rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .admin-course-picker-card-title {
-  font-size: 1rem;
+  font-size: 0.95rem;
   color: var(--ink);
 }
 
 .admin-course-picker-card-copy {
   margin: 0;
-  font-size: 0.82rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.76rem;
   color: var(--muted);
+}
+
+.admin-course-picker-card-copy span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.42rem;
+  border: 1px solid rgba(23, 126, 137, 0.18);
+  border-radius: 999px;
+  background: rgba(23, 126, 137, 0.05);
 }
 
 .admin-course-workspace {
   display: grid;
-  gap: 0.88rem;
-  padding: 1rem;
+  gap: 0.75rem;
+  padding: 0.82rem;
   border: 1px solid var(--line);
-  border-radius: 24px;
-  background: rgba(255, 255, 255, 0.74);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.62);
 }
 
 .admin-course-workspace-head {
@@ -2320,16 +2369,16 @@ body.theme-comfort .maintenance-badge {
 
 .admin-course-workspace-layout {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.72rem;
   grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.92fr);
 }
 
 .admin-course-workspace-panel {
   display: grid;
-  gap: 0.75rem;
-  padding: 0.86rem;
+  gap: 0.62rem;
+  padding: 0.74rem;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.56);
 }
 
@@ -2373,11 +2422,11 @@ body.theme-comfort .maintenance-badge {
 
 .admin-course-topic-launch {
   display: grid;
-  gap: 0.8rem;
-  padding: 0.88rem;
+  gap: 0.65rem;
+  padding: 0.74rem;
   border: 1px solid var(--line);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.6);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .admin-course-topic-launch-actions {
@@ -5207,6 +5256,7 @@ body.theme-dark .auth-actions .notification-menu-read-btn,
 body.theme-dark .admin-course-check,
 body.theme-dark .admin-course-overview-card,
 body.theme-dark .admin-course-toolbar-card,
+body.theme-dark .admin-courses-minimal-stat,
 body.theme-dark .admin-course-picker-card,
 body.theme-dark .admin-course-card,
 body.theme-dark .admin-course-workspace,
@@ -5315,6 +5365,7 @@ body.theme-comfort .auth-actions .notification-menu-read-btn,
 body.theme-comfort .admin-course-check,
 body.theme-comfort .admin-course-overview-card,
 body.theme-comfort .admin-course-toolbar-card,
+body.theme-comfort .admin-courses-minimal-stat,
 body.theme-comfort .admin-course-picker-card,
 body.theme-comfort .admin-course-card,
 body.theme-comfort .admin-course-workspace,
@@ -6121,6 +6172,7 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
   }
 
   .admin-course-toolbar,
+  .admin-courses-minimal-controls,
   .admin-course-workspace-layout {
     grid-template-columns: 1fr;
   }

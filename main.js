@@ -11358,7 +11358,7 @@ function renderCreateTest() {
             const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
             return `
                                 <label class="admin-course-check create-test-topic-chip">
-                                  <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${selectedTopics.includes(topic) ? "checked" : ""} />
+                                  <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
                                   <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
                                   ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
                                 </label>
@@ -11446,7 +11446,7 @@ function wireCreateTest() {
     const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
     const allTopicsMode = selectedSet.size === 0;
     topicInputs.forEach((entry) => {
-      entry.checked = selectedSet.has(String(entry.value || "").trim());
+      entry.checked = allTopicsMode || selectedSet.has(String(entry.value || "").trim());
     });
     const groupSections = Array.from(appEl.querySelectorAll(".create-test-topic-section.is-group"));
     groupSections.forEach((sectionEl) => {
@@ -14382,13 +14382,14 @@ function renderAdmin() {
             aria-pressed="${isActive ? "true" : "false"}"
           >
             <div class="admin-course-picker-card-head">
-              <span class="admin-course-card-order">#${idx + 1}</span>
-              <span class="admin-course-picker-card-status">${isActive ? "Open" : "Open course"}</span>
-            </div>
-            <div class="admin-course-picker-card-body">
               <b class="admin-course-picker-card-title">${escapeHtml(course)}</b>
-              <p class="admin-course-picker-card-copy">${topicCount} topics • ${subgroupCount} groups • ${questionCount} questions</p>
+              <span class="admin-course-picker-card-status">${isActive ? "Selected" : "Select"}</span>
             </div>
+            <p class="admin-course-picker-card-copy">
+              <span>${topicCount} topics</span>
+              <span>${subgroupCount} groups</span>
+              <span>${questionCount} questions</span>
+            </p>
           </button>
         `;
       })
@@ -14409,7 +14410,7 @@ function renderAdmin() {
             <div class="admin-course-workspace-head">
               <div>
                 <h4 style="margin: 0;">${escapeHtml(focusedCourse)}</h4>
-                <p class="subtle" style="margin: 0.22rem 0 0;">Manage everything related to this course from one place.</p>
+                <p class="subtle" style="margin: 0.22rem 0 0;">Focused workspace</p>
               </div>
               <div class="admin-course-workspace-head-actions">
                 <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save course name</button>
@@ -14429,7 +14430,7 @@ function renderAdmin() {
                 <div class="admin-course-workspace-panel-head">
                   <div>
                     <h4 style="margin: 0;">Topics and groups</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Keep the dashboard clean, then manage all topics and groups in one popup.</p>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Manage subgroup structure in one popup.</p>
                   </div>
                 </div>
 
@@ -14455,7 +14456,7 @@ function renderAdmin() {
                 <div class="admin-course-workspace-panel-head">
                   <div>
                     <h4 style="margin: 0;">Course tools</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Update the helper link and run course-level actions.</p>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Links and bulk actions.</p>
                   </div>
                 </div>
 
@@ -14514,34 +14515,21 @@ function renderAdmin() {
 
     pageContent = `
       <section class="card admin-section" id="admin-courses-section">
-        <div class="flex-between" style="gap: 1rem;">
+        <div class="admin-courses-minimal-head">
           <div>
-            <h3 style="margin: 0;">Courses by Year & Semester</h3>
-            <p class="subtle">Pick a course card, then manage its topics, groups, and tools in the workspace below.</p>
+            <h3 style="margin: 0;">Courses</h3>
+            <p class="subtle" style="margin: 0.22rem 0 0;">Year ${curriculumYear} • Semester ${curriculumSemester}</p>
           </div>
-          <p class="subtle" style="margin: 0;">Showing <b>${filteredCourseEntries.length}</b> of <b>${selectedSemesterCourses.length}</b> course(s)</p>
+          <div class="admin-courses-minimal-stats">
+            <span class="admin-courses-minimal-stat"><b>${filteredCourseEntries.length}</b><small>visible</small></span>
+            <span class="admin-courses-minimal-stat"><b>${selectedSemesterCourses.length}</b><small>courses</small></span>
+            <span class="admin-courses-minimal-stat"><b>${semesterTopicCount}</b><small>topics</small></span>
+            <span class="admin-courses-minimal-stat"><b>${semesterSubgroupCount}</b><small>groups</small></span>
+            <span class="admin-courses-minimal-stat"><b>${semesterQuestionCount}</b><small>questions</small></span>
+          </div>
         </div>
 
-        <div class="admin-course-overview" style="margin-top: 0.85rem;">
-          <article class="admin-course-overview-card">
-            <b>${selectedSemesterCourses.length}</b>
-            <small>Courses this semester</small>
-          </article>
-          <article class="admin-course-overview-card">
-            <b>${semesterTopicCount}</b>
-            <small>Total topics</small>
-          </article>
-          <article class="admin-course-overview-card">
-            <b>${semesterSubgroupCount}</b>
-            <small>Total subgroups</small>
-          </article>
-          <article class="admin-course-overview-card">
-            <b>${semesterQuestionCount}</b>
-            <small>Total questions</small>
-          </article>
-        </div>
-
-        <div class="admin-course-toolbar" style="margin-top: 0.85rem;">
+        <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
           <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
             <div class="form-row">
               <label>Year
@@ -14566,7 +14554,7 @@ function renderAdmin() {
           </form>
 
           <form id="admin-curriculum-add-form" class="admin-course-toolbar-card admin-course-add-form">
-            <label>New course name
+            <label>Add course
               <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
             </label>
             <div class="stack">
