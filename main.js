@@ -11232,7 +11232,9 @@ function renderCreateTest() {
   if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
     state.qbankFilters.topicSource = selectedTopicSource;
   }
-  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { source: selectedTopicSource });
+  const topicSections = selectedTopicSource
+    ? getAvailableTopicSectionsForCourse(selectedCourse, questions, { source: selectedTopicSource })
+    : [];
   const topicOptions = topicSections.flatMap((section) => section.topics || []);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
@@ -11296,7 +11298,7 @@ function renderCreateTest() {
             <label>
               Source
               <select name="topicSource" id="create-test-topic-source-select" ${topicSourceOptions.length ? "" : "disabled"}>
-                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "Select subgroup source" : "No subgroups yet"}</option>
+                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "" : "No subgroups yet"}</option>
                 ${topicSourceOptions
       .map((entry) => `<option value="${escapeHtml(entry.name)}" ${selectedTopicSource === entry.name ? "selected" : ""}>${escapeHtml(entry.name)}</option>`)
       .join("")}
@@ -11488,9 +11490,11 @@ function wireCreateTest() {
     if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
       state.qbankFilters.topicSource = selectedTopicSource;
     }
-    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
-      source: selectedTopicSource,
-    });
+    const topicSections = selectedTopicSource
+      ? getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
+        source: selectedTopicSource,
+      })
+      : [];
     const topicOptions = topicSections.flatMap((section) => section.topics || []);
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
