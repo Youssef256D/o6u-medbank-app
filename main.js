@@ -96,6 +96,7 @@ const STUDENT_DATA_REFRESH_MS = 8000;
 const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
+const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 1200;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
@@ -401,6 +402,8 @@ let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
 let studentForceRefreshPollHandle = null;
 let studentForceRefreshInFlight = false;
+let studentBackgroundRefreshPollHandle = null;
+let studentBackgroundRefreshInFlight = false;
 let siteMaintenanceGateRefreshHandle = null;
 let siteMaintenanceGateRefreshInFlight = false;
 let globalEventsBound = false;
@@ -3054,12 +3057,9 @@ function schedulePostAuthDataWarmup(user) {
   const routeBefore = String(state.route || "").trim();
   const adminPageBefore = String(state.adminPage || "").trim();
   const hasCachedAdminData = getUsers().length > 0 || getQuestions().length > 0;
-  const hasCachedStudentData = getSessions().length > 0 || getNotifications().length > 0 || getQuestions().length > 0;
   if (currentUser.role === "admin" && hasCachedAdminData) {
     state.adminDataLastSyncAt = Date.now();
     state.adminDataSyncError = "";
-  } else if (currentUser.role === "student" && hasCachedStudentData) {
-    state.studentDataLastSyncAt = Date.now();
   }
 
   postAuthWarmupRuntime.key = key;
@@ -8179,6 +8179,61 @@ function clearStudentSessionPolling() {
   studentDataAutoRefreshInFlight = false;
 }
 
+function clearStudentBackgroundRefreshPolling() {
+  if (studentBackgroundRefreshPollHandle) {
+    window.clearInterval(studentBackgroundRefreshPollHandle);
+    studentBackgroundRefreshPollHandle = null;
+  }
+  studentBackgroundRefreshInFlight = false;
+}
+
+function ensureStudentBackgroundRefreshPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    clearStudentBackgroundRefreshPolling();
+    return;
+  }
+  if (studentBackgroundRefreshPollHandle) {
+    return;
+  }
+
+  studentBackgroundRefreshPollHandle = window.setInterval(() => {
+    const activeUser = getCurrentUser();
+    const activeProfileId = getCurrentSessionProfileId(activeUser);
+    if (!activeUser || activeUser.role !== "student" || !isUuidValue(activeProfileId)) {
+      clearStudentBackgroundRefreshPolling();
+      return;
+    }
+    if (
+      studentBackgroundRefreshInFlight
+      || state.studentDataRefreshing
+      || isPostAuthDataWarmupActive(activeUser)
+      || state.route === "session"
+      || state.route === "review"
+    ) {
+      return;
+    }
+
+    const shouldForce = !Number(state.studentDataLastSyncAt || 0);
+    if (!shouldForce && !shouldRefreshStudentData(activeUser)) {
+      return;
+    }
+
+    studentBackgroundRefreshInFlight = true;
+    refreshStudentDataSnapshot(activeUser, {
+      force: shouldForce,
+      rerender: true,
+    })
+      .catch((error) => {
+        console.warn("Student background refresh failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentBackgroundRefreshInFlight = false;
+      });
+  }, STUDENT_BACKGROUND_SYNC_POLL_MS);
+}
+
 function clearStudentForceRefreshPolling() {
   if (studentForceRefreshPollHandle) {
     window.clearInterval(studentForceRefreshPollHandle);
@@ -9596,6 +9651,7 @@ function syncTopbar() {
   ensureSessionRealtimeSubscription(user);
   ensureStudentSessionPolling(user);
   ensureStudentForceRefreshPolling(user);
+  ensureStudentBackgroundRefreshPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const maintenanceRestricted = isSiteMaintenanceEnabledForUser(user);
@@ -23503,6 +23559,7 @@ async function logout() {
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
   clearStudentForceRefreshPolling();
+  clearStudentBackgroundRefreshPolling();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   resetRelationalSyncState();
