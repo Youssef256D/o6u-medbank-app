@@ -11235,17 +11235,18 @@ function renderCreateTest() {
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
-  const emptyTopicSelectionMeansAll = true;
   const filtered = applyQbankFilters(questions, {
     course: selectedCourse,
     topics: selectedTopics,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
-  const allTopicsSelected = emptyTopicSelectionMeansAll && selectedTopics.length === 0;
-  const selectedTopicLabel = selectedTopics.length
-    ? formatTopicFilterSummary(selectedTopics)
-    : "All topics";
+  const allTopicsSelected = topicOptions.length > 0 && selectedTopics.length === topicOptions.length;
+  const selectedTopicLabel = selectedTopics.length === 0
+    ? "0 topics selected"
+    : allTopicsSelected
+      ? "All topics"
+      : formatTopicFilterSummary(selectedTopics);
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11292,6 +11293,24 @@ function renderCreateTest() {
         <div class="create-test-filter-card create-test-topics-group">
           ${topicSections.length
       ? `
+              <div class="create-test-topic-actions">
+                <button
+                  type="button"
+                  class="btn ghost admin-btn-sm"
+                  data-action="create-test-select-all-topics"
+                  ${allTopicsSelected ? "disabled" : ""}
+                >
+                  Select all topics
+                </button>
+                <button
+                  type="button"
+                  class="btn ghost admin-btn-sm"
+                  data-action="create-test-clear-topic-selection"
+                  ${selectedTopics.length ? "" : "disabled"}
+                >
+                  Clear
+                </button>
+              </div>
               <div class="create-test-topic-sections">
                 ${topicSections
       .map((section) => `
@@ -11370,6 +11389,8 @@ function wireCreateTest() {
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
+  const selectAllTopicsBtn = appEl.querySelector("[data-action='create-test-select-all-topics']");
+  const clearTopicsBtn = appEl.querySelector("[data-action='create-test-clear-topic-selection']");
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
@@ -11387,10 +11408,17 @@ function wireCreateTest() {
 
   const syncTopicSelectionUi = () => {
     const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
-    const allTopicsMode = selectedSet.size === 0;
+    const totalTopics = topicInputs.length;
+    const allTopicsMode = totalTopics > 0 && selectedSet.size === totalTopics;
     topicInputs.forEach((entry) => {
       entry.checked = allTopicsMode || selectedSet.has(String(entry.value || "").trim());
     });
+    if (selectAllTopicsBtn) {
+      selectAllTopicsBtn.disabled = totalTopics === 0 || allTopicsMode;
+    }
+    if (clearTopicsBtn) {
+      clearTopicsBtn.disabled = selectedSet.size === 0;
+    }
   };
   syncTopicSelectionUi();
 
@@ -11406,9 +11434,12 @@ function wireCreateTest() {
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
-    const selectedTopicLabel = selectedTopics.length
-      ? formatTopicFilterSummary(selectedTopics)
-      : "All topics";
+    const allTopicsSelected = topicOptions.length > 0 && selectedTopics.length === topicOptions.length;
+    const selectedTopicLabel = selectedTopics.length === 0
+      ? "0 topics selected"
+      : allTopicsSelected
+        ? "All topics"
+        : formatTopicFilterSummary(selectedTopics);
     const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
       course: selectedCourse,
       topics: selectedTopics,
@@ -11449,6 +11480,16 @@ function wireCreateTest() {
       state.qbankFilters.topics = selected;
       updateCreateTestSummary();
     });
+  });
+
+  selectAllTopicsBtn?.addEventListener("click", () => {
+    state.qbankFilters.topics = topicInputs.map((entry) => String(entry.value || "").trim()).filter(Boolean);
+    updateCreateTestSummary();
+  });
+
+  clearTopicsBtn?.addEventListener("click", () => {
+    state.qbankFilters.topics = [];
+    updateCreateTestSummary();
   });
 
   sourceSelect?.addEventListener("change", () => {

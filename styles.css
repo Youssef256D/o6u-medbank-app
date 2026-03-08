@@ -3239,6 +3239,13 @@ label {
   gap: 0.65rem;
 }
 
+.create-test-topic-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .create-test-topic-section {
   display: grid;
   gap: 0.56rem;
