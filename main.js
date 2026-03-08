@@ -11296,7 +11296,7 @@ function renderCreateTest() {
             <label>
               Source
               <select name="topicSource" id="create-test-topic-source-select" ${topicSourceOptions.length ? "" : "disabled"}>
-                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "All sources" : "No sources yet"}</option>
+                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "Select subgroup source" : "No subgroups yet"}</option>
                 ${topicSourceOptions
       .map((entry) => `<option value="${escapeHtml(entry.name)}" ${selectedTopicSource === entry.name ? "selected" : ""}>${escapeHtml(entry.name)}</option>`)
       .join("")}
@@ -11414,7 +11414,7 @@ function renderCreateTest() {
           </span>
         </label>
 
-        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "All sources")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "No source selected")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
         <div class="stack">
           <button type="submit" class="btn">Start test</button>
         </div>
@@ -11523,7 +11523,7 @@ function wireCreateTest() {
       topicSourceSelect.value = selectedTopicSource;
     }
     if (summaryEl) {
-      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "All sources")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "No source selected")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
     if (countInput) {
       const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
@@ -21145,7 +21145,7 @@ function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
         .map((topic) => String(topic || "").trim())
         .filter((topic) => topic && !isRemovedTopicName(topic)),
     }))
-    .filter((entry) => entry.name && entry.topics.length);
+    .filter((entry) => entry.name);
 }
 
 function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
