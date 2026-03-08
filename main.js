@@ -11238,17 +11238,20 @@ function renderCreateTest() {
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
+  const emptyTopicSelectionMeansAll = !selectedTopicSource;
   const filtered = applyQbankFilters(questions, {
     course: selectedCourse,
     topicSource: selectedTopicSource,
     topics: selectedTopics,
+  }, {
+    strictEmptyTopics: !emptyTopicSelectionMeansAll,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
-  const allTopicsSelected = selectedTopics.length === 0;
+  const allTopicsSelected = emptyTopicSelectionMeansAll && selectedTopics.length === 0;
   const selectedTopicLabel = selectedTopics.length
     ? formatTopicFilterSummary(selectedTopics)
-    : (selectedTopicSource ? `All topics in ${selectedTopicSource}` : "All topics");
+    : (selectedTopicSource ? "0 topics selected" : "All topics");
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11444,7 +11447,8 @@ function wireCreateTest() {
 
   const syncTopicSelectionUi = () => {
     const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
-    const allTopicsMode = selectedSet.size === 0;
+    const selectedTopicSource = String(state.qbankFilters.topicSource || topicSourceSelect?.value || "").trim();
+    const allTopicsMode = selectedSet.size === 0 && !selectedTopicSource;
     topicInputs.forEach((entry) => {
       entry.checked = allTopicsMode || selectedSet.has(String(entry.value || "").trim());
     });
@@ -11492,13 +11496,16 @@ function wireCreateTest() {
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
+    const emptyTopicSelectionMeansAll = !selectedTopicSource;
     const selectedTopicLabel = selectedTopics.length
       ? formatTopicFilterSummary(selectedTopics)
-      : (selectedTopicSource ? `All topics in ${selectedTopicSource}` : "All topics");
+      : (selectedTopicSource ? "0 topics selected" : "All topics");
     const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
       course: selectedCourse,
       topicSource: selectedTopicSource,
       topics: selectedTopics,
+    }, {
+      strictEmptyTopics: !emptyTopicSelectionMeansAll,
     });
     const allowedSources = ["all", "unused", "incorrect", "flagged"];
     if (!allowedSources.includes(state.createTestSource)) {
@@ -11577,9 +11584,12 @@ function wireCreateTest() {
           .map((topic) => String(topic || "").trim())
           .filter((topic) => availableTopicSet.has(topic)),
       );
+      const emptyTopicSelectionMeansAll = !String(state.qbankFilters.topicSource || "").trim();
       const selectedSet = explicitSelectedSet.size
         ? explicitSelectedSet
-        : new Set(topicOptions.map((topic) => String(topic || "").trim()));
+        : emptyTopicSelectionMeansAll
+          ? new Set(topicOptions.map((topic) => String(topic || "").trim()))
+          : new Set();
       const normalizedGroupTopics = groupTopics.filter((topic) => availableTopicSet.has(String(topic || "").trim()));
       normalizedGroupTopics.forEach((topic) => {
         const normalizedTopic = String(topic || "").trim();
@@ -11592,7 +11602,7 @@ function wireCreateTest() {
           selectedSet.add(normalizedTopic);
         }
       });
-      state.qbankFilters.topics = selectedSet.size === topicOptions.length
+      state.qbankFilters.topics = emptyTopicSelectionMeansAll && selectedSet.size === topicOptions.length
         ? []
         : topicOptions.filter((topic) => selectedSet.has(String(topic || "").trim()));
       updateCreateTestSummary();
@@ -11649,7 +11659,9 @@ function wireCreateTest() {
       state.qbankFilters.topics = [];
       state.qbankFilters.topicSource = "";
     }
-    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters);
+    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
+      strictEmptyTopics: Boolean(String(state.qbankFilters.topicSource || "").trim()),
+    });
     pool = applySourceFilter(pool, source, user.id);
     const fallbackCount = Math.max(1, Math.min(500, pool.length || 0));
     const requestedCount = Math.floor(Number(data.get("count")));
@@ -20479,11 +20491,12 @@ function applyQuestionFilters(questions, filters, sort) {
   return result;
 }
 
-function applyQbankFilters(questions, filters) {
+function applyQbankFilters(questions, filters, options = {}) {
   const selectedCourse = String(filters?.course || "").trim();
   const selectedTopicSource = String(filters?.topicSource || "").trim();
   const selectedTopics = Array.isArray(filters?.topics) ? filters.topics.filter(Boolean) : [];
   const singleTopic = String(filters?.topic || "").trim();
+  const strictEmptyTopics = Boolean(options?.strictEmptyTopics);
   const sourceTopicKeys = (() => {
     if (!selectedCourse || !selectedTopicSource) {
       return null;
@@ -20519,8 +20532,13 @@ function applyQbankFilters(questions, filters) {
       if (selectedTopics.length && !selectedTopics.includes(question.qbankTopic)) {
         return false;
       }
-      if (!selectedTopics.length && singleTopic && question.qbankTopic !== singleTopic) {
-        return false;
+      if (!selectedTopics.length) {
+        if (singleTopic && question.qbankTopic !== singleTopic) {
+          return false;
+        }
+        if (strictEmptyTopics) {
+          return false;
+        }
       }
       return true;
     })
