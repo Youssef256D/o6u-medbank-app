@@ -182,6 +182,7 @@ const state = {
   adminCurriculumSemester: 1,
   adminCourseSearch: "",
   adminCourseFocus: "",
+  adminCourseTopicModalCourse: "",
   adminEditorCourse: "",
   adminEditorTopic: "",
   adminQuestionModalOpen: false,
@@ -240,6 +241,8 @@ const state = {
 
 let appVersionCheckPromise = null;
 let askAiWindowRef = null;
+
+let wasAdminCourseTopicModalOpen = false;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -9268,7 +9271,9 @@ function render() {
   }
 
   const isAdminQuestionModalOpen = state.route === "admin" && state.adminPage === "questions" && state.adminQuestionModalOpen;
+  const isAdminCourseTopicModalOpen = state.route === "admin" && state.adminPage === "courses" && Boolean(state.adminCourseTopicModalCourse);
   document.body.classList.toggle("is-admin-question-modal-open", isAdminQuestionModalOpen);
+  document.body.classList.toggle("is-admin-course-topic-modal-open", isAdminCourseTopicModalOpen);
   if (isAdminQuestionModalOpen && !wasAdminQuestionModalOpen) {
     window.requestAnimationFrame(() => {
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -9284,7 +9289,23 @@ function render() {
       focusTarget?.focus({ preventScroll: true });
     });
   }
+  if (isAdminCourseTopicModalOpen && !wasAdminCourseTopicModalOpen) {
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      const modal = appEl.querySelector(".admin-course-topic-modal");
+      const modalCard = modal?.querySelector(".admin-course-topic-modal-card");
+      if (modal) {
+        modal.scrollTop = 0;
+      }
+      if (modalCard) {
+        modalCard.scrollTop = 0;
+      }
+      const focusTarget = appEl.querySelector(".admin-course-topic-modal input[data-field='newCourseTopic']");
+      focusTarget?.focus({ preventScroll: true });
+    });
+  }
   wasAdminQuestionModalOpen = isAdminQuestionModalOpen;
+  wasAdminCourseTopicModalOpen = isAdminCourseTopicModalOpen;
 
   persistRouteState();
   const currentSessionPointer = getSessionRenderPointer(user);
@@ -11277,13 +11298,6 @@ function renderCreateTest() {
           </div>
         </div>
         <div class="create-test-filter-card create-test-topics-group">
-          <p class="create-test-topics-label">Topics (choose one or more)</p>
-          <div class="create-test-topic-grid create-test-topic-grid-toolbar">
-            <label class="admin-course-check create-test-topic-chip is-all">
-              <input type="checkbox" data-role="create-test-all-topics" ${allTopicsSelected ? "checked" : ""} />
-              <span class="create-test-topic-chip-copy">${selectedTopicSource ? "All shown topics" : "All topics"}</span>
-            </label>
-          </div>
           ${topicSections.length
       ? `
               <div class="create-test-topic-sections">
@@ -11409,7 +11423,6 @@ function wireCreateTest() {
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
   const topicGroupButtons = Array.from(appEl.querySelectorAll("[data-action='create-test-apply-topic-group']"));
-  const allTopicsInput = document.querySelector("input[data-role='create-test-all-topics']");
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
@@ -11431,9 +11444,6 @@ function wireCreateTest() {
     topicInputs.forEach((entry) => {
       entry.checked = selectedSet.has(String(entry.value || "").trim());
     });
-    if (allTopicsInput) {
-      allTopicsInput.checked = allTopicsMode;
-    }
     const groupSections = Array.from(appEl.querySelectorAll(".create-test-topic-section.is-group"));
     groupSections.forEach((sectionEl) => {
       const sectionTopicInputs = Array.from(sectionEl.querySelectorAll("input[data-role='create-test-topic']"));
@@ -11530,20 +11540,8 @@ function wireCreateTest() {
     input.addEventListener("change", () => {
       const selected = topicInputs.filter((entry) => entry.checked).map((entry) => entry.value);
       state.qbankFilters.topics = selected;
-      if (allTopicsInput) {
-        allTopicsInput.checked = selected.length === 0;
-      }
       updateCreateTestSummary();
     });
-  });
-
-  allTopicsInput?.addEventListener("change", () => {
-    if (allTopicsInput.checked) {
-      state.qbankFilters.topics = [];
-      updateCreateTestSummary();
-    } else if (!topicInputs.some((entry) => entry.checked)) {
-      allTopicsInput.checked = true;
-    }
   });
 
   topicGroupButtons.forEach((button) => {
@@ -14351,6 +14349,14 @@ function renderAdmin() {
     const focusedTopicCount = focusedCourse ? (topicCountByCourse[focusedCourse] || 0) : 0;
     const focusedSubgroupEntries = focusedCourse ? Object.entries(getCourseTopicGroups(focusedCourse)) : [];
     const focusedSubgroupCount = focusedSubgroupEntries.length;
+    const requestedModalCourse = String(state.adminCourseTopicModalCourse || "").trim();
+    const modalCourse = selectedSemesterCourses.includes(requestedModalCourse) ? requestedModalCourse : "";
+    const modalCourseIndex = modalCourse ? selectedSemesterCourses.findIndex((course) => course === modalCourse) : -1;
+    const modalTopicCount = modalCourse ? (topicCountByCourse[modalCourse] || 0) : 0;
+    const modalGroupCount = modalCourse ? Object.keys(getCourseTopicGroups(modalCourse)).length : 0;
+    if (requestedModalCourse && !modalCourse) {
+      state.adminCourseTopicModalCourse = "";
+    }
     const courseCards = filteredCourseEntries
       .map(({ course, idx }) => {
         const topicCount = topicCountByCourse[course] || 0;
@@ -14386,7 +14392,7 @@ function renderAdmin() {
             </span>
           `)
         .join("")
-      : '<span class="admin-course-subgroup-empty">No groups yet. Add topics and place them into groups below.</span>';
+      : '<span class="admin-course-subgroup-empty">No groups yet. Use Manage groups to create them.</span>';
     const focusedCourseWorkspace = focusedCourse
       ? `
           <section class="admin-course-workspace" data-course-index="${focusedCourseIndex}">
@@ -14413,7 +14419,7 @@ function renderAdmin() {
                 <div class="admin-course-workspace-panel-head">
                   <div>
                     <h4 style="margin: 0;">Topics and groups</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Students will see these same groups when they build a test.</p>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Keep the dashboard clean, then manage all topics and groups in one popup.</p>
                   </div>
                 </div>
 
@@ -14422,14 +14428,17 @@ function renderAdmin() {
                   <input data-field="curriculumCourseName" value="${escapeHtml(focusedCourse)}" />
                 </label>
 
-                <div class="admin-course-subgroup-summary">
-                  <p class="subtle" style="margin: 0;">Current groups</p>
-                  <div class="admin-course-subgroup-list">
-                    ${focusedSubgroupPreview}
+                <div class="admin-course-topic-launch">
+                  <div class="admin-course-subgroup-summary">
+                    <p class="subtle" style="margin: 0;">Current groups</p>
+                    <div class="admin-course-subgroup-list">
+                      ${focusedSubgroupPreview}
+                    </div>
+                  </div>
+                  <div class="admin-course-topic-launch-actions">
+                    <button class="btn" type="button" data-action="course-topic-manager-open">Manage groups</button>
                   </div>
                 </div>
-
-                <div data-role="course-topics-cell">${renderAdminCourseTopicControls(focusedCourse)}</div>
               </section>
 
               <section class="admin-course-workspace-panel">
@@ -14464,6 +14473,32 @@ function renderAdmin() {
               </section>
             </div>
           </section>
+        `
+      : "";
+    const courseTopicManagerModal = modalCourse
+      ? `
+          <div class="admin-course-topic-modal">
+            <button
+              class="admin-course-topic-modal-backdrop"
+              type="button"
+              data-action="course-topic-manager-close"
+              aria-label="Close topic and group manager"
+            ></button>
+            <section class="admin-course-topic-modal-card" role="dialog" aria-modal="true" aria-label="Manage topics and groups" data-course-index="${modalCourseIndex}">
+              <div class="flex-between admin-course-topic-modal-head">
+                <div>
+                  <h3 style="margin: 0;">Manage Groups</h3>
+                  <p class="subtle" style="margin: 0.22rem 0 0;">${escapeHtml(modalCourse)} • ${modalTopicCount} topics • ${modalGroupCount} groups</p>
+                </div>
+                <div class="stack">
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-manager-close">Close</button>
+                </div>
+              </div>
+              <div class="admin-course-topic-modal-body">
+                ${renderAdminCourseTopicControls(modalCourse)}
+              </div>
+            </section>
+          </div>
         `
       : "";
 
@@ -14542,6 +14577,7 @@ function renderAdmin() {
         ${focusedCourseWorkspace
       ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
       : ""}
+        ${courseTopicManagerModal}
       </section>
     `;
   }
@@ -15398,71 +15434,32 @@ function renderAdmin() {
   `;
 }
 
-function renderAdminCourseTopicControls(course, options = {}) {
+function renderAdminCourseTopicControls(course) {
   const topics = QBANK_COURSE_TOPICS[course] || [];
   const topicGroups = getCourseTopicGroups(course);
   const topicGroupEntries = Object.entries(topicGroups);
   const groupInputListId = `course-topic-group-options-${sanitizeStoragePathSegment(course, "course")}`;
-  const ungroupedTopicCount = topics.filter((topic) => !getTopicGroupNameForCourseTopic(course, topic)).length;
   return `
-    <div class="admin-course-topics">
-      <div class="admin-topic-list">
-        ${topics
-      .map(
-        (topic, topicIdx) => {
-          const groupName = getTopicGroupNameForCourseTopic(course, topic);
-          return `
-              <span class="admin-topic-chip">
-                <span>${escapeHtml(topic)}</span>
-                ${groupName ? `<span class="badge admin-topic-group-badge">${escapeHtml(groupName)}</span>` : ""}
-                <button
-                  type="button"
-                  data-action="course-topic-group-focus"
-                  data-topic-index="${topicIdx}"
-                  aria-label="Manage subgroup for ${escapeHtml(topic)}"
-                  title="Manage subgroup"
-                >
-                  subgroup
-                </button>
-                <button
-                  type="button"
-                  data-action="course-topic-rename"
-                  data-topic-index="${topicIdx}"
-                  aria-label="Rename ${escapeHtml(topic)}"
-                  title="Rename topic"
-                >
-                  edit
-                </button>
-                <button
-                  type="button"
-                  data-action="course-topic-remove"
-                  data-topic-index="${topicIdx}"
-                  aria-label="Remove ${escapeHtml(topic)}"
-                  title="Remove topic"
-                >
-                  x
-                </button>
-              </span>
-            `;
-        },
-      )
-      .join("")}
-      </div>
-      <details class="admin-topic-group-manager" data-role="course-topic-group-manager" ${options?.openGroupManager ? "open" : ""}>
-        <summary>
-          <span class="admin-topic-group-manager-copy">
-            <b>Manage subgroups</b>
-            <small>${topicGroupEntries.length} subgroup${topicGroupEntries.length === 1 ? "" : "s"} • ${ungroupedTopicCount} ungrouped</small>
-          </span>
-          <span class="admin-topic-group-manager-hint">Manage</span>
-        </summary>
-        <div class="admin-topic-group-manager-body">
-          <p class="subtle admin-topic-group-manager-note">Type a subgroup name to create it, or pick an existing one. Removing a subgroup does not change the topic data.</p>
-          <datalist id="${groupInputListId}">
-            ${topicGroupEntries
+    <div class="admin-course-topics admin-course-topic-manager">
+      <datalist id="${groupInputListId}">
+        ${topicGroupEntries
       .map(([groupName]) => `<option value="${escapeHtml(groupName)}"></option>`)
       .join("")}
-          </datalist>
+      </datalist>
+
+      <div class="admin-course-topic-manager-topbar">
+        <div>
+          <h4 style="margin: 0;">Topics</h4>
+          <p class="subtle" style="margin: 0.22rem 0 0;">Add, rename, remove, and place topics into groups.</p>
+        </div>
+        <div class="admin-topic-add admin-topic-add-inline">
+          <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
+          <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-add">Add topic</button>
+        </div>
+      </div>
+
+      <div class="admin-course-topic-manager-grid">
+        <section class="admin-course-topic-manager-panel">
           <div class="admin-topic-group-editor-list">
             ${topics
       .map((topic, topicIdx) => {
@@ -15481,7 +15478,7 @@ function renderAdminCourseTopicControls(course, options = {}) {
                     data-topic-index="${topicIdx}"
                     list="${groupInputListId}"
                     value="${escapeHtml(groupName)}"
-                    placeholder="Existing or new subgroup"
+                    placeholder="Existing or new group"
                   />
                   <button
                     class="btn ghost admin-btn-sm"
@@ -15489,7 +15486,7 @@ function renderAdminCourseTopicControls(course, options = {}) {
                     data-action="course-topic-group-save"
                     data-topic-index="${topicIdx}"
                   >
-                    Save
+                    Save group
                   </button>
                   <button
                     class="btn ghost admin-btn-sm"
@@ -15501,10 +15498,37 @@ function renderAdminCourseTopicControls(course, options = {}) {
                     Clear
                   </button>
                 </div>
+                <div class="admin-topic-group-editor-actions">
+                  <button
+                    class="btn ghost admin-btn-sm"
+                    type="button"
+                    data-action="course-topic-rename"
+                    data-topic-index="${topicIdx}"
+                  >
+                    Rename
+                  </button>
+                  <button
+                    class="btn danger admin-btn-sm"
+                    type="button"
+                    data-action="course-topic-remove"
+                    data-topic-index="${topicIdx}"
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
             `;
       })
       .join("")}
+          </div>
+        </section>
+
+        <section class="admin-course-topic-manager-panel">
+          <div class="admin-course-topic-manager-sidehead">
+            <div>
+              <h4 style="margin: 0;">Groups</h4>
+              <p class="subtle" style="margin: 0.22rem 0 0;">Rename or remove existing groups.</p>
+            </div>
           </div>
           <div class="admin-topic-groups">
             ${topicGroupEntries.length
@@ -15513,11 +15537,11 @@ function renderAdminCourseTopicControls(course, options = {}) {
               <article class="admin-topic-group-card" data-role="course-topic-group-card" data-group-name="${escapeHtml(groupName)}">
                 <div class="admin-topic-group-card-head">
                   <label class="admin-topic-group-card-name">
-                    <span>Subgroup</span>
+                    <span>Group name</span>
                     <input
                       data-field="courseTopicGroupRename"
                       value="${escapeHtml(groupName)}"
-                      placeholder="Subgroup name"
+                      placeholder="Group name"
                     />
                   </label>
                   <div class="admin-topic-group-card-actions">
@@ -15527,7 +15551,7 @@ function renderAdminCourseTopicControls(course, options = {}) {
                       data-action="course-topic-group-rename-save"
                       data-group-name="${escapeHtml(groupName)}"
                     >
-                      Save name
+                      Save
                     </button>
                     <button
                       class="btn danger admin-btn-sm"
@@ -15547,13 +15571,9 @@ function renderAdminCourseTopicControls(course, options = {}) {
               </article>
             `)
         .join("")
-      : '<span class="admin-topic-group-empty">No subgroups yet. Save a topic into a subgroup to create the first one.</span>'}
+      : '<span class="admin-topic-group-empty">No groups yet. Assign a topic to a group to create the first one.</span>'}
           </div>
-        </div>
-      </details>
-      <div class="admin-topic-add">
-        <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
-        <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-add">Add topic</button>
+        </section>
       </div>
     </div>
   `;
@@ -15583,6 +15603,9 @@ function wireAdmin() {
         state.adminBulkActionRunning = false;
         state.adminBulkActionType = "";
       }
+      if (page !== "courses") {
+        state.adminCourseTopicModalCourse = "";
+      }
       if (page === "activity") {
         refreshAdminPresenceSnapshot({ force: true })
           .then((ok) => {
@@ -15605,6 +15628,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-open-courses']").forEach((button) => {
     button.addEventListener("click", () => {
       state.adminPage = "courses";
+      state.adminCourseTopicModalCourse = "";
       state.adminEditQuestionId = null;
       state.adminQuestionModalOpen = false;
       state.adminSelectedQuestionIds = [];
@@ -16440,6 +16464,9 @@ function wireAdmin() {
       if (state.adminCourseFocus === oldName) {
         state.adminCourseFocus = newName;
       }
+      if (state.adminCourseTopicModalCourse === oldName) {
+        state.adminCourseTopicModalCourse = newName;
+      }
       try {
         await flushPendingSyncNow();
         toast("Course name updated.");
@@ -16478,6 +16505,9 @@ function wireAdmin() {
       if (state.adminCourseFocus === removedCourse) {
         state.adminCourseFocus = replacementCourse;
       }
+      if (state.adminCourseTopicModalCourse === removedCourse) {
+        state.adminCourseTopicModalCourse = "";
+      }
       try {
         await flushPendingSyncNow();
         toast("Course deleted.");
@@ -16498,8 +16528,9 @@ function wireAdmin() {
     if (
       ![
         "admin-focus-course",
+        "course-topic-manager-open",
+        "course-topic-manager-close",
         "course-topic-add",
-        "course-topic-group-focus",
         "course-topic-group-save",
         "course-topic-group-clear",
         "course-topic-group-rename-save",
@@ -16512,6 +16543,13 @@ function wireAdmin() {
         "course-question-clear",
       ].includes(action)
     ) {
+      return;
+    }
+
+    if (action === "course-topic-manager-close") {
+      state.adminCourseTopicModalCourse = "";
+      state.skipNextRouteAnimation = true;
+      render();
       return;
     }
 
@@ -16533,8 +16571,17 @@ function wireAdmin() {
       return;
     }
 
+    if (action === "course-topic-manager-open") {
+      state.adminCourseFocus = course;
+      state.adminCourseTopicModalCourse = course;
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+
     if (action === "course-question-edit") {
       state.adminPage = "questions";
+      state.adminCourseTopicModalCourse = "";
       state.adminFilters.course = course;
       state.adminFilters.topic = "";
       state.adminEditorCourse = course;
@@ -16574,26 +16621,10 @@ function wireAdmin() {
       return;
     }
 
-    const refreshRowTopics = (options = {}) => {
-      const topicsCell = row.querySelector("[data-role='course-topics-cell']");
-      if (!topicsCell) return;
-      const existingManager = topicsCell.querySelector("[data-role='course-topic-group-manager']");
-      const groupManagerOpen = options?.openGroupManager ?? Boolean(existingManager?.open);
-      topicsCell.innerHTML = renderAdminCourseTopicControls(course, { openGroupManager: groupManagerOpen });
+    const rerenderCoursesPage = () => {
+      state.skipNextRouteAnimation = true;
+      render();
     };
-
-    if (action === "course-topic-group-focus") {
-      const topicIndex = Number(actionEl.getAttribute("data-topic-index"));
-      const manager = row.querySelector("[data-role='course-topic-group-manager']");
-      const editorRow = row.querySelector(`[data-role='course-topic-group-editor-row'][data-topic-index='${topicIndex}']`);
-      const input = editorRow?.querySelector("input[data-field='courseTopicGroupName']");
-      if (manager) {
-        manager.open = true;
-      }
-      input?.focus();
-      input?.select();
-      return;
-    }
 
     if (action === "course-topic-group-rename-save" || action === "course-topic-group-remove") {
       const groupName = String(actionEl.getAttribute("data-group-name") || "").trim();
@@ -16617,7 +16648,7 @@ function wireAdmin() {
           toast("No changes to save.");
           return;
         }
-        refreshRowTopics({ openGroupManager: true });
+        rerenderCoursesPage();
         try {
           await flushPendingSyncNow({ throwOnRelationalFailure: false });
           toast("Subgroup renamed.");
@@ -16635,7 +16666,7 @@ function wireAdmin() {
       if (!changed) {
         return;
       }
-      refreshRowTopics({ openGroupManager: true });
+      rerenderCoursesPage();
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
         toast("Subgroup removed.");
@@ -16682,7 +16713,7 @@ function wireAdmin() {
         return;
       }
       applyCourseTopicsUpdate(course, []);
-      refreshRowTopics();
+      rerenderCoursesPage();
       try {
         await flushPendingSyncNow();
         toast(`Deleted ${existingTopics.length} topic(s) from ${course}.`);
@@ -16711,7 +16742,7 @@ function wireAdmin() {
       }
 
       applyCourseTopicsUpdate(course, [...existingTopics, topicName]);
-      refreshRowTopics();
+      rerenderCoursesPage();
       try {
         await flushPendingSyncNow();
         toast("Topic added.");
@@ -16739,7 +16770,7 @@ function wireAdmin() {
         toast("No changes to save.");
         return;
       }
-      refreshRowTopics({ openGroupManager: true });
+      rerenderCoursesPage();
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
         toast(nextGroupName ? "Topic moved into subgroup." : "Topic removed from subgroup.");
@@ -16765,7 +16796,7 @@ function wireAdmin() {
       const nextTopics = [...topics];
       nextTopics[topicIndex] = nextTopic;
       applyCourseTopicsUpdate(course, nextTopics, { renamedFrom: currentTopic, renamedTo: nextTopic });
-      refreshRowTopics();
+      rerenderCoursesPage();
       try {
         await flushPendingSyncNow();
         toast("Topic renamed.");
@@ -16783,7 +16814,7 @@ function wireAdmin() {
       course,
       topics.filter((_, idx) => idx !== topicIndex),
     );
-    refreshRowTopics();
+    rerenderCoursesPage();
     try {
       await flushPendingSyncNow();
       toast("Topic removed.");
@@ -16793,6 +16824,12 @@ function wireAdmin() {
   });
 
   adminCoursesSection?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.adminCourseTopicModalCourse) {
+      state.adminCourseTopicModalCourse = "";
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
     if (event.key !== "Enter") {
       return;
     }
