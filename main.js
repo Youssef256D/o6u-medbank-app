@@ -181,12 +181,14 @@ const state = {
   adminCurriculumYear: 1,
   adminCurriculumSemester: 1,
   adminCourseSearch: "",
+  adminCourseFocus: "",
   adminEditorCourse: "",
   adminEditorTopic: "",
   adminQuestionModalOpen: false,
   qbankFilters: {
     course: "",
     topics: [],
+    topicSource: "",
   },
   createTestSource: "all",
   analyticsCourse: "",
@@ -14280,49 +14282,105 @@ function renderAdmin() {
     const semesterTopicCount = selectedSemesterCourses.reduce((sum, course) => sum + (topicCountByCourse[course] || 0), 0);
     const semesterSubgroupCount = selectedSemesterCourses.reduce((sum, course) => sum + (subgroupCountByCourse[course] || 0), 0);
     const semesterQuestionCount = selectedSemesterCourses.reduce((sum, course) => sum + (questionCountByCourse[course] || 0), 0);
+    const preferredFocusedCourse = filteredCourseEntries.some(({ course }) => course === state.adminCourseFocus)
+      ? state.adminCourseFocus
+      : (filteredCourseEntries[0]?.course || "");
+    if (state.adminCourseFocus !== preferredFocusedCourse) {
+      state.adminCourseFocus = preferredFocusedCourse;
+    }
+    const focusedCourseEntry = filteredCourseEntries.find(({ course }) => course === preferredFocusedCourse) || null;
+    const focusedCourse = focusedCourseEntry?.course || "";
+    const focusedCourseIndex = Number.isFinite(focusedCourseEntry?.idx) ? focusedCourseEntry.idx : -1;
+    const focusedQuestionCount = focusedCourse ? (questionCountByCourse[focusedCourse] || 0) : 0;
+    const focusedTopicCount = focusedCourse ? (topicCountByCourse[focusedCourse] || 0) : 0;
+    const focusedSubgroupEntries = focusedCourse ? Object.entries(getCourseTopicGroups(focusedCourse)) : [];
+    const focusedSubgroupCount = focusedSubgroupEntries.length;
     const courseCards = filteredCourseEntries
       .map(({ course, idx }) => {
         const topicCount = topicCountByCourse[course] || 0;
         const subgroupCount = subgroupCountByCourse[course] || 0;
         const questionCount = questionCountByCourse[course] || 0;
+        const isActive = focusedCourse === course;
         return `
-          <article class="admin-course-card" data-course-index="${idx}">
-            <div class="admin-course-card-head">
-              <div class="admin-course-card-title">
-                <span class="admin-course-card-order">#${idx + 1}</span>
-                <label class="admin-course-card-name-field">
-                  <span>Course name</span>
-                  <input data-field="curriculumCourseName" value="${escapeHtml(course)}" />
-                </label>
+          <button
+            class="admin-course-picker-card${isActive ? " is-active" : ""}"
+            type="button"
+            data-action="admin-focus-course"
+            data-course-index="${idx}"
+            aria-pressed="${isActive ? "true" : "false"}"
+          >
+            <div class="admin-course-picker-card-head">
+              <span class="admin-course-card-order">#${idx + 1}</span>
+              <span class="admin-course-picker-card-status">${isActive ? "Open" : "Open course"}</span>
+            </div>
+            <div class="admin-course-picker-card-body">
+              <b class="admin-course-picker-card-title">${escapeHtml(course)}</b>
+              <p class="admin-course-picker-card-copy">${topicCount} topics • ${subgroupCount} groups • ${questionCount} questions</p>
+            </div>
+          </button>
+        `;
+      })
+      .join("");
+    const focusedSubgroupPreview = focusedSubgroupEntries.length
+      ? focusedSubgroupEntries
+        .map(([groupName, topics]) => `
+            <span class="admin-course-subgroup-chip" title="${escapeHtml((topics || []).join(", "))}">
+              <b>${escapeHtml(groupName)}</b>
+              <small>${(topics || []).length} topic${(topics || []).length === 1 ? "" : "s"}</small>
+            </span>
+          `)
+        .join("")
+      : '<span class="admin-course-subgroup-empty">No groups yet. Add topics and place them into groups below.</span>';
+    const focusedCourseWorkspace = focusedCourse
+      ? `
+          <section class="admin-course-workspace" data-course-index="${focusedCourseIndex}">
+            <div class="admin-course-workspace-head">
+              <div>
+                <h4 style="margin: 0;">${escapeHtml(focusedCourse)}</h4>
+                <p class="subtle" style="margin: 0.22rem 0 0;">Manage everything related to this course from one place.</p>
               </div>
-              <div class="admin-course-card-head-actions">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
-                <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete</button>
+              <div class="admin-course-workspace-head-actions">
+                <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save course name</button>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Open question bank</button>
+                <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete course</button>
               </div>
             </div>
 
             <div class="admin-course-card-stats">
-              <span class="admin-course-stat"><b>${topicCount}</b><small>Topics</small></span>
-              <span class="admin-course-stat"><b>${subgroupCount}</b><small>Subgroups</small></span>
-              <span class="admin-course-stat"><b>${questionCount}</b><small>Questions</small></span>
+              <span class="admin-course-stat"><b>${focusedTopicCount}</b><small>Topics</small></span>
+              <span class="admin-course-stat"><b>${focusedSubgroupCount}</b><small>Groups</small></span>
+              <span class="admin-course-stat"><b>${focusedQuestionCount}</b><small>Questions</small></span>
             </div>
 
-            <div class="admin-course-card-layout">
-              <section class="admin-course-card-panel admin-course-card-panel-main">
-                <div class="admin-course-card-panel-head">
+            <div class="admin-course-workspace-layout">
+              <section class="admin-course-workspace-panel admin-course-workspace-panel-main">
+                <div class="admin-course-workspace-panel-head">
                   <div>
-                    <h4 style="margin: 0;">Topics and subgroups</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Arrange topics the same way students should browse them.</p>
+                    <h4 style="margin: 0;">Topics and groups</h4>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Students will see these same groups when they build a test.</p>
                   </div>
                 </div>
-                <div data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</div>
+
+                <label class="admin-course-card-name-field admin-course-card-name-field-workspace">
+                  <span>Course name</span>
+                  <input data-field="curriculumCourseName" value="${escapeHtml(focusedCourse)}" />
+                </label>
+
+                <div class="admin-course-subgroup-summary">
+                  <p class="subtle" style="margin: 0;">Current groups</p>
+                  <div class="admin-course-subgroup-list">
+                    ${focusedSubgroupPreview}
+                  </div>
+                </div>
+
+                <div data-role="course-topics-cell">${renderAdminCourseTopicControls(focusedCourse)}</div>
               </section>
 
-              <section class="admin-course-card-panel">
-                <div class="admin-course-card-panel-head">
+              <section class="admin-course-workspace-panel">
+                <div class="admin-course-workspace-panel-head">
                   <div>
                     <h4 style="margin: 0;">Course tools</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Jump into questions or update the study helper link.</p>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Update the helper link and run course-level actions.</p>
                   </div>
                 </div>
 
@@ -14330,7 +14388,7 @@ function renderAdmin() {
                   <div class="admin-course-notebook-link">
                     <input
                       data-field="courseNotebookLink"
-                      value="${escapeHtml(notebookLinksByCourse[course] || "")}"
+                      value="${escapeHtml(notebookLinksByCourse[focusedCourse] || "")}"
                       placeholder="https://notebooklm.google.com/..."
                     />
                     <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save link</button>
@@ -14339,27 +14397,26 @@ function renderAdmin() {
 
                 <div class="admin-course-qbank">
                   <p class="admin-course-qbank-count">
-                    <b>${questionCount}</b> question${questionCount === 1 ? "" : "s"} in this course
+                    <b>${focusedQuestionCount}</b> question${focusedQuestionCount === 1 ? "" : "s"} in this course
                   </p>
                   <div class="admin-course-qbank-actions">
                     <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Open question bank</button>
-                    <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${questionCount ? "" : "disabled"}>Delete all questions</button>
+                    <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${focusedQuestionCount ? "" : "disabled"}>Delete all questions</button>
                     <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
                   </div>
                 </div>
               </section>
             </div>
-          </article>
-        `;
-      })
-      .join("");
+          </section>
+        `
+      : "";
 
     pageContent = `
       <section class="card admin-section" id="admin-courses-section">
         <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">Courses by Year & Semester</h3>
-            <p class="subtle">Search courses, organize topics into subgroups, and jump into course tools faster.</p>
+            <p class="subtle">Pick a course card, then manage its topics, groups, and tools in the workspace below.</p>
           </div>
           <p class="subtle" style="margin: 0;">Showing <b>${filteredCourseEntries.length}</b> of <b>${selectedSemesterCourses.length}</b> course(s)</p>
         </div>
@@ -14425,6 +14482,10 @@ function renderAdmin() {
             </div>
           `}
         </div>
+
+        ${focusedCourseWorkspace
+      ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
+      : ""}
       </section>
     `;
   }
@@ -16237,9 +16298,16 @@ function wireAdmin() {
   curriculumYearSelect?.addEventListener("change", syncCurriculumSelection);
   curriculumSemesterSelect?.addEventListener("change", syncCurriculumSelection);
   curriculumSearchInput?.addEventListener("input", () => {
-    state.adminCourseSearch = String(curriculumSearchInput.value || "");
+    const nextValue = String(curriculumSearchInput.value || "");
+    state.adminCourseSearch = nextValue;
     state.skipNextRouteAnimation = true;
     render();
+    const nextSearchInput = document.getElementById("admin-curriculum-search");
+    if (nextSearchInput instanceof HTMLInputElement) {
+      nextSearchInput.focus();
+      const cursorPos = nextValue.length;
+      nextSearchInput.setSelectionRange(cursorPos, cursorPos);
+    }
   });
 
   const curriculumAddForm = document.getElementById("admin-curriculum-add-form");
@@ -16267,6 +16335,8 @@ function wireAdmin() {
     const nextCurriculum = deepClone(O6U_CURRICULUM);
     nextCurriculum[year][semester].push(newCourseName);
     applyCurriculumUpdate(nextCurriculum);
+    state.adminCourseSearch = "";
+    state.adminCourseFocus = newCourseName;
     try {
       await flushPendingSyncNow();
       toast("Course added.");
@@ -16311,6 +16381,9 @@ function wireAdmin() {
       const nextCurriculum = deepClone(O6U_CURRICULUM);
       nextCurriculum[year][semester][index] = newName;
       applyCurriculumUpdate(nextCurriculum, { renamedFrom: oldName, renamedTo: newName });
+      if (state.adminCourseFocus === oldName) {
+        state.adminCourseFocus = newName;
+      }
       try {
         await flushPendingSyncNow();
         toast("Course name updated.");
@@ -16346,6 +16419,9 @@ function wireAdmin() {
       nextCurriculum[year][semester].splice(index, 1);
       const replacementCourse = nextCurriculum[year][semester][0] || CURRICULUM_COURSE_LIST[0] || removedCourse;
       applyCurriculumUpdate(nextCurriculum, { removedCourse, replacementCourse });
+      if (state.adminCourseFocus === removedCourse) {
+        state.adminCourseFocus = replacementCourse;
+      }
       try {
         await flushPendingSyncNow();
         toast("Course deleted.");
@@ -16365,6 +16441,7 @@ function wireAdmin() {
     const action = actionEl.getAttribute("data-action");
     if (
       ![
+        "admin-focus-course",
         "course-topic-add",
         "course-topic-group-focus",
         "course-topic-group-save",
@@ -16390,6 +16467,15 @@ function wireAdmin() {
     const currentCourses = O6U_CURRICULUM[year]?.[semester] || [];
     const course = currentCourses[index];
     if (!course) return;
+
+    if (action === "admin-focus-course") {
+      if (state.adminCourseFocus !== course) {
+        state.adminCourseFocus = course;
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+      return;
+    }
 
     if (action === "course-question-edit") {
       state.adminPage = "questions";

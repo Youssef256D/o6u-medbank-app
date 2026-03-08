@@ -2223,7 +2223,144 @@ body.theme-comfort .maintenance-badge {
 
 .admin-course-grid {
   display: grid;
-  gap: 0.95rem;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.admin-course-picker-card {
+  display: grid;
+  gap: 0.7rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.78);
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.admin-course-picker-card:hover {
+  border-color: rgba(23, 126, 137, 0.34);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px rgba(18, 38, 63, 0.08);
+}
+
+.admin-course-picker-card.is-active {
+  border-color: rgba(23, 126, 137, 0.48);
+  background: rgba(23, 126, 137, 0.08);
+  box-shadow: 0 12px 24px rgba(18, 38, 63, 0.08);
+}
+
+.admin-course-picker-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.admin-course-picker-card-status {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.admin-course-picker-card-body {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.admin-course-picker-card-title {
+  font-size: 1rem;
+  color: var(--ink);
+}
+
+.admin-course-picker-card-copy {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.admin-course-workspace {
+  display: grid;
+  gap: 0.88rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.admin-course-workspace-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.admin-course-workspace-head-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.admin-course-workspace-layout {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.92fr);
+}
+
+.admin-course-workspace-panel {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.86rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.admin-course-workspace-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.admin-course-subgroup-summary {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.admin-course-subgroup-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.admin-course-subgroup-chip {
+  display: inline-grid;
+  gap: 0.04rem;
+  padding: 0.36rem 0.56rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+}
+
+.admin-course-subgroup-chip small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.admin-course-subgroup-empty {
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 .admin-course-card {
@@ -4955,9 +5092,13 @@ body.theme-dark .auth-actions .notification-menu-read-btn,
 body.theme-dark .admin-course-check,
 body.theme-dark .admin-course-overview-card,
 body.theme-dark .admin-course-toolbar-card,
+body.theme-dark .admin-course-picker-card,
 body.theme-dark .admin-course-card,
+body.theme-dark .admin-course-workspace,
 body.theme-dark .admin-course-stat,
 body.theme-dark .admin-course-card-panel,
+body.theme-dark .admin-course-workspace-panel,
+body.theme-dark .admin-course-subgroup-chip,
 body.theme-dark .admin-course-empty-state,
 body.theme-dark .admin-na,
 body.theme-dark .admin-topic-chip,
@@ -5056,9 +5197,13 @@ body.theme-comfort .auth-actions .notification-menu-read-btn,
 body.theme-comfort .admin-course-check,
 body.theme-comfort .admin-course-overview-card,
 body.theme-comfort .admin-course-toolbar-card,
+body.theme-comfort .admin-course-picker-card,
 body.theme-comfort .admin-course-card,
+body.theme-comfort .admin-course-workspace,
 body.theme-comfort .admin-course-stat,
 body.theme-comfort .admin-course-card-panel,
+body.theme-comfort .admin-course-workspace-panel,
+body.theme-comfort .admin-course-subgroup-chip,
 body.theme-comfort .admin-course-empty-state,
 body.theme-comfort .admin-na,
 body.theme-comfort .admin-topic-chip,
@@ -5204,6 +5349,11 @@ body.theme-dark .admin-course-card-order {
   color: #a5f3fc;
 }
 
+body.theme-dark .admin-course-picker-card.is-active {
+  border-color: rgba(108, 196, 208, 0.38);
+  background: rgba(108, 196, 208, 0.12);
+}
+
 body.theme-comfort .notification-bell-badge {
   border-color: #6d513d;
 }
@@ -5241,6 +5391,11 @@ body.theme-comfort .admin-topic-group-editor-empty {
 body.theme-comfort .admin-course-card-order {
   background: rgba(128, 92, 62, 0.14);
   color: #6d4022;
+}
+
+body.theme-comfort .admin-course-picker-card.is-active {
+  border-color: rgba(128, 92, 62, 0.28);
+  background: rgba(128, 92, 62, 0.1);
 }
 
 body.theme-dark .exam-shell-moodle {
@@ -5837,21 +5992,24 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
   }
 
   .admin-course-toolbar,
-  .admin-course-card-layout {
+  .admin-course-workspace-layout {
     grid-template-columns: 1fr;
   }
 
-  .admin-course-card-head,
-  .admin-course-card-title {
+  .admin-course-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-course-workspace-head {
     flex-direction: column;
   }
 
-  .admin-course-card-head-actions,
+  .admin-course-workspace-head-actions,
   .admin-course-card-stats {
     width: 100%;
   }
 
-  .admin-course-card-head-actions .btn,
+  .admin-course-workspace-head-actions .btn,
   .admin-course-toolbar-card .btn,
   .create-test-topic-section-actions .btn {
     width: 100%;
