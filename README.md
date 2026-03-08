@@ -132,6 +132,23 @@ Recommended connection selection for your project UI choices:
 
 This project is static (`index.html` + `main.js` + `styles.css`), so GitHub Pages works.
 
+### Safe pre-release workflow (recommended)
+
+Use this to test everything before users see it:
+
+1. Test locally first:
+
+```bash
+cd "/Users/youssefayoub/Documents/Apps/MCQs Website"
+python3 -m http.server 4173
+```
+
+Open `http://localhost:4173` and verify the full flow as admin + student.
+
+2. Push your branch. The `Validate Changes` GitHub Action now runs automatically on every push/PR.
+3. Production is now manual-only. Nothing is published to GitHub Pages on push.
+4. When you approve the result, run the workflow `Deploy GitHub Pages (Manual)` and deploy `main`.
+
 Quick GitHub Pages steps:
 
 1. Push the project to a GitHub repository.

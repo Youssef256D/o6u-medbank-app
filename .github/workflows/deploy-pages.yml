@@ -1,9 +1,12 @@
-name: Deploy GitHub Pages
+name: Deploy GitHub Pages (Manual)
 
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy (branch/tag/SHA)"
+        required: true
+        default: "main"
 
 permissions:
   contents: read
@@ -23,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
