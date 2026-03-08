@@ -11196,19 +11196,34 @@ function renderCreateTest() {
   if (!availableCourses.includes(state.qbankFilters.course)) {
     state.qbankFilters.course = availableCourses[0];
     state.qbankFilters.topics = [];
+    state.qbankFilters.topicSource = "";
   }
   const selectedCourse = state.qbankFilters.course;
-  const topicOptions = getAvailableTopicsForCourse(selectedCourse, questions);
-  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions);
+  const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, questions);
+  const matchingTopicSource = topicSourceOptions.find((entry) => (
+    String(entry.name || "").trim().toLowerCase() === String(state.qbankFilters.topicSource || "").trim().toLowerCase()
+  ));
+  const selectedTopicSource = matchingTopicSource?.name || "";
+  if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
+    state.qbankFilters.topicSource = selectedTopicSource;
+  }
+  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { source: selectedTopicSource });
+  const topicOptions = topicSections.flatMap((section) => section.topics || []);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
-  const filtered = applyQbankFilters(questions, { course: selectedCourse, topics: selectedTopics });
+  const filtered = applyQbankFilters(questions, {
+    course: selectedCourse,
+    topicSource: selectedTopicSource,
+    topics: selectedTopics,
+  });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = selectedTopics.length === 0;
-  const selectedTopicLabel = formatTopicFilterSummary(selectedTopics);
+  const selectedTopicLabel = selectedTopics.length
+    ? formatTopicFilterSummary(selectedTopics)
+    : (selectedTopicSource ? `All topics in ${selectedTopicSource}` : "All topics");
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11241,21 +11256,32 @@ function renderCreateTest() {
 
       <div class="create-test-filter-layout">
         <div class="create-test-filter-card">
-          <label>
-            Course
-            <select name="course" id="create-test-course-select">
-              ${availableCourses
+          <div class="create-test-primary-filters">
+            <label>
+              Course
+              <select name="course" id="create-test-course-select">
+                ${availableCourses
       .map((course) => `<option value="${course}" ${selectedCourse === course ? "selected" : ""}>${course}</option>`)
       .join("")}
-            </select>
-          </label>
+              </select>
+            </label>
+            <label>
+              Source
+              <select name="topicSource" id="create-test-topic-source-select" ${topicSourceOptions.length ? "" : "disabled"}>
+                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "All sources" : "No sources yet"}</option>
+                ${topicSourceOptions
+      .map((entry) => `<option value="${escapeHtml(entry.name)}" ${selectedTopicSource === entry.name ? "selected" : ""}>${escapeHtml(entry.name)}</option>`)
+      .join("")}
+              </select>
+            </label>
+          </div>
         </div>
         <div class="create-test-filter-card create-test-topics-group">
           <p class="create-test-topics-label">Topics (choose one or more)</p>
           <div class="create-test-topic-grid create-test-topic-grid-toolbar">
             <label class="admin-course-check create-test-topic-chip is-all">
               <input type="checkbox" data-role="create-test-all-topics" ${allTopicsSelected ? "checked" : ""} />
-              <span class="create-test-topic-chip-copy">All topics</span>
+              <span class="create-test-topic-chip-copy">${selectedTopicSource ? "All shown topics" : "All topics"}</span>
             </label>
           </div>
           ${topicSections.length
@@ -11275,7 +11301,7 @@ function renderCreateTest() {
                                   ${section.kind === "group" ? `data-role="create-test-group-selection-count" data-group-name="${escapeHtml(section.name)}"` : ""}
                                 >
                                   ${section.kind === "group"
-            ? `${section.topics.filter((topic) => selectedTopics.includes(topic)).length}/${section.topics.length} selected`
+            ? `${allTopicsSelected ? section.topics.length : section.topics.filter((topic) => selectedTopics.includes(topic)).length}/${section.topics.length} selected`
             : `${section.topics.length} topic${section.topics.length === 1 ? "" : "s"}`}
                                 </span>
                               </div>
@@ -11288,7 +11314,7 @@ function renderCreateTest() {
                                       data-action="create-test-apply-topic-group"
                                       data-group-name="${escapeHtml(section.name)}"
                                       data-group-mode="select"
-                                      ${section.topics.every((topic) => selectedTopics.includes(topic)) ? "disabled" : ""}
+                                      ${(allTopicsSelected || section.topics.every((topic) => selectedTopics.includes(topic))) ? "disabled" : ""}
                                     >
                                       Select all
                                     </button>
@@ -11298,7 +11324,7 @@ function renderCreateTest() {
                                       data-action="create-test-apply-topic-group"
                                       data-group-name="${escapeHtml(section.name)}"
                                       data-group-mode="clear"
-                                      ${section.topics.some((topic) => selectedTopics.includes(topic)) ? "" : "disabled"}
+                                      ${(allTopicsSelected || section.topics.some((topic) => selectedTopics.includes(topic))) ? "" : "disabled"}
                                     >
                                       Clear
                                     </button>
@@ -11345,7 +11371,7 @@ function renderCreateTest() {
               <option value="timed">Timed</option>
             </select>
           </label>
-          <label class="create-test-setup-field">Source
+          <label class="create-test-setup-field">Question source
             <select name="source" id="create-test-source-select">
               <option value="all" ${state.createTestSource === "all" ? "selected" : ""}>All matching</option>
               <option value="unused" ${state.createTestSource === "unused" ? "selected" : ""}>Unused only</option>
@@ -11367,7 +11393,7 @@ function renderCreateTest() {
           </span>
         </label>
 
-        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "All sources")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
         <div class="stack">
           <button type="submit" class="btn">Start test</button>
         </div>
@@ -11378,6 +11404,7 @@ function renderCreateTest() {
 
 function wireCreateTest() {
   const courseSelect = document.getElementById("create-test-course-select");
+  const topicSourceSelect = document.getElementById("create-test-topic-source-select");
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
@@ -11435,14 +11462,28 @@ function wireCreateTest() {
     const availableCourses = getAvailableCoursesForUser(user);
     const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
     const selectedCourse = state.qbankFilters.course || fallbackCourse;
-    const topicOptions = getAvailableTopicsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+    const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+    const matchingTopicSource = topicSourceOptions.find((entry) => (
+      String(entry.name || "").trim().toLowerCase() === String(state.qbankFilters.topicSource || "").trim().toLowerCase()
+    ));
+    const selectedTopicSource = matchingTopicSource?.name || "";
+    if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
+      state.qbankFilters.topicSource = selectedTopicSource;
+    }
+    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
+      source: selectedTopicSource,
+    });
+    const topicOptions = topicSections.flatMap((section) => section.topics || []);
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
-    const selectedTopicLabel = formatTopicFilterSummary(selectedTopics);
+    const selectedTopicLabel = selectedTopics.length
+      ? formatTopicFilterSummary(selectedTopics)
+      : (selectedTopicSource ? `All topics in ${selectedTopicSource}` : "All topics");
     const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
       course: selectedCourse,
+      topicSource: selectedTopicSource,
       topics: selectedTopics,
     });
     const allowedSources = ["all", "unused", "incorrect", "flagged"];
@@ -11457,8 +11498,11 @@ function wireCreateTest() {
     };
     const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
     syncTopicSelectionUi();
+    if (topicSourceSelect instanceof HTMLSelectElement) {
+      topicSourceSelect.value = selectedTopicSource;
+    }
     if (summaryEl) {
-      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "All sources")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
     if (countInput) {
       const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
@@ -11469,6 +11513,14 @@ function wireCreateTest() {
   courseSelect?.addEventListener("change", () => {
     const fallbackCourse = getAvailableCoursesForUser(getCurrentUser())[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
     state.qbankFilters.course = courseSelect.value || fallbackCourse;
+    state.qbankFilters.topics = [];
+    state.qbankFilters.topicSource = "";
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  topicSourceSelect?.addEventListener("change", () => {
+    state.qbankFilters.topicSource = String(topicSourceSelect.value || "").trim();
     state.qbankFilters.topics = [];
     state.skipNextRouteAnimation = true;
     render();
@@ -11505,7 +11557,9 @@ function wireCreateTest() {
       if (!selectedCourse || !groupName) {
         return;
       }
-      const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+      const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
+        source: String(state.qbankFilters.topicSource || "").trim(),
+      });
       const groupSection = topicSections.find((section) => (
         section.kind === "group"
         && String(section.name || "").trim().toLowerCase() === groupName.toLowerCase()
@@ -11514,7 +11568,7 @@ function wireCreateTest() {
       if (!groupTopics.length) {
         return;
       }
-      const topicOptions = getAvailableTopicsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+      const topicOptions = topicSections.flatMap((section) => section.topics || []);
       const availableTopicSet = new Set(topicOptions.map((topic) => String(topic || "").trim()));
       const explicitSelectedSet = new Set(
         (state.qbankFilters.topics || [])
@@ -11591,6 +11645,7 @@ function wireCreateTest() {
     if (!availableCourses.includes(state.qbankFilters.course)) {
       state.qbankFilters.course = availableCourses[0] || "";
       state.qbankFilters.topics = [];
+      state.qbankFilters.topicSource = "";
     }
     let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters);
     pool = applySourceFilter(pool, source, user.id);
@@ -13628,6 +13683,7 @@ function wireAnalytics() {
     if (course && availableCourses.includes(course)) {
       state.qbankFilters.course = course;
     }
+    state.qbankFilters.topicSource = "";
     state.qbankFilters.topics = topic ? [topic] : [];
     state.skipNextRouteAnimation = true;
     navigate("create-test");
@@ -20383,8 +20439,25 @@ function applyQuestionFilters(questions, filters, sort) {
 }
 
 function applyQbankFilters(questions, filters) {
+  const selectedCourse = String(filters?.course || "").trim();
+  const selectedTopicSource = String(filters?.topicSource || "").trim();
   const selectedTopics = Array.isArray(filters?.topics) ? filters.topics.filter(Boolean) : [];
   const singleTopic = String(filters?.topic || "").trim();
+  const sourceTopicKeys = (() => {
+    if (!selectedCourse || !selectedTopicSource) {
+      return null;
+    }
+    const groups = getCourseTopicGroups(selectedCourse);
+    const matchingGroupName = findMatchingCourseTopicGroupName(groups, selectedTopicSource);
+    if (!matchingGroupName) {
+      return new Set();
+    }
+    return new Set(
+      (groups[matchingGroupName] || [])
+        .map((topic) => String(topic || "").trim().toLowerCase())
+        .filter(Boolean),
+    );
+  })();
 
   return questions
     .map((question) => {
@@ -20396,7 +20469,10 @@ function applyQbankFilters(questions, filters) {
       };
     })
     .filter((question) => {
-      if (filters.course && question.qbankCourse !== filters.course) {
+      if (selectedCourse && question.qbankCourse !== selectedCourse) {
+        return false;
+      }
+      if (sourceTopicKeys && (!sourceTopicKeys.size || !sourceTopicKeys.has(String(question.qbankTopic || "").trim().toLowerCase()))) {
         return false;
       }
       if (selectedTopics.length && !selectedTopics.includes(question.qbankTopic)) {
@@ -20998,7 +21074,16 @@ function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
   return normalizeCourseTopicGroupEntries(merged, course);
 }
 
-function getAvailableTopicSectionsForCourse(course, questions = []) {
+function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
+  return getAvailableTopicSectionsForCourse(course, questions)
+    .filter((section) => section.kind === "group" && section.name && Array.isArray(section.topics) && section.topics.length)
+    .map((section) => ({
+      name: section.name,
+      topics: [...section.topics],
+    }));
+}
+
+function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
   const topicOptions = getAvailableTopicsForCourse(course, questions);
   const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
   const groups = getCourseTopicGroups(course);
@@ -21029,6 +21114,15 @@ function getAvailableTopicSectionsForCourse(course, questions = []) {
       name: sections.length ? "Other topics" : "",
       topics: ungroupedTopics,
     });
+  }
+
+  const requestedSource = String(options?.source || "").trim();
+  if (requestedSource) {
+    const matchingSection = sections.find((section) => (
+      section.kind === "group"
+      && String(section.name || "").trim().toLowerCase() === requestedSource.toLowerCase()
+    ));
+    return matchingSection ? [matchingSection] : [];
   }
 
   return sections;

@@ -3040,6 +3040,11 @@ label {
   padding: 0.8rem;
 }
 
+.create-test-primary-filters {
+  display: grid;
+  gap: 0.72rem;
+}
+
 .create-test-topics-label {
   margin: 0;
   font-size: 0.87rem;
