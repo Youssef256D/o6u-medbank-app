@@ -21015,7 +21015,37 @@ function normalizeCourseTopicMap(rawMap) {
 }
 
 function normalizeCourseTopicGroupEntries(rawGroups, course, topicsOverride = null) {
-  const source = rawGroups && typeof rawGroups === "object" && !Array.isArray(rawGroups) ? rawGroups : {};
+  const source = (() => {
+    if (rawGroups && typeof rawGroups === "object" && !Array.isArray(rawGroups)) {
+      return rawGroups;
+    }
+    if (Array.isArray(rawGroups)) {
+      const legacyMap = {};
+      rawGroups.forEach((entry) => {
+        if (typeof entry === "string") {
+          const groupName = String(entry || "").trim();
+          if (groupName) {
+            legacyMap[groupName] = [];
+          }
+          return;
+        }
+        if (entry && typeof entry === "object") {
+          const groupName = String(entry.name || entry.group || "").trim();
+          if (!groupName) {
+            return;
+          }
+          const topics = Array.isArray(entry.topics)
+            ? entry.topics
+            : Array.isArray(entry.items)
+              ? entry.items
+              : [];
+          legacyMap[groupName] = topics;
+        }
+      });
+      return legacyMap;
+    }
+    return {};
+  })();
   const availableTopics = normalizeCourseTopicList(
     topicsOverride || COURSE_TOPIC_OVERRIDES[course] || QBANK_COURSE_TOPICS[course] || [],
     course,
@@ -21062,7 +21092,21 @@ function normalizeCourseTopicGroupMap(rawMap) {
 }
 
 function getCourseTopicGroups(course) {
-  return normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[course], course);
+  const direct = normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[course], course);
+  if (Object.keys(direct).length) {
+    return direct;
+  }
+  const requestedKey = String(course || "").trim().toLowerCase();
+  if (!requestedKey) {
+    return direct;
+  }
+  const fallbackCourseKey = Object.keys(COURSE_TOPIC_GROUPS || {}).find(
+    (name) => String(name || "").trim().toLowerCase() === requestedKey,
+  );
+  if (!fallbackCourseKey) {
+    return direct;
+  }
+  return normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[fallbackCourseKey], course);
 }
 
 function findMatchingCourseTopicGroupName(groups, requestedName) {
