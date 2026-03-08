@@ -85,16 +85,18 @@ const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
-const RELATIONAL_FLUSH_DEBOUNCE_MS = 850;
+const RELATIONAL_FLUSH_DEBOUNCE_MS = 300;
 const RELATIONAL_RETRY_FLUSH_MS = 2200;
+const SUPABASE_FLUSH_DEBOUNCE_MS = 260;
 const SUPABASE_RETRY_FLUSH_MS = 3000;
-const SESSION_SYNC_FLUSH_MS = 4000;
+const SESSION_SYNC_FLUSH_MS = 2000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
-const STUDENT_DATA_REFRESH_MS = 20000;
-const STUDENT_FULL_DATA_REFRESH_MS = 180000;
+const STUDENT_DATA_REFRESH_MS = 8000;
+const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
+const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 1200;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const SESSION_REALTIME_DEBOUNCE_MS = 900;
@@ -317,6 +319,12 @@ const LEGACY_SUPABASE_STATE_SYNC_KEY_SET = new Set(LEGACY_SUPABASE_STATE_SYNC_KE
 const LEGACY_SUPABASE_STATE_GLOBAL_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => USER_SCOPED_SYNC_KEY_SET.has(key));
 const RELATIONAL_COMBINED_COURSE_SYNC_MARKER = "__relational_combined_course_topic_sync__";
+const AUTO_STUDENT_REFRESH_SYNC_KEYS = new Set([
+  STORAGE_KEYS.questions,
+  STORAGE_KEYS.curriculum,
+  STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.users,
+]);
 
 const supabaseSync = {
   enabled: false,
@@ -391,6 +399,8 @@ let sessionRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
+let studentForceRefreshPollHandle = null;
+let studentForceRefreshInFlight = false;
 let siteMaintenanceGateRefreshHandle = null;
 let siteMaintenanceGateRefreshInFlight = false;
 let globalEventsBound = false;
@@ -964,7 +974,56 @@ function getStudentRefreshTriggerToken() {
   return String(payload.token || "").trim();
 }
 
-function shouldForceStudentRefreshFromAdminTrigger(user = null) {
+function createStudentRefreshTriggerPayload(user = null, options = {}) {
+  const current = user || getCurrentUser();
+  const currentProfileId = String(getUserProfileId(current) || "").trim();
+  const actorName = String(current?.name || current?.email || "Admin").trim() || "Admin";
+  const normalizedKeys = [...new Set(
+    (Array.isArray(options?.changedKeys) ? options.changedKeys : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )];
+  const reason = String(options?.reason || "").trim();
+  return {
+    token: makeId("student_refresh"),
+    requestedAt: nowISO(),
+    requestedById: isUuidValue(currentProfileId) ? currentProfileId : null,
+    requestedBy: actorName,
+    ...(reason ? { reason } : {}),
+    ...(normalizedKeys.length ? { changedKeys: normalizedKeys } : {}),
+  };
+}
+
+function queueStudentRefreshSignal(options = {}) {
+  const current = options?.user || getCurrentUser();
+  if (!current || current.role !== "admin") {
+    return false;
+  }
+  if (!supabaseSync.enabled) {
+    return false;
+  }
+  const existing = load(STORAGE_KEYS.studentRefreshTrigger, null);
+  const lastRequestedAtMs = parseSyncTimestampMs(existing?.requestedAt);
+  if (
+    !options?.force
+    && lastRequestedAtMs
+    && (Date.now() - lastRequestedAtMs) < AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS
+  ) {
+    return false;
+  }
+  const payload = createStudentRefreshTriggerPayload(current, options);
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTrigger, payload);
+  scheduleSupabaseWrite(STORAGE_KEYS.studentRefreshTrigger, payload);
+  if (options?.flushNow !== false) {
+    flushSupabaseWrites().catch((error) => {
+      console.warn("Auto student refresh signal flush failed.", error?.message || error);
+    });
+  }
+  scheduleSyncStatusUiRefresh();
+  return true;
+}
+
+function shouldForceStudentRefreshFromAdminTrigger(user = null, options = {}) {
   const current = user || getCurrentUser();
   if (!current || current.role !== "student") {
     return false;
@@ -978,6 +1037,9 @@ function shouldForceStudentRefreshFromAdminTrigger(user = null) {
     return false;
   }
   saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, token);
+  if (options?.reload === false) {
+    return true;
+  }
   const nextUrl = new URL(window.location.href);
   nextUrl.searchParams.set("student_refresh", token);
   window.location.replace(nextUrl.toString());
@@ -5449,7 +5511,7 @@ function scheduleSupabaseWrite(storageKey, value) {
     flushSupabaseWrites().catch((error) => {
       console.warn("Supabase write flush failed.", error);
     });
-  }, 1200);
+  }, SUPABASE_FLUSH_DEBOUNCE_MS);
   return true;
 }
 
@@ -5645,11 +5707,23 @@ async function flushRelationalWrites(options = {}) {
   const entries = Array.from(entryMap.entries());
   let firstError = null;
   let succeededCount = 0;
+  const syncedStorageKeys = new Set();
 
   for (const [storageKey, payload] of entries) {
     try {
       await syncRelationalKey(storageKey, payload);
       succeededCount += 1;
+      if (
+        storageKey === STORAGE_KEYS.curriculum
+        && payload
+        && typeof payload === "object"
+        && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+      ) {
+        syncedStorageKeys.add(STORAGE_KEYS.curriculum);
+        syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
+      } else {
+        syncedStorageKeys.add(storageKey);
+      }
     } catch (error) {
       console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
       relationalSync.pendingWrites.set(storageKey, payload);
@@ -5663,6 +5737,17 @@ async function flushRelationalWrites(options = {}) {
 
   if (succeededCount > 0) {
     relationalSync.lastSuccessAt = Date.now();
+    const shouldBroadcastStudentRefresh = (
+      getCurrentUser()?.role === "admin"
+      && [...syncedStorageKeys].some((storageKey) => AUTO_STUDENT_REFRESH_SYNC_KEYS.has(storageKey))
+    );
+    if (shouldBroadcastStudentRefresh) {
+      queueStudentRefreshSignal({
+        changedKeys: [...syncedStorageKeys],
+        reason: "admin_sync",
+        flushNow: false,
+      });
+    }
   }
   relationalSync.flushing = false;
   if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
@@ -7260,6 +7345,11 @@ async function persistImportedQuestionsNow(questionsPayload) {
     return { ok: false, message: error?.message || "Could not persist imported questions to database." };
   }
 
+  queueStudentRefreshSignal({
+    changedKeys: [STORAGE_KEYS.questions, STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics],
+    reason: "import_sync",
+    flushNow: true,
+  });
   return { ok: true };
 }
 
@@ -8089,6 +8179,76 @@ function clearStudentSessionPolling() {
   studentDataAutoRefreshInFlight = false;
 }
 
+function clearStudentForceRefreshPolling() {
+  if (studentForceRefreshPollHandle) {
+    window.clearInterval(studentForceRefreshPollHandle);
+    studentForceRefreshPollHandle = null;
+  }
+  studentForceRefreshInFlight = false;
+}
+
+function ensureStudentForceRefreshPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(profileId)
+    || !supabaseSync.enabled
+    || !supabaseSync.client
+    || !supabaseSync.tableName
+    || !supabaseSync.storageKeyColumn
+  ) {
+    clearStudentForceRefreshPolling();
+    return;
+  }
+  if (studentForceRefreshPollHandle) {
+    return;
+  }
+
+  studentForceRefreshPollHandle = window.setInterval(() => {
+    const activeUser = getCurrentUser();
+    const activeProfileId = getCurrentSessionProfileId(activeUser);
+    if (
+      !activeUser
+      || activeUser.role !== "student"
+      || !isUuidValue(activeProfileId)
+      || !supabaseSync.enabled
+      || !supabaseSync.client
+      || !supabaseSync.tableName
+      || !supabaseSync.storageKeyColumn
+    ) {
+      clearStudentForceRefreshPolling();
+      return;
+    }
+    if (studentForceRefreshInFlight || state.studentDataRefreshing) {
+      return;
+    }
+    studentForceRefreshInFlight = true;
+    hydrateSupabaseSyncKeys([STORAGE_KEYS.studentRefreshTrigger])
+      .then((result) => {
+        if (result?.error) {
+          return;
+        }
+        const hasNewTrigger = shouldForceStudentRefreshFromAdminTrigger(activeUser, { reload: false });
+        if (!hasNewTrigger) {
+          return;
+        }
+        if (state.route === "session" || state.route === "review") {
+          toast("New admin updates are ready. Finish this block to load them.");
+          return;
+        }
+        return refreshStudentDataSnapshot(activeUser, { force: true, rerender: true });
+      })
+      .catch((error) => {
+        console.warn("Student force-refresh polling failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentForceRefreshInFlight = false;
+      });
+  }, STUDENT_FORCE_REFRESH_POLL_MS);
+}
+
 function ensureStudentNotificationPolling(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = getCurrentSessionProfileId(currentUser);
@@ -8742,9 +8902,13 @@ async function refreshStudentDataFromSupabaseState(user) {
     STORAGE_KEYS.topicNewCatalog,
     STORAGE_KEYS.courseNotebookLinks,
     STORAGE_KEYS.siteMaintenance,
+    STORAGE_KEYS.studentRefreshTrigger,
   ]).catch((error) => ({ error }));
   if (globalRefreshResult?.error) {
     return false;
+  }
+  if (shouldForceStudentRefreshFromAdminTrigger(user)) {
+    return true;
   }
 
   const userScopedKeys = (state.route === "session" || state.route === "review")
@@ -8825,7 +8989,11 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       STORAGE_KEYS.courseNotebookLinks,
       STORAGE_KEYS.topicNewCatalog,
       STORAGE_KEYS.autoApproveStudentAccess,
+      STORAGE_KEYS.studentRefreshTrigger,
     ]).catch(() => ({ hadRemoteData: false }));
+    if (shouldForceStudentRefreshFromAdminTrigger(user)) {
+      return true;
+    }
     if (!hasPendingSessionWrites) {
       await hydrateRelationalSessions(user);
     }
@@ -9427,6 +9595,7 @@ function syncTopbar() {
   ensureStudentNotificationPolling(user);
   ensureSessionRealtimeSubscription(user);
   ensureStudentSessionPolling(user);
+  ensureStudentForceRefreshPolling(user);
   const isAdmin = user?.role === "admin";
   const isAdminHeader = Boolean(user && isAdmin);
   const maintenanceRestricted = isSiteMaintenanceEnabledForUser(user);
@@ -14236,8 +14405,6 @@ function renderAdmin() {
     const filteredCourseEntries = selectedSemesterCourses
       .map((course, idx) => ({ course, idx }))
       .filter(({ course }) => !normalizedCourseSearch || String(course || "").trim().toLowerCase().includes(normalizedCourseSearch));
-    const semesterTopicCount = selectedSemesterCourses.reduce((sum, course) => sum + (topicCountByCourse[course] || 0), 0);
-    const semesterQuestionCount = selectedSemesterCourses.reduce((sum, course) => sum + (questionCountByCourse[course] || 0), 0);
     const preferredFocusedCourse = filteredCourseEntries.some(({ course }) => course === state.adminCourseFocus)
       ? state.adminCourseFocus
       : (filteredCourseEntries[0]?.course || "");
@@ -14354,12 +14521,6 @@ function renderAdmin() {
           <div>
             <h3 style="margin: 0;">Courses</h3>
             <p class="subtle" style="margin: 0.22rem 0 0;">Year ${curriculumYear} • Semester ${curriculumSemester}</p>
-          </div>
-          <div class="admin-courses-minimal-stats">
-            <span class="admin-courses-minimal-stat"><b>${filteredCourseEntries.length}</b><small>visible</small></span>
-            <span class="admin-courses-minimal-stat"><b>${selectedSemesterCourses.length}</b><small>courses</small></span>
-            <span class="admin-courses-minimal-stat"><b>${semesterTopicCount}</b><small>topics</small></span>
-            <span class="admin-courses-minimal-stat"><b>${semesterQuestionCount}</b><small>questions</small></span>
           </div>
         </div>
 
@@ -15254,7 +15415,7 @@ function renderAdmin() {
           <button class="btn ghost admin-btn-sm ${adminForceRefreshBusy ? "is-loading" : ""}" type="button" data-action="admin-force-student-refresh" ${adminForceRefreshBusy || !canForceStudentRefresh ? "disabled" : ""} ${!canForceStudentRefresh ? 'title="Supabase app-state sync must be active to broadcast this action."' : ""}>
             ${adminForceRefreshBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Sending refresh signal...</span>` : "Force student refresh"}
           </button>
-          <small class="subtle">Students will auto-reload once on their next open/sign-in.</small>
+          <small class="subtle">Students auto-refresh every few seconds and pick up admin updates quickly.</small>
           <small class="subtle">Last forced student refresh: <b>${escapeHtml(lastStudentRefreshLabel)}</b></small>
           <small class="subtle">Edits save locally first, then sync automatically in the background.</small>
           ${!canManualSupabaseSync ? '<small class="subtle">Supabase sync requires an active Supabase admin session.</small>' : ""}
@@ -15486,13 +15647,12 @@ function wireAdmin() {
     render();
 
     try {
-      const triggerPayload = {
-        token: makeId("student_refresh"),
-        requestedAt: nowISO(),
-        requestedById: currentProfileId,
-        requestedBy: String(currentUser.name || currentUser.email || "Admin").trim() || "Admin",
-      };
-      save(STORAGE_KEYS.studentRefreshTrigger, triggerPayload);
+      queueStudentRefreshSignal({
+        user: currentUser,
+        force: true,
+        reason: "manual_admin_refresh",
+        flushNow: false,
+      });
       await flushPendingSyncNow({ throwOnRelationalFailure: false });
       const remoteKey = buildRemoteSyncKey(STORAGE_KEYS.studentRefreshTrigger, getSyncScopeForUser(currentUser));
       const deferred = supabaseSync.pendingWrites.has(remoteKey);
@@ -15501,7 +15661,7 @@ function wireAdmin() {
       if (deferred) {
         toast("Refresh signal queued locally and will sync to cloud automatically.");
       } else {
-        toast("Refresh signal sent. Students will reload once on their next open/sign-in.");
+        toast("Refresh signal sent. Students will auto-refresh shortly.");
       }
     } catch (error) {
       const message = getErrorMessage(error, "Could not send refresh signal.");
@@ -23342,6 +23502,7 @@ async function logout() {
   syncPresenceRuntime(null);
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
+  clearStudentForceRefreshPolling();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
   resetRelationalSyncState();
