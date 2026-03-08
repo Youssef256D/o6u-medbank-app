@@ -1932,7 +1932,7 @@ body.theme-comfort .maintenance-badge {
 
 .admin-course-topics {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.55rem;
 }
 
 .admin-topic-list {
@@ -1978,7 +1978,7 @@ body.theme-comfort .maintenance-badge {
   color: var(--brand-strong);
 }
 
-.admin-topic-chip button[data-action="course-topic-group-set"] {
+.admin-topic-chip button[data-action="course-topic-group-focus"] {
   color: var(--brand-strong);
 }
 
@@ -1986,59 +1986,170 @@ body.theme-comfort .maintenance-badge {
   color: var(--brand);
 }
 
-.admin-topic-chip button[data-action="course-topic-group-set"]:hover {
+.admin-topic-chip button[data-action="course-topic-group-focus"]:hover {
   color: var(--brand);
+}
+
+.admin-topic-group-manager {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+}
+
+.admin-topic-group-manager summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  cursor: pointer;
+  padding: 0.72rem 0.82rem;
+  list-style: none;
+}
+
+.admin-topic-group-manager summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-topic-group-manager-copy {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.admin-topic-group-manager-copy small {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.admin-topic-group-manager-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(23, 126, 137, 0.1);
+  color: var(--brand-strong);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.admin-topic-group-manager-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 0.82rem 0.82rem;
+  border-top: 1px solid var(--line);
+}
+
+.admin-topic-group-manager-note {
+  margin: 0.78rem 0 0;
+}
+
+.admin-topic-group-editor-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.admin-topic-group-editor-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1.2fr);
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.admin-topic-group-editor-topic {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.admin-topic-group-editor-name {
+  font-size: 0.92rem;
+}
+
+.admin-topic-group-editor-empty {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.46rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.admin-topic-group-editor-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.admin-topic-group-editor-controls input {
+  margin: 0;
+  min-width: 0;
 }
 
 .admin-topic-groups {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.admin-topic-group-card {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.78rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.admin-topic-group-card-head {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.admin-topic-group-card-name {
+  display: grid;
+  gap: 0.26rem;
+}
+
+.admin-topic-group-card-name span {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-topic-group-card-name input {
+  margin: 0;
+}
+
+.admin-topic-group-card-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
-.admin-topic-group-chip {
+.admin-topic-group-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.admin-topic-group-member {
   display: inline-flex;
   align-items: center;
-  gap: 0.36rem;
-  padding: 0.3rem 0.48rem;
-  border: 1px dashed var(--line-strong);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.62);
-  font-size: 0.78rem;
-  color: var(--ink);
-}
-
-.admin-topic-group-copy {
-  display: grid;
-  gap: 0.04rem;
-}
-
-.admin-topic-group-copy small {
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.admin-topic-group-chip button {
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  padding: 0 0.12rem;
-  margin: 0;
-  line-height: 1;
-  font-size: 0.82rem;
-}
-
-.admin-topic-group-chip button:hover {
-  color: var(--danger);
-}
-
-.admin-topic-group-chip button[data-action="course-topic-group-rename"] {
+  padding: 0.24rem 0.52rem;
+  border-radius: 999px;
+  background: rgba(23, 126, 137, 0.1);
   color: var(--brand-strong);
-}
-
-.admin-topic-group-chip button[data-action="course-topic-group-rename"]:hover {
-  color: var(--brand);
+  font-size: 0.76rem;
 }
 
 .admin-topic-group-empty {
@@ -4646,7 +4757,10 @@ body.theme-dark .auth-actions .notification-menu-read-btn,
 body.theme-dark .admin-course-check,
 body.theme-dark .admin-na,
 body.theme-dark .admin-topic-chip,
+body.theme-dark .admin-topic-group-manager,
+body.theme-dark .admin-topic-group-editor-row,
 body.theme-dark .admin-topic-group-chip,
+body.theme-dark .admin-topic-group-card,
 body.theme-dark .admin-user-suggestions,
 body.theme-dark .admin-question-bulk-bar,
 body.theme-dark .admin-import-report,
@@ -4738,7 +4852,10 @@ body.theme-comfort .auth-actions .notification-menu-read-btn,
 body.theme-comfort .admin-course-check,
 body.theme-comfort .admin-na,
 body.theme-comfort .admin-topic-chip,
+body.theme-comfort .admin-topic-group-manager,
+body.theme-comfort .admin-topic-group-editor-row,
 body.theme-comfort .admin-topic-group-chip,
+body.theme-comfort .admin-topic-group-card,
 body.theme-comfort .admin-user-suggestions,
 body.theme-comfort .admin-question-bulk-bar,
 body.theme-comfort .admin-import-report,
@@ -4852,6 +4969,17 @@ body.theme-dark .admin-topic-group-badge {
   color: #a5f3fc;
 }
 
+body.theme-dark .admin-topic-group-member,
+body.theme-dark .admin-topic-group-manager-hint {
+  background: rgba(108, 196, 208, 0.16);
+  color: #a5f3fc;
+}
+
+body.theme-dark .admin-topic-group-editor-empty {
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #cfcfcf;
+}
+
 body.theme-comfort .notification-bell-badge {
   border-color: #6d513d;
 }
@@ -4864,6 +4992,17 @@ body.theme-comfort .create-test-topic-badge {
 body.theme-comfort .admin-topic-group-badge {
   background: rgba(128, 92, 62, 0.16);
   color: #6d4022;
+}
+
+body.theme-comfort .admin-topic-group-member,
+body.theme-comfort .admin-topic-group-manager-hint {
+  background: rgba(128, 92, 62, 0.14);
+  color: #6d4022;
+}
+
+body.theme-comfort .admin-topic-group-editor-empty {
+  border-color: rgba(118, 90, 67, 0.3);
+  color: #6a5240;
 }
 
 body.theme-dark .exam-shell-moodle {
@@ -5457,6 +5596,15 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
   .admin-topic-chip {
     width: 100%;
     border-radius: 10px;
+  }
+
+  .admin-topic-group-editor-row,
+  .admin-topic-group-editor-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-topic-group-card-actions .btn {
+    width: 100%;
   }
 
   .admin-user-actions {

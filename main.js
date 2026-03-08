@@ -15166,10 +15166,12 @@ function renderAdmin() {
   `;
 }
 
-function renderAdminCourseTopicControls(course) {
+function renderAdminCourseTopicControls(course, options = {}) {
   const topics = QBANK_COURSE_TOPICS[course] || [];
   const topicGroups = getCourseTopicGroups(course);
   const topicGroupEntries = Object.entries(topicGroups);
+  const groupInputListId = `course-topic-group-options-${sanitizeStoragePathSegment(course, "course")}`;
+  const ungroupedTopicCount = topics.filter((topic) => !getTopicGroupNameForCourseTopic(course, topic)).length;
   return `
     <div class="admin-course-topics">
       <div class="admin-topic-list">
@@ -15183,12 +15185,12 @@ function renderAdminCourseTopicControls(course) {
                 ${groupName ? `<span class="badge admin-topic-group-badge">${escapeHtml(groupName)}</span>` : ""}
                 <button
                   type="button"
-                  data-action="course-topic-group-set"
+                  data-action="course-topic-group-focus"
                   data-topic-index="${topicIdx}"
-                  aria-label="Set parent group for ${escapeHtml(topic)}"
-                  title="Set parent group"
+                  aria-label="Manage parent group for ${escapeHtml(topic)}"
+                  title="Manage parent group"
                 >
-                  group
+                  parent
                 </button>
                 <button
                   type="button"
@@ -15214,38 +15216,109 @@ function renderAdminCourseTopicControls(course) {
       )
       .join("")}
       </div>
-      <div class="admin-topic-groups">
-        ${topicGroupEntries.length
+      <details class="admin-topic-group-manager" data-role="course-topic-group-manager" ${options?.openGroupManager ? "open" : ""}>
+        <summary>
+          <span class="admin-topic-group-manager-copy">
+            <b>Manage parent groups</b>
+            <small>${topicGroupEntries.length} group${topicGroupEntries.length === 1 ? "" : "s"} • ${ungroupedTopicCount} ungrouped</small>
+          </span>
+          <span class="admin-topic-group-manager-hint">Open</span>
+        </summary>
+        <div class="admin-topic-group-manager-body">
+          <p class="subtle admin-topic-group-manager-note">Type a new group name to create it, or pick an existing one. Removing a group does not change the topic data.</p>
+          <datalist id="${groupInputListId}">
+            ${topicGroupEntries
+      .map(([groupName]) => `<option value="${escapeHtml(groupName)}"></option>`)
+      .join("")}
+          </datalist>
+          <div class="admin-topic-group-editor-list">
+            ${topics
+      .map((topic, topicIdx) => {
+        const groupName = getTopicGroupNameForCourseTopic(course, topic);
+        return `
+              <div class="admin-topic-group-editor-row" data-role="course-topic-group-editor-row" data-topic-index="${topicIdx}">
+                <div class="admin-topic-group-editor-topic">
+                  <b class="admin-topic-group-editor-name">${escapeHtml(topic)}</b>
+                  ${groupName
+            ? `<span class="badge admin-topic-group-badge">${escapeHtml(groupName)}</span>`
+            : '<span class="admin-topic-group-editor-empty">Ungrouped</span>'}
+                </div>
+                <div class="admin-topic-group-editor-controls">
+                  <input
+                    data-field="courseTopicGroupName"
+                    data-topic-index="${topicIdx}"
+                    list="${groupInputListId}"
+                    value="${escapeHtml(groupName)}"
+                    placeholder="Existing or new parent group"
+                  />
+                  <button
+                    class="btn ghost admin-btn-sm"
+                    type="button"
+                    data-action="course-topic-group-save"
+                    data-topic-index="${topicIdx}"
+                  >
+                    Save
+                  </button>
+                  <button
+                    class="btn ghost admin-btn-sm"
+                    type="button"
+                    data-action="course-topic-group-clear"
+                    data-topic-index="${topicIdx}"
+                    ${groupName ? "" : "disabled"}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            `;
+      })
+      .join("")}
+          </div>
+          <div class="admin-topic-groups">
+            ${topicGroupEntries.length
       ? topicGroupEntries
         .map(([groupName, groupedTopics]) => `
-              <span class="admin-topic-group-chip" title="${escapeHtml((groupedTopics || []).join(", "))}">
-                <span class="admin-topic-group-copy">
-                  <b>${escapeHtml(groupName)}</b>
-                  <small>${(groupedTopics || []).length} topic${(groupedTopics || []).length === 1 ? "" : "s"}</small>
-                </span>
-                <button
-                  type="button"
-                  data-action="course-topic-group-rename"
-                  data-group-name="${escapeHtml(groupName)}"
-                  aria-label="Rename ${escapeHtml(groupName)}"
-                  title="Rename parent group"
-                >
-                  edit
-                </button>
-                <button
-                  type="button"
-                  data-action="course-topic-group-remove"
-                  data-group-name="${escapeHtml(groupName)}"
-                  aria-label="Remove ${escapeHtml(groupName)}"
-                  title="Remove parent group"
-                >
-                  x
-                </button>
-              </span>
+              <article class="admin-topic-group-card" data-role="course-topic-group-card" data-group-name="${escapeHtml(groupName)}">
+                <div class="admin-topic-group-card-head">
+                  <label class="admin-topic-group-card-name">
+                    <span>Parent group</span>
+                    <input
+                      data-field="courseTopicGroupRename"
+                      value="${escapeHtml(groupName)}"
+                      placeholder="Parent group name"
+                    />
+                  </label>
+                  <div class="admin-topic-group-card-actions">
+                    <button
+                      class="btn ghost admin-btn-sm"
+                      type="button"
+                      data-action="course-topic-group-rename-save"
+                      data-group-name="${escapeHtml(groupName)}"
+                    >
+                      Save name
+                    </button>
+                    <button
+                      class="btn danger admin-btn-sm"
+                      type="button"
+                      data-action="course-topic-group-remove"
+                      data-group-name="${escapeHtml(groupName)}"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+                <div class="admin-topic-group-members" title="${escapeHtml((groupedTopics || []).join(", "))}">
+                  ${(groupedTopics || [])
+            .map((topicName) => `<span class="admin-topic-group-member">${escapeHtml(topicName)}</span>`)
+            .join("")}
+                </div>
+              </article>
             `)
         .join("")
-      : '<span class="admin-topic-group-empty">No parent groups yet.</span>'}
-      </div>
+      : '<span class="admin-topic-group-empty">No parent groups yet. Save a topic into a group to create the first one.</span>'}
+          </div>
+        </div>
+      </details>
       <div class="admin-topic-add">
         <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
         <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-add">Add topic</button>
@@ -16172,8 +16245,10 @@ function wireAdmin() {
     if (
       ![
         "course-topic-add",
-        "course-topic-group-set",
-        "course-topic-group-rename",
+        "course-topic-group-focus",
+        "course-topic-group-save",
+        "course-topic-group-clear",
+        "course-topic-group-rename-save",
         "course-topic-group-remove",
         "course-topic-rename",
         "course-topic-remove",
@@ -16236,25 +16311,42 @@ function wireAdmin() {
       return;
     }
 
-    const refreshRowTopics = () => {
+    const refreshRowTopics = (options = {}) => {
       const topicsCell = row.querySelector("[data-role='course-topics-cell']");
       if (!topicsCell) return;
-      topicsCell.innerHTML = renderAdminCourseTopicControls(course);
+      const existingManager = topicsCell.querySelector("[data-role='course-topic-group-manager']");
+      const groupManagerOpen = options?.openGroupManager ?? Boolean(existingManager?.open);
+      topicsCell.innerHTML = renderAdminCourseTopicControls(course, { openGroupManager: groupManagerOpen });
     };
 
-    if (action === "course-topic-group-rename" || action === "course-topic-group-remove") {
+    if (action === "course-topic-group-focus") {
+      const topicIndex = Number(actionEl.getAttribute("data-topic-index"));
+      const manager = row.querySelector("[data-role='course-topic-group-manager']");
+      const editorRow = row.querySelector(`[data-role='course-topic-group-editor-row'][data-topic-index='${topicIndex}']`);
+      const input = editorRow?.querySelector("input[data-field='courseTopicGroupName']");
+      if (manager) {
+        manager.open = true;
+      }
+      input?.focus();
+      input?.select();
+      return;
+    }
+
+    if (action === "course-topic-group-rename-save" || action === "course-topic-group-remove") {
       const groupName = String(actionEl.getAttribute("data-group-name") || "").trim();
       if (!groupName) {
         return;
       }
 
-      if (action === "course-topic-group-rename") {
-        const response = window.prompt("Rename parent group", groupName);
-        if (response === null) {
+      if (action === "course-topic-group-rename-save") {
+        const groupCard = actionEl.closest("[data-role='course-topic-group-card']");
+        const input = groupCard?.querySelector("input[data-field='courseTopicGroupRename']");
+        const nextGroupName = String(input?.value || "").trim();
+        if (!nextGroupName) {
+          toast("Parent group name is required.");
           return;
         }
-        const nextGroupName = String(response || "").trim();
-        if (!nextGroupName || nextGroupName === groupName) {
+        if (nextGroupName === groupName) {
           return;
         }
         const changed = renameCourseTopicGroup(course, groupName, nextGroupName);
@@ -16262,7 +16354,7 @@ function wireAdmin() {
           toast("No changes to save.");
           return;
         }
-        refreshRowTopics();
+        refreshRowTopics({ openGroupManager: true });
         try {
           await flushPendingSyncNow({ throwOnRelationalFailure: false });
           toast("Parent group renamed.");
@@ -16280,7 +16372,7 @@ function wireAdmin() {
       if (!changed) {
         return;
       }
-      refreshRowTopics();
+      refreshRowTopics({ openGroupManager: true });
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
         toast("Parent group removed.");
@@ -16371,16 +16463,11 @@ function wireAdmin() {
     const currentTopic = topics[topicIndex];
     if (!currentTopic) return;
 
-    if (action === "course-topic-group-set") {
+    if (action === "course-topic-group-save" || action === "course-topic-group-clear") {
+      const editorRow = actionEl.closest("[data-role='course-topic-group-editor-row']");
+      const input = editorRow?.querySelector("input[data-field='courseTopicGroupName']");
       const currentGroup = getTopicGroupNameForCourseTopic(course, currentTopic);
-      const response = window.prompt(
-        "Parent group name (leave blank to remove)",
-        currentGroup,
-      );
-      if (response === null) {
-        return;
-      }
-      const nextGroupName = String(response || "").trim();
+      const nextGroupName = action === "course-topic-group-clear" ? "" : String(input?.value || "").trim();
       if (nextGroupName === currentGroup) {
         return;
       }
@@ -16389,7 +16476,7 @@ function wireAdmin() {
         toast("No changes to save.");
         return;
       }
-      refreshRowTopics();
+      refreshRowTopics({ openGroupManager: true });
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
         toast(nextGroupName ? "Topic grouped." : "Topic removed from parent group.");
@@ -16439,6 +16526,37 @@ function wireAdmin() {
       toast("Topic removed.");
     } catch (syncError) {
       toast(`Topic removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+    }
+  });
+
+  adminCoursesSection?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+
+    if (target.matches("input[data-field='courseTopicGroupName']")) {
+      const editorRow = target.closest("[data-role='course-topic-group-editor-row']");
+      const saveButton = editorRow?.querySelector("[data-action='course-topic-group-save']");
+      if (!saveButton) {
+        return;
+      }
+      event.preventDefault();
+      saveButton.click();
+      return;
+    }
+
+    if (target.matches("input[data-field='courseTopicGroupRename']")) {
+      const groupCard = target.closest("[data-role='course-topic-group-card']");
+      const saveButton = groupCard?.querySelector("[data-action='course-topic-group-rename-save']");
+      if (!saveButton) {
+        return;
+      }
+      event.preventDefault();
+      saveButton.click();
     }
   });
 
