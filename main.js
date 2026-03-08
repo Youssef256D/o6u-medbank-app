@@ -5284,6 +5284,34 @@ function mergeHydratedSessionsWithLocal(remotePayload) {
   return [...mergedSessionById.values()];
 }
 
+function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
+  const remoteMap = normalizeCourseTopicGroupMap(remotePayload);
+  const localMap = normalizeCourseTopicGroupMap(load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS));
+  const mergedMap = {};
+
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    const remoteGroups = normalizeCourseTopicGroupEntries(remoteMap?.[course], course);
+    const localGroups = normalizeCourseTopicGroupEntries(localMap?.[course], course);
+    const mergedGroups = { ...remoteGroups };
+
+    Object.entries(localGroups).forEach(([localGroupName, localTopics]) => {
+      const matchingRemoteName = findMatchingCourseTopicGroupName(mergedGroups, localGroupName);
+      if (!matchingRemoteName) {
+        mergedGroups[localGroupName] = Array.isArray(localTopics) ? [...localTopics] : [];
+        return;
+      }
+      mergedGroups[matchingRemoteName] = normalizeCourseTopicList(
+        [...(mergedGroups[matchingRemoteName] || []), ...(Array.isArray(localTopics) ? localTopics : [])],
+        course,
+      );
+    });
+
+    mergedMap[course] = normalizeCourseTopicGroupEntries(mergedGroups, course);
+  });
+
+  return mergedMap;
+}
+
 async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
   if (
     !supabaseSync.enabled ||
@@ -5346,6 +5374,8 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
         payload = mergeHydratedSessionsWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.users) {
         payload = mergeHydratedUsersWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.courseTopicGroups) {
+        payload = mergeHydratedCourseTopicGroupsWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewCatalog) {
         payload = mergeHydratedTopicNewCatalogWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewSeen) {
