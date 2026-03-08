@@ -11579,8 +11579,23 @@ function wireCreateTest() {
   });
 
   topicSourceSelect?.addEventListener("change", () => {
-    state.qbankFilters.topicSource = String(topicSourceSelect.value || "").trim();
-    state.qbankFilters.topics = [];
+    const nextSource = String(topicSourceSelect.value || "").trim();
+    state.qbankFilters.topicSource = nextSource;
+    if (!nextSource) {
+      state.qbankFilters.topics = [];
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const user = getCurrentUser();
+    const availableCourses = getAvailableCoursesForUser(user);
+    const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
+    const selectedCourse = state.qbankFilters.course || fallbackCourse;
+    const sourceSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
+      source: nextSource,
+    });
+    const sourceTopics = sourceSections.flatMap((section) => section.topics || []);
+    state.qbankFilters.topics = sourceTopics;
     state.skipNextRouteAnimation = true;
     render();
   });
@@ -21082,11 +21097,45 @@ function normalizeCourseTopicGroupEntries(rawGroups, course, topicsOverride = nu
   return normalized;
 }
 
+function resolveMatchingCourseKeyInMap(course, sourceMap) {
+  const requestedCourse = String(course || "").trim();
+  if (!requestedCourse || !sourceMap || typeof sourceMap !== "object") {
+    return "";
+  }
+  if (Object.prototype.hasOwnProperty.call(sourceMap, requestedCourse)) {
+    return requestedCourse;
+  }
+  const requestedLower = requestedCourse.toLowerCase();
+  const requestedLookupKey = normalizeCourseLookupKey(requestedCourse);
+  const requestedCourseCode = extractCourseCodeKey(requestedCourse);
+  return Object.keys(sourceMap || {}).find((configuredCourse) => {
+    const configuredName = String(configuredCourse || "").trim();
+    if (!configuredName) {
+      return false;
+    }
+    if (configuredName.toLowerCase() === requestedLower) {
+      return true;
+    }
+    if (requestedLookupKey && normalizeCourseLookupKey(configuredName) === requestedLookupKey) {
+      return true;
+    }
+    if (requestedCourseCode && extractCourseCodeKey(configuredName) === requestedCourseCode) {
+      return true;
+    }
+    return false;
+  }) || "";
+}
+
 function normalizeCourseTopicGroupMap(rawMap) {
   const source = rawMap && typeof rawMap === "object" ? rawMap : {};
   const normalized = {};
   CURRICULUM_COURSE_LIST.forEach((course) => {
-    normalized[course] = normalizeCourseTopicGroupEntries(source[course], course, COURSE_TOPIC_OVERRIDES[course] || []);
+    const matchedCourseKey = resolveMatchingCourseKeyInMap(course, source);
+    normalized[course] = normalizeCourseTopicGroupEntries(
+      source[matchedCourseKey || course],
+      course,
+      COURSE_TOPIC_OVERRIDES[course] || [],
+    );
   });
   return normalized;
 }
@@ -21096,13 +21145,7 @@ function getCourseTopicGroups(course) {
   if (Object.keys(direct).length) {
     return direct;
   }
-  const requestedKey = String(course || "").trim().toLowerCase();
-  if (!requestedKey) {
-    return direct;
-  }
-  const fallbackCourseKey = Object.keys(COURSE_TOPIC_GROUPS || {}).find(
-    (name) => String(name || "").trim().toLowerCase() === requestedKey,
-  );
+  const fallbackCourseKey = resolveMatchingCourseKeyInMap(course, COURSE_TOPIC_GROUPS);
   if (!fallbackCourseKey) {
     return direct;
   }
