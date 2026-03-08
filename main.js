@@ -15,6 +15,9 @@ const STORAGE_KEYS = {
   systemLogs: "mcq_system_logs",
   curriculum: "mcq_curriculum",
   courseTopics: "mcq_course_topics",
+  courseTopicGroups: "mcq_course_topic_groups",
+  topicNewCatalog: "mcq_topic_new_catalog",
+  topicNewSeen: "mcq_topic_new_seen",
   courseNotebookLinks: "mcq_course_notebook_links",
   autoApproveStudentAccess: "mcq_auto_approve_student_access",
   siteMaintenance: "mcq_site_maintenance",
@@ -62,6 +65,20 @@ const KNOWN_ROUTES = new Set([
   "profile",
   "admin",
 ]);
+const PRIVATE_ROUTE_SET = new Set([
+  "complete-profile",
+  "dashboard",
+  "notifications",
+  "create-test",
+  "qbank",
+  "builder",
+  "session",
+  "review",
+  "analytics",
+  "profile",
+  "admin",
+]);
+const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const INITIAL_ROUTE = resolveInitialRoute();
@@ -259,13 +276,20 @@ const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.systemLogs,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.courseTopicGroups,
+  STORAGE_KEYS.topicNewCatalog,
   STORAGE_KEYS.courseNotebookLinks,
   STORAGE_KEYS.autoApproveStudentAccess,
   STORAGE_KEYS.siteMaintenance,
   STORAGE_KEYS.studentRefreshTrigger,
 ];
 
-const USER_SCOPED_SYNC_KEYS = [STORAGE_KEYS.sessions, STORAGE_KEYS.incorrectQueue, STORAGE_KEYS.flashcards];
+const USER_SCOPED_SYNC_KEYS = [
+  STORAGE_KEYS.sessions,
+  STORAGE_KEYS.incorrectQueue,
+  STORAGE_KEYS.flashcards,
+  STORAGE_KEYS.topicNewSeen,
+];
 const USER_SCOPED_SYNC_KEY_SET = new Set(USER_SCOPED_SYNC_KEYS);
 const GLOBAL_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
 const RELATIONAL_SYNC_KEYS = [
@@ -302,6 +326,8 @@ const supabaseAuth = {
   enabled: false,
   client: null,
   activeUserId: "",
+  initializing: false,
+  initialized: false,
 };
 
 const relationalSync = {
@@ -408,6 +434,7 @@ const SYSTEM_LOG_AUDITED_STORAGE_KEYS = new Set([
   STORAGE_KEYS.questions,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
+  STORAGE_KEYS.courseTopicGroups,
   STORAGE_KEYS.courseNotebookLinks,
   STORAGE_KEYS.autoApproveStudentAccess,
   STORAGE_KEYS.siteMaintenance,
@@ -505,6 +532,7 @@ const REMOVED_TOPIC_KEYS = new Set(REMOVED_TOPIC_NAMES.map((topic) => topic.toLo
 let O6U_CURRICULUM = deepClone(DEFAULT_O6U_CURRICULUM);
 let CURRICULUM_COURSE_LIST = [];
 let COURSE_TOPIC_OVERRIDES = {};
+let COURSE_TOPIC_GROUPS = {};
 let COURSE_NOTEBOOK_LINKS = {};
 let QBANK_COURSE_TOPICS = {};
 rebuildCurriculumCatalog();
@@ -1168,6 +1196,21 @@ function getOrCreateSupabaseBrowserClient() {
   return client;
 }
 
+function isSupabaseAuthRestorePending(user = null, route = state.route) {
+  const currentUser = user || getCurrentUser();
+  if (currentUser) {
+    return false;
+  }
+  const normalizedRoute = String(route || "").trim().toLowerCase();
+  if (!PRIVATE_ROUTE_SET.has(normalizedRoute)) {
+    return false;
+  }
+  if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
+    return false;
+  }
+  return supabaseAuth.initializing || !supabaseAuth.initialized;
+}
+
 async function initSupabaseSync() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     return { enabled: false, hadRemoteData: false };
@@ -1292,7 +1335,9 @@ function resolveGoogleOAuthPendingState(user, privateRoutes = []) {
   }
 
   const route = String(state.route || "").trim().toLowerCase();
-  const isPrivateRoute = Array.isArray(privateRoutes) && privateRoutes.includes(route);
+  const isPrivateRoute = Array.isArray(privateRoutes)
+    ? privateRoutes.includes(route)
+    : (privateRoutes instanceof Set ? privateRoutes.has(route) : false);
   const shouldClearForOnboarding = Boolean(user) && route === "signup" && isGoogleSignupCompletionFlow(user);
   const shouldClearForSignedInRoute = Boolean(user) && isPrivateRoute;
 
@@ -1468,11 +1513,14 @@ function getKnownAuthProviderByEmail(email) {
 }
 
 async function initSupabaseAuth() {
+  supabaseAuth.initializing = true;
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     if (isGoogleOAuthPendingState()) {
       setGoogleOAuthPendingState(false);
     }
     setPasswordRecoveryPendingState(false);
+    supabaseAuth.initialized = true;
+    supabaseAuth.initializing = false;
     return;
   }
 
@@ -1727,6 +1775,9 @@ async function initSupabaseAuth() {
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
     supabaseAuth.activeUserId = "";
+  } finally {
+    supabaseAuth.initialized = true;
+    supabaseAuth.initializing = false;
   }
 }
 
@@ -4940,6 +4991,15 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
       }));
   }
 
+  if (storageKey === STORAGE_KEYS.topicNewSeen) {
+    const source = isRecordObject(payload) ? payload : {};
+    const currentValue = source[currentUserId];
+    if (currentValue !== undefined) {
+      return { [currentUserId]: normalizeTopicNewSeenState(currentValue) };
+    }
+    return { [currentUserId]: normalizeTopicNewSeenState(source) };
+  }
+
   if (storageKey === STORAGE_KEYS.incorrectQueue || storageKey === STORAGE_KEYS.flashcards) {
     const source = payload && typeof payload === "object" ? payload : {};
     if (Array.isArray(source)) {
@@ -4957,6 +5017,113 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
 
 function isRecordObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function getUserMergeMatchKeys(user) {
+  if (!isRecordObject(user)) {
+    return [];
+  }
+  const keys = [];
+  const authId = String(user.supabaseAuthId || "").trim().toLowerCase();
+  const id = String(user.id || "").trim().toLowerCase();
+  const email = String(user.email || "").trim().toLowerCase();
+  if (authId) {
+    keys.push(`auth:${authId}`);
+  }
+  if (id) {
+    keys.push(`id:${id}`);
+  }
+  if (email) {
+    keys.push(`email:${email}`);
+  }
+  return [...new Set(keys)];
+}
+
+function mergeUserRecord(remoteUser, localUser) {
+  const remoteCourses = Array.isArray(remoteUser?.assignedCourses) ? remoteUser.assignedCourses : [];
+  const localCourses = Array.isArray(localUser?.assignedCourses) ? localUser.assignedCourses : [];
+  const remoteEmail = String(remoteUser?.email || "").trim().toLowerCase();
+  const localEmail = String(localUser?.email || "").trim().toLowerCase();
+  const remotePhone = String(remoteUser?.phone || "").trim();
+  const localPhone = String(localUser?.phone || "").trim();
+  const remotePassword = String(remoteUser?.password || "").trim();
+  const localPassword = String(localUser?.password || "").trim();
+  return {
+    ...(isRecordObject(localUser) ? localUser : {}),
+    ...(isRecordObject(remoteUser) ? remoteUser : {}),
+    id: String(remoteUser?.id || localUser?.id || "").trim(),
+    supabaseAuthId: String(remoteUser?.supabaseAuthId || localUser?.supabaseAuthId || "").trim(),
+    email: remoteEmail || localEmail,
+    phone: remotePhone || localPhone,
+    password: remotePassword || localPassword,
+    assignedCourses: remoteCourses.length ? remoteCourses : localCourses,
+    createdAt: String(remoteUser?.createdAt || localUser?.createdAt || nowISO()).trim(),
+    approvedAt: remoteUser?.approvedAt || localUser?.approvedAt || null,
+    approvedBy: remoteUser?.approvedBy || localUser?.approvedBy || null,
+    profileCompleted: typeof remoteUser?.profileCompleted === "boolean"
+      ? remoteUser.profileCompleted
+      : Boolean(localUser?.profileCompleted),
+  };
+}
+
+function shouldPreserveLocalUserRecord(user, activeUserId = "") {
+  if (!isRecordObject(user)) {
+    return false;
+  }
+  const normalizedActiveUserId = String(activeUserId || "").trim().toLowerCase();
+  const localId = String(user.id || "").trim().toLowerCase();
+  const authId = String(user.supabaseAuthId || "").trim().toLowerCase();
+  return isLegacyDemoUser(user)
+    || !hasSupabaseManagedIdentity(user)
+    || (normalizedActiveUserId && (normalizedActiveUserId === localId || normalizedActiveUserId === authId));
+}
+
+function mergeHydratedUsersWithLocal(remotePayload) {
+  const remoteUsers = Array.isArray(remotePayload) ? remotePayload.filter(isRecordObject) : [];
+  const localUsers = load(STORAGE_KEYS.users, []);
+  const normalizedLocalUsers = Array.isArray(localUsers) ? localUsers.filter(isRecordObject) : [];
+  const activeUserId = String(load(STORAGE_KEYS.currentUserId, "") || "").trim();
+  const localIndexByKey = new Map();
+  normalizedLocalUsers.forEach((user, index) => {
+    getUserMergeMatchKeys(user).forEach((key) => {
+      if (!localIndexByKey.has(key)) {
+        localIndexByKey.set(key, index);
+      }
+    });
+  });
+
+  const consumedLocalIndexes = new Set();
+  const mergedUsers = remoteUsers.map((remoteUser) => {
+    const matchingIndex = getUserMergeMatchKeys(remoteUser)
+      .map((key) => localIndexByKey.get(key))
+      .find((index) => Number.isInteger(index));
+    if (!Number.isInteger(matchingIndex)) {
+      return remoteUser;
+    }
+    consumedLocalIndexes.add(matchingIndex);
+    return mergeUserRecord(remoteUser, normalizedLocalUsers[matchingIndex]);
+  });
+
+  normalizedLocalUsers.forEach((localUser, index) => {
+    if (consumedLocalIndexes.has(index) || !shouldPreserveLocalUserRecord(localUser, activeUserId)) {
+      return;
+    }
+    mergedUsers.push(localUser);
+  });
+
+  const dedupedUsers = [];
+  const seenKeys = new Set();
+  mergedUsers.forEach((user) => {
+    const matchKeys = getUserMergeMatchKeys(user);
+    const canonicalKey = matchKeys[0];
+    if (!canonicalKey || seenKeys.has(canonicalKey)) {
+      return;
+    }
+    seenKeys.add(canonicalKey);
+    matchKeys.forEach((key) => seenKeys.add(key));
+    dedupedUsers.push(user);
+  });
+  return dedupedUsers;
 }
 
 function parseSyncTimestampMs(value) {
@@ -5143,6 +5310,7 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
 
   const rows = Array.isArray(data) ? data : [];
   let hadRemoteData = false;
+  let shouldRehydrateCourseCatalog = false;
   keySpecs.forEach(({ storageKey, candidates }) => {
     const primaryKey = buildRemoteSyncKey(storageKey, scope);
     const primaryRows = primaryKey
@@ -5166,6 +5334,12 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
       const hasPendingWrite = candidates.some((candidate) => supabaseSync.pendingWrites.has(candidate));
       if (storageKey === STORAGE_KEYS.sessions) {
         payload = mergeHydratedSessionsWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.users) {
+        payload = mergeHydratedUsersWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.topicNewCatalog) {
+        payload = mergeHydratedTopicNewCatalogWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.topicNewSeen) {
+        payload = mergeHydratedTopicNewSeenWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.siteMaintenance) {
         const resolvedMaintenance = resolveHydratedSiteMaintenanceConfig(payload, { hasPendingWrite });
         payload = resolvedMaintenance.config;
@@ -5174,10 +5348,22 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
         }
       }
       writeStorageKey(storageKey, payload);
+      if (
+        storageKey === STORAGE_KEYS.curriculum
+        || storageKey === STORAGE_KEYS.courseTopics
+        || storageKey === STORAGE_KEYS.courseTopicGroups
+        || storageKey === STORAGE_KEYS.courseNotebookLinks
+      ) {
+        shouldRehydrateCourseCatalog = true;
+      }
     } catch {
       // Ignore malformed remote payloads and keep local fallback.
     }
   });
+
+  if (shouldRehydrateCourseCatalog) {
+    rehydrateCourseCatalogConfigFromStorage();
+  }
 
   return { hadRemoteData };
 }
@@ -7198,12 +7384,17 @@ function seedData() {
   }
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, null);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
+  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, null);
+  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object"
+    ? savedCourseTopicGroups
+    : {};
   const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, null);
   COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
     ? savedCourseNotebookLinks
     : {};
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
   save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
   if (typeof load(STORAGE_KEYS.autoApproveStudentAccess, null) !== "boolean") {
     save(STORAGE_KEYS.autoApproveStudentAccess, DEFAULT_AUTO_APPROVE_STUDENT_ACCESS);
@@ -8534,6 +8725,8 @@ async function refreshStudentDataFromSupabaseState(user) {
     STORAGE_KEYS.questions,
     STORAGE_KEYS.curriculum,
     STORAGE_KEYS.courseTopics,
+    STORAGE_KEYS.courseTopicGroups,
+    STORAGE_KEYS.topicNewCatalog,
     STORAGE_KEYS.courseNotebookLinks,
     STORAGE_KEYS.siteMaintenance,
   ]).catch((error) => ({ error }));
@@ -8613,7 +8806,13 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       state.studentDataLastFullSyncAt = now;
     }
     await hydrateRelationalNotifications(user);
-    await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
+    await hydrateSupabaseSyncKeys([
+      STORAGE_KEYS.siteMaintenance,
+      STORAGE_KEYS.courseTopicGroups,
+      STORAGE_KEYS.courseNotebookLinks,
+      STORAGE_KEYS.topicNewCatalog,
+      STORAGE_KEYS.autoApproveStudentAccess,
+    ]).catch(() => ({ hadRemoteData: false }));
     if (!hasPendingSessionWrites) {
       await hydrateRelationalSessions(user);
     }
@@ -8789,6 +8988,15 @@ function renderAdminLoading() {
   `;
 }
 
+function renderAuthRestoreLoading() {
+  return `
+    <section class="panel">
+      <h2 class="title">Restoring Your Session</h2>
+      <p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Checking your saved sign-in...</span></p>
+    </section>
+  `;
+}
+
 function renderSiteMaintenancePage(user = null) {
   const currentUser = user || getCurrentUser();
   const config = getSiteMaintenanceConfig();
@@ -8830,6 +9038,7 @@ function render() {
   document.removeEventListener("keydown", handleReviewKeydown);
 
   const user = getCurrentUser();
+  const authRestorePending = isSupabaseAuthRestorePending(user, state.route);
   if (!user || user.role !== "admin") {
     state.adminDataRefreshing = false;
     state.adminDataLastSyncAt = 0;
@@ -8860,25 +9069,11 @@ function render() {
     document.body.classList.remove("is-routing");
   }
 
-  const privateRoutes = [
-    "complete-profile",
-    "dashboard",
-    "notifications",
-    "create-test",
-    "qbank",
-    "builder",
-    "session",
-    "review",
-    "analytics",
-    "profile",
-    "admin",
-  ];
-  const authEntryRoutes = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
   const studentProfileCompletionRoute = getStudentProfileCompletionRoute(user);
   const googleSignupOnboarding = studentProfileCompletionRoute === "signup";
   const passwordRecoveryPending = isPasswordRecoveryPendingState();
 
-  if (privateRoutes.includes(state.route) && !user) {
+  if (!authRestorePending && PRIVATE_ROUTE_SET.has(state.route) && !user) {
     state.route = "login";
   }
 
@@ -8897,7 +9092,7 @@ function render() {
   }
 
   if (
-    privateRoutes.includes(state.route)
+    PRIVATE_ROUTE_SET.has(state.route)
     && user
     && !isUserAccessApproved(user)
     && !studentProfileCompletionRoute
@@ -8908,11 +9103,11 @@ function render() {
     toast("Your account is pending admin approval.");
   }
 
-  if (user && authEntryRoutes.has(state.route) && !(state.route === "signup" && googleSignupOnboarding)) {
+  if (user && AUTH_ENTRY_ROUTE_SET.has(state.route) && !(state.route === "signup" && googleSignupOnboarding)) {
     state.route = user.role === "admin" ? "admin" : "dashboard";
   }
 
-  if (state.route === "admin" && user?.role !== "admin") {
+  if (!authRestorePending && state.route === "admin" && user?.role !== "admin") {
     state.route = "dashboard";
     toast("Admin role required for this page.");
   }
@@ -8938,7 +9133,7 @@ function render() {
     state.route = "create-test";
   }
 
-  resolveGoogleOAuthPendingState(user, privateRoutes);
+  resolveGoogleOAuthPendingState(user, PRIVATE_ROUTE_SET);
 
   const isExamWideRoute = state.route === "session" || state.route === "review";
   const isAdminRoute = state.route === "admin";
@@ -8964,7 +9159,10 @@ function render() {
     state.sessionNavSettingsOpen = false;
   }
 
-  if (shouldShowSiteMaintenanceGate(user, state.route)) {
+  if (authRestorePending) {
+    clearSiteMaintenanceGateRefreshPolling();
+    appEl.innerHTML = renderAuthRestoreLoading();
+  } else if (shouldShowSiteMaintenanceGate(user, state.route)) {
     ensureSiteMaintenanceGateRefreshPolling(user);
     appEl.innerHTML = renderSiteMaintenancePage(user);
   } else {
@@ -9193,6 +9391,7 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
 
 function syncTopbar() {
   const user = getCurrentUser();
+  const authRestorePending = isSupabaseAuthRestorePending(user);
   ensureNotificationsRealtimeSubscription(user);
   ensureStudentNotificationPolling(user);
   ensureSessionRealtimeSubscription(user);
@@ -9220,6 +9419,21 @@ function syncTopbar() {
       button.classList.toggle("hidden", route === "admin");
     }
   });
+
+  if (!user && authRestorePending) {
+    state.userMenuOpen = false;
+    state.notificationMenuOpen = false;
+    publicNavEl.classList.add("hidden");
+    privateNavEl.classList.add("hidden");
+    adminLinkEl.classList.add("hidden");
+    authActionsEl.classList.remove("hidden");
+    authActionsEl.innerHTML = `
+      ${renderThemeToggleButton()}
+      <span class="subtle">Restoring session...</span>
+    `;
+    markActiveNav();
+    return;
+  }
 
   if (!user) {
     state.userMenuOpen = false;
@@ -9828,10 +10042,10 @@ function wireAuth(mode) {
               toast("Your account is pending admin approval.");
               return;
             }
+            save(STORAGE_KEYS.currentUserId, localDemoUser.id);
             if (await shouldForceRefreshForUpdates(localDemoUser)) {
               return;
             }
-            save(STORAGE_KEYS.currentUserId, localDemoUser.id);
             navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
             toast(
               shouldAllowSupabaseManagedLocalFallback(error)
@@ -9867,10 +10081,10 @@ function wireAuth(mode) {
           toast("Your account is pending admin approval.");
           return;
         }
+        save(STORAGE_KEYS.currentUserId, user.id);
         if (await shouldForceRefreshForUpdates(user)) {
           return;
         }
-        save(STORAGE_KEYS.currentUserId, user.id);
         navigate(user.role === "admin" ? "admin" : "dashboard");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
@@ -10982,6 +11196,7 @@ function renderCreateTest() {
   }
   const selectedCourse = state.qbankFilters.course;
   const topicOptions = getAvailableTopicsForCourse(selectedCourse, questions);
+  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
@@ -10990,7 +11205,7 @@ function renderCreateTest() {
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = selectedTopics.length === 0;
-  const selectedTopicLabel = allTopicsSelected ? "All topics" : selectedTopics.join(" + ");
+  const selectedTopicLabel = formatTopicFilterSummary(selectedTopics);
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11034,22 +11249,60 @@ function renderCreateTest() {
         </div>
         <div class="create-test-filter-card create-test-topics-group">
           <p class="create-test-topics-label">Topics (choose one or more)</p>
-          <div class="create-test-topic-grid">
-            ${topicOptions
-      .map(
-        (topic) => `
-                  <label class="admin-course-check create-test-topic-chip">
-                    <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${selectedTopics.includes(topic) ? "checked" : ""} />
-                    <span>${escapeHtml(topic)}</span>
-                  </label>
-                `,
-      )
-      .join("")}
+          <div class="create-test-topic-grid create-test-topic-grid-toolbar">
             <label class="admin-course-check create-test-topic-chip is-all">
               <input type="checkbox" data-role="create-test-all-topics" ${allTopicsSelected ? "checked" : ""} />
-              <span>All topics</span>
+              <span class="create-test-topic-chip-copy">All topics</span>
             </label>
           </div>
+          ${topicSections.length
+      ? `
+              <div class="create-test-topic-sections">
+                ${topicSections
+      .map((section) => `
+                      <section class="create-test-topic-section${section.kind === "group" ? " is-group" : ""}">
+                        ${section.kind !== "flat" && section.name
+          ? `
+                            <div class="create-test-topic-section-head">
+                              <div class="create-test-topic-section-copy">
+                                <p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>
+                                <span class="create-test-topic-section-count">${section.topics.length} topic${section.topics.length === 1 ? "" : "s"}</span>
+                              </div>
+                              ${section.kind === "group"
+            ? `
+                                  <button
+                                    class="btn ghost admin-btn-sm create-test-topic-section-action"
+                                    type="button"
+                                    data-action="create-test-toggle-topic-group"
+                                    data-group-name="${escapeHtml(section.name)}"
+                                  >
+                                    Toggle group
+                                  </button>
+                                `
+            : ""}
+                            </div>
+                          `
+          : ""}
+                        <div class="create-test-topic-grid">
+                          ${section.topics
+          .map((topic) => {
+            const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
+            return `
+                                <label class="admin-course-check create-test-topic-chip">
+                                  <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${selectedTopics.includes(topic) ? "checked" : ""} />
+                                  <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
+                                  ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
+                                </label>
+                              `;
+          })
+          .join("")}
+                        </div>
+                      </section>
+                    `)
+      .join("")}
+              </div>
+            `
+      : '<p class="subtle create-test-topic-empty">No published topics are available for this course yet.</p>'}
         </div>
       </div>
     </section>
@@ -11103,6 +11356,7 @@ function wireCreateTest() {
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
+  const topicGroupButtons = Array.from(appEl.querySelectorAll("[data-action='create-test-toggle-topic-group']"));
   const allTopicsInput = document.querySelector("input[data-role='create-test-all-topics']");
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
@@ -11119,6 +11373,16 @@ function wireCreateTest() {
   };
   syncDurationInputState();
 
+  const syncTopicSelectionUi = () => {
+    const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
+    topicInputs.forEach((entry) => {
+      entry.checked = selectedSet.has(String(entry.value || "").trim());
+    });
+    if (allTopicsInput) {
+      allTopicsInput.checked = selectedSet.size === 0;
+    }
+  };
+
   const updateCreateTestSummary = () => {
     const user = getCurrentUser();
     const availableCourses = getAvailableCoursesForUser(user);
@@ -11126,7 +11390,10 @@ function wireCreateTest() {
     const selectedCourse = state.qbankFilters.course || fallbackCourse;
     const topicOptions = getAvailableTopicsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
-    const selectedTopicLabel = selectedTopics.length ? selectedTopics.join(" + ") : "All topics";
+    if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
+      state.qbankFilters.topics = selectedTopics;
+    }
+    const selectedTopicLabel = formatTopicFilterSummary(selectedTopics);
     const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
       course: selectedCourse,
       topics: selectedTopics,
@@ -11142,6 +11409,7 @@ function wireCreateTest() {
       flagged: "Flagged only",
     };
     const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
+    syncTopicSelectionUi();
     if (summaryEl) {
       summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
@@ -11173,13 +11441,54 @@ function wireCreateTest() {
   allTopicsInput?.addEventListener("change", () => {
     if (allTopicsInput.checked) {
       state.qbankFilters.topics = [];
-      topicInputs.forEach((entry) => {
-        entry.checked = false;
-      });
       updateCreateTestSummary();
     } else if (!topicInputs.some((entry) => entry.checked)) {
       allTopicsInput.checked = true;
     }
+  });
+
+  topicGroupButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const user = getCurrentUser();
+      const availableCourses = getAvailableCoursesForUser(user);
+      const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
+      const selectedCourse = state.qbankFilters.course || fallbackCourse;
+      const groupName = String(button.getAttribute("data-group-name") || "").trim();
+      if (!selectedCourse || !groupName) {
+        return;
+      }
+      const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+      const groupSection = topicSections.find((section) => (
+        section.kind === "group"
+        && String(section.name || "").trim().toLowerCase() === groupName.toLowerCase()
+      ));
+      const groupTopics = Array.isArray(groupSection?.topics) ? groupSection.topics.filter(Boolean) : [];
+      if (!groupTopics.length) {
+        return;
+      }
+      const topicOptions = getAvailableTopicsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+      const availableTopicSet = new Set(topicOptions.map((topic) => String(topic || "").trim()));
+      const selectedSet = new Set(
+        (state.qbankFilters.topics || [])
+          .map((topic) => String(topic || "").trim())
+          .filter((topic) => availableTopicSet.has(topic)),
+      );
+      const normalizedGroupTopics = groupTopics.filter((topic) => availableTopicSet.has(String(topic || "").trim()));
+      const allGroupTopicsSelected = normalizedGroupTopics.every((topic) => selectedSet.has(String(topic || "").trim()));
+      normalizedGroupTopics.forEach((topic) => {
+        const normalizedTopic = String(topic || "").trim();
+        if (!normalizedTopic) {
+          return;
+        }
+        if (allGroupTopicsSelected) {
+          selectedSet.delete(normalizedTopic);
+        } else {
+          selectedSet.add(normalizedTopic);
+        }
+      });
+      state.qbankFilters.topics = topicOptions.filter((topic) => selectedSet.has(String(topic || "").trim()));
+      updateCreateTestSummary();
+    });
   });
 
   sourceSelect?.addEventListener("change", () => {
@@ -11260,6 +11569,13 @@ function wireCreateTest() {
     navigate("session");
     toast("Test created.");
   });
+
+  const currentUser = getCurrentUser();
+  const visibleCourse = String(state.qbankFilters.course || courseSelect?.value || "").trim();
+  const visibleTopics = topicInputs.map((input) => String(input.value || "").trim()).filter(Boolean);
+  if (currentUser?.role === "student" && visibleCourse && visibleTopics.length) {
+    markTopicListAsSeen(visibleCourse, visibleTopics, currentUser);
+  }
 }
 
 function getSessionFontScaleCssValue() {
@@ -13606,6 +13922,7 @@ function renderAdmin() {
       }
     });
     const publishedQuestions = questions.filter((entry) => entry.status === "published").length;
+    const draftQuestions = Math.max(questions.length - publishedQuestions, 0);
     let completedSessions = 0;
     let inProgressSessions = 0;
     sessions.forEach((session) => {
@@ -13615,6 +13932,7 @@ function renderAdmin() {
         inProgressSessions += 1;
       }
     });
+    const totalSessions = sessions.length;
     const userStats = buildAdminUserStatistics(users);
     const registrationYearRows = userStats.registrationByYear
       .map((entry) => {
@@ -13660,21 +13978,36 @@ function renderAdmin() {
     pageContent = `
       <section class="card admin-section" id="admin-stats-section">
         <h2 class="title">O6U Admin Dashboard</h2>
-        <p class="subtle">Live statistics for users, questions, activity, registration year, and auth providers.</p>
+        <p class="subtle">Core totals first, with provider mix and registration history summarized underneath.</p>
         <div class="stats-grid" style="margin-top: 0.85rem;">
-          <article class="card"><p class="metric">${users.length}<small>Total accounts</small></p></article>
-          <article class="card"><p class="metric">${students}<small>Student accounts</small></p></article>
-          <article class="card"><p class="metric">${admins}<small>Admin accounts</small></p></article>
-          <article class="card"><p class="metric">${userStats.thisYearRegistrations}<small>Registered in ${userStats.currentYear}</small></p></article>
-          <article class="card"><p class="metric">${userStats.lastYearRegistrations}<small>Registered in ${userStats.currentYear - 1}</small></p></article>
-          <article class="card"><p class="metric">${userStats.googleCount}<small>Google accounts</small></p></article>
-          <article class="card"><p class="metric">${userStats.emailCount}<small>Email accounts</small></p></article>
-          <article class="card"><p class="metric">${userStats.otherProviderCount}<small>Other providers</small></p></article>
-          <article class="card"><p class="metric">${userStats.unknownProviderCount}<small>Unknown provider</small></p></article>
-          <article class="card"><p class="metric">${questions.length}<small>Total questions</small></p></article>
-          <article class="card"><p class="metric">${publishedQuestions}<small>Published questions</small></p></article>
-          <article class="card"><p class="metric">${completedSessions}<small>Completed tests</small></p></article>
-          <article class="card"><p class="metric">${inProgressSessions}<small>Active tests</small></p></article>
+          <article class="card">
+            <p class="metric">
+              ${users.length}
+              <small>Total accounts</small>
+              <small>${students} students • ${admins} admins</small>
+            </p>
+          </article>
+          <article class="card">
+            <p class="metric">
+              ${userStats.thisYearRegistrations}
+              <small>Registered in ${userStats.currentYear}</small>
+              <small>${userStats.lastYearRegistrations} registered in ${userStats.currentYear - 1}</small>
+            </p>
+          </article>
+          <article class="card">
+            <p class="metric">
+              ${questions.length}
+              <small>Total questions</small>
+              <small>${publishedQuestions} published • ${draftQuestions} draft${draftQuestions === 1 ? "" : "s"}</small>
+            </p>
+          </article>
+          <article class="card">
+            <p class="metric">
+              ${completedSessions}
+              <small>Completed tests</small>
+              <small>${inProgressSessions} active • ${totalSessions} total test${totalSessions === 1 ? "" : "s"}</small>
+            </p>
+          </article>
         </div>
         <div class="admin-dashboard-breakdowns">
           <article class="card admin-dashboard-breakdown-card">
@@ -14835,14 +15168,28 @@ function renderAdmin() {
 
 function renderAdminCourseTopicControls(course) {
   const topics = QBANK_COURSE_TOPICS[course] || [];
+  const topicGroups = getCourseTopicGroups(course);
+  const topicGroupEntries = Object.entries(topicGroups);
   return `
     <div class="admin-course-topics">
       <div class="admin-topic-list">
         ${topics
       .map(
-        (topic, topicIdx) => `
+        (topic, topicIdx) => {
+          const groupName = getTopicGroupNameForCourseTopic(course, topic);
+          return `
               <span class="admin-topic-chip">
                 <span>${escapeHtml(topic)}</span>
+                ${groupName ? `<span class="badge admin-topic-group-badge">${escapeHtml(groupName)}</span>` : ""}
+                <button
+                  type="button"
+                  data-action="course-topic-group-set"
+                  data-topic-index="${topicIdx}"
+                  aria-label="Set parent group for ${escapeHtml(topic)}"
+                  title="Set parent group"
+                >
+                  group
+                </button>
                 <button
                   type="button"
                   data-action="course-topic-rename"
@@ -14862,9 +15209,42 @@ function renderAdminCourseTopicControls(course) {
                   x
                 </button>
               </span>
-            `,
+            `;
+        },
       )
       .join("")}
+      </div>
+      <div class="admin-topic-groups">
+        ${topicGroupEntries.length
+      ? topicGroupEntries
+        .map(([groupName, groupedTopics]) => `
+              <span class="admin-topic-group-chip" title="${escapeHtml((groupedTopics || []).join(", "))}">
+                <span class="admin-topic-group-copy">
+                  <b>${escapeHtml(groupName)}</b>
+                  <small>${(groupedTopics || []).length} topic${(groupedTopics || []).length === 1 ? "" : "s"}</small>
+                </span>
+                <button
+                  type="button"
+                  data-action="course-topic-group-rename"
+                  data-group-name="${escapeHtml(groupName)}"
+                  aria-label="Rename ${escapeHtml(groupName)}"
+                  title="Rename parent group"
+                >
+                  edit
+                </button>
+                <button
+                  type="button"
+                  data-action="course-topic-group-remove"
+                  data-group-name="${escapeHtml(groupName)}"
+                  aria-label="Remove ${escapeHtml(groupName)}"
+                  title="Remove parent group"
+                >
+                  x
+                </button>
+              </span>
+            `)
+        .join("")
+      : '<span class="admin-topic-group-empty">No parent groups yet.</span>'}
       </div>
       <div class="admin-topic-add">
         <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
@@ -15792,6 +16172,9 @@ function wireAdmin() {
     if (
       ![
         "course-topic-add",
+        "course-topic-group-set",
+        "course-topic-group-rename",
+        "course-topic-group-remove",
         "course-topic-rename",
         "course-topic-remove",
         "course-topic-clear",
@@ -15858,6 +16241,54 @@ function wireAdmin() {
       if (!topicsCell) return;
       topicsCell.innerHTML = renderAdminCourseTopicControls(course);
     };
+
+    if (action === "course-topic-group-rename" || action === "course-topic-group-remove") {
+      const groupName = String(actionEl.getAttribute("data-group-name") || "").trim();
+      if (!groupName) {
+        return;
+      }
+
+      if (action === "course-topic-group-rename") {
+        const response = window.prompt("Rename parent group", groupName);
+        if (response === null) {
+          return;
+        }
+        const nextGroupName = String(response || "").trim();
+        if (!nextGroupName || nextGroupName === groupName) {
+          return;
+        }
+        const changed = renameCourseTopicGroup(course, groupName, nextGroupName);
+        if (!changed) {
+          toast("No changes to save.");
+          return;
+        }
+        refreshRowTopics();
+        try {
+          await flushPendingSyncNow({ throwOnRelationalFailure: false });
+          toast("Parent group renamed.");
+        } catch (syncError) {
+          toast(`Parent group renamed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+        }
+        return;
+      }
+
+      const groupedTopics = getCourseTopicGroups(course)[groupName] || [];
+      if (!window.confirm(`Remove parent group "${groupName}"? ${groupedTopics.length} topic(s) will stay unchanged.`)) {
+        return;
+      }
+      const changed = removeCourseTopicGroup(course, groupName);
+      if (!changed) {
+        return;
+      }
+      refreshRowTopics();
+      try {
+        await flushPendingSyncNow({ throwOnRelationalFailure: false });
+        toast("Parent group removed.");
+      } catch (syncError) {
+        toast(`Parent group removed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
+      return;
+    }
 
     if (action === "course-question-clear") {
       const questions = getQuestions();
@@ -15940,6 +16371,34 @@ function wireAdmin() {
     const currentTopic = topics[topicIndex];
     if (!currentTopic) return;
 
+    if (action === "course-topic-group-set") {
+      const currentGroup = getTopicGroupNameForCourseTopic(course, currentTopic);
+      const response = window.prompt(
+        "Parent group name (leave blank to remove)",
+        currentGroup,
+      );
+      if (response === null) {
+        return;
+      }
+      const nextGroupName = String(response || "").trim();
+      if (nextGroupName === currentGroup) {
+        return;
+      }
+      const changed = setCourseTopicParentGroup(course, currentTopic, nextGroupName);
+      if (!changed) {
+        toast("No changes to save.");
+        return;
+      }
+      refreshRowTopics();
+      try {
+        await flushPendingSyncNow({ throwOnRelationalFailure: false });
+        toast(nextGroupName ? "Topic grouped." : "Topic removed from parent group.");
+      } catch (syncError) {
+        toast(`Grouping saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
+      return;
+    }
+
     if (action === "course-topic-rename") {
       const nextTopic = String(window.prompt("Rename topic", currentTopic) || "").trim();
       if (!nextTopic || nextTopic === currentTopic) {
@@ -15955,7 +16414,7 @@ function wireAdmin() {
       }
       const nextTopics = [...topics];
       nextTopics[topicIndex] = nextTopic;
-      applyCourseTopicsUpdate(course, nextTopics);
+      applyCourseTopicsUpdate(course, nextTopics, { renamedFrom: currentTopic, renamedTo: nextTopic });
       refreshRowTopics();
       try {
         await flushPendingSyncNow();
@@ -19630,6 +20089,243 @@ function getAvailableTopicsForCourse(course, questions = []) {
   return [...orderedConfigured, ...extraTopics];
 }
 
+function buildTopicNewKey(course, topic) {
+  const normalizedCourse = String(course || "").trim().toLowerCase();
+  const normalizedTopic = String(topic || "").trim().toLowerCase();
+  if (!normalizedCourse || !normalizedTopic) {
+    return "";
+  }
+  return `${normalizedCourse}::${normalizedTopic}`;
+}
+
+function normalizeTopicNewCatalog(raw) {
+  const source = isRecordObject(raw) ? raw : {};
+  const normalized = {};
+  Object.entries(source).forEach(([rawKey, value]) => {
+    const course = String(value?.course || "").trim();
+    const topic = String(value?.topic || "").trim();
+    const badgeId = String(value?.badgeId || "").trim();
+    const createdAt = String(value?.createdAt || "").trim();
+    const key = String(rawKey || "").trim();
+    if (!key || !course || !topic || !badgeId) {
+      return;
+    }
+    normalized[key] = {
+      course,
+      topic,
+      badgeId,
+      createdAt,
+    };
+  });
+  return normalized;
+}
+
+function normalizeTopicNewSeenState(raw) {
+  const source = isRecordObject(raw) ? raw : {};
+  const normalized = {};
+  Object.entries(source).forEach(([rawKey, value]) => {
+    const key = String(rawKey || "").trim();
+    const badgeId = String(value || "").trim();
+    if (!key || !badgeId) {
+      return;
+    }
+    normalized[key] = badgeId;
+  });
+  return normalized;
+}
+
+function normalizeTopicNewSeenUserMap(raw) {
+  const source = isRecordObject(raw) ? raw : {};
+  const normalized = {};
+  Object.entries(source).forEach(([rawUserId, value]) => {
+    const userId = String(rawUserId || "").trim();
+    if (!userId) {
+      return;
+    }
+    normalized[userId] = normalizeTopicNewSeenState(value);
+  });
+  return normalized;
+}
+
+function getTopicNewCatalog() {
+  return normalizeTopicNewCatalog(load(STORAGE_KEYS.topicNewCatalog, {}));
+}
+
+function getTopicNewSeenState(user = null) {
+  const current = user || getCurrentUser();
+  const userId = String(current?.id || "").trim();
+  if (!userId) {
+    return {};
+  }
+  const stateByUser = normalizeTopicNewSeenUserMap(load(STORAGE_KEYS.topicNewSeen, {}));
+  return normalizeTopicNewSeenState(stateByUser[userId]);
+}
+
+function saveTopicNewSeenState(nextState, user = null) {
+  const current = user || getCurrentUser();
+  const userId = String(current?.id || "").trim();
+  if (!userId) {
+    return false;
+  }
+  const stateByUser = normalizeTopicNewSeenUserMap(load(STORAGE_KEYS.topicNewSeen, {}));
+  stateByUser[userId] = normalizeTopicNewSeenState(nextState);
+  save(STORAGE_KEYS.topicNewSeen, stateByUser);
+  return true;
+}
+
+function isTopicNewForUser(course, topic, user = null) {
+  const current = user || getCurrentUser();
+  if (!current || current.role !== "student") {
+    return false;
+  }
+  const key = buildTopicNewKey(course, topic);
+  if (!key) {
+    return false;
+  }
+  const entry = getTopicNewCatalog()[key];
+  if (!entry) {
+    return false;
+  }
+  const seenState = getTopicNewSeenState(current);
+  return seenState[key] !== entry.badgeId;
+}
+
+function markTopicListAsSeen(course, topics, user = null) {
+  const current = user || getCurrentUser();
+  if (!current || current.role !== "student") {
+    return false;
+  }
+  const catalog = getTopicNewCatalog();
+  const seenState = getTopicNewSeenState(current);
+  let changed = false;
+  (Array.isArray(topics) ? topics : []).forEach((topic) => {
+    const key = buildTopicNewKey(course, topic);
+    const entry = catalog[key];
+    if (!entry || seenState[key] === entry.badgeId) {
+      return;
+    }
+    seenState[key] = entry.badgeId;
+    changed = true;
+  });
+  if (changed) {
+    saveTopicNewSeenState(seenState, current);
+  }
+  return changed;
+}
+
+function mergeHydratedTopicNewCatalogWithLocal(remotePayload) {
+  const remote = normalizeTopicNewCatalog(remotePayload);
+  const local = getTopicNewCatalog();
+  const merged = { ...remote };
+  Object.entries(local).forEach(([key, localEntry]) => {
+    const remoteEntry = merged[key];
+    if (!remoteEntry) {
+      merged[key] = localEntry;
+      return;
+    }
+    const localMs = parseSyncTimestampMs(localEntry?.createdAt);
+    const remoteMs = parseSyncTimestampMs(remoteEntry?.createdAt);
+    merged[key] = localMs >= remoteMs ? localEntry : remoteEntry;
+  });
+  return merged;
+}
+
+function mergeHydratedTopicNewSeenWithLocal(remotePayload) {
+  const remote = normalizeTopicNewSeenUserMap(remotePayload);
+  const local = normalizeTopicNewSeenUserMap(load(STORAGE_KEYS.topicNewSeen, {}));
+  const merged = { ...local };
+  Object.entries(remote).forEach(([userId, remoteState]) => {
+    const localState = normalizeTopicNewSeenState(local[userId]);
+    merged[userId] = {
+      ...normalizeTopicNewSeenState(remoteState),
+      ...localState,
+    };
+  });
+  return merged;
+}
+
+function syncTopicNewCatalogForCourse(course, previousTopics, nextTopics, options = {}) {
+  const normalizedCourse = String(course || "").trim();
+  if (!normalizedCourse) {
+    return false;
+  }
+  const previousList = normalizeCourseTopicList(previousTopics, normalizedCourse);
+  const nextList = normalizeCourseTopicList(nextTopics, normalizedCourse);
+  const previousKeySet = new Set(previousList.map((topic) => buildTopicNewKey(normalizedCourse, topic)).filter(Boolean));
+  const nextKeySet = new Set(nextList.map((topic) => buildTopicNewKey(normalizedCourse, topic)).filter(Boolean));
+  const catalog = getTopicNewCatalog();
+  const renamedFrom = String(options?.renamedFrom || "").trim();
+  const renamedTo = String(options?.renamedTo || "").trim();
+  let changed = false;
+
+  if (renamedFrom && renamedTo) {
+    const oldKey = buildTopicNewKey(normalizedCourse, renamedFrom);
+    const newKey = buildTopicNewKey(normalizedCourse, renamedTo);
+    if (oldKey && newKey && catalog[oldKey]) {
+      if (oldKey === newKey) {
+        if (catalog[oldKey].topic !== renamedTo || catalog[oldKey].course !== normalizedCourse) {
+          catalog[oldKey] = {
+            ...catalog[oldKey],
+            course: normalizedCourse,
+            topic: renamedTo,
+          };
+          changed = true;
+        }
+      } else {
+        catalog[newKey] = {
+          ...catalog[oldKey],
+          course: normalizedCourse,
+          topic: renamedTo,
+        };
+        delete catalog[oldKey];
+        changed = true;
+      }
+    }
+  }
+
+  previousList.forEach((topic) => {
+    const key = buildTopicNewKey(normalizedCourse, topic);
+    if (!key || nextKeySet.has(key) || !catalog[key]) {
+      return;
+    }
+    delete catalog[key];
+    changed = true;
+  });
+
+  nextList.forEach((topic) => {
+    const key = buildTopicNewKey(normalizedCourse, topic);
+    if (!key) {
+      return;
+    }
+    if (catalog[key]) {
+      if (catalog[key].topic !== topic || catalog[key].course !== normalizedCourse) {
+        catalog[key] = {
+          ...catalog[key],
+          course: normalizedCourse,
+          topic,
+        };
+        changed = true;
+      }
+      return;
+    }
+    if (previousKeySet.has(key)) {
+      return;
+    }
+    catalog[key] = {
+      course: normalizedCourse,
+      topic,
+      badgeId: makeId("topicnew"),
+      createdAt: nowISO(),
+    };
+    changed = true;
+  });
+
+  if (changed) {
+    save(STORAGE_KEYS.topicNewCatalog, normalizeTopicNewCatalog(catalog));
+  }
+  return changed;
+}
+
 function getQbankCourseTopicMeta(question) {
   const explicitCourse = String(question.qbankCourse || "").trim();
   const explicitTopic = String(question.qbankTopic || question.topic || "").trim();
@@ -19786,6 +20482,238 @@ function normalizeCourseTopicMap(rawMap) {
   return normalized;
 }
 
+function normalizeCourseTopicGroupEntries(rawGroups, course, topicsOverride = null) {
+  const source = rawGroups && typeof rawGroups === "object" && !Array.isArray(rawGroups) ? rawGroups : {};
+  const availableTopics = normalizeCourseTopicList(
+    topicsOverride || COURSE_TOPIC_OVERRIDES[course] || QBANK_COURSE_TOPICS[course] || [],
+    course,
+  );
+  const availableByKey = new Map(
+    availableTopics.map((topic) => [String(topic || "").trim().toLowerCase(), topic]),
+  );
+  const normalized = {};
+  const seenGroupKeys = new Set();
+
+  Object.entries(source).forEach(([rawGroupName, rawTopics]) => {
+    const groupName = String(rawGroupName || "").trim();
+    const groupKey = groupName.toLowerCase();
+    if (!groupName || seenGroupKeys.has(groupKey)) {
+      return;
+    }
+    const topics = Array.isArray(rawTopics) ? rawTopics : [];
+    const seenTopicKeys = new Set();
+    const normalizedTopics = [];
+    topics.forEach((entry) => {
+      const topicKey = String(entry || "").trim().toLowerCase();
+      const canonicalTopic = availableByKey.get(topicKey);
+      if (!canonicalTopic || seenTopicKeys.has(topicKey)) {
+        return;
+      }
+      seenTopicKeys.add(topicKey);
+      normalizedTopics.push(canonicalTopic);
+    });
+    if (!normalizedTopics.length) {
+      return;
+    }
+    normalized[groupName] = normalizedTopics;
+    seenGroupKeys.add(groupKey);
+  });
+
+  return normalized;
+}
+
+function normalizeCourseTopicGroupMap(rawMap) {
+  const source = rawMap && typeof rawMap === "object" ? rawMap : {};
+  const normalized = {};
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    normalized[course] = normalizeCourseTopicGroupEntries(source[course], course, COURSE_TOPIC_OVERRIDES[course] || []);
+  });
+  return normalized;
+}
+
+function getCourseTopicGroups(course) {
+  return normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[course], course);
+}
+
+function findMatchingCourseTopicGroupName(groups, requestedName) {
+  const requested = String(requestedName || "").trim().toLowerCase();
+  if (!requested) {
+    return "";
+  }
+  return Object.keys(groups || {}).find((name) => String(name || "").trim().toLowerCase() === requested) || "";
+}
+
+function getTopicGroupNameForCourseTopic(course, topic) {
+  const topicKey = String(topic || "").trim().toLowerCase();
+  if (!topicKey) {
+    return "";
+  }
+  const groups = getCourseTopicGroups(course);
+  return Object.entries(groups).find(([, topics]) => (
+    Array.isArray(topics) && topics.some((entry) => String(entry || "").trim().toLowerCase() === topicKey)
+  ))?.[0] || "";
+}
+
+function applyCourseTopicGroupsUpdate(course, nextGroups) {
+  if (!course || !CURRICULUM_COURSE_LIST.includes(course)) {
+    return false;
+  }
+  const normalizedGroups = normalizeCourseTopicGroupEntries(nextGroups, course);
+  const currentGroups = getCourseTopicGroups(course);
+  if (JSON.stringify(normalizedGroups) === JSON.stringify(currentGroups)) {
+    return false;
+  }
+  COURSE_TOPIC_GROUPS[course] = normalizedGroups;
+  save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
+  return true;
+}
+
+function setCourseTopicParentGroup(course, topic, groupName) {
+  const canonicalTopic = (QBANK_COURSE_TOPICS[course] || []).find(
+    (entry) => String(entry || "").trim().toLowerCase() === String(topic || "").trim().toLowerCase(),
+  );
+  if (!course || !canonicalTopic) {
+    return false;
+  }
+  const groups = getCourseTopicGroups(course);
+  Object.keys(groups).forEach((name) => {
+    groups[name] = (groups[name] || []).filter(
+      (entry) => String(entry || "").trim().toLowerCase() !== String(canonicalTopic || "").trim().toLowerCase(),
+    );
+    if (!groups[name].length) {
+      delete groups[name];
+    }
+  });
+
+  const nextGroupNameRaw = String(groupName || "").trim();
+  if (nextGroupNameRaw) {
+    const existingGroupName = findMatchingCourseTopicGroupName(groups, nextGroupNameRaw) || nextGroupNameRaw;
+    const existingTopics = Array.isArray(groups[existingGroupName]) ? groups[existingGroupName] : [];
+    groups[existingGroupName] = [...existingTopics, canonicalTopic];
+  }
+
+  return applyCourseTopicGroupsUpdate(course, groups);
+}
+
+function renameCourseTopicGroup(course, currentName, nextName) {
+  const groups = getCourseTopicGroups(course);
+  const currentGroupName = findMatchingCourseTopicGroupName(groups, currentName);
+  const nextGroupNameRaw = String(nextName || "").trim();
+  if (!currentGroupName || !nextGroupNameRaw) {
+    return false;
+  }
+  const matchingTargetName = findMatchingCourseTopicGroupName(groups, nextGroupNameRaw);
+  const mergedTopics = [
+    ...(matchingTargetName && matchingTargetName !== currentGroupName ? (groups[matchingTargetName] || []) : []),
+    ...(groups[currentGroupName] || []),
+  ];
+  if (matchingTargetName && matchingTargetName !== currentGroupName) {
+    delete groups[matchingTargetName];
+  }
+  delete groups[currentGroupName];
+  groups[nextGroupNameRaw] = mergedTopics;
+  return applyCourseTopicGroupsUpdate(course, groups);
+}
+
+function removeCourseTopicGroup(course, groupName) {
+  const groups = getCourseTopicGroups(course);
+  const currentGroupName = findMatchingCourseTopicGroupName(groups, groupName);
+  if (!currentGroupName) {
+    return false;
+  }
+  delete groups[currentGroupName];
+  return applyCourseTopicGroupsUpdate(course, groups);
+}
+
+function syncCourseTopicGroupsForCourse(course, options = {}) {
+  if (!course || !CURRICULUM_COURSE_LIST.includes(course)) {
+    return false;
+  }
+  const groups = getCourseTopicGroups(course);
+  const renamedFrom = String(options?.renamedFrom || "").trim();
+  const renamedTo = String(options?.renamedTo || "").trim();
+  if (renamedFrom && renamedTo) {
+    Object.keys(groups).forEach((groupName) => {
+      groups[groupName] = (groups[groupName] || []).map((topic) => (
+        String(topic || "").trim().toLowerCase() === renamedFrom.toLowerCase() ? renamedTo : topic
+      ));
+    });
+  }
+  return applyCourseTopicGroupsUpdate(course, groups);
+}
+
+function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
+  const merged = normalizeCourseTopicGroupEntries(baseGroups, course);
+  Object.entries(normalizeCourseTopicGroupEntries(incomingGroups, course)).forEach(([groupName, topics]) => {
+    const targetName = findMatchingCourseTopicGroupName(merged, groupName) || groupName;
+    merged[targetName] = [...(merged[targetName] || []), ...(Array.isArray(topics) ? topics : [])];
+  });
+  return normalizeCourseTopicGroupEntries(merged, course);
+}
+
+function getAvailableTopicSectionsForCourse(course, questions = []) {
+  const topicOptions = getAvailableTopicsForCourse(course, questions);
+  const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
+  const groups = getCourseTopicGroups(course);
+  const groupedTopicKeys = new Set();
+  const sections = [];
+
+  Object.entries(groups).forEach(([groupName, configuredTopics]) => {
+    const visibleTopics = (configuredTopics || [])
+      .map((topic) => topicByKey.get(String(topic || "").trim().toLowerCase()))
+      .filter(Boolean);
+    if (!visibleTopics.length) {
+      return;
+    }
+    visibleTopics.forEach((topic) => groupedTopicKeys.add(String(topic || "").trim().toLowerCase()));
+    sections.push({
+      kind: "group",
+      name: groupName,
+      topics: visibleTopics,
+    });
+  });
+
+  const ungroupedTopics = topicOptions.filter(
+    (topic) => !groupedTopicKeys.has(String(topic || "").trim().toLowerCase()),
+  );
+  if (ungroupedTopics.length) {
+    sections.push({
+      kind: sections.length ? "ungrouped" : "flat",
+      name: sections.length ? "Other topics" : "",
+      topics: ungroupedTopics,
+    });
+  }
+
+  return sections;
+}
+
+function formatTopicFilterSummary(topics) {
+  const selectedTopics = Array.isArray(topics) ? topics.filter(Boolean) : [];
+  if (!selectedTopics.length) {
+    return "All topics";
+  }
+  if (selectedTopics.length <= 2) {
+    return selectedTopics.join(" + ");
+  }
+  return `${selectedTopics.length} topics selected`;
+}
+
+function rehydrateCourseCatalogConfigFromStorage() {
+  const savedCurriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  O6U_CURRICULUM = normalizeCurriculum(savedCurriculum || DEFAULT_O6U_CURRICULUM);
+  const savedCourseTopics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
+  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
+  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object"
+    ? savedCourseTopicGroups
+    : {};
+  const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
+  COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
+    ? savedCourseNotebookLinks
+    : {};
+  rebuildCurriculumCatalog();
+}
+
 function normalizeCourseNotebookLink(link) {
   const raw = String(link || "").trim();
   if (!raw) {
@@ -19899,6 +20827,7 @@ function rebuildCurriculumCatalog() {
     ),
   ];
   COURSE_TOPIC_OVERRIDES = normalizeCourseTopicMap(COURSE_TOPIC_OVERRIDES);
+  COURSE_TOPIC_GROUPS = normalizeCourseTopicGroupMap(COURSE_TOPIC_GROUPS);
   COURSE_NOTEBOOK_LINKS = normalizeCourseNotebookLinkMap(COURSE_NOTEBOOK_LINKS);
   QBANK_COURSE_TOPICS = Object.fromEntries(
     Object.entries(COURSE_TOPIC_OVERRIDES).map(([course, topics]) => [course, [...topics]]),
@@ -20012,10 +20941,19 @@ function applyCurriculumUpdate(nextCurriculum, options = {}) {
       renamedTo,
     );
   }
+  if (renamedFrom && renamedTo && COURSE_TOPIC_GROUPS[renamedFrom]) {
+    COURSE_TOPIC_GROUPS[renamedTo] = mergeCourseTopicGroupEntries(
+      COURSE_TOPIC_GROUPS[renamedTo],
+      COURSE_TOPIC_GROUPS[renamedFrom],
+      renamedTo,
+    );
+    delete COURSE_TOPIC_GROUPS[renamedFrom];
+  }
   if (renamedFrom && renamedTo && COURSE_NOTEBOOK_LINKS[renamedFrom] && !COURSE_NOTEBOOK_LINKS[renamedTo]) {
     COURSE_NOTEBOOK_LINKS[renamedTo] = COURSE_NOTEBOOK_LINKS[renamedFrom];
   }
   if (removedCourse) {
+    delete COURSE_TOPIC_GROUPS[removedCourse];
     delete COURSE_NOTEBOOK_LINKS[removedCourse];
   }
 
@@ -20023,6 +20961,7 @@ function applyCurriculumUpdate(nextCurriculum, options = {}) {
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
   save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
 
   const questions = getQuestions();
@@ -20063,13 +21002,16 @@ function applyCurriculumUpdate(nextCurriculum, options = {}) {
   syncUsersWithCurriculum();
 }
 
-function applyCourseTopicsUpdate(course, nextTopics) {
+function applyCourseTopicsUpdate(course, nextTopics, options = {}) {
   if (!course || !CURRICULUM_COURSE_LIST.includes(course)) {
     return;
   }
+  const previousTopics = [...(QBANK_COURSE_TOPICS[course] || [])];
   COURSE_TOPIC_OVERRIDES[course] = normalizeCourseTopicList(nextTopics, course);
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  syncTopicNewCatalogForCourse(course, previousTopics, COURSE_TOPIC_OVERRIDES[course], options);
+  syncCourseTopicGroupsForCourse(course, options);
 
   const questions = getQuestions();
   let questionsChanged = false;
@@ -20411,6 +21353,7 @@ function importQuestionsFromRaw(raw, config) {
   const errors = [];
   let records = [];
   let topicCatalogChanged = false;
+  const topicCatalogPreviousByCourse = new Map();
   let usedCsvImport = false;
   const forceDraft = Boolean(config?.importAsDraft);
 
@@ -20446,7 +21389,13 @@ function importQuestionsFromRaw(raw, config) {
   records.forEach((row, index) => {
     const course = sanitizeCourseAssignments([row.course || config.defaultCourse])[0] || config.defaultCourse;
     const importedTopic = String(row.topic || "").trim();
-    if (course && importedTopic && !QBANK_COURSE_TOPICS[course]?.includes(importedTopic)) {
+    const topicExists = (QBANK_COURSE_TOPICS[course] || []).some(
+      (topic) => String(topic || "").trim().toLowerCase() === importedTopic.toLowerCase(),
+    );
+    if (course && importedTopic && !topicExists) {
+      if (!topicCatalogPreviousByCourse.has(course)) {
+        topicCatalogPreviousByCourse.set(course, [...(QBANK_COURSE_TOPICS[course] || [])]);
+      }
       COURSE_TOPIC_OVERRIDES[course] = normalizeCourseTopicList(
         [...(QBANK_COURSE_TOPICS[course] || []), importedTopic],
         course,
@@ -20513,6 +21462,9 @@ function importQuestionsFromRaw(raw, config) {
   }
   if (topicCatalogChanged) {
     save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    topicCatalogPreviousByCourse.forEach((previousTopics, course) => {
+      syncTopicNewCatalogForCourse(course, previousTopics, COURSE_TOPIC_OVERRIDES[course] || []);
+    });
   }
   return { added, total, errors };
 }
@@ -22117,11 +23069,10 @@ async function loginAsDemo(email, password) {
     toast("This account is pending admin approval.");
     return;
   }
+  save(STORAGE_KEYS.currentUserId, user.id);
   if (await shouldForceRefreshForUpdates(user)) {
     return;
   }
-
-  save(STORAGE_KEYS.currentUserId, user.id);
   appendSystemLog("auth.login", `Logged in as ${user.email}`, {
     userId: user.id,
     role: user.role,
@@ -22313,7 +23264,6 @@ init().catch((error) => {
   const alreadyAttemptedRecovery = readSessionStorageKey(BOOT_RECOVERY_FLAG) === "1";
   if (!alreadyAttemptedRecovery) {
     writeSessionStorageKey(BOOT_RECOVERY_FLAG, "1");
-    Object.values(STORAGE_KEYS).forEach((key) => removeStorageKey(key));
     init()
       .then(() => {
         removeSessionStorageKey(BOOT_RECOVERY_FLAG);

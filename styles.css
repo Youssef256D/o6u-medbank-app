@@ -1944,6 +1944,7 @@ body.theme-comfort .maintenance-badge {
 .admin-topic-chip {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.28rem;
   padding: 0.2rem 0.5rem;
   border: 1px solid var(--line);
@@ -1951,6 +1952,11 @@ body.theme-comfort .maintenance-badge {
   background: #fff;
   font-size: 0.8rem;
   color: var(--ink);
+}
+
+.admin-topic-group-badge {
+  background: rgba(23, 126, 137, 0.12);
+  color: var(--brand-strong);
 }
 
 .admin-topic-chip button {
@@ -1972,8 +1978,72 @@ body.theme-comfort .maintenance-badge {
   color: var(--brand-strong);
 }
 
+.admin-topic-chip button[data-action="course-topic-group-set"] {
+  color: var(--brand-strong);
+}
+
 .admin-topic-chip button[data-action="course-topic-rename"]:hover {
   color: var(--brand);
+}
+
+.admin-topic-chip button[data-action="course-topic-group-set"]:hover {
+  color: var(--brand);
+}
+
+.admin-topic-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.admin-topic-group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  padding: 0.3rem 0.48rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.62);
+  font-size: 0.78rem;
+  color: var(--ink);
+}
+
+.admin-topic-group-copy {
+  display: grid;
+  gap: 0.04rem;
+}
+
+.admin-topic-group-copy small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.admin-topic-group-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.12rem;
+  margin: 0;
+  line-height: 1;
+  font-size: 0.82rem;
+}
+
+.admin-topic-group-chip button:hover {
+  color: var(--danger);
+}
+
+.admin-topic-group-chip button[data-action="course-topic-group-rename"] {
+  color: var(--brand-strong);
+}
+
+.admin-topic-group-chip button[data-action="course-topic-group-rename"]:hover {
+  color: var(--brand);
+}
+
+.admin-topic-group-empty {
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .admin-topic-add {
@@ -2557,13 +2627,77 @@ label {
   gap: 0.5rem;
 }
 
+.create-test-topic-grid-toolbar {
+  margin-bottom: 0.1rem;
+}
+
+.create-test-topic-sections {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.create-test-topic-section {
+  display: grid;
+  gap: 0.56rem;
+  padding: 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.create-test-topic-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.create-test-topic-section-copy {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.create-test-topic-section-title {
+  margin: 0;
+  font-size: 0.93rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.create-test-topic-section-count {
+  font-size: 0.77rem;
+  color: var(--muted);
+}
+
+.create-test-topic-section-action {
+  flex-shrink: 0;
+}
+
 .create-test-topic-chip {
   padding: 0.32rem 0.62rem;
   font-size: 0.95rem;
 }
 
+.create-test-topic-chip-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.create-test-topic-badge {
+  margin-left: auto;
+  background: rgba(210, 124, 18, 0.16);
+  color: #9a3412;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .create-test-topic-chip.is-all {
   border-color: rgba(23, 126, 137, 0.35);
+}
+
+.create-test-topic-empty {
+  margin: 0;
 }
 
 input,
@@ -4512,12 +4646,14 @@ body.theme-dark .auth-actions .notification-menu-read-btn,
 body.theme-dark .admin-course-check,
 body.theme-dark .admin-na,
 body.theme-dark .admin-topic-chip,
+body.theme-dark .admin-topic-group-chip,
 body.theme-dark .admin-user-suggestions,
 body.theme-dark .admin-question-bulk-bar,
 body.theme-dark .admin-import-report,
 body.theme-dark .admin-question-image-preview,
 body.theme-dark .create-test-randomize,
 body.theme-dark .create-test-filter-card,
+body.theme-dark .create-test-topic-section,
 body.theme-dark .choice,
 body.theme-dark .btn.ghost,
 body.theme-dark input,
@@ -4602,12 +4738,14 @@ body.theme-comfort .auth-actions .notification-menu-read-btn,
 body.theme-comfort .admin-course-check,
 body.theme-comfort .admin-na,
 body.theme-comfort .admin-topic-chip,
+body.theme-comfort .admin-topic-group-chip,
 body.theme-comfort .admin-user-suggestions,
 body.theme-comfort .admin-question-bulk-bar,
 body.theme-comfort .admin-import-report,
 body.theme-comfort .admin-question-image-preview,
 body.theme-comfort .create-test-randomize,
 body.theme-comfort .create-test-filter-card,
+body.theme-comfort .create-test-topic-section,
 body.theme-comfort .choice,
 body.theme-comfort .btn.ghost,
 body.theme-comfort input,
@@ -4704,8 +4842,28 @@ body.theme-dark .notification-bell-badge {
   border-color: #141414;
 }
 
+body.theme-dark .create-test-topic-badge {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+}
+
+body.theme-dark .admin-topic-group-badge {
+  background: rgba(108, 196, 208, 0.16);
+  color: #a5f3fc;
+}
+
 body.theme-comfort .notification-bell-badge {
   border-color: #6d513d;
+}
+
+body.theme-comfort .create-test-topic-badge {
+  background: rgba(178, 115, 41, 0.18);
+  color: #8a4b12;
+}
+
+body.theme-comfort .admin-topic-group-badge {
+  background: rgba(128, 92, 62, 0.16);
+  color: #6d4022;
 }
 
 body.theme-dark .exam-shell-moodle {
