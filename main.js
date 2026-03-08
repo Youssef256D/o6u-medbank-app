@@ -180,6 +180,7 @@ const state = {
   adminPage: INITIAL_ADMIN_PAGE,
   adminCurriculumYear: 1,
   adminCurriculumSemester: 1,
+  adminCourseSearch: "",
   adminEditorCourse: "",
   adminEditorTopic: "",
   adminQuestionModalOpen: false,
@@ -11265,19 +11266,41 @@ function renderCreateTest() {
           ? `
                             <div class="create-test-topic-section-head">
                               <div class="create-test-topic-section-copy">
+                                ${section.kind === "group" ? '<span class="create-test-topic-section-kicker">Subgroup</span>' : ""}
                                 <p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>
-                                <span class="create-test-topic-section-count">${section.topics.length} topic${section.topics.length === 1 ? "" : "s"}</span>
+                                <span
+                                  class="create-test-topic-section-count"
+                                  ${section.kind === "group" ? `data-role="create-test-group-selection-count" data-group-name="${escapeHtml(section.name)}"` : ""}
+                                >
+                                  ${section.kind === "group"
+            ? `${section.topics.filter((topic) => selectedTopics.includes(topic)).length}/${section.topics.length} selected`
+            : `${section.topics.length} topic${section.topics.length === 1 ? "" : "s"}`}
+                                </span>
                               </div>
                               ${section.kind === "group"
             ? `
-                                  <button
-                                    class="btn ghost admin-btn-sm create-test-topic-section-action"
-                                    type="button"
-                                    data-action="create-test-toggle-topic-group"
-                                    data-group-name="${escapeHtml(section.name)}"
-                                  >
-                                    Toggle group
-                                  </button>
+                                  <div class="create-test-topic-section-actions">
+                                    <button
+                                      class="btn ghost admin-btn-sm create-test-topic-section-action"
+                                      type="button"
+                                      data-action="create-test-apply-topic-group"
+                                      data-group-name="${escapeHtml(section.name)}"
+                                      data-group-mode="select"
+                                      ${section.topics.every((topic) => selectedTopics.includes(topic)) ? "disabled" : ""}
+                                    >
+                                      Select all
+                                    </button>
+                                    <button
+                                      class="btn ghost admin-btn-sm create-test-topic-section-action"
+                                      type="button"
+                                      data-action="create-test-apply-topic-group"
+                                      data-group-name="${escapeHtml(section.name)}"
+                                      data-group-mode="clear"
+                                      ${section.topics.some((topic) => selectedTopics.includes(topic)) ? "" : "disabled"}
+                                    >
+                                      Clear
+                                    </button>
+                                  </div>
                                 `
             : ""}
                             </div>
@@ -11356,7 +11379,7 @@ function wireCreateTest() {
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
-  const topicGroupButtons = Array.from(appEl.querySelectorAll("[data-action='create-test-toggle-topic-group']"));
+  const topicGroupButtons = Array.from(appEl.querySelectorAll("[data-action='create-test-apply-topic-group']"));
   const allTopicsInput = document.querySelector("input[data-role='create-test-all-topics']");
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
@@ -11375,13 +11398,35 @@ function wireCreateTest() {
 
   const syncTopicSelectionUi = () => {
     const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
+    const allTopicsMode = selectedSet.size === 0;
     topicInputs.forEach((entry) => {
       entry.checked = selectedSet.has(String(entry.value || "").trim());
     });
     if (allTopicsInput) {
-      allTopicsInput.checked = selectedSet.size === 0;
+      allTopicsInput.checked = allTopicsMode;
     }
+    const groupSections = Array.from(appEl.querySelectorAll(".create-test-topic-section.is-group"));
+    groupSections.forEach((sectionEl) => {
+      const sectionTopicInputs = Array.from(sectionEl.querySelectorAll("input[data-role='create-test-topic']"));
+      const totalTopics = sectionTopicInputs.length;
+      const selectedCount = allTopicsMode
+        ? totalTopics
+        : sectionTopicInputs.filter((entry) => selectedSet.has(String(entry.value || "").trim())).length;
+      const countEl = sectionEl.querySelector("[data-role='create-test-group-selection-count']");
+      if (countEl) {
+        countEl.textContent = `${selectedCount}/${totalTopics} selected`;
+      }
+      const selectAllButton = sectionEl.querySelector("[data-action='create-test-apply-topic-group'][data-group-mode='select']");
+      const clearButton = sectionEl.querySelector("[data-action='create-test-apply-topic-group'][data-group-mode='clear']");
+      if (selectAllButton) {
+        selectAllButton.disabled = selectedCount === totalTopics;
+      }
+      if (clearButton) {
+        clearButton.disabled = selectedCount === 0;
+      }
+    });
   };
+  syncTopicSelectionUi();
 
   const updateCreateTestSummary = () => {
     const user = getCurrentUser();
@@ -11454,6 +11499,7 @@ function wireCreateTest() {
       const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
       const selectedCourse = state.qbankFilters.course || fallbackCourse;
       const groupName = String(button.getAttribute("data-group-name") || "").trim();
+      const groupMode = String(button.getAttribute("data-group-mode") || "select").trim().toLowerCase();
       if (!selectedCourse || !groupName) {
         return;
       }
@@ -11468,25 +11514,29 @@ function wireCreateTest() {
       }
       const topicOptions = getAvailableTopicsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
       const availableTopicSet = new Set(topicOptions.map((topic) => String(topic || "").trim()));
-      const selectedSet = new Set(
+      const explicitSelectedSet = new Set(
         (state.qbankFilters.topics || [])
           .map((topic) => String(topic || "").trim())
           .filter((topic) => availableTopicSet.has(topic)),
       );
+      const selectedSet = explicitSelectedSet.size
+        ? explicitSelectedSet
+        : new Set(topicOptions.map((topic) => String(topic || "").trim()));
       const normalizedGroupTopics = groupTopics.filter((topic) => availableTopicSet.has(String(topic || "").trim()));
-      const allGroupTopicsSelected = normalizedGroupTopics.every((topic) => selectedSet.has(String(topic || "").trim()));
       normalizedGroupTopics.forEach((topic) => {
         const normalizedTopic = String(topic || "").trim();
         if (!normalizedTopic) {
           return;
         }
-        if (allGroupTopicsSelected) {
+        if (groupMode === "clear") {
           selectedSet.delete(normalizedTopic);
         } else {
           selectedSet.add(normalizedTopic);
         }
       });
-      state.qbankFilters.topics = topicOptions.filter((topic) => selectedSet.has(String(topic || "").trim()));
+      state.qbankFilters.topics = selectedSet.size === topicOptions.length
+        ? []
+        : topicOptions.filter((topic) => selectedSet.has(String(topic || "").trim()));
       updateCreateTestSummary();
     });
   });
@@ -14208,6 +14258,8 @@ function renderAdmin() {
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
     const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
     const notebookLinksByCourse = COURSE_NOTEBOOK_LINKS;
+    const courseSearchQuery = String(state.adminCourseSearch || "").trim();
+    const normalizedCourseSearch = courseSearchQuery.toLowerCase();
     const questionCountByCourse = questions.reduce((acc, question) => {
       const mappedCourse = getQbankCourseTopicMeta(question).course;
       if (!mappedCourse) {
@@ -14216,99 +14268,162 @@ function renderAdmin() {
       acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
       return acc;
     }, {});
-    const curriculumRows = selectedSemesterCourses
-      .map(
-        (course, idx) => `
-          <tr data-course-index="${idx}">
-            <td>${idx + 1}</td>
-            <td><input data-field="curriculumCourseName" value="${escapeHtml(course)}" /></td>
-            <td data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</td>
-            <td>
-              <div class="admin-course-notebook-link">
-                <input
-                  data-field="courseNotebookLink"
-                  value="${escapeHtml(notebookLinksByCourse[course] || "")}"
-                  placeholder="https://notebooklm.google.com/..."
-                />
-                <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save link</button>
+    const topicCountByCourse = Object.fromEntries(
+      selectedSemesterCourses.map((course) => [course, (QBANK_COURSE_TOPICS[course] || []).length]),
+    );
+    const subgroupCountByCourse = Object.fromEntries(
+      selectedSemesterCourses.map((course) => [course, Object.keys(getCourseTopicGroups(course)).length]),
+    );
+    const filteredCourseEntries = selectedSemesterCourses
+      .map((course, idx) => ({ course, idx }))
+      .filter(({ course }) => !normalizedCourseSearch || String(course || "").trim().toLowerCase().includes(normalizedCourseSearch));
+    const semesterTopicCount = selectedSemesterCourses.reduce((sum, course) => sum + (topicCountByCourse[course] || 0), 0);
+    const semesterSubgroupCount = selectedSemesterCourses.reduce((sum, course) => sum + (subgroupCountByCourse[course] || 0), 0);
+    const semesterQuestionCount = selectedSemesterCourses.reduce((sum, course) => sum + (questionCountByCourse[course] || 0), 0);
+    const courseCards = filteredCourseEntries
+      .map(({ course, idx }) => {
+        const topicCount = topicCountByCourse[course] || 0;
+        const subgroupCount = subgroupCountByCourse[course] || 0;
+        const questionCount = questionCountByCourse[course] || 0;
+        return `
+          <article class="admin-course-card" data-course-index="${idx}">
+            <div class="admin-course-card-head">
+              <div class="admin-course-card-title">
+                <span class="admin-course-card-order">#${idx + 1}</span>
+                <label class="admin-course-card-name-field">
+                  <span>Course name</span>
+                  <input data-field="curriculumCourseName" value="${escapeHtml(course)}" />
+                </label>
               </div>
-            </td>
-            <td>
-              <div class="admin-course-qbank">
-                <p class="admin-course-qbank-count">
-                  <b>${questionCountByCourse[course] || 0}</b> questions
-                </p>
-                <div class="admin-course-qbank-actions">
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Edit questions</button>
-                  <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${(questionCountByCourse[course] || 0) ? "" : "disabled"}>Delete all questions</button>
-                  <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
-                </div>
-              </div>
-            </td>
-            <td>
-              <div class="stack">
+              <div class="admin-course-card-head-actions">
                 <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
                 <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete</button>
               </div>
-            </td>
-          </tr>
-        `,
-      )
+            </div>
+
+            <div class="admin-course-card-stats">
+              <span class="admin-course-stat"><b>${topicCount}</b><small>Topics</small></span>
+              <span class="admin-course-stat"><b>${subgroupCount}</b><small>Subgroups</small></span>
+              <span class="admin-course-stat"><b>${questionCount}</b><small>Questions</small></span>
+            </div>
+
+            <div class="admin-course-card-layout">
+              <section class="admin-course-card-panel admin-course-card-panel-main">
+                <div class="admin-course-card-panel-head">
+                  <div>
+                    <h4 style="margin: 0;">Topics and subgroups</h4>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Arrange topics the same way students should browse them.</p>
+                  </div>
+                </div>
+                <div data-role="course-topics-cell">${renderAdminCourseTopicControls(course)}</div>
+              </section>
+
+              <section class="admin-course-card-panel">
+                <div class="admin-course-card-panel-head">
+                  <div>
+                    <h4 style="margin: 0;">Course tools</h4>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Jump into questions or update the study helper link.</p>
+                  </div>
+                </div>
+
+                <label class="admin-course-tool-field">Ask AI / Notebook link
+                  <div class="admin-course-notebook-link">
+                    <input
+                      data-field="courseNotebookLink"
+                      value="${escapeHtml(notebookLinksByCourse[course] || "")}"
+                      placeholder="https://notebooklm.google.com/..."
+                    />
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save link</button>
+                  </div>
+                </label>
+
+                <div class="admin-course-qbank">
+                  <p class="admin-course-qbank-count">
+                    <b>${questionCount}</b> question${questionCount === 1 ? "" : "s"} in this course
+                  </p>
+                  <div class="admin-course-qbank-actions">
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Open question bank</button>
+                    <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${questionCount ? "" : "disabled"}>Delete all questions</button>
+                    <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </article>
+        `;
+      })
       .join("");
 
     pageContent = `
       <section class="card admin-section" id="admin-courses-section">
-        <div class="flex-between">
+        <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">Courses by Year & Semester</h3>
-            <p class="subtle">Add, rename, or remove courses for each academic year and semester.</p>
+            <p class="subtle">Search courses, organize topics into subgroups, and jump into course tools faster.</p>
           </div>
+          <p class="subtle" style="margin: 0;">Showing <b>${filteredCourseEntries.length}</b> of <b>${selectedSemesterCourses.length}</b> course(s)</p>
         </div>
-        <form id="admin-curriculum-filter-form" style="margin-top: 0.8rem;">
-          <div class="form-row">
-            <label>Year
-              <select name="curriculumYear">
-                <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
-                <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
-                <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
-                <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
-                <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
-              </select>
-            </label>
-            <label>Semester
-              <select name="curriculumSemester">
-                <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
-                <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
-              </select>
-            </label>
-          </div>
-        </form>
 
-        <form id="admin-curriculum-add-form" style="margin-top: 0.8rem;">
-          <label>New course name
-            <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
-          </label>
-          <div class="stack">
-            <button class="btn" type="submit">Add course</button>
-          </div>
-        </form>
+        <div class="admin-course-overview" style="margin-top: 0.85rem;">
+          <article class="admin-course-overview-card">
+            <b>${selectedSemesterCourses.length}</b>
+            <small>Courses this semester</small>
+          </article>
+          <article class="admin-course-overview-card">
+            <b>${semesterTopicCount}</b>
+            <small>Total topics</small>
+          </article>
+          <article class="admin-course-overview-card">
+            <b>${semesterSubgroupCount}</b>
+            <small>Total subgroups</small>
+          </article>
+          <article class="admin-course-overview-card">
+            <b>${semesterQuestionCount}</b>
+            <small>Total questions</small>
+          </article>
+        </div>
 
-        <div class="table-wrap" style="margin-top: 0.9rem;">
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Course Name</th>
-                <th>Topics</th>
-                <th>Ask AI Link</th>
-                <th>Question Bank</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${curriculumRows || `<tr><td colspan="6" class="subtle">No courses in this semester yet.</td></tr>`}
-            </tbody>
-          </table>
+        <div class="admin-course-toolbar" style="margin-top: 0.85rem;">
+          <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
+            <div class="form-row">
+              <label>Year
+                <select name="curriculumYear">
+                  <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
+                  <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
+                  <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
+                  <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
+                  <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
+                </select>
+              </label>
+              <label>Semester
+                <select name="curriculumSemester">
+                  <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
+                  <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
+                </select>
+              </label>
+              <label class="admin-course-search-field">Search course
+                <input id="admin-curriculum-search" type="search" value="${escapeHtml(courseSearchQuery)}" placeholder="Filter by course name..." />
+              </label>
+            </div>
+          </form>
+
+          <form id="admin-curriculum-add-form" class="admin-course-toolbar-card admin-course-add-form">
+            <label>New course name
+              <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
+            </label>
+            <div class="stack">
+              <button class="btn" type="submit">Add course</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="admin-course-grid" style="margin-top: 0.95rem;">
+          ${courseCards || `
+            <div class="admin-course-empty-state">
+              <h4 style="margin: 0;">No matching courses</h4>
+              <p class="subtle" style="margin: 0;">Try a different search term or switch the year/semester filter.</p>
+            </div>
+          `}
         </div>
       </section>
     `;
@@ -15187,10 +15302,10 @@ function renderAdminCourseTopicControls(course, options = {}) {
                   type="button"
                   data-action="course-topic-group-focus"
                   data-topic-index="${topicIdx}"
-                  aria-label="Manage parent group for ${escapeHtml(topic)}"
-                  title="Manage parent group"
+                  aria-label="Manage subgroup for ${escapeHtml(topic)}"
+                  title="Manage subgroup"
                 >
-                  parent
+                  subgroup
                 </button>
                 <button
                   type="button"
@@ -15219,13 +15334,13 @@ function renderAdminCourseTopicControls(course, options = {}) {
       <details class="admin-topic-group-manager" data-role="course-topic-group-manager" ${options?.openGroupManager ? "open" : ""}>
         <summary>
           <span class="admin-topic-group-manager-copy">
-            <b>Manage parent groups</b>
-            <small>${topicGroupEntries.length} group${topicGroupEntries.length === 1 ? "" : "s"} • ${ungroupedTopicCount} ungrouped</small>
+            <b>Manage subgroups</b>
+            <small>${topicGroupEntries.length} subgroup${topicGroupEntries.length === 1 ? "" : "s"} • ${ungroupedTopicCount} ungrouped</small>
           </span>
-          <span class="admin-topic-group-manager-hint">Open</span>
+          <span class="admin-topic-group-manager-hint">Manage</span>
         </summary>
         <div class="admin-topic-group-manager-body">
-          <p class="subtle admin-topic-group-manager-note">Type a new group name to create it, or pick an existing one. Removing a group does not change the topic data.</p>
+          <p class="subtle admin-topic-group-manager-note">Type a subgroup name to create it, or pick an existing one. Removing a subgroup does not change the topic data.</p>
           <datalist id="${groupInputListId}">
             ${topicGroupEntries
       .map(([groupName]) => `<option value="${escapeHtml(groupName)}"></option>`)
@@ -15249,7 +15364,7 @@ function renderAdminCourseTopicControls(course, options = {}) {
                     data-topic-index="${topicIdx}"
                     list="${groupInputListId}"
                     value="${escapeHtml(groupName)}"
-                    placeholder="Existing or new parent group"
+                    placeholder="Existing or new subgroup"
                   />
                   <button
                     class="btn ghost admin-btn-sm"
@@ -15281,11 +15396,11 @@ function renderAdminCourseTopicControls(course, options = {}) {
               <article class="admin-topic-group-card" data-role="course-topic-group-card" data-group-name="${escapeHtml(groupName)}">
                 <div class="admin-topic-group-card-head">
                   <label class="admin-topic-group-card-name">
-                    <span>Parent group</span>
+                    <span>Subgroup</span>
                     <input
                       data-field="courseTopicGroupRename"
                       value="${escapeHtml(groupName)}"
-                      placeholder="Parent group name"
+                      placeholder="Subgroup name"
                     />
                   </label>
                   <div class="admin-topic-group-card-actions">
@@ -15315,7 +15430,7 @@ function renderAdminCourseTopicControls(course, options = {}) {
               </article>
             `)
         .join("")
-      : '<span class="admin-topic-group-empty">No parent groups yet. Save a topic into a group to create the first one.</span>'}
+      : '<span class="admin-topic-group-empty">No subgroups yet. Save a topic into a subgroup to create the first one.</span>'}
           </div>
         </div>
       </details>
@@ -16112,6 +16227,7 @@ function wireAdmin() {
   const curriculumFilterForm = document.getElementById("admin-curriculum-filter-form");
   const curriculumYearSelect = curriculumFilterForm?.querySelector("select[name='curriculumYear']");
   const curriculumSemesterSelect = curriculumFilterForm?.querySelector("select[name='curriculumSemester']");
+  const curriculumSearchInput = document.getElementById("admin-curriculum-search");
   const syncCurriculumSelection = () => {
     state.adminCurriculumYear = sanitizeAcademicYear(curriculumYearSelect?.value || 1);
     state.adminCurriculumSemester = sanitizeAcademicSemester(curriculumSemesterSelect?.value || 1);
@@ -16120,6 +16236,11 @@ function wireAdmin() {
   };
   curriculumYearSelect?.addEventListener("change", syncCurriculumSelection);
   curriculumSemesterSelect?.addEventListener("change", syncCurriculumSelection);
+  curriculumSearchInput?.addEventListener("input", () => {
+    state.adminCourseSearch = String(curriculumSearchInput.value || "");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
 
   const curriculumAddForm = document.getElementById("admin-curriculum-add-form");
   curriculumAddForm?.addEventListener("submit", async (event) => {
@@ -16158,7 +16279,7 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='curriculum-rename']").forEach((button) => {
     button.addEventListener("click", async () => {
-      const row = button.closest("tr[data-course-index]");
+      const row = button.closest("[data-course-index]");
       if (!row) return;
 
       const index = Number(row.getAttribute("data-course-index"));
@@ -16203,7 +16324,7 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='curriculum-delete']").forEach((button) => {
     button.addEventListener("click", async () => {
-      const row = button.closest("tr[data-course-index]");
+      const row = button.closest("[data-course-index]");
       if (!row) return;
 
       const index = Number(row.getAttribute("data-course-index"));
@@ -16261,7 +16382,7 @@ function wireAdmin() {
       return;
     }
 
-    const row = actionEl.closest("tr[data-course-index]");
+    const row = actionEl.closest("[data-course-index]");
     if (!row) return;
     const index = Number(row.getAttribute("data-course-index"));
     const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
@@ -16343,7 +16464,7 @@ function wireAdmin() {
         const input = groupCard?.querySelector("input[data-field='courseTopicGroupRename']");
         const nextGroupName = String(input?.value || "").trim();
         if (!nextGroupName) {
-          toast("Parent group name is required.");
+          toast("Subgroup name is required.");
           return;
         }
         if (nextGroupName === groupName) {
@@ -16357,15 +16478,15 @@ function wireAdmin() {
         refreshRowTopics({ openGroupManager: true });
         try {
           await flushPendingSyncNow({ throwOnRelationalFailure: false });
-          toast("Parent group renamed.");
+          toast("Subgroup renamed.");
         } catch (syncError) {
-          toast(`Parent group renamed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+          toast(`Subgroup renamed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
         }
         return;
       }
 
       const groupedTopics = getCourseTopicGroups(course)[groupName] || [];
-      if (!window.confirm(`Remove parent group "${groupName}"? ${groupedTopics.length} topic(s) will stay unchanged.`)) {
+      if (!window.confirm(`Remove subgroup "${groupName}"? ${groupedTopics.length} topic(s) will stay unchanged.`)) {
         return;
       }
       const changed = removeCourseTopicGroup(course, groupName);
@@ -16375,9 +16496,9 @@ function wireAdmin() {
       refreshRowTopics({ openGroupManager: true });
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast("Parent group removed.");
+        toast("Subgroup removed.");
       } catch (syncError) {
-        toast(`Parent group removed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+        toast(`Subgroup removed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -16479,9 +16600,9 @@ function wireAdmin() {
       refreshRowTopics({ openGroupManager: true });
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast(nextGroupName ? "Topic grouped." : "Topic removed from parent group.");
+        toast(nextGroupName ? "Topic moved into subgroup." : "Topic removed from subgroup.");
       } catch (syncError) {
-        toast(`Grouping saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+        toast(`Subgroup changes saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -16552,6 +16673,28 @@ function wireAdmin() {
     if (target.matches("input[data-field='courseTopicGroupRename']")) {
       const groupCard = target.closest("[data-role='course-topic-group-card']");
       const saveButton = groupCard?.querySelector("[data-action='course-topic-group-rename-save']");
+      if (!saveButton) {
+        return;
+      }
+      event.preventDefault();
+      saveButton.click();
+      return;
+    }
+
+    if (target.matches("input[data-field='curriculumCourseName']")) {
+      const courseCard = target.closest("[data-course-index]");
+      const saveButton = courseCard?.querySelector("[data-action='curriculum-rename']");
+      if (!saveButton) {
+        return;
+      }
+      event.preventDefault();
+      saveButton.click();
+      return;
+    }
+
+    if (target.matches("input[data-field='courseNotebookLink']")) {
+      const courseCard = target.closest("[data-course-index]");
+      const saveButton = courseCard?.querySelector("[data-action='course-notebook-link-save']");
       if (!saveButton) {
         return;
       }
