@@ -212,6 +212,9 @@ const state = {
   adminDataLastSyncAt: 0,
   adminDataSyncError: "",
   adminForceRefreshRunning: false,
+  adminCourseQuestionCountCache: null,
+  adminCourseQuestionCountCacheRevision: 0,
+  questionsRevision: 0,
   adminPresenceRows: [],
   adminPresenceLoading: false,
   adminPresenceError: "",
@@ -243,6 +246,7 @@ let appVersionCheckPromise = null;
 let askAiWindowRef = null;
 
 let wasAdminCourseTopicModalOpen = false;
+let adminCourseSearchDebounce = null;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -14316,14 +14320,20 @@ function renderAdmin() {
     const notebookLinksByCourse = COURSE_NOTEBOOK_LINKS;
     const courseSearchQuery = String(state.adminCourseSearch || "").trim();
     const normalizedCourseSearch = courseSearchQuery.toLowerCase();
-    const questionCountByCourse = questions.reduce((acc, question) => {
-      const mappedCourse = getQbankCourseTopicMeta(question).course;
-      if (!mappedCourse) {
+    const questionsRevision = Number(state.questionsRevision || 0);
+    let questionCountByCourse = state.adminCourseQuestionCountCache;
+    if (!questionCountByCourse || state.adminCourseQuestionCountCacheRevision !== questionsRevision) {
+      questionCountByCourse = questions.reduce((acc, question) => {
+        const mappedCourse = getQbankCourseTopicMeta(question).course;
+        if (!mappedCourse) {
+          return acc;
+        }
+        acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
         return acc;
-      }
-      acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
-      return acc;
-    }, {});
+      }, {});
+      state.adminCourseQuestionCountCache = questionCountByCourse;
+      state.adminCourseQuestionCountCacheRevision = questionsRevision;
+    }
     const topicCountByCourse = Object.fromEntries(
       selectedSemesterCourses.map((course) => [course, (QBANK_COURSE_TOPICS[course] || []).length]),
     );
@@ -16380,14 +16390,20 @@ function wireAdmin() {
   curriculumSearchInput?.addEventListener("input", () => {
     const nextValue = String(curriculumSearchInput.value || "");
     state.adminCourseSearch = nextValue;
-    state.skipNextRouteAnimation = true;
-    render();
-    const nextSearchInput = document.getElementById("admin-curriculum-search");
-    if (nextSearchInput instanceof HTMLInputElement) {
-      nextSearchInput.focus();
-      const cursorPos = nextValue.length;
-      nextSearchInput.setSelectionRange(cursorPos, cursorPos);
+    if (adminCourseSearchDebounce) {
+      window.clearTimeout(adminCourseSearchDebounce);
     }
+    adminCourseSearchDebounce = window.setTimeout(() => {
+      adminCourseSearchDebounce = null;
+      state.skipNextRouteAnimation = true;
+      render();
+      const nextSearchInput = document.getElementById("admin-curriculum-search");
+      if (nextSearchInput instanceof HTMLInputElement) {
+        nextSearchInput.focus();
+        const cursorPos = nextValue.length;
+        nextSearchInput.setSelectionRange(cursorPos, cursorPos);
+      }
+    }, 140);
   });
 
   const curriculumAddForm = document.getElementById("admin-curriculum-add-form");
@@ -20523,10 +20539,11 @@ function applyQbankFilters(questions, filters) {
     .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded));
 }
 
-function getAvailableTopicsForCourse(course, questions = []) {
+function getAvailableTopicsForCourse(course, questions = [], options = {}) {
   const configuredTopics = (QBANK_COURSE_TOPICS[course] || []).filter((topic) => !isRemovedTopicName(topic));
   const questionTopics = [];
   const seen = new Set();
+  const includeConfigured = Boolean(options?.includeConfigured);
 
   (questions || []).forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
@@ -20541,10 +20558,12 @@ function getAvailableTopicsForCourse(course, questions = []) {
     questionTopics.push(meta.topic);
   });
 
-  // Student topic filters should only show topics that currently have published questions.
+  // Student topic filters default to published topics, but allow configured topics when needed.
   const questionTopicKeys = new Set(questionTopics.map((topic) => String(topic || "").trim().toLowerCase()));
   const configuredTopicKeys = new Set(configuredTopics.map((topic) => String(topic || "").trim().toLowerCase()));
-  const orderedConfigured = configuredTopics.filter((topic) => questionTopicKeys.has(String(topic || "").trim().toLowerCase()));
+  const orderedConfigured = includeConfigured
+    ? configuredTopics
+    : configuredTopics.filter((topic) => questionTopicKeys.has(String(topic || "").trim().toLowerCase()));
   const extraTopics = questionTopics.filter((topic) => !configuredTopicKeys.has(String(topic || "").trim().toLowerCase()));
   return [...orderedConfigured, ...extraTopics];
 }
@@ -21121,9 +21140,10 @@ function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
 }
 
 function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
-  const topicOptions = getAvailableTopicsForCourse(course, questions);
-  const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
   const groups = getCourseTopicGroups(course);
+  const includeConfigured = Boolean(options?.includeConfigured) || Object.keys(groups).length > 0;
+  const topicOptions = getAvailableTopicsForCourse(course, questions, { includeConfigured });
+  const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
   const groupedTopicKeys = new Set();
   const sections = [];
 
@@ -23500,6 +23520,9 @@ function writeStorageKey(key, value) {
   } catch (error) {
     warnStorageFallback(error);
     inMemoryStorage.set(key, serialized);
+  }
+  if (key === STORAGE_KEYS.questions) {
+    state.questionsRevision = (state.questionsRevision || 0) + 1;
   }
 }
 
