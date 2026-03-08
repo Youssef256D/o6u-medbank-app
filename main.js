@@ -20518,13 +20518,23 @@ function syncTopicNewCatalogForCourse(course, previousTopics, nextTopics, option
 }
 
 function getQbankCourseTopicMeta(question) {
-  const explicitCourse = String(question.qbankCourse || "").trim();
+  const explicitCourse = String(question.qbankCourse || question.course || "").trim();
   const explicitTopic = String(question.qbankTopic || question.topic || "").trim();
   const sanitizedExplicitTopic = isRemovedTopicName(explicitTopic) ? "" : explicitTopic;
-  if (QBANK_COURSE_TOPICS[explicitCourse]) {
+  const matchedExplicitCourse = resolveMatchingCourseKeyInMap(explicitCourse, QBANK_COURSE_TOPICS);
+  if (matchedExplicitCourse && QBANK_COURSE_TOPICS[matchedExplicitCourse]) {
+    const canonicalTopic = (() => {
+      if (!sanitizedExplicitTopic) {
+        return "";
+      }
+      const matchingTopic = (QBANK_COURSE_TOPICS[matchedExplicitCourse] || []).find(
+        (topic) => String(topic || "").trim().toLowerCase() === sanitizedExplicitTopic.toLowerCase(),
+      );
+      return matchingTopic || sanitizedExplicitTopic;
+    })();
     return {
-      course: explicitCourse,
-      topic: sanitizedExplicitTopic || resolveDefaultTopic(explicitCourse, sanitizedExplicitTopic),
+      course: matchedExplicitCourse,
+      topic: canonicalTopic || resolveDefaultTopic(matchedExplicitCourse, canonicalTopic),
     };
   }
 
