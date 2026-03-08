@@ -5285,31 +5285,7 @@ function mergeHydratedSessionsWithLocal(remotePayload) {
 }
 
 function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
-  const remoteMap = normalizeCourseTopicGroupMap(remotePayload);
-  const localMap = normalizeCourseTopicGroupMap(load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS));
-  const mergedMap = {};
-
-  CURRICULUM_COURSE_LIST.forEach((course) => {
-    const remoteGroups = normalizeCourseTopicGroupEntries(remoteMap?.[course], course);
-    const localGroups = normalizeCourseTopicGroupEntries(localMap?.[course], course);
-    const mergedGroups = { ...remoteGroups };
-
-    Object.entries(localGroups).forEach(([localGroupName, localTopics]) => {
-      const matchingRemoteName = findMatchingCourseTopicGroupName(mergedGroups, localGroupName);
-      if (!matchingRemoteName) {
-        mergedGroups[localGroupName] = Array.isArray(localTopics) ? [...localTopics] : [];
-        return;
-      }
-      mergedGroups[matchingRemoteName] = normalizeCourseTopicList(
-        [...(mergedGroups[matchingRemoteName] || []), ...(Array.isArray(localTopics) ? localTopics : [])],
-        course,
-      );
-    });
-
-    mergedMap[course] = normalizeCourseTopicGroupEntries(mergedGroups, course);
-  });
-
-  return mergedMap;
+  return normalizeCourseTopicGroupMap({});
 }
 
 async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
@@ -5375,7 +5351,7 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
       } else if (storageKey === STORAGE_KEYS.users) {
         payload = mergeHydratedUsersWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.courseTopicGroups) {
-        payload = mergeHydratedCourseTopicGroupsWithLocal(payload);
+        payload = {};
       } else if (storageKey === STORAGE_KEYS.topicNewCatalog) {
         payload = mergeHydratedTopicNewCatalogWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewSeen) {
@@ -7424,10 +7400,7 @@ function seedData() {
   }
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, null);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
-  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, null);
-  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object"
-    ? savedCourseTopicGroups
-    : {};
+  COURSE_TOPIC_GROUPS = {};
   const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, null);
   COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
     ? savedCourseNotebookLinks
@@ -11254,36 +11227,25 @@ function renderCreateTest() {
     state.qbankFilters.topicSource = "";
   }
   const selectedCourse = state.qbankFilters.course;
-  const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, questions);
-  const matchingTopicSource = topicSourceOptions.find((entry) => (
-    String(entry.name || "").trim().toLowerCase() === String(state.qbankFilters.topicSource || "").trim().toLowerCase()
-  ));
-  const selectedTopicSource = matchingTopicSource?.name || "";
-  if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
-    state.qbankFilters.topicSource = selectedTopicSource;
-  }
-  const topicSections = selectedTopicSource
-    ? getAvailableTopicSectionsForCourse(selectedCourse, questions, { source: selectedTopicSource })
-    : [];
+  state.qbankFilters.topicSource = "";
+  const selectedTopicSource = "";
+  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions);
   const topicOptions = topicSections.flatMap((section) => section.topics || []);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
-  const emptyTopicSelectionMeansAll = !selectedTopicSource;
+  const emptyTopicSelectionMeansAll = true;
   const filtered = applyQbankFilters(questions, {
     course: selectedCourse,
-    topicSource: selectedTopicSource,
     topics: selectedTopics,
-  }, {
-    strictEmptyTopics: !emptyTopicSelectionMeansAll,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = emptyTopicSelectionMeansAll && selectedTopics.length === 0;
   const selectedTopicLabel = selectedTopics.length
     ? formatTopicFilterSummary(selectedTopics)
-    : (selectedTopicSource ? "0 topics selected" : "All topics");
+    : "All topics";
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11325,15 +11287,6 @@ function renderCreateTest() {
       .join("")}
               </select>
             </label>
-            <label>
-              Source
-              <select name="topicSource" id="create-test-topic-source-select" ${topicSourceOptions.length ? "" : "disabled"}>
-                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "Select a subgroup" : "No subgroups yet"}</option>
-                ${topicSourceOptions
-      .map((entry) => `<option value="${escapeHtml(entry.name)}" ${selectedTopicSource === entry.name ? "selected" : ""}>${escapeHtml(entry.name)}</option>`)
-      .join("")}
-              </select>
-            </label>
           </div>
         </div>
         <div class="create-test-filter-card create-test-topics-group">
@@ -11342,51 +11295,8 @@ function renderCreateTest() {
               <div class="create-test-topic-sections">
                 ${topicSections
       .map((section) => `
-                      <section class="create-test-topic-section${section.kind === "group" ? " is-group" : ""}">
-                        ${section.kind !== "flat" && section.name
-          ? `
-                            <div class="create-test-topic-section-head">
-                              <div class="create-test-topic-section-copy">
-                                ${section.kind === "group" ? '<span class="create-test-topic-section-kicker">Subgroup</span>' : ""}
-                                <p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>
-                                <span
-                                  class="create-test-topic-section-count"
-                                  ${section.kind === "group" ? `data-role="create-test-group-selection-count" data-group-name="${escapeHtml(section.name)}"` : ""}
-                                >
-                                  ${section.kind === "group"
-            ? `${allTopicsSelected ? section.topics.length : section.topics.filter((topic) => selectedTopics.includes(topic)).length}/${section.topics.length} selected`
-            : `${section.topics.length} topic${section.topics.length === 1 ? "" : "s"}`}
-                                </span>
-                              </div>
-                              ${section.kind === "group"
-            ? `
-                                  <div class="create-test-topic-section-actions">
-                                    <button
-                                      class="btn ghost admin-btn-sm create-test-topic-section-action"
-                                      type="button"
-                                      data-action="create-test-apply-topic-group"
-                                      data-group-name="${escapeHtml(section.name)}"
-                                      data-group-mode="select"
-                                      ${(allTopicsSelected || section.topics.every((topic) => selectedTopics.includes(topic))) ? "disabled" : ""}
-                                    >
-                                      Select all
-                                    </button>
-                                    <button
-                                      class="btn ghost admin-btn-sm create-test-topic-section-action"
-                                      type="button"
-                                      data-action="create-test-apply-topic-group"
-                                      data-group-name="${escapeHtml(section.name)}"
-                                      data-group-mode="clear"
-                                      ${(allTopicsSelected || section.topics.some((topic) => selectedTopics.includes(topic))) ? "" : "disabled"}
-                                    >
-                                      Clear
-                                    </button>
-                                  </div>
-                                `
-            : ""}
-                            </div>
-                          `
-          : ""}
+                      <section class="create-test-topic-section">
+                        ${section.name ? `<p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>` : ""}
                         <div class="create-test-topic-grid">
                           ${section.topics
           .map((topic) => {
@@ -11406,11 +11316,7 @@ function renderCreateTest() {
       .join("")}
               </div>
             `
-      : `<p class="subtle create-test-topic-empty">${
-        topicSourceOptions.length && !selectedTopicSource
-          ? "Select a source first to see topics."
-          : "No published topics are available for this course yet."
-      }</p>`}
+      : '<p class="subtle create-test-topic-empty">No published topics are available for this course yet.</p>'}
         </div>
       </div>
     </section>
@@ -11450,7 +11356,7 @@ function renderCreateTest() {
           </span>
         </label>
 
-        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "No source selected")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
         <div class="stack">
           <button type="submit" class="btn">Start test</button>
         </div>
@@ -11461,11 +11367,9 @@ function renderCreateTest() {
 
 function wireCreateTest() {
   const courseSelect = document.getElementById("create-test-course-select");
-  const topicSourceSelect = document.getElementById("create-test-topic-source-select");
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
-  const topicGroupButtons = Array.from(appEl.querySelectorAll("[data-action='create-test-apply-topic-group']"));
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
@@ -11483,30 +11387,9 @@ function wireCreateTest() {
 
   const syncTopicSelectionUi = () => {
     const selectedSet = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim()));
-    const selectedTopicSource = String(state.qbankFilters.topicSource || topicSourceSelect?.value || "").trim();
-    const allTopicsMode = selectedSet.size === 0 && !selectedTopicSource;
+    const allTopicsMode = selectedSet.size === 0;
     topicInputs.forEach((entry) => {
       entry.checked = allTopicsMode || selectedSet.has(String(entry.value || "").trim());
-    });
-    const groupSections = Array.from(appEl.querySelectorAll(".create-test-topic-section.is-group"));
-    groupSections.forEach((sectionEl) => {
-      const sectionTopicInputs = Array.from(sectionEl.querySelectorAll("input[data-role='create-test-topic']"));
-      const totalTopics = sectionTopicInputs.length;
-      const selectedCount = allTopicsMode
-        ? totalTopics
-        : sectionTopicInputs.filter((entry) => selectedSet.has(String(entry.value || "").trim())).length;
-      const countEl = sectionEl.querySelector("[data-role='create-test-group-selection-count']");
-      if (countEl) {
-        countEl.textContent = `${selectedCount}/${totalTopics} selected`;
-      }
-      const selectAllButton = sectionEl.querySelector("[data-action='create-test-apply-topic-group'][data-group-mode='select']");
-      const clearButton = sectionEl.querySelector("[data-action='create-test-apply-topic-group'][data-group-mode='clear']");
-      if (selectAllButton) {
-        selectAllButton.disabled = selectedCount === totalTopics;
-      }
-      if (clearButton) {
-        clearButton.disabled = selectedCount === 0;
-      }
     });
   };
   syncTopicSelectionUi();
@@ -11516,34 +11399,19 @@ function wireCreateTest() {
     const availableCourses = getAvailableCoursesForUser(user);
     const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
     const selectedCourse = state.qbankFilters.course || fallbackCourse;
-    const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
-    const matchingTopicSource = topicSourceOptions.find((entry) => (
-      String(entry.name || "").trim().toLowerCase() === String(state.qbankFilters.topicSource || "").trim().toLowerCase()
-    ));
-    const selectedTopicSource = matchingTopicSource?.name || "";
-    if (String(state.qbankFilters.topicSource || "").trim() !== selectedTopicSource) {
-      state.qbankFilters.topicSource = selectedTopicSource;
-    }
-    const topicSections = selectedTopicSource
-      ? getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
-        source: selectedTopicSource,
-      })
-      : [];
+    state.qbankFilters.topicSource = "";
+    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
     const topicOptions = topicSections.flatMap((section) => section.topics || []);
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
-    const emptyTopicSelectionMeansAll = !selectedTopicSource;
     const selectedTopicLabel = selectedTopics.length
       ? formatTopicFilterSummary(selectedTopics)
-      : (selectedTopicSource ? "0 topics selected" : "All topics");
+      : "All topics";
     const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
       course: selectedCourse,
-      topicSource: selectedTopicSource,
       topics: selectedTopics,
-    }, {
-      strictEmptyTopics: !emptyTopicSelectionMeansAll,
     });
     const allowedSources = ["all", "unused", "incorrect", "flagged"];
     if (!allowedSources.includes(state.createTestSource)) {
@@ -11557,11 +11425,8 @@ function wireCreateTest() {
     };
     const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
     syncTopicSelectionUi();
-    if (topicSourceSelect instanceof HTMLSelectElement) {
-      topicSourceSelect.value = selectedTopicSource;
-    }
     if (summaryEl) {
-      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedTopicSource || "No source selected")}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
     if (countInput) {
       const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
@@ -11578,86 +11443,10 @@ function wireCreateTest() {
     render();
   });
 
-  topicSourceSelect?.addEventListener("change", () => {
-    const nextSource = String(topicSourceSelect.value || "").trim();
-    state.qbankFilters.topicSource = nextSource;
-    if (!nextSource) {
-      state.qbankFilters.topics = [];
-      state.skipNextRouteAnimation = true;
-      render();
-      return;
-    }
-    const user = getCurrentUser();
-    const availableCourses = getAvailableCoursesForUser(user);
-    const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
-    const selectedCourse = state.qbankFilters.course || fallbackCourse;
-    const sourceSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
-      source: nextSource,
-    });
-    const sourceTopics = sourceSections.flatMap((section) => section.topics || []);
-    state.qbankFilters.topics = sourceTopics;
-    state.skipNextRouteAnimation = true;
-    render();
-  });
-
   topicInputs.forEach((input) => {
     input.addEventListener("change", () => {
       const selected = topicInputs.filter((entry) => entry.checked).map((entry) => entry.value);
       state.qbankFilters.topics = selected;
-      updateCreateTestSummary();
-    });
-  });
-
-  topicGroupButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const user = getCurrentUser();
-      const availableCourses = getAvailableCoursesForUser(user);
-      const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
-      const selectedCourse = state.qbankFilters.course || fallbackCourse;
-      const groupName = String(button.getAttribute("data-group-name") || "").trim();
-      const groupMode = String(button.getAttribute("data-group-mode") || "select").trim().toLowerCase();
-      if (!selectedCourse || !groupName) {
-        return;
-      }
-      const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user), {
-        source: String(state.qbankFilters.topicSource || "").trim(),
-      });
-      const groupSection = topicSections.find((section) => (
-        section.kind === "group"
-        && String(section.name || "").trim().toLowerCase() === groupName.toLowerCase()
-      ));
-      const groupTopics = Array.isArray(groupSection?.topics) ? groupSection.topics.filter(Boolean) : [];
-      if (!groupTopics.length) {
-        return;
-      }
-      const topicOptions = topicSections.flatMap((section) => section.topics || []);
-      const availableTopicSet = new Set(topicOptions.map((topic) => String(topic || "").trim()));
-      const explicitSelectedSet = new Set(
-        (state.qbankFilters.topics || [])
-          .map((topic) => String(topic || "").trim())
-          .filter((topic) => availableTopicSet.has(topic)),
-      );
-      const emptyTopicSelectionMeansAll = !String(state.qbankFilters.topicSource || "").trim();
-      const selectedSet = explicitSelectedSet.size
-        ? explicitSelectedSet
-        : emptyTopicSelectionMeansAll
-          ? new Set(topicOptions.map((topic) => String(topic || "").trim()))
-          : new Set();
-      const normalizedGroupTopics = groupTopics.filter((topic) => availableTopicSet.has(String(topic || "").trim()));
-      normalizedGroupTopics.forEach((topic) => {
-        const normalizedTopic = String(topic || "").trim();
-        if (!normalizedTopic) {
-          return;
-        }
-        if (groupMode === "clear") {
-          selectedSet.delete(normalizedTopic);
-        } else {
-          selectedSet.add(normalizedTopic);
-        }
-      });
-      state.qbankFilters.topics = emptyTopicSelectionMeansAll && selectedSet.size === topicOptions.length
-        ? []
-        : topicOptions.filter((topic) => selectedSet.has(String(topic || "").trim()));
       updateCreateTestSummary();
     });
   });
@@ -11712,9 +11501,7 @@ function wireCreateTest() {
       state.qbankFilters.topics = [];
       state.qbankFilters.topicSource = "";
     }
-    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
-      strictEmptyTopics: Boolean(String(state.qbankFilters.topicSource || "").trim()),
-    });
+    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters);
     pool = applySourceFilter(pool, source, user.id);
     const fallbackCount = Math.max(1, Math.min(500, pool.length || 0));
     const requestedCount = Math.floor(Number(data.get("count")));
@@ -14378,6 +14165,9 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "courses") {
+    if (state.adminCourseTopicModalCourse) {
+      state.adminCourseTopicModalCourse = "";
+    }
     const questions = getQuestions();
     const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
@@ -14402,14 +14192,10 @@ function renderAdmin() {
     const topicCountByCourse = Object.fromEntries(
       selectedSemesterCourses.map((course) => [course, (QBANK_COURSE_TOPICS[course] || []).length]),
     );
-    const subgroupCountByCourse = Object.fromEntries(
-      selectedSemesterCourses.map((course) => [course, Object.keys(getCourseTopicGroups(course)).length]),
-    );
     const filteredCourseEntries = selectedSemesterCourses
       .map((course, idx) => ({ course, idx }))
       .filter(({ course }) => !normalizedCourseSearch || String(course || "").trim().toLowerCase().includes(normalizedCourseSearch));
     const semesterTopicCount = selectedSemesterCourses.reduce((sum, course) => sum + (topicCountByCourse[course] || 0), 0);
-    const semesterSubgroupCount = selectedSemesterCourses.reduce((sum, course) => sum + (subgroupCountByCourse[course] || 0), 0);
     const semesterQuestionCount = selectedSemesterCourses.reduce((sum, course) => sum + (questionCountByCourse[course] || 0), 0);
     const preferredFocusedCourse = filteredCourseEntries.some(({ course }) => course === state.adminCourseFocus)
       ? state.adminCourseFocus
@@ -14422,20 +14208,9 @@ function renderAdmin() {
     const focusedCourseIndex = Number.isFinite(focusedCourseEntry?.idx) ? focusedCourseEntry.idx : -1;
     const focusedQuestionCount = focusedCourse ? (questionCountByCourse[focusedCourse] || 0) : 0;
     const focusedTopicCount = focusedCourse ? (topicCountByCourse[focusedCourse] || 0) : 0;
-    const focusedSubgroupEntries = focusedCourse ? Object.entries(getCourseTopicGroups(focusedCourse)) : [];
-    const focusedSubgroupCount = focusedSubgroupEntries.length;
-    const requestedModalCourse = String(state.adminCourseTopicModalCourse || "").trim();
-    const modalCourse = selectedSemesterCourses.includes(requestedModalCourse) ? requestedModalCourse : "";
-    const modalCourseIndex = modalCourse ? selectedSemesterCourses.findIndex((course) => course === modalCourse) : -1;
-    const modalTopicCount = modalCourse ? (topicCountByCourse[modalCourse] || 0) : 0;
-    const modalGroupCount = modalCourse ? Object.keys(getCourseTopicGroups(modalCourse)).length : 0;
-    if (requestedModalCourse && !modalCourse) {
-      state.adminCourseTopicModalCourse = "";
-    }
     const courseCards = filteredCourseEntries
       .map(({ course, idx }) => {
         const topicCount = topicCountByCourse[course] || 0;
-        const subgroupCount = subgroupCountByCourse[course] || 0;
         const questionCount = questionCountByCourse[course] || 0;
         const isActive = focusedCourse === course;
         return `
@@ -14452,23 +14227,12 @@ function renderAdmin() {
             </div>
             <p class="admin-course-picker-card-copy">
               <span>${topicCount} topics</span>
-              <span>${subgroupCount} groups</span>
               <span>${questionCount} questions</span>
             </p>
           </button>
         `;
       })
       .join("");
-    const focusedSubgroupPreview = focusedSubgroupEntries.length
-      ? focusedSubgroupEntries
-        .map(([groupName, topics]) => `
-            <span class="admin-course-subgroup-chip" title="${escapeHtml((topics || []).join(", "))}">
-              <b>${escapeHtml(groupName)}</b>
-              <small>${(topics || []).length} topic${(topics || []).length === 1 ? "" : "s"}</small>
-            </span>
-          `)
-        .join("")
-      : '<span class="admin-course-subgroup-empty">No groups yet. Use Manage groups to create them.</span>';
     const focusedCourseWorkspace = focusedCourse
       ? `
           <section class="admin-course-workspace" data-course-index="${focusedCourseIndex}">
@@ -14486,7 +14250,6 @@ function renderAdmin() {
 
             <div class="admin-course-card-stats">
               <span class="admin-course-stat"><b>${focusedTopicCount}</b><small>Topics</small></span>
-              <span class="admin-course-stat"><b>${focusedSubgroupCount}</b><small>Groups</small></span>
               <span class="admin-course-stat"><b>${focusedQuestionCount}</b><small>Questions</small></span>
             </div>
 
@@ -14494,8 +14257,8 @@ function renderAdmin() {
               <section class="admin-course-workspace-panel admin-course-workspace-panel-main">
                 <div class="admin-course-workspace-panel-head">
                   <div>
-                    <h4 style="margin: 0;">Topics and groups</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Manage subgroup structure in one popup.</p>
+                    <h4 style="margin: 0;">Topics</h4>
+                    <p class="subtle" style="margin: 0.22rem 0 0;">Manage all course topics in one place.</p>
                   </div>
                 </div>
 
@@ -14505,15 +14268,7 @@ function renderAdmin() {
                 </label>
 
                 <div class="admin-course-topic-launch">
-                  <div class="admin-course-subgroup-summary">
-                    <p class="subtle" style="margin: 0;">Current groups</p>
-                    <div class="admin-course-subgroup-list">
-                      ${focusedSubgroupPreview}
-                    </div>
-                  </div>
-                  <div class="admin-course-topic-launch-actions">
-                    <button class="btn" type="button" data-action="course-topic-manager-open">Manage groups</button>
-                  </div>
+                  ${renderAdminCourseTopicControls(focusedCourse)}
                 </div>
               </section>
 
@@ -14551,33 +14306,6 @@ function renderAdmin() {
           </section>
         `
       : "";
-    const courseTopicManagerModal = modalCourse
-      ? `
-          <div class="admin-course-topic-modal">
-            <button
-              class="admin-course-topic-modal-backdrop"
-              type="button"
-              data-action="course-topic-manager-close"
-              aria-label="Close topic and group manager"
-            ></button>
-            <section class="admin-course-topic-modal-card" role="dialog" aria-modal="true" aria-label="Manage topics and groups" data-course-index="${modalCourseIndex}">
-              <div class="flex-between admin-course-topic-modal-head">
-                <div>
-                  <h3 style="margin: 0;">Manage Groups</h3>
-                  <p class="subtle" style="margin: 0.22rem 0 0;">${escapeHtml(modalCourse)} • ${modalTopicCount} topics • ${modalGroupCount} groups</p>
-                </div>
-                <div class="stack">
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-manager-close">Close</button>
-                </div>
-              </div>
-              <div class="admin-course-topic-modal-body">
-                ${renderAdminCourseTopicControls(modalCourse)}
-              </div>
-            </section>
-          </div>
-        `
-      : "";
-    const isCourseTopicModalOpen = Boolean(modalCourse);
 
     pageContent = `
       <section class="card admin-section" id="admin-courses-section">
@@ -14590,19 +14318,11 @@ function renderAdmin() {
             <span class="admin-courses-minimal-stat"><b>${filteredCourseEntries.length}</b><small>visible</small></span>
             <span class="admin-courses-minimal-stat"><b>${selectedSemesterCourses.length}</b><small>courses</small></span>
             <span class="admin-courses-minimal-stat"><b>${semesterTopicCount}</b><small>topics</small></span>
-            <span class="admin-courses-minimal-stat"><b>${semesterSubgroupCount}</b><small>groups</small></span>
             <span class="admin-courses-minimal-stat"><b>${semesterQuestionCount}</b><small>questions</small></span>
           </div>
         </div>
 
-        ${isCourseTopicModalOpen
-      ? `
-            <div class="admin-course-modal-focus-hint" style="margin-top: 0.8rem;">
-              <span>Managing subgroups for <b>${escapeHtml(modalCourse)}</b></span>
-            </div>
-          `
-      : `
-            <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
+        <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
               <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
                 <div class="form-row">
                   <label>Year
@@ -14648,8 +14368,7 @@ function renderAdmin() {
             ${focusedCourseWorkspace
         ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
         : ""}
-          `}
-        ${courseTopicManagerModal}
+          
       </section>
     `;
   }
@@ -15508,21 +15227,12 @@ function renderAdmin() {
 
 function renderAdminCourseTopicControls(course) {
   const topics = QBANK_COURSE_TOPICS[course] || [];
-  const topicGroups = getCourseTopicGroups(course);
-  const topicGroupEntries = Object.entries(topicGroups);
-  const groupInputListId = `course-topic-group-options-${sanitizeStoragePathSegment(course, "course")}`;
   return `
     <div class="admin-course-topics admin-course-topic-manager">
-      <datalist id="${groupInputListId}">
-        ${topicGroupEntries
-      .map(([groupName]) => `<option value="${escapeHtml(groupName)}"></option>`)
-      .join("")}
-      </datalist>
-
       <div class="admin-course-topic-manager-topbar">
         <div>
           <h4 style="margin: 0;">Topics</h4>
-          <p class="subtle" style="margin: 0.22rem 0 0;">Add, rename, remove, and place topics into groups.</p>
+          <p class="subtle" style="margin: 0.22rem 0 0;">Add, rename, and remove topics.</p>
         </div>
         <div class="admin-topic-add admin-topic-add-inline">
           <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
@@ -15530,122 +15240,34 @@ function renderAdminCourseTopicControls(course) {
         </div>
       </div>
 
-      <div class="admin-course-topic-manager-grid">
-        <section class="admin-course-topic-manager-panel">
-          <div class="admin-topic-group-editor-list">
-            ${topics
-      .map((topic, topicIdx) => {
-        const groupName = getTopicGroupNameForCourseTopic(course, topic);
-        return `
-              <div class="admin-topic-group-editor-row" data-role="course-topic-group-editor-row" data-topic-index="${topicIdx}">
-                <div class="admin-topic-group-editor-topic">
-                  <b class="admin-topic-group-editor-name">${escapeHtml(topic)}</b>
-                  ${groupName
-            ? `<span class="badge admin-topic-group-badge">${escapeHtml(groupName)}</span>`
-            : '<span class="admin-topic-group-editor-empty">Ungrouped</span>'}
-                </div>
-                <div class="admin-topic-group-editor-controls">
-                  <input
-                    data-field="courseTopicGroupName"
-                    data-topic-index="${topicIdx}"
-                    list="${groupInputListId}"
-                    value="${escapeHtml(groupName)}"
-                    placeholder="Existing or new group"
-                  />
-                  <button
-                    class="btn ghost admin-btn-sm"
-                    type="button"
-                    data-action="course-topic-group-save"
-                    data-topic-index="${topicIdx}"
-                  >
-                    Save group
-                  </button>
-                  <button
-                    class="btn ghost admin-btn-sm"
-                    type="button"
-                    data-action="course-topic-group-clear"
-                    data-topic-index="${topicIdx}"
-                    ${groupName ? "" : "disabled"}
-                  >
-                    Clear
-                  </button>
-                </div>
-                <div class="admin-topic-group-editor-actions">
-                  <button
-                    class="btn ghost admin-btn-sm"
-                    type="button"
-                    data-action="course-topic-rename"
-                    data-topic-index="${topicIdx}"
-                  >
-                    Rename
-                  </button>
-                  <button
-                    class="btn danger admin-btn-sm"
-                    type="button"
-                    data-action="course-topic-remove"
-                    data-topic-index="${topicIdx}"
-                  >
-                    Remove
-                  </button>
-                </div>
+      <div class="admin-topic-group-editor-list">
+        ${topics
+      .map((topic, topicIdx) => `
+            <div class="admin-topic-group-editor-row" data-role="course-topic-group-editor-row" data-topic-index="${topicIdx}">
+              <div class="admin-topic-group-editor-topic">
+                <b class="admin-topic-group-editor-name">${escapeHtml(topic)}</b>
               </div>
-            `;
-      })
-      .join("")}
-          </div>
-        </section>
-
-        <section class="admin-course-topic-manager-panel">
-          <div class="admin-course-topic-manager-sidehead">
-            <div>
-              <h4 style="margin: 0;">Groups</h4>
-              <p class="subtle" style="margin: 0.22rem 0 0;">Rename or remove existing groups.</p>
+              <div class="admin-topic-group-editor-actions">
+                <button
+                  class="btn ghost admin-btn-sm"
+                  type="button"
+                  data-action="course-topic-rename"
+                  data-topic-index="${topicIdx}"
+                >
+                  Rename
+                </button>
+                <button
+                  class="btn danger admin-btn-sm"
+                  type="button"
+                  data-action="course-topic-remove"
+                  data-topic-index="${topicIdx}"
+                >
+                  Remove
+                </button>
+              </div>
             </div>
-          </div>
-          <div class="admin-topic-groups">
-            ${topicGroupEntries.length
-      ? topicGroupEntries
-        .map(([groupName, groupedTopics]) => `
-              <article class="admin-topic-group-card" data-role="course-topic-group-card" data-group-name="${escapeHtml(groupName)}">
-                <div class="admin-topic-group-card-head">
-                  <label class="admin-topic-group-card-name">
-                    <span>Group name</span>
-                    <input
-                      data-field="courseTopicGroupRename"
-                      value="${escapeHtml(groupName)}"
-                      placeholder="Group name"
-                    />
-                  </label>
-                  <div class="admin-topic-group-card-actions">
-                    <button
-                      class="btn ghost admin-btn-sm"
-                      type="button"
-                      data-action="course-topic-group-rename-save"
-                      data-group-name="${escapeHtml(groupName)}"
-                    >
-                      Save
-                    </button>
-                    <button
-                      class="btn danger admin-btn-sm"
-                      type="button"
-                      data-action="course-topic-group-remove"
-                      data-group-name="${escapeHtml(groupName)}"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-                <div class="admin-topic-group-members" title="${escapeHtml((groupedTopics || []).join(", "))}">
-                  ${(groupedTopics || [])
-            .map((topicName) => `<span class="admin-topic-group-member">${escapeHtml(topicName)}</span>`)
-            .join("")}
-                </div>
-              </article>
-            `)
-        .join("")
-      : '<span class="admin-topic-group-empty">No groups yet. Assign a topic to a group to create the first one.</span>'}
-          </div>
-        </section>
+          `)
+      .join("")}
       </div>
     </div>
   `;
@@ -20555,25 +20177,9 @@ function applyQuestionFilters(questions, filters, sort) {
 
 function applyQbankFilters(questions, filters, options = {}) {
   const selectedCourse = String(filters?.course || "").trim();
-  const selectedTopicSource = String(filters?.topicSource || "").trim();
   const selectedTopics = Array.isArray(filters?.topics) ? filters.topics.filter(Boolean) : [];
   const singleTopic = String(filters?.topic || "").trim();
   const strictEmptyTopics = Boolean(options?.strictEmptyTopics);
-  const sourceTopicKeys = (() => {
-    if (!selectedCourse || !selectedTopicSource) {
-      return null;
-    }
-    const groups = getCourseTopicGroups(selectedCourse);
-    const matchingGroupName = findMatchingCourseTopicGroupName(groups, selectedTopicSource);
-    if (!matchingGroupName) {
-      return new Set();
-    }
-    return new Set(
-      (groups[matchingGroupName] || [])
-        .map((topic) => String(topic || "").trim().toLowerCase())
-        .filter(Boolean),
-    );
-  })();
 
   return questions
     .map((question) => {
@@ -20586,9 +20192,6 @@ function applyQbankFilters(questions, filters, options = {}) {
     })
     .filter((question) => {
       if (selectedCourse && question.qbankCourse !== selectedCourse) {
-        return false;
-      }
-      if (sourceTopicKeys && (!sourceTopicKeys.size || !sourceTopicKeys.has(String(question.qbankTopic || "").trim().toLowerCase()))) {
         return false;
       }
       if (selectedTopics.length && !selectedTopics.includes(question.qbankTopic)) {
@@ -21141,15 +20744,7 @@ function normalizeCourseTopicGroupMap(rawMap) {
 }
 
 function getCourseTopicGroups(course) {
-  const direct = normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[course], course);
-  if (Object.keys(direct).length) {
-    return direct;
-  }
-  const fallbackCourseKey = resolveMatchingCourseKeyInMap(course, COURSE_TOPIC_GROUPS);
-  if (!fallbackCourseKey) {
-    return direct;
-  }
-  return normalizeCourseTopicGroupEntries(COURSE_TOPIC_GROUPS[fallbackCourseKey], course);
+  return {};
 }
 
 function findMatchingCourseTopicGroupName(groups, requestedName) {
@@ -21269,72 +20864,19 @@ function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
 }
 
 function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
-  const groups = getCourseTopicGroups(course);
-  return Object.entries(groups)
-    .map(([name, topics]) => ({
-      name: String(name || "").trim(),
-      topics: (Array.isArray(topics) ? topics : [])
-        .map((topic) => String(topic || "").trim())
-        .filter((topic) => topic && !isRemovedTopicName(topic)),
-    }))
-    .filter((entry) => entry.name);
+  return [];
 }
 
 function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
-  const groups = getCourseTopicGroups(course);
-  const includeConfigured = Boolean(options?.includeConfigured) || Object.keys(groups).length > 0;
-  const topicOptions = getAvailableTopicsForCourse(course, questions, { includeConfigured });
-  const topicByKey = new Map(topicOptions.map((topic) => [String(topic || "").trim().toLowerCase(), topic]));
-  Object.values(groups).forEach((groupTopics) => {
-    (Array.isArray(groupTopics) ? groupTopics : []).forEach((topic) => {
-      const normalizedTopic = String(topic || "").trim();
-      const topicKey = normalizedTopic.toLowerCase();
-      if (!normalizedTopic || isRemovedTopicName(normalizedTopic) || topicByKey.has(topicKey)) {
-        return;
-      }
-      topicByKey.set(topicKey, normalizedTopic);
-    });
-  });
-  const allTopicOptions = [...topicByKey.values()];
-  const groupedTopicKeys = new Set();
-  const sections = [];
-
-  Object.entries(groups).forEach(([groupName, configuredTopics]) => {
-    const visibleTopics = (configuredTopics || [])
-      .map((topic) => topicByKey.get(String(topic || "").trim().toLowerCase()))
-      .filter(Boolean);
-    if (!visibleTopics.length) {
-      return;
-    }
-    visibleTopics.forEach((topic) => groupedTopicKeys.add(String(topic || "").trim().toLowerCase()));
-    sections.push({
-      kind: "group",
-      name: groupName,
-      topics: visibleTopics,
-    });
-  });
-
-  const ungroupedTopics = allTopicOptions.filter(
-    (topic) => !groupedTopicKeys.has(String(topic || "").trim().toLowerCase()),
-  );
-  if (ungroupedTopics.length) {
-    sections.push({
-      kind: sections.length ? "ungrouped" : "flat",
-      name: sections.length ? "Other topics" : "",
-      topics: ungroupedTopics,
-    });
+  const topics = getAvailableTopicsForCourse(course, questions);
+  if (!topics.length) {
+    return [];
   }
-
-  const requestedSource = String(options?.source || "").trim();
-  if (requestedSource) {
-    const matchingSection = sections.find((section) => (
-      section.kind === "group"
-      && String(section.name || "").trim().toLowerCase() === requestedSource.toLowerCase()
-    ));
-    return matchingSection ? [matchingSection] : [];
-  }
-
-  return sections;
+  return [{
+    kind: "flat",
+    name: "",
+    topics,
+  }];
 }
 
 function formatTopicFilterSummary(topics) {
@@ -21353,10 +20895,8 @@ function rehydrateCourseCatalogConfigFromStorage() {
   O6U_CURRICULUM = normalizeCurriculum(savedCurriculum || DEFAULT_O6U_CURRICULUM);
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
-  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
-  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object"
-    ? savedCourseTopicGroups
-    : {};
+  COURSE_TOPIC_GROUPS = {};
+  save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
   const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
   COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
     ? savedCourseNotebookLinks
