@@ -11298,7 +11298,7 @@ function renderCreateTest() {
             <label>
               Source
               <select name="topicSource" id="create-test-topic-source-select" ${topicSourceOptions.length ? "" : "disabled"}>
-                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "" : "No subgroups yet"}</option>
+                <option value="" ${selectedTopicSource ? "" : "selected"}>${topicSourceOptions.length ? "Select a subgroup" : "No subgroups yet"}</option>
                 ${topicSourceOptions
       .map((entry) => `<option value="${escapeHtml(entry.name)}" ${selectedTopicSource === entry.name ? "selected" : ""}>${escapeHtml(entry.name)}</option>`)
       .join("")}
@@ -11376,7 +11376,11 @@ function renderCreateTest() {
       .join("")}
               </div>
             `
-      : '<p class="subtle create-test-topic-empty">No published topics are available for this course yet.</p>'}
+      : `<p class="subtle create-test-topic-empty">${
+        topicSourceOptions.length && !selectedTopicSource
+          ? "Select a source first to see topics."
+          : "No published topics are available for this course yet."
+      }</p>`}
         </div>
       </div>
     </section>
@@ -14528,6 +14532,7 @@ function renderAdmin() {
           </div>
         `
       : "";
+    const isCourseTopicModalOpen = Boolean(modalCourse);
 
     pageContent = `
       <section class="card admin-section" id="admin-courses-section">
@@ -14545,52 +14550,60 @@ function renderAdmin() {
           </div>
         </div>
 
-        <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
-          <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
-            <div class="form-row">
-              <label>Year
-                <select name="curriculumYear">
-                  <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
-                  <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
-                  <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
-                  <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
-                  <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
-                </select>
-              </label>
-              <label>Semester
-                <select name="curriculumSemester">
-                  <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
-                  <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
-                </select>
-              </label>
-              <label class="admin-course-search-field">Search course
-                <input id="admin-curriculum-search" type="search" value="${escapeHtml(courseSearchQuery)}" placeholder="Filter by course name..." />
-              </label>
+        ${isCourseTopicModalOpen
+      ? `
+            <div class="admin-course-modal-focus-hint" style="margin-top: 0.8rem;">
+              <span>Managing subgroups for <b>${escapeHtml(modalCourse)}</b></span>
             </div>
-          </form>
+          `
+      : `
+            <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
+              <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
+                <div class="form-row">
+                  <label>Year
+                    <select name="curriculumYear">
+                      <option value="1" ${curriculumYear === 1 ? "selected" : ""}>Year 1</option>
+                      <option value="2" ${curriculumYear === 2 ? "selected" : ""}>Year 2</option>
+                      <option value="3" ${curriculumYear === 3 ? "selected" : ""}>Year 3</option>
+                      <option value="4" ${curriculumYear === 4 ? "selected" : ""}>Year 4</option>
+                      <option value="5" ${curriculumYear === 5 ? "selected" : ""}>Year 5</option>
+                    </select>
+                  </label>
+                  <label>Semester
+                    <select name="curriculumSemester">
+                      <option value="1" ${curriculumSemester === 1 ? "selected" : ""}>Semester 1</option>
+                      <option value="2" ${curriculumSemester === 2 ? "selected" : ""}>Semester 2</option>
+                    </select>
+                  </label>
+                  <label class="admin-course-search-field">Search course
+                    <input id="admin-curriculum-search" type="search" value="${escapeHtml(courseSearchQuery)}" placeholder="Filter by course name..." />
+                  </label>
+                </div>
+              </form>
 
-          <form id="admin-curriculum-add-form" class="admin-course-toolbar-card admin-course-add-form">
-            <label>Add course
-              <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
-            </label>
-            <div class="stack">
-              <button class="btn" type="submit">Add course</button>
+              <form id="admin-curriculum-add-form" class="admin-course-toolbar-card admin-course-add-form">
+                <label>Add course
+                  <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
+                </label>
+                <div class="stack">
+                  <button class="btn" type="submit">Add course</button>
+                </div>
+              </form>
             </div>
-          </form>
-        </div>
 
-        <div class="admin-course-grid" style="margin-top: 0.95rem;">
-          ${courseCards || `
-            <div class="admin-course-empty-state">
-              <h4 style="margin: 0;">No matching courses</h4>
-              <p class="subtle" style="margin: 0;">Try a different search term or switch the year/semester filter.</p>
+            <div class="admin-course-grid" style="margin-top: 0.95rem;">
+              ${courseCards || `
+                <div class="admin-course-empty-state">
+                  <h4 style="margin: 0;">No matching courses</h4>
+                  <p class="subtle" style="margin: 0;">Try a different search term or switch the year/semester filter.</p>
+                </div>
+              `}
             </div>
+
+            ${focusedCourseWorkspace
+        ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
+        : ""}
           `}
-        </div>
-
-        ${focusedCourseWorkspace
-      ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
-      : ""}
         ${courseTopicManagerModal}
       </section>
     `;
@@ -20993,17 +21006,15 @@ function normalizeCourseTopicGroupEntries(rawGroups, course, topicsOverride = nu
     const seenTopicKeys = new Set();
     const normalizedTopics = [];
     topics.forEach((entry) => {
-      const topicKey = String(entry || "").trim().toLowerCase();
-      const canonicalTopic = availableByKey.get(topicKey);
-      if (!canonicalTopic || seenTopicKeys.has(topicKey)) {
+      const rawTopic = String(entry || "").trim();
+      const topicKey = rawTopic.toLowerCase();
+      if (!rawTopic || seenTopicKeys.has(topicKey)) {
         return;
       }
+      const canonicalTopic = availableByKey.get(topicKey) || rawTopic;
       seenTopicKeys.add(topicKey);
       normalizedTopics.push(canonicalTopic);
     });
-    if (!normalizedTopics.length) {
-      return;
-    }
     normalized[groupName] = normalizedTopics;
     seenGroupKeys.add(groupKey);
   });
