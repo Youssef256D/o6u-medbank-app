@@ -3308,6 +3308,21 @@ label {
   font-size: 0.95rem;
 }
 
+.create-test-topic-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.52rem;
+}
+
+.create-test-topic-chip.is-list-item {
+  width: fit-content;
+  max-width: 100%;
+  justify-self: start;
+  justify-content: flex-start;
+  border-radius: 12px;
+  padding: 0.42rem 0.68rem;
+}
+
 .create-test-topic-chip-copy {
   flex: 1 1 auto;
   min-width: 0;

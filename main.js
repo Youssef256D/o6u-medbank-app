@@ -7849,6 +7849,20 @@ function bindGlobalEvents() {
         state.userMenuOpen = false;
       }
       syncTopbar();
+      if (state.notificationMenuOpen) {
+        const user = getCurrentUser();
+        if (user?.role === "student") {
+          const unreadNotificationIds = getVisibleNotificationsForUser(user)
+            .filter((notification) => !isNotificationReadByUser(notification, user))
+            .map((notification) => notification.id);
+          if (unreadNotificationIds.length) {
+            const result = await markNotificationsReadForUser(user, unreadNotificationIds);
+            if (result.changed) {
+              syncTopbar();
+            }
+          }
+        }
+      }
       return;
     }
 
@@ -11467,6 +11481,10 @@ function renderCreateTest() {
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = topicOptions.length > 0 && selectedTopics.length === topicOptions.length;
+  const singleFlatTopicSection = (
+    topicSections.length === 1
+    && (!topicSections[0]?.name || String(topicSections[0]?.kind || "") === "flat")
+  );
   const selectedTopicLabel = selectedTopics.length === 0
     ? "0 topics selected"
     : allTopicsSelected
@@ -11536,29 +11554,48 @@ function renderCreateTest() {
                   Clear
                 </button>
               </div>
-              <div class="create-test-topic-sections">
-                ${topicSections
-      .map((section) => `
-                      <section class="create-test-topic-section">
-                        ${section.name ? `<p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>` : ""}
-                        <div class="create-test-topic-grid">
-                          ${section.topics
-          .map((topic) => {
-            const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
-            return `
-                                <label class="admin-course-check create-test-topic-chip">
-                                  <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
-                                  <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
-                                  ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
-                                </label>
-                              `;
-          })
-          .join("")}
-                        </div>
-                      </section>
-                    `)
-      .join("")}
-              </div>
+              ${singleFlatTopicSection
+      ? `
+                  <div class="create-test-topic-list">
+                    ${(topicSections[0]?.topics || [])
+        .map((topic) => {
+          const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
+          return `
+                            <label class="admin-course-check create-test-topic-chip is-list-item">
+                              <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
+                              <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
+                              ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
+                            </label>
+                          `;
+        })
+        .join("")}
+                  </div>
+                `
+      : `
+                  <div class="create-test-topic-sections">
+                    ${topicSections
+        .map((section) => `
+                          <section class="create-test-topic-section">
+                            ${section.name ? `<p class="create-test-topic-section-title">${escapeHtml(section.name)}</p>` : ""}
+                            <div class="create-test-topic-grid">
+                              ${section.topics
+            .map((topic) => {
+              const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
+              return `
+                                    <label class="admin-course-check create-test-topic-chip">
+                                      <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
+                                      <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
+                                      ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
+                                    </label>
+                                  `;
+            })
+            .join("")}
+                            </div>
+                          </section>
+                        `)
+        .join("")}
+                  </div>
+                `}
             `
       : '<p class="subtle create-test-topic-empty">No published topics are available for this course yet.</p>'}
         </div>
