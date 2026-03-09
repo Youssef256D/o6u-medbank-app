@@ -111,6 +111,9 @@ const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 15000;
 const SUPABASE_SESSION_TIMEOUT_MS = 12000;
+const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 2500;
+const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 3;
+const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 350;
 const ADMIN_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
@@ -1657,6 +1660,9 @@ async function initSupabaseAuth() {
       let localUser = upsertLocalUserFromAuth(data.session.user);
       const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
       localUser = profileSync.user;
+      if (localUser?.id) {
+        saveLocalOnly(STORAGE_KEYS.currentUserId, localUser.id);
+      }
       const hasRecoveryFlag = isPasswordRecoveryPendingState();
       const shouldHonorRecoveryRoute = hasRecoveryFlag && (callbackStatus === "processed" || state.route === "reset-password");
       if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
@@ -1733,6 +1739,9 @@ async function initSupabaseAuth() {
         let localUser = upsertLocalUserFromAuth(session.user);
         const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
         localUser = profileSync.user;
+        if (localUser?.id) {
+          saveLocalOnly(STORAGE_KEYS.currentUserId, localUser.id);
+        }
         const hasRecoveryFlag = isPasswordRecoveryPendingState();
         const shouldHonorRecoveryRoute = event === "PASSWORD_RECOVERY" || (hasRecoveryFlag && state.route === "reset-password");
         if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
@@ -1795,10 +1804,18 @@ async function initSupabaseAuth() {
         supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
         setPasswordRecoveryPendingState(false);
-        const sessionCheck = await supabaseAuth.client.auth.getSession().catch(() => ({ data: { session: null } }));
-        if (sessionCheck?.data?.session?.user) {
-          const recoveredSessionUserId = String(sessionCheck.data.session.user.id || "").trim();
+        const recoveredSessionUser = await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
+        if (recoveredSessionUser) {
+          const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
           supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
+          let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
+          const recoveredProfileSync = await refreshLocalUserFromRelationalProfile(recoveredSessionUser, recoveredLocalUser);
+          recoveredLocalUser = recoveredProfileSync.user;
+          if (recoveredLocalUser?.id) {
+            saveLocalOnly(STORAGE_KEYS.currentUserId, recoveredLocalUser.id);
+          }
+          state.skipNextRouteAnimation = true;
+          render();
           return;
         }
         clearNotificationRealtimeSubscription();
@@ -1854,6 +1871,37 @@ async function initSupabaseAuth() {
     supabaseAuth.initialized = true;
     supabaseAuth.initializing = false;
   }
+}
+
+async function tryRecoverSessionAfterSignedOutEvent(authClient) {
+  if (!authClient?.auth) {
+    return null;
+  }
+  for (let attempt = 0; attempt < SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS; attempt += 1) {
+    const sessionResult = await runWithTimeoutResult(
+      authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+      SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS,
+      "Supabase session recovery timed out.",
+    );
+    const sessionUser = sessionResult?.data?.session?.user || null;
+    if (sessionUser) {
+      return sessionUser;
+    }
+
+    const refreshToken = String(sessionResult?.data?.session?.refresh_token || "").trim();
+    await runWithTimeoutResult(
+      refreshToken
+        ? authClient.auth.refreshSession({ refresh_token: refreshToken }).catch(() => null)
+        : authClient.auth.refreshSession().catch(() => null),
+      SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS,
+      "Supabase session refresh timed out.",
+    );
+
+    if (attempt < SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS));
+    }
+  }
+  return null;
 }
 
 function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
