@@ -14189,10 +14189,17 @@ function renderAdmin() {
     const publishedQuestions = questions.filter((entry) => entry.status === "published").length;
     const draftQuestions = Math.max(questions.length - publishedQuestions, 0);
     let completedSessions = 0;
+    let solvedQuestions = 0;
     let inProgressSessions = 0;
     sessions.forEach((session) => {
       if (session.status === "completed") {
         completedSessions += 1;
+        const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
+        questionIds.forEach((qid) => {
+          if (session.responses?.[qid]) {
+            solvedQuestions += 1;
+          }
+        });
       } else if (session.status === "in_progress") {
         inProgressSessions += 1;
       }
@@ -14268,9 +14275,9 @@ function renderAdmin() {
           </article>
           <article class="card">
             <p class="metric">
-              ${completedSessions}
-              <small>Completed tests</small>
-              <small>${inProgressSessions} active • ${totalSessions} total test${totalSessions === 1 ? "" : "s"}</small>
+              ${solvedQuestions}
+              <small>Solved questions</small>
+              <small>${completedSessions} completed • ${inProgressSessions} active • ${totalSessions} total test${totalSessions === 1 ? "" : "s"}</small>
             </p>
           </article>
         </div>
