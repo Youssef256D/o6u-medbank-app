@@ -11179,8 +11179,8 @@ function renderDashboard() {
   const user = getCurrentUser();
   const questions = getPublishedQuestionsForUser(user);
   const analytics = getStudentAnalyticsSnapshot(user.id);
-  const completedCount = Array.isArray(analytics.sessionRollups) ? analytics.sessionRollups.length : 0;
   const stats = analytics.stats;
+  const solvedQuestionsCount = Number.isFinite(stats?.totalAnswered) ? stats.totalAnswered : 0;
   const syncStatusText = getStudentDataSyncStatusText();
 
   return `
@@ -11199,7 +11199,7 @@ function renderDashboard() {
       <div class="stats-grid" style="margin-top: 0.9rem;">
         <article class="card"><p class="metric">${stats.accuracy}%<small>Overall accuracy</small></p></article>
         <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Avg time / question</small></p></article>
-        <article class="card"><p class="metric">${completedCount}<small>Completed blocks</small></p></article>
+        <article class="card"><p class="metric">${solvedQuestionsCount}<small>Solved questions</small></p></article>
         <article class="card"><p class="metric">${questions.length}<small>Total questions in bank</small></p></article>
       </div>
     </section>
