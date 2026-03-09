@@ -11187,7 +11187,7 @@ function renderDashboard() {
     <section class="panel">
       <p class="kicker">Welcome back</p>
       <div class="flex-between">
-        <h2 class="title">Dr. ...... Dashboard</h2>
+        <h2 class="title">Dr Youssef Ayoub's Dashboard</h2>
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
           <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
