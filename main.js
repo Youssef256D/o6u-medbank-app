@@ -107,13 +107,17 @@ const NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR = "::";
 const ANALYTICS_RECENT_SESSION_WINDOW = 3;
 const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
+const SITE_ACTIVITY_HEARTBEAT_MS = 30000;
+const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 15000;
 const SUPABASE_SESSION_TIMEOUT_MS = 12000;
-const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 2500;
-const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 3;
-const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 350;
+const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 5000;
+const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
+const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 600;
+const SUPABASE_SESSION_RECOVERY_RETRY_MS = 6000;
+const SUPABASE_SESSION_RECOVERY_RETRY_LIMIT = 20;
 const ADMIN_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
@@ -189,6 +193,8 @@ const state = {
   adminCourseSearch: "",
   adminCourseFocus: "",
   adminCourseTopicModalCourse: "",
+  adminCourseTopicGroupCreateModalOpen: false,
+  adminCourseTopicInlineCreateOpen: false,
   adminEditorCourse: "",
   adminEditorTopic: "",
   adminQuestionModalOpen: false,
@@ -225,6 +231,7 @@ const state = {
   adminPresenceLoading: false,
   adminPresenceError: "",
   adminPresenceLastSyncAt: 0,
+  adminActivityReportRunning: false,
   adminImportRunning: false,
   adminImportStatus: "",
   adminImportStatusTone: "neutral",
@@ -252,6 +259,8 @@ let appVersionCheckPromise = null;
 let askAiWindowRef = null;
 
 let wasAdminCourseTopicModalOpen = false;
+let wasAdminCourseTopicGroupCreateModalOpen = false;
+let wasAdminCourseTopicInlineCreateOpen = false;
 let adminCourseSearchDebounce = null;
 
 const SUPABASE_CONFIG = {
@@ -409,6 +418,9 @@ let studentBackgroundRefreshPollHandle = null;
 let studentBackgroundRefreshInFlight = false;
 let siteMaintenanceGateRefreshHandle = null;
 let siteMaintenanceGateRefreshInFlight = false;
+let supabaseSessionRecoveryHandle = null;
+let supabaseSessionRecoveryRetries = 0;
+let supabaseSessionRecoveryInFlight = false;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -424,6 +436,19 @@ const presenceRuntime = {
   lastSolving: false,
   pushInFlight: false,
   nextRetryAt: 0,
+};
+const siteActivityRuntime = {
+  timer: null,
+  sessionKey: "",
+  startedAt: "",
+  entryRoute: "",
+  lastRoute: "",
+  pageViews: 0,
+  lastSentAt: 0,
+  lastPayloadKey: "",
+  pushInFlight: false,
+  nextRetryAt: 0,
+  endingInFlight: false,
 };
 const sessionSyncRuntime = {
   timer: null,
@@ -1253,6 +1278,75 @@ function scheduleSupabaseBootstrapRetry() {
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
 
+function clearSupabaseSessionRecoveryRetry() {
+  if (supabaseSessionRecoveryHandle) {
+    window.clearInterval(supabaseSessionRecoveryHandle);
+    supabaseSessionRecoveryHandle = null;
+  }
+  supabaseSessionRecoveryRetries = 0;
+  supabaseSessionRecoveryInFlight = false;
+}
+
+async function tryRecoverSupabaseSessionInBackground() {
+  if (supabaseSessionRecoveryInFlight) {
+    return false;
+  }
+  if (supabaseAuth.initializing) {
+    return false;
+  }
+  if (!SUPABASE_CONFIG.enabled || !getSupabaseAuthClient()) {
+    return false;
+  }
+  if (!getCurrentUser() || hasActiveSupabaseSessionForUser()) {
+    clearSupabaseSessionRecoveryRetry();
+    return false;
+  }
+
+  supabaseSessionRecoveryInFlight = true;
+  try {
+    await initSupabaseAuth();
+    const recovered = hasActiveSupabaseSessionForUser();
+    if (recovered) {
+      clearSupabaseSessionRecoveryRetry();
+      state.skipNextRouteAnimation = true;
+      render();
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.warn("Background Supabase session recovery failed.", error?.message || error);
+    return false;
+  } finally {
+    supabaseSessionRecoveryInFlight = false;
+  }
+}
+
+function scheduleSupabaseSessionRecoveryRetry() {
+  if (
+    supabaseSessionRecoveryHandle
+    || !SUPABASE_CONFIG.enabled
+    || !getSupabaseAuthClient()
+    || !getCurrentUser()
+    || hasActiveSupabaseSessionForUser()
+  ) {
+    return;
+  }
+  supabaseSessionRecoveryRetries = 0;
+  tryRecoverSupabaseSessionInBackground().catch(() => { });
+  supabaseSessionRecoveryHandle = window.setInterval(() => {
+    if (
+      !getCurrentUser()
+      || hasActiveSupabaseSessionForUser()
+      || supabaseSessionRecoveryRetries >= SUPABASE_SESSION_RECOVERY_RETRY_LIMIT
+    ) {
+      clearSupabaseSessionRecoveryRetry();
+      return;
+    }
+    supabaseSessionRecoveryRetries += 1;
+    tryRecoverSupabaseSessionInBackground().catch(() => { });
+  }, SUPABASE_SESSION_RECOVERY_RETRY_MS);
+}
+
 function getOrCreateSupabaseBrowserClient() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     return null;
@@ -1657,6 +1751,7 @@ async function initSupabaseAuth() {
       console.warn("Supabase auth session bootstrap failed.", error.message);
       setGoogleOAuthPendingState(false);
     } else if (data?.session?.user) {
+      clearSupabaseSessionRecoveryRetry();
       let localUser = upsertLocalUserFromAuth(data.session.user);
       const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
       localUser = profileSync.user;
@@ -1729,6 +1824,7 @@ async function initSupabaseAuth() {
       const sessionUserId = String(session?.user?.id || "").trim();
       supabaseAuth.activeUserId = isUuidValue(sessionUserId) ? sessionUserId : "";
       if (session?.user) {
+        clearSupabaseSessionRecoveryRetry();
         if (event === "TOKEN_REFRESHED") {
           return;
         }
@@ -1800,12 +1896,14 @@ async function initSupabaseAuth() {
       }
 
       if (event === "SIGNED_OUT") {
+        const preservedLocalUser = getCurrentUser();
         resetPostAuthWarmupRuntimeState();
         supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
         setPasswordRecoveryPendingState(false);
         const recoveredSessionUser = await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
         if (recoveredSessionUser) {
+          clearSupabaseSessionRecoveryRetry();
           const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
           supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
           let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
@@ -1818,13 +1916,39 @@ async function initSupabaseAuth() {
           render();
           return;
         }
+        const shouldPreserveLocalSession = Boolean(preservedLocalUser?.id) && hasSupabaseManagedIdentity(preservedLocalUser);
+        if (shouldPreserveLocalSession) {
+          clearNotificationRealtimeSubscription();
+          clearSessionRealtimeSubscription();
+          clearAdminPresencePolling();
+          clearAdminDashboardPolling();
+          syncPresenceRuntime(null);
+          resetSiteActivityRuntime();
+          relationalSync.enabled = false;
+          relationalSync.readyCheckedAt = 0;
+          relationalSync.readyPromise = null;
+          relationalSync.lastReadyError = "Cloud session was interrupted. Retrying automatically while your local session stays active.";
+          relationalSync.lastFailureAt = Date.now();
+          relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+          relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+          supabaseSync.lastFailureAt = Date.now();
+          supabaseSync.lastFailureMessage = "Cloud session was interrupted. Changes stay local until reconnection succeeds.";
+          supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+          scheduleSyncStatusUiRefresh();
+          scheduleSupabaseSessionRecoveryRetry();
+          state.skipNextRouteAnimation = true;
+          render();
+          return;
+        }
         clearNotificationRealtimeSubscription();
         clearSessionRealtimeSubscription();
+        clearSupabaseSessionRecoveryRetry();
         resetRelationalSyncState();
         resetSupabaseSyncRuntimeState();
         clearAdminPresencePolling();
         clearAdminDashboardPolling();
         syncPresenceRuntime(null);
+        resetSiteActivityRuntime();
         state.adminDataRefreshing = false;
         state.adminDataLastSyncAt = 0;
         state.adminDataSyncError = "";
@@ -2680,6 +2804,16 @@ function getUserProfileId(user) {
 function getActiveSupabaseAuthUserId() {
   const authId = String(supabaseAuth.activeUserId || "").trim();
   return isUuidValue(authId) ? authId : "";
+}
+
+function hasActiveSupabaseSessionForUser(user = null) {
+  const currentUser = user || getCurrentUser();
+  const activeAuthId = getActiveSupabaseAuthUserId();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!isUuidValue(activeAuthId) || !isUuidValue(profileId)) {
+    return false;
+  }
+  return activeAuthId === profileId;
 }
 
 function getCurrentSessionProfileId(user = null) {
@@ -5395,7 +5529,13 @@ function mergeHydratedSessionsWithLocal(remotePayload) {
 }
 
 function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
-  return normalizeCourseTopicGroupMap({});
+  const remoteGroups = normalizeCourseTopicGroupMap(remotePayload);
+  const localGroups = normalizeCourseTopicGroupMap(load(STORAGE_KEYS.courseTopicGroups, {}));
+  const merged = {};
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    merged[course] = mergeCourseTopicGroupEntries(remoteGroups[course], localGroups[course], course);
+  });
+  return normalizeCourseTopicGroupMap(merged);
 }
 
 async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
@@ -5461,7 +5601,7 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
       } else if (storageKey === STORAGE_KEYS.users) {
         payload = mergeHydratedUsersWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.courseTopicGroups) {
-        payload = {};
+        payload = mergeHydratedCourseTopicGroupsWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewCatalog) {
         payload = mergeHydratedTopicNewCatalogWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewSeen) {
@@ -7423,10 +7563,29 @@ async function syncSessionsToRelational(sessionsPayload) {
     return;
   }
 
+  const courseRowsResult = await fetchRowsPaged((from, to) => (
+    client
+      .from("courses")
+      .select("id,course_name,is_active")
+      .eq("is_active", true)
+      .order("course_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+  if (courseRowsResult.error) {
+    throw courseRowsResult.error;
+  }
+  const courseIdByName = Object.fromEntries(
+    (Array.isArray(courseRowsResult.data) ? courseRowsResult.data : [])
+      .map((row) => [String(row?.course_name || "").trim(), String(row?.id || "").trim()])
+      .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
+  );
+
   const upsertBlocks = ownedSessions.map((session) => ({
     ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
     external_id: String(session.id || "").trim(),
     user_id: authIdByLocalUserId[session.userId],
+    course_id: courseIdByName[String(getSessionCourseList(session)[0] || "").trim()] || null,
     mode: session.mode === "timed" ? "timed" : "tutor",
     source: ["all", "unused", "incorrect", "flagged"].includes(String(session.source || "")) ? session.source : "all",
     status: ["in_progress", "completed", "suspended"].includes(String(session.status || "")) ? session.status : "in_progress",
@@ -7538,7 +7697,8 @@ function seedData() {
   }
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, null);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
-  COURSE_TOPIC_GROUPS = {};
+  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, null);
+  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object" ? savedCourseTopicGroups : {};
   const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, null);
   COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
     ? savedCourseNotebookLinks
@@ -8027,25 +8187,36 @@ function bindGlobalEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+      endCurrentUserActivitySession().catch(() => { });
       return;
+    }
+    if (getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
+      tryRecoverSupabaseSessionInBackground().catch(() => { });
     }
     scheduleNotificationRealtimeHydration(0);
     scheduleSessionRealtimeHydration(0);
+    syncSiteActivityRuntime(getCurrentUser());
   });
 
   window.addEventListener("pagehide", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    endCurrentUserActivitySession().catch(() => { });
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
+    resetSiteActivityRuntime();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
   });
 
   window.addEventListener("online", () => {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    if (getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
+      tryRecoverSupabaseSessionInBackground().catch(() => { });
+    }
     scheduleSessionRealtimeHydration(0);
+    syncSiteActivityRuntime(getCurrentUser());
   });
 
   window.addEventListener("hashchange", () => {
@@ -8802,7 +8973,7 @@ function setPresenceRouteState() {
 
 async function pushCurrentUserPresence(options = {}) {
   const currentUser = getCurrentUser();
-  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId)) {
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId) || !hasActiveSupabaseSessionForUser(currentUser)) {
     return false;
   }
 
@@ -8852,7 +9023,7 @@ async function pushCurrentUserPresence(options = {}) {
 
 async function markCurrentUserOffline() {
   const currentUser = getCurrentUser();
-  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId)) {
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId) || !hasActiveSupabaseSessionForUser(currentUser)) {
     return;
   }
   const client = getRelationalClient();
@@ -8871,8 +9042,197 @@ async function markCurrentUserOffline() {
     .eq("user_id", currentUser.supabaseAuthId);
 }
 
+function resetSiteActivityRuntime(options = {}) {
+  if (!options?.preserveTimer && siteActivityRuntime.timer) {
+    window.clearInterval(siteActivityRuntime.timer);
+    siteActivityRuntime.timer = null;
+  }
+  siteActivityRuntime.sessionKey = "";
+  siteActivityRuntime.startedAt = "";
+  siteActivityRuntime.entryRoute = "";
+  siteActivityRuntime.lastRoute = "";
+  siteActivityRuntime.pageViews = 0;
+  siteActivityRuntime.lastSentAt = 0;
+  siteActivityRuntime.lastPayloadKey = "";
+  siteActivityRuntime.pushInFlight = false;
+  siteActivityRuntime.nextRetryAt = 0;
+  siteActivityRuntime.endingInFlight = false;
+}
+
+function ensureSiteActivitySessionSeed() {
+  const route = String(state.route || "").trim() || "dashboard";
+  if (!siteActivityRuntime.sessionKey || !siteActivityRuntime.startedAt) {
+    siteActivityRuntime.sessionKey = makeId("activity_session");
+    siteActivityRuntime.startedAt = nowISO();
+    siteActivityRuntime.entryRoute = route;
+    siteActivityRuntime.lastRoute = route;
+    siteActivityRuntime.pageViews = 1;
+    siteActivityRuntime.lastPayloadKey = "";
+    siteActivityRuntime.lastSentAt = 0;
+    return route;
+  }
+  if (!siteActivityRuntime.entryRoute) {
+    siteActivityRuntime.entryRoute = route;
+  }
+  if (!siteActivityRuntime.lastRoute) {
+    siteActivityRuntime.lastRoute = route;
+  } else if (siteActivityRuntime.lastRoute !== route) {
+    siteActivityRuntime.lastRoute = route;
+    siteActivityRuntime.pageViews = Math.max(1, Number(siteActivityRuntime.pageViews || 0) + 1);
+  }
+  if (!Number.isFinite(Number(siteActivityRuntime.pageViews)) || Number(siteActivityRuntime.pageViews) <= 0) {
+    siteActivityRuntime.pageViews = 1;
+  }
+  return route;
+}
+
+async function pushCurrentUserActivitySession(options = {}) {
+  const currentUser = getCurrentUser();
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId) || !hasActiveSupabaseSessionForUser(currentUser)) {
+    return false;
+  }
+
+  const route = ensureSiteActivitySessionSeed();
+  if (document.visibilityState === "hidden" && !options?.allowWhenHidden) {
+    return false;
+  }
+
+  const ready = await ensureRelationalSyncReady();
+  if (!ready) {
+    return false;
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    return false;
+  }
+
+  const force = Boolean(options?.force);
+  const now = Date.now();
+  const payload = {
+    session_key: siteActivityRuntime.sessionKey,
+    user_id: currentUser.supabaseAuthId,
+    full_name: String(currentUser.name || "").trim() || "Student",
+    email: String(currentUser.email || "").trim().toLowerCase(),
+    role: currentUser.role === "admin" ? "admin" : "student",
+    entry_route: siteActivityRuntime.entryRoute || route,
+    current_route: route,
+    exit_route: null,
+    page_views: Math.max(1, Number(siteActivityRuntime.pageViews || 1)),
+    started_at: siteActivityRuntime.startedAt || nowISO(),
+    last_seen_at: nowISO(),
+    ended_at: null,
+  };
+  const payloadKey = JSON.stringify([
+    payload.session_key,
+    payload.current_route,
+    payload.page_views,
+    payload.entry_route,
+  ]);
+  const tooSoon = now - siteActivityRuntime.lastSentAt < 8000;
+  if (!force && tooSoon && payloadKey === siteActivityRuntime.lastPayloadKey) {
+    return true;
+  }
+
+  const { error } = await client.from("user_activity_sessions").upsert([payload], { onConflict: "session_key" });
+  if (error) {
+    return false;
+  }
+
+  siteActivityRuntime.lastPayloadKey = payloadKey;
+  siteActivityRuntime.lastSentAt = now;
+  return true;
+}
+
+async function endCurrentUserActivitySession() {
+  const currentUser = getCurrentUser();
+  const sessionKey = String(siteActivityRuntime.sessionKey || "").trim();
+  if (!currentUser?.supabaseAuthId || !isUuidValue(currentUser.supabaseAuthId) || !sessionKey || !hasActiveSupabaseSessionForUser(currentUser)) {
+    resetSiteActivityRuntime();
+    return false;
+  }
+  if (siteActivityRuntime.endingInFlight) {
+    return false;
+  }
+
+  const client = getRelationalClient();
+  if (!client) {
+    resetSiteActivityRuntime();
+    return false;
+  }
+
+  siteActivityRuntime.endingInFlight = true;
+  try {
+    const finalRoute = String(siteActivityRuntime.lastRoute || state.route || "").trim() || null;
+    const { error } = await client
+      .from("user_activity_sessions")
+      .update({
+        current_route: null,
+        exit_route: finalRoute,
+        page_views: Math.max(1, Number(siteActivityRuntime.pageViews || 1)),
+        last_seen_at: nowISO(),
+        ended_at: nowISO(),
+      })
+      .eq("session_key", sessionKey)
+      .eq("user_id", currentUser.supabaseAuthId);
+    if (error) {
+      return false;
+    }
+    return true;
+  } finally {
+    resetSiteActivityRuntime();
+  }
+}
+
+function syncSiteActivityRuntime(user) {
+  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId) || !hasActiveSupabaseSessionForUser(user)) {
+    resetSiteActivityRuntime();
+    return;
+  }
+
+  if (document.visibilityState === "hidden") {
+    if (siteActivityRuntime.timer) {
+      window.clearInterval(siteActivityRuntime.timer);
+      siteActivityRuntime.timer = null;
+    }
+    return;
+  }
+
+  if (!siteActivityRuntime.timer) {
+    siteActivityRuntime.timer = window.setInterval(() => {
+      pushCurrentUserActivitySession().catch((error) => {
+        console.warn("Site activity heartbeat failed.", error?.message || error);
+      });
+    }, SITE_ACTIVITY_HEARTBEAT_MS);
+  }
+
+  const currentRoute = String(state.route || "").trim() || "dashboard";
+  const needsStart = !siteActivityRuntime.sessionKey || !siteActivityRuntime.startedAt;
+  const routeChanged = Boolean(siteActivityRuntime.sessionKey) && siteActivityRuntime.lastRoute !== currentRoute;
+  const now = Date.now();
+  const heartbeatDue = (now - siteActivityRuntime.lastSentAt) >= SITE_ACTIVITY_HEARTBEAT_MS;
+  if (!needsStart && !routeChanged && !heartbeatDue) {
+    return;
+  }
+  if (now < siteActivityRuntime.nextRetryAt || siteActivityRuntime.pushInFlight) {
+    return;
+  }
+
+  siteActivityRuntime.pushInFlight = true;
+  pushCurrentUserActivitySession({ force: needsStart || routeChanged })
+    .then((ok) => {
+      siteActivityRuntime.nextRetryAt = ok ? 0 : (Date.now() + 15000);
+    })
+    .catch((error) => {
+      console.warn("Site activity update failed.", error?.message || error);
+      siteActivityRuntime.nextRetryAt = Date.now() + 15000;
+    })
+    .finally(() => {
+      siteActivityRuntime.pushInFlight = false;
+    });
+}
+
 function syncPresenceRuntime(user) {
-  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId)) {
+  if (!user?.supabaseAuthId || !isUuidValue(user.supabaseAuthId) || !hasActiveSupabaseSessionForUser(user)) {
     if (presenceRuntime.timer) {
       window.clearInterval(presenceRuntime.timer);
       presenceRuntime.timer = null;
@@ -8971,6 +9331,473 @@ async function refreshAdminPresenceSnapshot(options = {}) {
   } finally {
     state.adminPresenceLoading = false;
   }
+}
+
+function getLocalDayRange(baseDate = new Date()) {
+  const start = new Date(baseDate);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  const yyyy = start.getFullYear();
+  const mm = String(start.getMonth() + 1).padStart(2, "0");
+  const dd = String(start.getDate()).padStart(2, "0");
+  return {
+    label: `${yyyy}-${mm}-${dd}`,
+    startMs: start.getTime(),
+    endMs: end.getTime(),
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+  };
+}
+
+function getActivitySessionDurationMsForRange(sessionRow, rangeStartMs, rangeEndMs) {
+  const startedAtMs = parseSyncTimestampMs(sessionRow?.started_at);
+  if (!startedAtMs) {
+    return 0;
+  }
+  const lastSeenAtMs = parseSyncTimestampMs(sessionRow?.last_seen_at);
+  const endedAtMs = parseSyncTimestampMs(sessionRow?.ended_at);
+  const sessionEndMs = Math.max(endedAtMs, lastSeenAtMs, startedAtMs);
+  if (startedAtMs >= rangeEndMs || sessionEndMs <= rangeStartMs) {
+    return 0;
+  }
+  const clampedStartMs = Math.max(startedAtMs, rangeStartMs);
+  const clampedEndMs = Math.min(sessionEndMs, rangeEndMs);
+  return Math.max(0, clampedEndMs - clampedStartMs);
+}
+
+function formatReportDurationMs(durationMs) {
+  const totalSeconds = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return seconds ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function formatReportDateTime(value) {
+  if (!value) {
+    return "-";
+  }
+  const ms = parseSyncTimestampMs(value);
+  if (!ms) {
+    return "-";
+  }
+  return new Date(ms).toLocaleString();
+}
+
+function downloadBlobFile(blob, fileName) {
+  if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === "function") {
+    window.navigator.msSaveOrOpenBlob(blob, fileName);
+    return;
+  }
+  const exportUrl = URL.createObjectURL(blob);
+  const downloadLink = document.createElement("a");
+  downloadLink.href = exportUrl;
+  downloadLink.download = fileName;
+  document.body.appendChild(downloadLink);
+  downloadLink.click();
+  downloadLink.remove();
+  window.setTimeout(() => URL.revokeObjectURL(exportUrl), 1200);
+}
+
+async function buildAdminActivityReportSnapshot() {
+  const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    throw new Error("Admin role required.");
+  }
+
+  const ready = await ensureRelationalSyncReady({ force: true });
+  if (!ready) {
+    throw new Error("Reporting database is unavailable.");
+  }
+  const client = getRelationalClient();
+  if (!client) {
+    throw new Error("Supabase relational client is unavailable.");
+  }
+
+  const dayRange = getLocalDayRange();
+  const lookbackStartIso = new Date(dayRange.startMs - ACTIVITY_REPORT_LOOKBACK_MS).toISOString();
+
+  const [
+    profilesResult,
+    presenceResult,
+    sessionsResult,
+    blocksResult,
+    coursesResult,
+  ] = await Promise.all([
+    runWithTimeoutResult(
+      client.from("profiles").select("id,full_name,email,role,approved,created_at"),
+      ADMIN_REQUEST_TIMEOUT_MS,
+      "Profiles query timed out.",
+    ),
+    runWithTimeoutResult(
+      client.from("user_presence").select("user_id,full_name,email,role,current_route,is_online,is_solving,last_seen_at"),
+      ADMIN_REQUEST_TIMEOUT_MS,
+      "Presence query timed out.",
+    ),
+    runWithTimeoutResult(
+      client
+        .from("user_activity_sessions")
+        .select("session_key,user_id,full_name,email,role,entry_route,current_route,exit_route,page_views,started_at,last_seen_at,ended_at")
+        .gte("last_seen_at", lookbackStartIso)
+        .order("last_seen_at", { ascending: false }),
+      ADMIN_REQUEST_TIMEOUT_MS,
+      "Activity sessions query timed out.",
+    ),
+    runWithTimeoutResult(
+      client
+        .from("test_blocks")
+        .select("id,user_id,course_id,status,question_count,elapsed_seconds,created_at,completed_at,updated_at")
+        .gte("updated_at", lookbackStartIso)
+        .order("updated_at", { ascending: false }),
+      ADMIN_REQUEST_TIMEOUT_MS,
+      "Test blocks query timed out.",
+    ),
+    runWithTimeoutResult(
+      client.from("courses").select("id,course_name,course_code"),
+      ADMIN_REQUEST_TIMEOUT_MS,
+      "Courses query timed out.",
+    ),
+  ]);
+
+  const queryResults = [profilesResult, presenceResult, sessionsResult, blocksResult, coursesResult];
+  const failedResult = queryResults.find((result) => result?.error);
+  if (failedResult?.error) {
+    throw new Error(failedResult.error.message || "Could not build activity report.");
+  }
+
+  const profiles = Array.isArray(profilesResult?.data) ? profilesResult.data : [];
+  const presenceRows = Array.isArray(presenceResult?.data) ? presenceResult.data : [];
+  const sessionRows = Array.isArray(sessionsResult?.data) ? sessionsResult.data : [];
+  const blockRows = Array.isArray(blocksResult?.data) ? blocksResult.data : [];
+  const courseRows = Array.isArray(coursesResult?.data) ? coursesResult.data : [];
+
+  const profileById = new Map(profiles.map((row) => [String(row?.id || ""), row]));
+  const courseNameById = new Map(
+    courseRows.map((row) => [
+      String(row?.id || ""),
+      String(row?.course_name || "").trim() || String(row?.course_code || "").trim() || "Unknown course",
+    ]),
+  );
+
+  const todayPresenceRows = presenceRows.filter((row) => shouldTreatPresenceAsOnline(row) || parseSyncTimestampMs(row?.last_seen_at) >= dayRange.startMs);
+  const onlineRows = presenceRows.filter((row) => shouldTreatPresenceAsOnline(row));
+  const solvingRows = onlineRows.filter((row) => Boolean(row?.is_solving));
+  const todaySessionRows = sessionRows.filter((row) => getActivitySessionDurationMsForRange(row, dayRange.startMs, dayRange.endMs) > 0);
+
+  const userStatsById = new Map();
+  const ensureUserStats = (userId) => {
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedUserId) {
+      return null;
+    }
+    if (!userStatsById.has(normalizedUserId)) {
+      const profile = profileById.get(normalizedUserId) || null;
+      userStatsById.set(normalizedUserId, {
+        userId: normalizedUserId,
+        name: String(profile?.full_name || "").trim(),
+        email: String(profile?.email || "").trim().toLowerCase(),
+        role: String(profile?.role || "student").trim() || "student",
+        sessionsToday: 0,
+        totalDurationMs: 0,
+        pageViews: 0,
+        testsStartedToday: 0,
+        testsCompletedToday: 0,
+        completedTestDurationSec: 0,
+        lastSeenAt: "",
+        status: "offline",
+      });
+    }
+    return userStatsById.get(normalizedUserId);
+  };
+
+  let totalSiteDurationMs = 0;
+  let totalPageViews = 0;
+  todaySessionRows.forEach((row) => {
+    const userStats = ensureUserStats(row?.user_id);
+    if (!userStats) {
+      return;
+    }
+    const durationMs = getActivitySessionDurationMsForRange(row, dayRange.startMs, dayRange.endMs);
+    userStats.sessionsToday += 1;
+    userStats.totalDurationMs += durationMs;
+    userStats.pageViews += Math.max(1, Number(row?.page_views || 1));
+    userStats.lastSeenAt = parseSyncTimestampMs(row?.last_seen_at) > parseSyncTimestampMs(userStats.lastSeenAt) ? row?.last_seen_at || userStats.lastSeenAt : userStats.lastSeenAt;
+    if (!userStats.name) {
+      userStats.name = String(row?.full_name || "").trim();
+    }
+    if (!userStats.email) {
+      userStats.email = String(row?.email || "").trim().toLowerCase();
+    }
+    if (!userStats.role) {
+      userStats.role = String(row?.role || "student").trim() || "student";
+    }
+    totalSiteDurationMs += durationMs;
+    totalPageViews += Math.max(1, Number(row?.page_views || 1));
+  });
+
+  todayPresenceRows.forEach((row) => {
+    const userStats = ensureUserStats(row?.user_id);
+    if (!userStats) {
+      return;
+    }
+    userStats.lastSeenAt = parseSyncTimestampMs(row?.last_seen_at) > parseSyncTimestampMs(userStats.lastSeenAt) ? row?.last_seen_at || userStats.lastSeenAt : userStats.lastSeenAt;
+    if (!userStats.name) {
+      userStats.name = String(row?.full_name || "").trim();
+    }
+    if (!userStats.email) {
+      userStats.email = String(row?.email || "").trim().toLowerCase();
+    }
+    userStats.role = String(row?.role || userStats.role || "student").trim() || "student";
+    userStats.status = shouldTreatPresenceAsOnline(row)
+      ? (row?.is_solving ? "solving" : "online")
+      : userStats.status;
+  });
+
+  const startedTodayBlocks = [];
+  const completedTodayBlocks = [];
+  blockRows.forEach((row) => {
+    const createdAtMs = parseSyncTimestampMs(row?.created_at);
+    const completedAtMs = parseSyncTimestampMs(row?.completed_at);
+    const startedToday = createdAtMs >= dayRange.startMs && createdAtMs < dayRange.endMs;
+    const completedToday = completedAtMs >= dayRange.startMs && completedAtMs < dayRange.endMs;
+    if (startedToday) {
+      startedTodayBlocks.push(row);
+    }
+    if (completedToday) {
+      completedTodayBlocks.push(row);
+    }
+    if (!startedToday && !completedToday) {
+      return;
+    }
+    const userStats = ensureUserStats(row?.user_id);
+    if (!userStats) {
+      return;
+    }
+    if (startedToday) {
+      userStats.testsStartedToday += 1;
+    }
+    if (completedToday) {
+      userStats.testsCompletedToday += 1;
+      userStats.completedTestDurationSec += Math.max(0, Number(row?.elapsed_seconds || 0));
+    }
+  });
+
+  const courseStatsById = new Map();
+  const ensureCourseStats = (courseId) => {
+    const normalizedCourseId = String(courseId || "").trim() || "__unknown__";
+    if (!courseStatsById.has(normalizedCourseId)) {
+      courseStatsById.set(normalizedCourseId, {
+        courseName: courseNameById.get(normalizedCourseId) || "Unknown course",
+        testsStartedToday: 0,
+        testsCompletedToday: 0,
+        totalQuestions: 0,
+        activeUserIds: new Set(),
+      });
+    }
+    return courseStatsById.get(normalizedCourseId);
+  };
+
+  startedTodayBlocks.forEach((row) => {
+    const courseStats = ensureCourseStats(row?.course_id);
+    courseStats.testsStartedToday += 1;
+    courseStats.totalQuestions += Math.max(0, Number(row?.question_count || 0));
+    if (row?.user_id) {
+      courseStats.activeUserIds.add(String(row.user_id));
+    }
+  });
+
+  completedTodayBlocks.forEach((row) => {
+    const courseStats = ensureCourseStats(row?.course_id);
+    courseStats.testsCompletedToday += 1;
+    courseStats.totalQuestions += Math.max(0, Number(row?.question_count || 0));
+    if (row?.user_id) {
+      courseStats.activeUserIds.add(String(row.user_id));
+    }
+  });
+
+  const activeUsersToday = [...userStatsById.values()].filter((entry) => entry.sessionsToday > 0);
+  const totalUsers = profiles.length;
+  const totalStudents = profiles.filter((row) => String(row?.role || "") === "student").length;
+  const approvedStudents = profiles.filter((row) => String(row?.role || "") === "student" && Boolean(row?.approved)).length;
+  const pendingStudents = profiles.filter((row) => String(row?.role || "") === "student" && !Boolean(row?.approved)).length;
+  const newUsersToday = profiles.filter((row) => {
+    const createdAtMs = parseSyncTimestampMs(row?.created_at);
+    return createdAtMs >= dayRange.startMs && createdAtMs < dayRange.endMs;
+  }).length;
+  const averageSessionDurationMs = todaySessionRows.length ? Math.round(totalSiteDurationMs / todaySessionRows.length) : 0;
+  const averageActiveUserDurationMs = activeUsersToday.length ? Math.round(totalSiteDurationMs / activeUsersToday.length) : 0;
+  const averagePageViewsPerSession = todaySessionRows.length ? Number((totalPageViews / todaySessionRows.length).toFixed(1)) : 0;
+  const averageCompletedTestDurationSec = completedTodayBlocks.length
+    ? Math.round(completedTodayBlocks.reduce((sum, row) => sum + Math.max(0, Number(row?.elapsed_seconds || 0)), 0) / completedTodayBlocks.length)
+    : 0;
+  const averageQuestionsPerCompletedTest = completedTodayBlocks.length
+    ? Number((completedTodayBlocks.reduce((sum, row) => sum + Math.max(0, Number(row?.question_count || 0)), 0) / completedTodayBlocks.length).toFixed(1))
+    : 0;
+
+  const userBreakdown = [...userStatsById.values()]
+    .filter((entry) => entry.sessionsToday > 0 || entry.testsStartedToday > 0 || entry.testsCompletedToday > 0 || entry.status !== "offline")
+    .sort((a, b) => b.totalDurationMs - a.totalDurationMs || b.testsCompletedToday - a.testsCompletedToday || a.name.localeCompare(b.name));
+
+  const courseBreakdown = [...courseStatsById.values()]
+    .sort((a, b) => b.testsStartedToday - a.testsStartedToday || b.testsCompletedToday - a.testsCompletedToday || a.courseName.localeCompare(b.courseName));
+
+  return {
+    dayRange,
+    generatedAt: nowISO(),
+    summary: {
+      totalUsers,
+      totalStudents,
+      approvedStudents,
+      pendingStudents,
+      newUsersToday,
+      activeUsersToday: activeUsersToday.length,
+      onlineNow: onlineRows.length,
+      solvingNow: solvingRows.length,
+      totalSiteDurationMs,
+      averageSessionDurationMs,
+      averageActiveUserDurationMs,
+      totalSessionsToday: todaySessionRows.length,
+      totalPageViews,
+      averagePageViewsPerSession,
+      testsStartedToday: startedTodayBlocks.length,
+      testsCompletedToday: completedTodayBlocks.length,
+      averageCompletedTestDurationSec,
+      averageQuestionsPerCompletedTest,
+    },
+    userBreakdown,
+    courseBreakdown,
+  };
+}
+
+function renderAdminActivityReportWorkbook(snapshot) {
+  const summaryRows = [
+    ["Report date", snapshot.dayRange.label],
+    ["Generated at", formatReportDateTime(snapshot.generatedAt)],
+    ["Registered users", snapshot.summary.totalUsers.toLocaleString()],
+    ["Students", snapshot.summary.totalStudents.toLocaleString()],
+    ["Approved students", snapshot.summary.approvedStudents.toLocaleString()],
+    ["Pending students", snapshot.summary.pendingStudents.toLocaleString()],
+    ["New users today", snapshot.summary.newUsersToday.toLocaleString()],
+    ["Active users today", snapshot.summary.activeUsersToday.toLocaleString()],
+    ["Online now", snapshot.summary.onlineNow.toLocaleString()],
+    ["Solving now", snapshot.summary.solvingNow.toLocaleString()],
+    ["Total site time today", formatReportDurationMs(snapshot.summary.totalSiteDurationMs)],
+    ["Average time per active user", formatReportDurationMs(snapshot.summary.averageActiveUserDurationMs)],
+    ["Average session duration", formatReportDurationMs(snapshot.summary.averageSessionDurationMs)],
+    ["Sessions started today", snapshot.summary.totalSessionsToday.toLocaleString()],
+    ["Page views today", snapshot.summary.totalPageViews.toLocaleString()],
+    ["Average page views per session", String(snapshot.summary.averagePageViewsPerSession)],
+    ["Tests started today", snapshot.summary.testsStartedToday.toLocaleString()],
+    ["Tests completed today", snapshot.summary.testsCompletedToday.toLocaleString()],
+    ["Average completed test time", formatReportDurationMs(snapshot.summary.averageCompletedTestDurationSec * 1000)],
+    ["Average questions per completed test", String(snapshot.summary.averageQuestionsPerCompletedTest)],
+  ];
+
+  const renderTable = (headers, rows, emptyMessage) => `
+    <table>
+      <thead>
+        <tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr>
+      </thead>
+      <tbody>
+        ${rows.length
+        ? rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")
+        : `<tr><td colspan="${headers.length}">${escapeHtml(emptyMessage)}</td></tr>`
+      }
+      </tbody>
+    </table>
+  `;
+
+  const userRows = snapshot.userBreakdown.map((entry) => ([
+    entry.name || "Unknown user",
+    entry.email || "-",
+    entry.role || "student",
+    entry.status,
+    String(entry.sessionsToday),
+    formatReportDurationMs(entry.totalDurationMs),
+    entry.sessionsToday ? formatReportDurationMs(Math.round(entry.totalDurationMs / entry.sessionsToday)) : "-",
+    String(entry.pageViews),
+    String(entry.testsStartedToday),
+    String(entry.testsCompletedToday),
+    entry.testsCompletedToday ? formatReportDurationMs(Math.round((entry.completedTestDurationSec / entry.testsCompletedToday) * 1000)) : "-",
+    formatReportDateTime(entry.lastSeenAt),
+  ]));
+
+  const courseRows = snapshot.courseBreakdown.map((entry) => ([
+    entry.courseName,
+    String(entry.testsStartedToday),
+    String(entry.testsCompletedToday),
+    String(entry.activeUserIds.size),
+    String(entry.totalQuestions),
+  ]));
+
+  return `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8" />
+  <meta name="ProgId" content="Excel.Sheet" />
+  <meta name="Generator" content="O6U MedBank" />
+  <style>
+    body { font-family: Arial, sans-serif; color: #0f172a; }
+    h1, h2 { margin: 0 0 12px; }
+    p { margin: 0 0 8px; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0 24px; }
+    th, td { border: 1px solid #cbd5e1; padding: 8px 10px; vertical-align: top; }
+    th { background: #e2e8f0; text-align: left; font-weight: 700; }
+    .section { margin-top: 28px; }
+    .subtle { color: #475569; }
+  </style>
+</head>
+<body>
+  <h1>O6U MedBank Daily Activity Report</h1>
+  <p class="subtle">Daily operational report for ${escapeHtml(snapshot.dayRange.label)}.</p>
+
+  <div class="section">
+    <h2>Summary</h2>
+    ${renderTable(["Metric", "Value"], summaryRows, "No summary metrics available.")}
+  </div>
+
+  <div class="section">
+    <h2>User Breakdown</h2>
+    ${renderTable(
+    ["User", "Email", "Role", "Status", "Sessions", "Time On Site", "Avg Session", "Page Views", "Tests Started", "Tests Completed", "Avg Completed Test", "Last Seen"],
+    userRows,
+    "No user activity recorded for this day.",
+  )}
+  </div>
+
+  <div class="section">
+    <h2>Course Breakdown</h2>
+    ${renderTable(
+    ["Course", "Tests Started", "Tests Completed", "Active Users", "Questions In Tests"],
+    courseRows,
+    "No course activity recorded for this day.",
+  )}
+  </div>
+</body>
+</html>`;
+}
+
+async function downloadAdminActivityReport() {
+  const snapshot = await buildAdminActivityReportSnapshot();
+  const workbookHtml = renderAdminActivityReportWorkbook(snapshot);
+  const blob = new Blob(["\ufeff", workbookHtml], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const fileName = `o6u-medbank-daily-activity-${snapshot.dayRange.label}.xls`;
+  downloadBlobFile(blob, fileName);
+  appendSystemLog("admin.activity.report", "Admin daily activity report downloaded.", {
+    reportDate: snapshot.dayRange.label,
+    activeUsers: snapshot.summary.activeUsersToday,
+    testsStarted: snapshot.summary.testsStartedToday,
+    testsCompleted: snapshot.summary.testsCompletedToday,
+  });
+  return fileName;
 }
 
 function shouldRefreshStudentData(user) {
@@ -9346,9 +10173,13 @@ function render() {
     state.adminPresenceError = "";
     state.adminPresenceRows = [];
     state.adminPresenceLastSyncAt = 0;
+    state.adminActivityReportRunning = false;
     adminQuestionsLastHydratedAt = 0;
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
+  }
+  if (!user) {
+    clearSupabaseSessionRecoveryRetry();
   }
   if (!user || user.role !== "student") {
     state.studentDataRefreshing = false;
@@ -9356,6 +10187,7 @@ function render() {
     state.studentDataLastFullSyncAt = 0;
   }
   syncPresenceRuntime(user);
+  syncSiteActivityRuntime(user);
   const skipTransition = state.skipNextRouteAnimation;
   const routeChanged = lastRenderedRoute !== state.route;
   if (skipTransition) {
@@ -9592,12 +10424,20 @@ function render() {
       if (modalCard) {
         modalCard.scrollTop = 0;
       }
-      const focusTarget = appEl.querySelector(".admin-course-topic-modal input[data-field='newCourseTopic']");
+      const focusTarget = appEl.querySelector(".admin-course-topic-modal input[data-field='newCourseTopicInline']");
+      focusTarget?.focus({ preventScroll: true });
+    });
+  }
+  if (isAdminCourseTopicModalOpen && state.adminCourseTopicInlineCreateOpen && !wasAdminCourseTopicInlineCreateOpen) {
+    window.requestAnimationFrame(() => {
+      const focusTarget = appEl.querySelector(".admin-course-topic-modal input[data-field='newCourseTopicInline']");
       focusTarget?.focus({ preventScroll: true });
     });
   }
   wasAdminQuestionModalOpen = isAdminQuestionModalOpen;
   wasAdminCourseTopicModalOpen = isAdminCourseTopicModalOpen;
+  wasAdminCourseTopicGroupCreateModalOpen = Boolean(state.adminCourseTopicGroupCreateModalOpen);
+  wasAdminCourseTopicInlineCreateOpen = Boolean(state.adminCourseTopicInlineCreateOpen);
 
   persistRouteState();
   const currentSessionPointer = getSessionRenderPointer(user);
@@ -11514,17 +12354,34 @@ function renderCreateTest() {
     state.qbankFilters.topicSource = "";
   }
   const selectedCourse = state.qbankFilters.course;
-  state.qbankFilters.topicSource = "";
-  const selectedTopicSource = "";
-  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions);
+  const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, questions);
+  const hasTopicSources = topicSourceOptions.length > 0;
+  let selectedTopicSource = String(state.qbankFilters.topicSource || "").trim();
+  if (hasTopicSources) {
+    if (!topicSourceOptions.some((option) => option.value === selectedTopicSource)) {
+      const selectedTopicKeys = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim().toLowerCase()).filter(Boolean));
+      const inferredSource = selectedTopicKeys.size
+        ? topicSourceOptions.find((option) => option.topics.some((topic) => selectedTopicKeys.has(String(topic || "").trim().toLowerCase())))
+        : null;
+      selectedTopicSource = inferredSource?.value || "";
+      state.qbankFilters.topicSource = selectedTopicSource;
+    }
+  } else {
+    selectedTopicSource = "";
+    state.qbankFilters.topicSource = "";
+  }
+  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { topicSource: selectedTopicSource });
   const topicOptions = topicSections.flatMap((section) => section.topics || []);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
+  const effectiveTopicsForFilter = hasTopicSources ? selectedTopics : selectedTopics;
   const filtered = applyQbankFilters(questions, {
     course: selectedCourse,
-    topics: selectedTopics,
+    topics: effectiveTopicsForFilter,
+  }, {
+    strictEmptyTopics: hasTopicSources,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
@@ -11533,11 +12390,16 @@ function renderCreateTest() {
     topicSections.length === 1
     && (!topicSections[0]?.name || String(topicSections[0]?.kind || "") === "flat")
   );
-  const selectedTopicLabel = selectedTopics.length === 0
-    ? "0 topics selected"
-    : allTopicsSelected
-      ? "All topics"
-      : formatTopicFilterSummary(selectedTopics);
+  const selectedTopicLabel = hasTopicSources && !selectedTopicSource
+    ? "Choose a source first"
+    : selectedTopics.length === 0
+      ? "0 topics selected"
+      : allTopicsSelected
+        ? "All topics"
+        : formatTopicFilterSummary(selectedTopics);
+  const selectedSourceLabel = hasTopicSources
+    ? (selectedTopicSource || "No source selected")
+    : "Direct topics";
   const allowedSources = ["all", "unused", "incorrect", "flagged"];
   if (!allowedSources.includes(state.createTestSource)) {
     state.createTestSource = "all";
@@ -11579,10 +12441,25 @@ function renderCreateTest() {
       .join("")}
               </select>
             </label>
+            ${hasTopicSources
+      ? `
+              <label>
+                Source
+                <select name="topicSource" id="create-test-topic-source-select">
+                  <option value="" ${selectedTopicSource ? "" : "selected"}>Choose a source</option>
+                  ${topicSourceOptions
+        .map((option) => `<option value="${escapeHtml(option.value)}" ${selectedTopicSource === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`)
+        .join("")}
+                </select>
+              </label>
+            `
+      : ""}
           </div>
         </div>
         <div class="create-test-filter-card create-test-topics-group">
-          ${topicSections.length
+          ${hasTopicSources && !selectedTopicSource
+      ? '<p class="subtle create-test-topic-empty">Choose a source to see the topics inside it.</p>'
+      : topicSections.length
       ? `
               <div class="create-test-topic-actions">
                 <button
@@ -11685,7 +12562,7 @@ function renderCreateTest() {
           </span>
         </label>
 
-        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
         <div class="stack">
           <button type="submit" class="btn">Start test</button>
         </div>
@@ -11696,6 +12573,7 @@ function renderCreateTest() {
 
 function wireCreateTest() {
   const courseSelect = document.getElementById("create-test-course-select");
+  const topicSourceSelect = document.getElementById("create-test-topic-source-select");
   const sourceSelect = document.getElementById("create-test-source-select");
   const endActiveBlockBtn = appEl.querySelector("[data-action='end-active-block']");
   const topicInputs = Array.from(document.querySelectorAll("input[data-role='create-test-topic']"));
@@ -11737,22 +12615,42 @@ function wireCreateTest() {
     const availableCourses = getAvailableCoursesForUser(user);
     const fallbackCourse = availableCourses[0] || Object.keys(QBANK_COURSE_TOPICS)[0] || "";
     const selectedCourse = state.qbankFilters.course || fallbackCourse;
-    state.qbankFilters.topicSource = "";
-    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, getPublishedQuestionsForUser(user));
+    const questions = getPublishedQuestionsForUser(user);
+    const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, questions);
+    const hasTopicSources = topicSourceOptions.length > 0;
+    let selectedTopicSource = String(state.qbankFilters.topicSource || "").trim();
+    if (hasTopicSources) {
+      if (!topicSourceOptions.some((option) => option.value === selectedTopicSource)) {
+        selectedTopicSource = "";
+        state.qbankFilters.topicSource = "";
+        state.qbankFilters.topics = [];
+      }
+    } else {
+      selectedTopicSource = "";
+      state.qbankFilters.topicSource = "";
+    }
+    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { topicSource: selectedTopicSource });
     const topicOptions = topicSections.flatMap((section) => section.topics || []);
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
     const allTopicsSelected = topicOptions.length > 0 && selectedTopics.length === topicOptions.length;
-    const selectedTopicLabel = selectedTopics.length === 0
-      ? "0 topics selected"
-      : allTopicsSelected
-        ? "All topics"
-        : formatTopicFilterSummary(selectedTopics);
-    const filteredByCourseTopic = applyQbankFilters(getPublishedQuestionsForUser(user), {
+    const selectedTopicLabel = hasTopicSources && !selectedTopicSource
+      ? "Choose a source first"
+      : selectedTopics.length === 0
+        ? "0 topics selected"
+        : allTopicsSelected
+          ? "All topics"
+          : formatTopicFilterSummary(selectedTopics);
+    const selectedSourceLabel = hasTopicSources
+      ? (selectedTopicSource || "No source selected")
+      : "Direct topics";
+    const filteredByCourseTopic = applyQbankFilters(questions, {
       course: selectedCourse,
       topics: selectedTopics,
+    }, {
+      strictEmptyTopics: hasTopicSources,
     });
     const allowedSources = ["all", "unused", "incorrect", "flagged"];
     if (!allowedSources.includes(state.createTestSource)) {
@@ -11767,7 +12665,7 @@ function wireCreateTest() {
     const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
     syncTopicSelectionUi();
     if (summaryEl) {
-      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+      summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
     if (countInput) {
       const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
@@ -11780,6 +12678,18 @@ function wireCreateTest() {
     state.qbankFilters.course = courseSelect.value || fallbackCourse;
     state.qbankFilters.topics = [];
     state.qbankFilters.topicSource = "";
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  topicSourceSelect?.addEventListener("change", () => {
+    const selectedCourse = String(state.qbankFilters.course || courseSelect?.value || "").trim();
+    const questions = getPublishedQuestionsForUser(getCurrentUser());
+    const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(selectedCourse, questions);
+    const nextSource = String(topicSourceSelect.value || "").trim();
+    const selectedOption = topicSourceOptions.find((option) => option.value === nextSource);
+    state.qbankFilters.topicSource = selectedOption?.value || "";
+    state.qbankFilters.topics = selectedOption ? [...selectedOption.topics] : [];
     state.skipNextRouteAnimation = true;
     render();
   });
@@ -11852,7 +12762,19 @@ function wireCreateTest() {
       state.qbankFilters.topics = [];
       state.qbankFilters.topicSource = "";
     }
-    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters);
+    const topicSourceOptions = getAvailableTopicSourceOptionsForCourse(state.qbankFilters.course, getPublishedQuestionsForUser(user));
+    const hasTopicSources = topicSourceOptions.length > 0;
+    if (hasTopicSources && !String(state.qbankFilters.topicSource || "").trim()) {
+      toast("Choose a source first.");
+      return;
+    }
+    if (hasTopicSources && !(state.qbankFilters.topics || []).length) {
+      toast("Choose at least one topic.");
+      return;
+    }
+    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
+      strictEmptyTopics: hasTopicSources,
+    });
     pool = applySourceFilter(pool, source, user.id);
     const fallbackCount = Math.max(1, Math.min(500, pool.length || 0));
     const requestedCount = Math.floor(Number(data.get("count")));
@@ -14220,6 +15142,7 @@ function renderAdmin() {
 
   const allCourses = Object.keys(QBANK_COURSE_TOPICS);
   let pageContent = "";
+  let adminGlobalOverlay = "";
 
   if (activeAdminPage === "dashboard") {
     const users = getUsers();
@@ -14523,13 +15446,15 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "courses") {
-    if (state.adminCourseTopicModalCourse) {
-      state.adminCourseTopicModalCourse = "";
-    }
     const questions = getQuestions();
     const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
     const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
+    if (state.adminCourseTopicModalCourse && !selectedSemesterCourses.includes(state.adminCourseTopicModalCourse)) {
+      state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
+    }
     const notebookLinksByCourse = COURSE_NOTEBOOK_LINKS;
     const courseSearchQuery = String(state.adminCourseSearch || "").trim();
     const normalizedCourseSearch = courseSearchQuery.toLowerCase();
@@ -14559,7 +15484,11 @@ function renderAdmin() {
     if (state.adminCourseFocus !== preferredFocusedCourse) {
       state.adminCourseFocus = preferredFocusedCourse;
     }
-    const focusedCourseEntry = filteredCourseEntries.find(({ course }) => course === preferredFocusedCourse) || null;
+    const focusedCourseEntry = selectedSemesterCourses
+      .map((course, idx) => ({ course, idx }))
+      .find(({ course }) => course === state.adminCourseTopicModalCourse)
+      || filteredCourseEntries.find(({ course }) => course === preferredFocusedCourse)
+      || null;
     const focusedCourse = focusedCourseEntry?.course || "";
     const focusedCourseIndex = Number.isFinite(focusedCourseEntry?.idx) ? focusedCourseEntry.idx : -1;
     const focusedQuestionCount = focusedCourse ? (questionCountByCourse[focusedCourse] || 0) : 0;
@@ -14568,7 +15497,7 @@ function renderAdmin() {
       .map(({ course, idx }) => {
         const topicCount = topicCountByCourse[course] || 0;
         const questionCount = questionCountByCourse[course] || 0;
-        const isActive = focusedCourse === course;
+        const isActive = state.adminCourseTopicModalCourse === course;
         return `
           <button
             class="admin-course-picker-card${isActive ? " is-active" : ""}"
@@ -14579,7 +15508,7 @@ function renderAdmin() {
           >
             <div class="admin-course-picker-card-head">
               <b class="admin-course-picker-card-title">${escapeHtml(course)}</b>
-              <span class="admin-course-picker-card-status">${isActive ? "Selected" : "Select"}</span>
+              <span class="admin-course-picker-card-status">${isActive ? "Opened" : "Open"}</span>
             </div>
             <p class="admin-course-picker-card-copy">
               <span>${topicCount} topics</span>
@@ -14592,73 +15521,75 @@ function renderAdmin() {
     const focusedCourseWorkspace = focusedCourse
       ? `
           <section class="admin-course-workspace" data-course-index="${focusedCourseIndex}">
-            <div class="admin-course-workspace-head">
-              <div>
-                <h4 style="margin: 0;">${escapeHtml(focusedCourse)}</h4>
-                <p class="subtle" style="margin: 0.22rem 0 0;">Focused workspace</p>
+            <div class="admin-course-workspace-hero">
+              <div class="admin-course-workspace-hero-main">
+                <label class="admin-course-card-name-field admin-course-card-name-field-head">
+                  <span>Course name</span>
+                  <div class="admin-course-card-name-inline">
+                    <input data-field="curriculumCourseName" value="${escapeHtml(focusedCourse)}" />
+                    <button class="btn admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
+                  </div>
+                </label>
+                <div class="admin-course-workspace-hero-actions">
+                  <div class="admin-course-workspace-meta">
+                    <span class="admin-course-meta-pill"><b>${focusedTopicCount}</b><small>Topics</small></span>
+                    <span class="admin-course-meta-pill"><b>${focusedQuestionCount}</b><small>Questions</small></span>
+                  </div>
+                </div>
               </div>
-              <div class="admin-course-workspace-head-actions">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="curriculum-rename">Save course name</button>
-                <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Open question bank</button>
-                <button class="btn danger admin-btn-sm" type="button" data-action="curriculum-delete">Delete course</button>
-              </div>
-            </div>
-
-            <div class="admin-course-card-stats">
-              <span class="admin-course-stat"><b>${focusedTopicCount}</b><small>Topics</small></span>
-              <span class="admin-course-stat"><b>${focusedQuestionCount}</b><small>Questions</small></span>
             </div>
 
             <div class="admin-course-workspace-layout">
               <section class="admin-course-workspace-panel admin-course-workspace-panel-main">
-                <div class="admin-course-workspace-panel-head">
-                  <div>
-                    <h4 style="margin: 0;">Topics</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Manage all course topics in one place.</p>
-                  </div>
-                </div>
-
-                <label class="admin-course-card-name-field admin-course-card-name-field-workspace">
-                  <span>Course name</span>
-                  <input data-field="curriculumCourseName" value="${escapeHtml(focusedCourse)}" />
-                </label>
-
-                <div class="admin-course-topic-launch">
-                  ${renderAdminCourseTopicControls(focusedCourse)}
-                </div>
+                ${renderAdminCourseTopicControls(focusedCourse)}
               </section>
 
-              <section class="admin-course-workspace-panel">
-                <div class="admin-course-workspace-panel-head">
-                  <div>
-                    <h4 style="margin: 0;">Course tools</h4>
-                    <p class="subtle" style="margin: 0.22rem 0 0;">Links and bulk actions.</p>
+              <div class="admin-course-workspace-sidebar">
+                <section class="admin-course-workspace-panel">
+                  <div class="admin-course-workspace-panel-head">
+                    <div>
+                      <h4 style="margin: 0;">Course tools</h4>
+                      <p class="subtle" style="margin: 0.22rem 0 0;">Notebook link and course-wide actions.</p>
+                    </div>
                   </div>
-                </div>
 
-                <label class="admin-course-tool-field">Ask AI / Notebook link
-                  <div class="admin-course-notebook-link">
-                    <input
-                      data-field="courseNotebookLink"
-                      value="${escapeHtml(notebookLinksByCourse[focusedCourse] || "")}"
-                      placeholder="https://notebooklm.google.com/..."
-                    />
-                    <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save link</button>
-                  </div>
-                </label>
+                  <label class="admin-course-tool-field">Ask AI / Notebook link
+                    <div class="admin-course-notebook-link admin-course-notebook-link-inline">
+                      <input
+                        data-field="courseNotebookLink"
+                        value="${escapeHtml(notebookLinksByCourse[focusedCourse] || "")}"
+                        placeholder="https://notebooklm.google.com/..."
+                      />
+                      <button class="btn ghost admin-btn-sm" type="button" data-action="course-notebook-link-save">Save</button>
+                    </div>
+                  </label>
+                </section>
 
-                <div class="admin-course-qbank">
-                  <p class="admin-course-qbank-count">
-                    <b>${focusedQuestionCount}</b> question${focusedQuestionCount === 1 ? "" : "s"} in this course
-                  </p>
-                  <div class="admin-course-qbank-actions">
-                    <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit">Open question bank</button>
-                    <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${focusedQuestionCount ? "" : "disabled"}>Delete all questions</button>
-                    <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
+                <section class="admin-course-workspace-panel admin-course-workspace-panel-danger">
+                  <div class="admin-course-workspace-panel-head">
+                    <div>
+                      <h4 style="margin: 0;">Danger zone</h4>
+                      <p class="subtle" style="margin: 0.22rem 0 0;">These actions are destructive and cannot be undone.</p>
+                    </div>
                   </div>
-                </div>
-              </section>
+
+                  <div class="admin-course-tool-group admin-course-tool-group-danger">
+                    <p class="admin-course-qbank-count">
+                      <b>${focusedQuestionCount}</b> question${focusedQuestionCount === 1 ? "" : "s"} in this course
+                    </p>
+                    <div class="admin-course-qbank-actions">
+                      <button class="btn danger admin-btn-sm" type="button" data-action="course-question-clear" ${focusedQuestionCount ? "" : "disabled"}>Delete all questions</button>
+                      <button class="btn danger admin-btn-sm" type="button" data-action="course-topic-clear">Delete all topics</button>
+                    </div>
+                  </div>
+
+                  <div class="admin-course-danger-footer">
+                    <button class="btn danger admin-course-danger-primary" type="button" data-action="curriculum-delete">Delete course permanently</button>
+                  </div>
+                </section>
+              </div>
             </div>
+
           </section>
         `
       : "";
@@ -14670,6 +15601,12 @@ function renderAdmin() {
             <h3 style="margin: 0;">Courses</h3>
             <p class="subtle" style="margin: 0.22rem 0 0;">Year ${curriculumYear} • Semester ${curriculumSemester}</p>
           </div>
+          <form id="admin-curriculum-add-form" class="admin-courses-head-add-form">
+            <label class="admin-courses-head-add-label">Add new course
+              <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
+            </label>
+            <button class="btn" type="submit">Add new course</button>
+          </form>
         </div>
 
         <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
@@ -14695,15 +15632,6 @@ function renderAdmin() {
                   </label>
                 </div>
               </form>
-
-              <form id="admin-curriculum-add-form" class="admin-course-toolbar-card admin-course-add-form">
-                <label>Add course
-                  <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
-                </label>
-                <div class="stack">
-                  <button class="btn" type="submit">Add course</button>
-                </div>
-              </form>
             </div>
 
             <div class="admin-course-grid" style="margin-top: 0.95rem;">
@@ -14714,13 +15642,31 @@ function renderAdmin() {
                 </div>
               `}
             </div>
-
-            ${focusedCourseWorkspace
-        ? `<div style="margin-top: 0.95rem;">${focusedCourseWorkspace}</div>`
-        : ""}
-          
       </section>
     `;
+
+    adminGlobalOverlay = focusedCourseWorkspace && state.adminCourseTopicModalCourse
+      ? `
+          <div class="admin-course-topic-modal admin-course-details-modal">
+            <button class="admin-course-topic-modal-backdrop" type="button" data-action="course-topic-manager-close" aria-label="Close course details"></button>
+            <section class="admin-course-topic-modal-card admin-course-details-modal-card" role="dialog" aria-modal="true" aria-label="Course details">
+              <div class="flex-between admin-course-topic-modal-head">
+                <div>
+                  <h3 style="margin: 0;">Course details</h3>
+                  <p class="subtle" style="margin: 0.22rem 0 0;">Manage topics, links, and question actions.</p>
+                </div>
+                <div class="admin-course-topic-modal-head-actions">
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-question-edit" data-course-index="${focusedCourseIndex}">Open question bank</button>
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-manager-close">Close</button>
+                </div>
+              </div>
+              <div class="admin-course-topic-modal-body">
+                ${focusedCourseWorkspace}
+              </div>
+            </section>
+          </div>
+        `
+      : "";
   }
 
   if (activeAdminPage === "questions") {
@@ -15483,6 +16429,9 @@ function renderAdmin() {
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.45rem;">
             <div style="display: flex; align-items: center; gap: 0.6rem;">
               <span class="subtle" style="font-size: 0.8rem;">Last sync: <b>${lastSyncLabel}</b></span>
+              <button class="btn ghost admin-btn-sm ${state.adminActivityReportRunning ? "is-loading" : ""}" type="button" data-action="download-admin-activity-report" ${state.adminActivityReportRunning ? "disabled" : ""}>
+                ${state.adminActivityReportRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Preparing report...</span>` : "Download daily report"}
+              </button>
               <button class="btn ghost admin-btn-sm ${state.adminPresenceLoading ? "is-loading" : ""}" type="button" data-action="refresh-admin-activity" ${state.adminPresenceLoading ? "disabled" : ""}>
                 ${state.adminPresenceLoading ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh now"}
               </button>
@@ -15572,52 +16521,125 @@ function renderAdmin() {
 
       <div class="admin-main">${syncNotice}${pageContent}</div>
     </section>
+    ${adminGlobalOverlay}
   `;
 }
 
 function renderAdminCourseTopicControls(course) {
   const topics = QBANK_COURSE_TOPICS[course] || [];
+  const groups = getCourseTopicGroups(course);
+  const groupNames = Object.keys(groups);
+  const groupOptionListId = `course-topic-groups-${String(course || "course").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "course"}`;
   return `
     <div class="admin-course-topics admin-course-topic-manager">
       <div class="admin-course-topic-manager-topbar">
         <div>
           <h4 style="margin: 0;">Topics</h4>
-          <p class="subtle" style="margin: 0.22rem 0 0;">Add, rename, and remove topics.</p>
-        </div>
-        <div class="admin-topic-add admin-topic-add-inline">
-          <input data-field="newCourseTopic" placeholder="Add topic (e.g., Diabetes Mellitus)" />
-          <button class="btn ghost admin-btn-sm" type="button" data-action="course-topic-add">Add topic</button>
+          <p class="subtle" style="margin: 0.22rem 0 0;">Add, edit, and group topics directly in the table.</p>
         </div>
       </div>
 
-      <div class="admin-topic-group-editor-list">
-        ${topics
-      .map((topic, topicIdx) => `
-            <div class="admin-topic-group-editor-row" data-role="course-topic-group-editor-row" data-topic-index="${topicIdx}">
-              <div class="admin-topic-group-editor-topic">
-                <b class="admin-topic-group-editor-name">${escapeHtml(topic)}</b>
-              </div>
-              <div class="admin-topic-group-editor-actions">
-                <button
-                  class="btn ghost admin-btn-sm"
-                  type="button"
-                  data-action="course-topic-rename"
-                  data-topic-index="${topicIdx}"
-                >
-                  Rename
-                </button>
-                <button
-                  class="btn danger admin-btn-sm"
-                  type="button"
-                  data-action="course-topic-remove"
-                  data-topic-index="${topicIdx}"
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          `)
-      .join("")}
+      <datalist id="${groupOptionListId}">
+        ${groupNames.map((groupName) => `<option value="${escapeHtml(groupName)}"></option>`).join("")}
+      </datalist>
+
+      <div class="table-wrap admin-topic-table-wrap">
+        <table class="admin-topic-table">
+          <thead>
+            <tr>
+              <th>Topic</th>
+              <th>Subgroup</th>
+              <th class="admin-topic-table-actions-head">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${state.adminCourseTopicInlineCreateOpen
+      ? `
+            <tr class="admin-topic-table-create-row is-open" data-role="course-topic-create-row">
+              <td>
+                <input data-field="newCourseTopicInline" placeholder="Add topic (e.g., Diabetes Mellitus)" />
+              </td>
+              <td>
+                <input
+                  data-field="newCourseTopicGroupInline"
+                  list="${groupOptionListId}"
+                  placeholder="Type or create subgroup"
+                />
+              </td>
+              <td>
+                <div class="admin-topic-table-actions">
+                  <button
+                    class="btn admin-btn-sm admin-topic-inline-add-btn"
+                    type="button"
+                    data-action="course-topic-inline-add"
+                    aria-label="Add topic"
+                    title="Add topic"
+                  >
+                    +
+                  </button>
+                </div>
+              </td>
+            </tr>
+            `
+      : `
+            <tr class="admin-topic-table-create-row is-collapsed" data-role="course-topic-create-row">
+              <td colspan="2"></td>
+              <td>
+                <div class="admin-topic-table-actions">
+                  <button
+                    class="btn admin-btn-sm admin-topic-inline-add-btn"
+                    type="button"
+                    data-action="course-topic-inline-open"
+                    aria-label="Show add topic fields"
+                    title="Add topic"
+                  >
+                    +
+                  </button>
+                </div>
+              </td>
+            </tr>
+            `}
+            ${topics.length
+      ? topics
+        .map((topic, topicIdx) => `
+                  <tr data-role="course-topic-row" data-topic-index="${topicIdx}">
+                    <td>
+                      <input data-field="courseTopicName" value="${escapeHtml(topic)}" />
+                    </td>
+                    <td>
+                      <input
+                        data-field="courseTopicGroupName"
+                        list="${groupOptionListId}"
+                        value="${escapeHtml(getTopicGroupNameForCourseTopic(course, topic))}"
+                        placeholder="Type or create subgroup"
+                      />
+                    </td>
+                    <td>
+                      <div class="admin-topic-table-actions">
+                        <button
+                          class="btn ghost admin-btn-sm"
+                          type="button"
+                          data-action="course-topic-save"
+                          data-topic-index="${topicIdx}"
+                        >
+                          Save
+                        </button>
+                        <button
+                          class="btn danger admin-btn-sm"
+                          type="button"
+                          data-action="course-topic-remove"
+                          data-topic-index="${topicIdx}"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `)
+        .join("")
+      : `<tr><td colspan="3" class="subtle">No topics yet. Press + to add the first one.</td></tr>`}
+          </tbody>
+        </table>
       </div>
     </div>
   `;
@@ -15649,6 +16671,8 @@ function wireAdmin() {
       }
       if (page !== "courses") {
         state.adminCourseTopicModalCourse = "";
+        state.adminCourseTopicGroupCreateModalOpen = false;
+        state.adminCourseTopicInlineCreateOpen = false;
       }
       if (page === "activity") {
         refreshAdminPresenceSnapshot({ force: true })
@@ -15673,6 +16697,8 @@ function wireAdmin() {
     button.addEventListener("click", () => {
       state.adminPage = "courses";
       state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.adminEditQuestionId = null;
       state.adminQuestionModalOpen = false;
       state.adminSelectedQuestionIds = [];
@@ -16070,6 +17096,26 @@ function wireAdmin() {
       await refreshAdminPresenceSnapshot({ force: true });
       state.skipNextRouteAnimation = true;
       render();
+    });
+    appEl.querySelector("[data-action='download-admin-activity-report']")?.addEventListener("click", async () => {
+      if (state.adminActivityReportRunning) {
+        return;
+      }
+      state.adminActivityReportRunning = true;
+      state.skipNextRouteAnimation = true;
+      render();
+      try {
+        const fileName = await downloadAdminActivityReport();
+        toast(`Downloaded ${fileName}.`);
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not build the daily activity report."));
+      } finally {
+        state.adminActivityReportRunning = false;
+        if (state.route === "admin" && state.adminPage === "activity") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      }
     });
   } else {
     clearAdminPresencePolling();
@@ -16476,13 +17522,47 @@ function wireAdmin() {
     }
   });
 
+  appEl.querySelectorAll("[data-action='course-topic-manager-close']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+  appEl.querySelectorAll(".admin-course-topic-modal").forEach((modal) => {
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (state.adminCourseTopicGroupCreateModalOpen) {
+        state.adminCourseTopicGroupCreateModalOpen = false;
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+      if (state.adminCourseTopicInlineCreateOpen) {
+        state.adminCourseTopicInlineCreateOpen = false;
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+      state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
   appEl.querySelectorAll("[data-action='curriculum-rename']").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest("[data-course-index]");
       if (!row) return;
 
       const index = Number(row.getAttribute("data-course-index"));
-      const input = row.querySelector("input[data-field='curriculumCourseName']");
+      const input = row.querySelector("[data-field='curriculumCourseName']");
       const newName = String(input?.value || "").trim();
       const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
       const semester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
@@ -16556,6 +17636,8 @@ function wireAdmin() {
       }
       if (state.adminCourseTopicModalCourse === removedCourse) {
         state.adminCourseTopicModalCourse = "";
+        state.adminCourseTopicGroupCreateModalOpen = false;
+        state.adminCourseTopicInlineCreateOpen = false;
       }
       try {
         await flushPendingSyncNow();
@@ -16569,7 +17651,9 @@ function wireAdmin() {
   });
 
   const adminCoursesSection = document.getElementById("admin-courses-section");
-  adminCoursesSection?.addEventListener("click", async (event) => {
+  const adminCourseDetailsModal = appEl.querySelector(".admin-course-topic-modal");
+  const adminCourseInteractionRoots = [adminCoursesSection, adminCourseDetailsModal].filter(Boolean);
+  const handleAdminCourseAction = async (event) => {
     const actionEl = event.target.closest("[data-action]");
     if (!actionEl) return;
 
@@ -16579,12 +17663,9 @@ function wireAdmin() {
         "admin-focus-course",
         "course-topic-manager-open",
         "course-topic-manager-close",
-        "course-topic-add",
-        "course-topic-group-save",
-        "course-topic-group-clear",
-        "course-topic-group-rename-save",
-        "course-topic-group-remove",
-        "course-topic-rename",
+        "course-topic-inline-open",
+        "course-topic-inline-add",
+        "course-topic-save",
         "course-topic-remove",
         "course-topic-clear",
         "course-notebook-link-save",
@@ -16597,6 +17678,8 @@ function wireAdmin() {
 
     if (action === "course-topic-manager-close") {
       state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.skipNextRouteAnimation = true;
       render();
       return;
@@ -16611,18 +17694,10 @@ function wireAdmin() {
     const course = currentCourses[index];
     if (!course) return;
 
-    if (action === "admin-focus-course") {
-      if (state.adminCourseFocus !== course) {
-        state.adminCourseFocus = course;
-        state.skipNextRouteAnimation = true;
-        render();
-      }
-      return;
-    }
-
-    if (action === "course-topic-manager-open") {
+    if (action === "admin-focus-course" || action === "course-topic-manager-open") {
       state.adminCourseFocus = course;
       state.adminCourseTopicModalCourse = course;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.skipNextRouteAnimation = true;
       render();
       return;
@@ -16631,6 +17706,8 @@ function wireAdmin() {
     if (action === "course-question-edit") {
       state.adminPage = "questions";
       state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.adminFilters.course = course;
       state.adminFilters.topic = "";
       state.adminEditorCourse = course;
@@ -16675,53 +17752,9 @@ function wireAdmin() {
       render();
     };
 
-    if (action === "course-topic-group-rename-save" || action === "course-topic-group-remove") {
-      const groupName = String(actionEl.getAttribute("data-group-name") || "").trim();
-      if (!groupName) {
-        return;
-      }
-
-      if (action === "course-topic-group-rename-save") {
-        const groupCard = actionEl.closest("[data-role='course-topic-group-card']");
-        const input = groupCard?.querySelector("input[data-field='courseTopicGroupRename']");
-        const nextGroupName = String(input?.value || "").trim();
-        if (!nextGroupName) {
-          toast("Subgroup name is required.");
-          return;
-        }
-        if (nextGroupName === groupName) {
-          return;
-        }
-        const changed = renameCourseTopicGroup(course, groupName, nextGroupName);
-        if (!changed) {
-          toast("No changes to save.");
-          return;
-        }
-        rerenderCoursesPage();
-        try {
-          await flushPendingSyncNow({ throwOnRelationalFailure: false });
-          toast("Subgroup renamed.");
-        } catch (syncError) {
-          toast(`Subgroup renamed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-        }
-        return;
-      }
-
-      const groupedTopics = getCourseTopicGroups(course)[groupName] || [];
-      if (!window.confirm(`Remove subgroup "${groupName}"? ${groupedTopics.length} topic(s) will stay unchanged.`)) {
-        return;
-      }
-      const changed = removeCourseTopicGroup(course, groupName);
-      if (!changed) {
-        return;
-      }
+    if (action === "course-topic-inline-open") {
+      state.adminCourseTopicInlineCreateOpen = true;
       rerenderCoursesPage();
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast("Subgroup removed.");
-      } catch (syncError) {
-        toast(`Subgroup removed locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
       return;
     }
 
@@ -16772,9 +17805,12 @@ function wireAdmin() {
       return;
     }
 
-    if (action === "course-topic-add") {
-      const input = row.querySelector("input[data-field='newCourseTopic']");
-      const topicName = String(input?.value || "").trim();
+    if (action === "course-topic-inline-add") {
+      const createRow = actionEl.closest("[data-role='course-topic-create-row']");
+      const topicInput = createRow?.querySelector("input[data-field='newCourseTopicInline']");
+      const groupInput = createRow?.querySelector("input[data-field='newCourseTopicGroupInline']");
+      const topicName = String(topicInput?.value || "").trim();
+      const requestedGroupName = String(groupInput?.value || "").trim();
       if (!topicName) {
         toast("Topic name is required.");
         return;
@@ -16791,10 +17827,15 @@ function wireAdmin() {
       }
 
       applyCourseTopicsUpdate(course, [...existingTopics, topicName]);
+      if (requestedGroupName) {
+        const canonicalGroupName = findMatchingCourseTopicGroupName(getCourseTopicGroups(course), requestedGroupName) || requestedGroupName;
+        setCourseTopicParentGroup(course, topicName, canonicalGroupName);
+      }
+      state.adminCourseTopicInlineCreateOpen = false;
       rerenderCoursesPage();
       try {
-        await flushPendingSyncNow();
-        toast("Topic added.");
+        await flushPendingSyncNow({ throwOnRelationalFailure: false });
+        toast(requestedGroupName ? "Topic and subgroup saved." : "Topic added.");
       } catch (syncError) {
         toast(`Topic added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
@@ -16806,32 +17847,15 @@ function wireAdmin() {
     const currentTopic = topics[topicIndex];
     if (!currentTopic) return;
 
-    if (action === "course-topic-group-save" || action === "course-topic-group-clear") {
-      const editorRow = actionEl.closest("[data-role='course-topic-group-editor-row']");
-      const input = editorRow?.querySelector("input[data-field='courseTopicGroupName']");
-      const currentGroup = getTopicGroupNameForCourseTopic(course, currentTopic);
-      const nextGroupName = action === "course-topic-group-clear" ? "" : String(input?.value || "").trim();
-      if (nextGroupName === currentGroup) {
-        return;
-      }
-      const changed = setCourseTopicParentGroup(course, currentTopic, nextGroupName);
-      if (!changed) {
-        toast("No changes to save.");
-        return;
-      }
-      rerenderCoursesPage();
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast(nextGroupName ? "Topic moved into subgroup." : "Topic removed from subgroup.");
-      } catch (syncError) {
-        toast(`Subgroup changes saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
-      return;
-    }
-
-    if (action === "course-topic-rename") {
-      const nextTopic = String(window.prompt("Rename topic", currentTopic) || "").trim();
-      if (!nextTopic || nextTopic === currentTopic) {
+    if (action === "course-topic-save") {
+      const topicRow = actionEl.closest("[data-role='course-topic-row']");
+      const topicInput = topicRow?.querySelector("input[data-field='courseTopicName']");
+      const groupInput = topicRow?.querySelector("input[data-field='courseTopicGroupName']");
+      const nextTopic = String(topicInput?.value || "").trim();
+      const requestedGroupName = String(groupInput?.value || "").trim();
+      const currentGroupName = getTopicGroupNameForCourseTopic(course, currentTopic);
+      if (!nextTopic) {
+        toast("Topic name is required.");
         return;
       }
       if (isRemovedTopicName(nextTopic)) {
@@ -16842,15 +17866,34 @@ function wireAdmin() {
         toast("This topic name already exists.");
         return;
       }
-      const nextTopics = [...topics];
-      nextTopics[topicIndex] = nextTopic;
-      applyCourseTopicsUpdate(course, nextTopics, { renamedFrom: currentTopic, renamedTo: nextTopic });
+
+      let changed = false;
+      if (nextTopic !== currentTopic) {
+        const nextTopics = [...topics];
+        nextTopics[topicIndex] = nextTopic;
+        applyCourseTopicsUpdate(course, nextTopics, { renamedFrom: currentTopic, renamedTo: nextTopic });
+        changed = true;
+      }
+
+      const canonicalTopicName = nextTopic || currentTopic;
+      const canonicalGroupName = requestedGroupName
+        ? (findMatchingCourseTopicGroupName(getCourseTopicGroups(course), requestedGroupName) || requestedGroupName)
+        : "";
+      const resolvedCurrentGroupName = getTopicGroupNameForCourseTopic(course, canonicalTopicName);
+      if (canonicalGroupName !== resolvedCurrentGroupName) {
+        changed = setCourseTopicParentGroup(course, canonicalTopicName, canonicalGroupName) || changed;
+      }
+
+      if (!changed) {
+        toast("No changes to save.");
+        return;
+      }
       rerenderCoursesPage();
       try {
-        await flushPendingSyncNow();
-        toast("Topic renamed.");
+        await flushPendingSyncNow({ throwOnRelationalFailure: false });
+        toast("Topic updated.");
       } catch (syncError) {
-        toast(`Topic renamed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+        toast(`Topic updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
       return;
     }
@@ -16870,11 +17913,24 @@ function wireAdmin() {
     } catch (syncError) {
       toast(`Topic removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
     }
-  });
-
-  adminCoursesSection?.addEventListener("keydown", (event) => {
+  };
+  const handleAdminCourseKeydown = (event) => {
     if (event.key === "Escape" && state.adminCourseTopicModalCourse) {
+      if (state.adminCourseTopicGroupCreateModalOpen) {
+        state.adminCourseTopicGroupCreateModalOpen = false;
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+      if (state.adminCourseTopicInlineCreateOpen) {
+        state.adminCourseTopicInlineCreateOpen = false;
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
       state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.skipNextRouteAnimation = true;
       render();
       return;
@@ -16883,13 +17939,13 @@ function wireAdmin() {
       return;
     }
     const target = event.target;
-    if (!(target instanceof HTMLInputElement)) {
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) {
       return;
     }
 
-    if (target.matches("input[data-field='courseTopicGroupName']")) {
-      const editorRow = target.closest("[data-role='course-topic-group-editor-row']");
-      const saveButton = editorRow?.querySelector("[data-action='course-topic-group-save']");
+    if (target.matches("input[data-field='newCourseTopicInline'], input[data-field='newCourseTopicGroupInline']")) {
+      const createRow = target.closest("[data-role='course-topic-create-row']");
+      const saveButton = createRow?.querySelector("[data-action='course-topic-inline-add']");
       if (!saveButton) {
         return;
       }
@@ -16898,9 +17954,9 @@ function wireAdmin() {
       return;
     }
 
-    if (target.matches("input[data-field='courseTopicGroupRename']")) {
-      const groupCard = target.closest("[data-role='course-topic-group-card']");
-      const saveButton = groupCard?.querySelector("[data-action='course-topic-group-rename-save']");
+    if (target.matches("input[data-field='courseTopicName'], input[data-field='courseTopicGroupName']")) {
+      const topicRow = target.closest("[data-role='course-topic-row']");
+      const saveButton = topicRow?.querySelector("[data-action='course-topic-save']");
       if (!saveButton) {
         return;
       }
@@ -16909,7 +17965,7 @@ function wireAdmin() {
       return;
     }
 
-    if (target.matches("input[data-field='curriculumCourseName']")) {
+    if (target.matches("[data-field='curriculumCourseName']")) {
       const courseCard = target.closest("[data-course-index]");
       const saveButton = courseCard?.querySelector("[data-action='curriculum-rename']");
       if (!saveButton) {
@@ -16929,6 +17985,10 @@ function wireAdmin() {
       event.preventDefault();
       saveButton.click();
     }
+  };
+  adminCourseInteractionRoots.forEach((root) => {
+    root.addEventListener("click", handleAdminCourseAction);
+    root.addEventListener("keydown", handleAdminCourseKeydown);
   });
 
   const addUserForm = document.getElementById("admin-add-user-form");
@@ -21103,7 +22163,32 @@ function normalizeCourseTopicGroupMap(rawMap) {
 }
 
 function getCourseTopicGroups(course) {
-  return {};
+  const normalizedCourse = String(course || "").trim();
+  if (!normalizedCourse) {
+    return {};
+  }
+  const matchedCourseKey = resolveMatchingCourseKeyInMap(normalizedCourse, COURSE_TOPIC_GROUPS);
+  return normalizeCourseTopicGroupEntries(
+    COURSE_TOPIC_GROUPS[matchedCourseKey || normalizedCourse],
+    normalizedCourse,
+    COURSE_TOPIC_OVERRIDES[normalizedCourse] || [],
+  );
+}
+
+function createCourseTopicGroup(course, groupName) {
+  if (!course || !CURRICULUM_COURSE_LIST.includes(course)) {
+    return false;
+  }
+  const nextGroupName = String(groupName || "").trim();
+  if (!nextGroupName) {
+    return false;
+  }
+  const groups = getCourseTopicGroups(course);
+  if (findMatchingCourseTopicGroupName(groups, nextGroupName)) {
+    return false;
+  }
+  groups[nextGroupName] = [];
+  return applyCourseTopicGroupsUpdate(course, groups);
 }
 
 function findMatchingCourseTopicGroupName(groups, requestedName) {
@@ -21223,10 +22308,57 @@ function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
 }
 
 function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
-  return [];
+  const availableTopics = getAvailableTopicsForCourse(course, questions);
+  if (!course || !availableTopics.length) {
+    return [];
+  }
+  const topicMap = new Map(
+    availableTopics.map((topic) => [String(topic || "").trim().toLowerCase(), topic]),
+  );
+  const groups = getCourseTopicGroups(course);
+  return Object.entries(groups)
+    .map(([groupName, rawTopics]) => {
+      const groupedTopics = [];
+      const seen = new Set();
+      (Array.isArray(rawTopics) ? rawTopics : []).forEach((entry) => {
+        const canonicalTopic = topicMap.get(String(entry || "").trim().toLowerCase());
+        if (!canonicalTopic) {
+          return;
+        }
+        const canonicalKey = String(canonicalTopic || "").trim().toLowerCase();
+        if (seen.has(canonicalKey)) {
+          return;
+        }
+        seen.add(canonicalKey);
+        groupedTopics.push(canonicalTopic);
+      });
+      if (!groupedTopics.length) {
+        return null;
+      }
+      return {
+        value: groupName,
+        label: groupName,
+        topics: groupedTopics,
+      };
+    })
+    .filter(Boolean);
 }
 
 function getAvailableTopicSectionsForCourse(course, questions = [], options = {}) {
+  const sourceOptions = getAvailableTopicSourceOptionsForCourse(course, questions);
+  if (sourceOptions.length) {
+    const requestedSource = String(options?.topicSource || "").trim().toLowerCase();
+    const selectedSource = sourceOptions.find((option) => String(option?.value || "").trim().toLowerCase() === requestedSource);
+    if (!selectedSource) {
+      return [];
+    }
+    return [{
+      kind: "group",
+      name: selectedSource.label,
+      topics: selectedSource.topics,
+    }];
+  }
+
   const topics = getAvailableTopicsForCourse(course, questions);
   if (!topics.length) {
     return [];
@@ -21254,8 +22386,8 @@ function rehydrateCourseCatalogConfigFromStorage() {
   O6U_CURRICULUM = normalizeCurriculum(savedCurriculum || DEFAULT_O6U_CURRICULUM);
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
-  COURSE_TOPIC_GROUPS = {};
-  save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
+  const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
+  COURSE_TOPIC_GROUPS = savedCourseTopicGroups && typeof savedCourseTopicGroups === "object" ? savedCourseTopicGroups : {};
   const savedCourseNotebookLinks = load(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
   COURSE_NOTEBOOK_LINKS = savedCourseNotebookLinks && typeof savedCourseNotebookLinks === "object"
     ? savedCourseNotebookLinks
@@ -23640,6 +24772,7 @@ async function logout() {
     role: String(actor?.role || ""),
   }, { force: true });
   const offlinePromise = markCurrentUserOffline().catch(() => { });
+  const activityEndPromise = endCurrentUserActivitySession().catch(() => { });
   const authClient = getSupabaseAuthClient();
   const signOutPromise = authClient
     ? authClient.auth.signOut().catch((error) => {
@@ -23648,6 +24781,8 @@ async function logout() {
     : Promise.resolve();
 
   syncPresenceRuntime(null);
+  resetSiteActivityRuntime();
+  clearSupabaseSessionRecoveryRetry();
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
   clearStudentForceRefreshPolling();
@@ -23669,7 +24804,7 @@ async function logout() {
   state.reviewIndex = 0;
   navigate("landing");
   toast("Logged out.");
-  Promise.allSettled([offlinePromise, signOutPromise]).catch(() => { });
+  Promise.allSettled([offlinePromise, activityEndPromise, signOutPromise]).catch(() => { });
 }
 
 function selectHtml(name, options, selected) {
