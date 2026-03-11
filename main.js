@@ -10079,6 +10079,10 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     }
     if (!hasPendingUserWrites) {
       await hydrateRelationalProfiles(user);
+      // Keep the legacy cloud user backup merged in as well. Older accounts can
+      // still live there even when relational sync succeeds, and the admin
+      // dashboard reads from the merged local user state.
+      await hydrateUsersFromSupabaseBackup().catch(() => false);
     }
     if (shouldHydrateQuestions) {
       await hydrateRelationalQuestions();
@@ -12376,12 +12380,11 @@ function renderCreateTest() {
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
-  const effectiveTopicsForFilter = hasTopicSources ? selectedTopics : selectedTopics;
   const filtered = applyQbankFilters(questions, {
     course: selectedCourse,
-    topics: effectiveTopicsForFilter,
+    topics: selectedTopics,
   }, {
-    strictEmptyTopics: hasTopicSources,
+    strictEmptyTopics: true,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
   const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
@@ -12411,7 +12414,8 @@ function renderCreateTest() {
     flagged: "Flagged only",
   };
   const sourceFiltered = applySourceFilter(filtered, state.createTestSource, user.id);
-  const defaultQuestionCount = Math.max(1, Math.min(500, sourceFiltered.length || 0));
+  const defaultQuestionCount = Math.max(0, Math.min(500, sourceFiltered.length || 0));
+  const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
 
   return `
     <section class="panel">
@@ -12532,7 +12536,7 @@ function renderCreateTest() {
       <form id="create-test-block-form" class="create-test-setup-form">
         <div class="create-test-setup-grid">
           <label class="create-test-setup-field">Number of questions
-            <input name="count" type="number" min="1" max="500" step="1" value="${defaultQuestionCount}" />
+            <input name="count" type="number" min="0" max="500" step="1" value="${defaultQuestionCount}" />
           </label>
           <label class="create-test-setup-field">Mode
             <select name="mode" id="create-test-mode-select">
@@ -12564,7 +12568,7 @@ function renderCreateTest() {
 
         <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
         <div class="stack">
-          <button type="submit" class="btn">Start test</button>
+          <button type="submit" class="btn" ${canStartTest ? "" : "disabled"}>Start test</button>
         </div>
       </form>
     </section>
@@ -12582,6 +12586,7 @@ function wireCreateTest() {
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
+  const submitButton = blockForm?.querySelector("button[type='submit']");
   const modeSelect = document.getElementById("create-test-mode-select");
   const durationInput = document.getElementById("create-test-duration-input");
 
@@ -12650,7 +12655,7 @@ function wireCreateTest() {
       course: selectedCourse,
       topics: selectedTopics,
     }, {
-      strictEmptyTopics: hasTopicSources,
+      strictEmptyTopics: true,
     });
     const allowedSources = ["all", "unused", "incorrect", "flagged"];
     if (!allowedSources.includes(state.createTestSource)) {
@@ -12668,8 +12673,11 @@ function wireCreateTest() {
       summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
     }
     if (countInput) {
-      const suggestedCount = Math.max(1, Math.min(500, filtered.length || 0));
+      const suggestedCount = Math.max(0, Math.min(500, filtered.length || 0));
       countInput.value = String(suggestedCount);
+    }
+    if (submitButton) {
+      submitButton.disabled = !(selectedTopics.length && filtered.length > 0 && (!hasTopicSources || selectedTopicSource));
     }
   };
 
@@ -12689,7 +12697,7 @@ function wireCreateTest() {
     const nextSource = String(topicSourceSelect.value || "").trim();
     const selectedOption = topicSourceOptions.find((option) => option.value === nextSource);
     state.qbankFilters.topicSource = selectedOption?.value || "";
-    state.qbankFilters.topics = selectedOption ? [...selectedOption.topics] : [];
+    state.qbankFilters.topics = [];
     state.skipNextRouteAnimation = true;
     render();
   });
@@ -12768,20 +12776,24 @@ function wireCreateTest() {
       toast("Choose a source first.");
       return;
     }
-    if (hasTopicSources && !(state.qbankFilters.topics || []).length) {
+    if (!(state.qbankFilters.topics || []).length) {
       toast("Choose at least one topic.");
       return;
     }
     let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
-      strictEmptyTopics: hasTopicSources,
+      strictEmptyTopics: true,
     });
     pool = applySourceFilter(pool, source, user.id);
-    const fallbackCount = Math.max(1, Math.min(500, pool.length || 0));
+    const fallbackCount = Math.max(0, Math.min(500, pool.length || 0));
     const requestedCount = Math.floor(Number(data.get("count")));
     const count = Math.min(
       500,
-      Math.max(1, Number.isFinite(requestedCount) ? requestedCount : fallbackCount),
+      Math.max(0, Number.isFinite(requestedCount) ? requestedCount : fallbackCount),
     );
+    if (count <= 0) {
+      toast("Choose at least one topic first.");
+      return;
+    }
 
     if (randomize) {
       pool = shuffle(pool);
@@ -22308,7 +22320,7 @@ function mergeCourseTopicGroupEntries(baseGroups, incomingGroups, course) {
 }
 
 function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
-  const availableTopics = getAvailableTopicsForCourse(course, questions);
+  const availableTopics = getAvailableTopicsForCourse(course, questions, { includeConfigured: true });
   if (!course || !availableTopics.length) {
     return [];
   }
@@ -22321,7 +22333,11 @@ function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
       const groupedTopics = [];
       const seen = new Set();
       (Array.isArray(rawTopics) ? rawTopics : []).forEach((entry) => {
-        const canonicalTopic = topicMap.get(String(entry || "").trim().toLowerCase());
+        const rawTopic = String(entry || "").trim();
+        if (!rawTopic || isRemovedTopicName(rawTopic)) {
+          return;
+        }
+        const canonicalTopic = topicMap.get(rawTopic.toLowerCase()) || rawTopic;
         if (!canonicalTopic) {
           return;
         }
@@ -22373,7 +22389,7 @@ function getAvailableTopicSectionsForCourse(course, questions = [], options = {}
 function formatTopicFilterSummary(topics) {
   const selectedTopics = Array.isArray(topics) ? topics.filter(Boolean) : [];
   if (!selectedTopics.length) {
-    return "All topics";
+    return "0 topics selected";
   }
   if (selectedTopics.length <= 2) {
     return selectedTopics.join(" + ");
