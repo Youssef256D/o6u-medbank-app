@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS public.app_state (
 
 CREATE INDEX IF NOT EXISTS app_state_updated_at_idx ON public.app_state (updated_at DESC);
 
-ALTER TABLE public.app_state DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.app_state ENABLE ROW LEVEL SECURITY;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.app_state TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.app_state TO anon, authenticated;
 
 COMMIT;

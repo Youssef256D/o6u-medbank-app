@@ -7,7 +7,7 @@ function isUuid(value: string): boolean {
 }
 
 function parseAllowedOrigins(): string[] {
-  return String(Deno.env.get("ALLOWED_ORIGIN") || "*")
+  return String(Deno.env.get("ALLOWED_ORIGIN") || "https://youssef256d.github.io")
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
@@ -47,6 +47,9 @@ function jsonResponse(status: number, payload: unknown, requestOrigin = ""): Res
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Cache-Control": "no-store",
       ...buildCorsHeaders(requestOrigin),
     },
   });
