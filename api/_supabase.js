@@ -3,6 +3,32 @@
 const MAX_BODY_BYTES = 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// Simple in-memory rate limiter: max requests per IP within a sliding window.
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const rateLimitStore = new Map();
+
+function isRateLimited(req) {
+  const ip =
+    String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    req.socket?.remoteAddress ||
+    "unknown";
+  const now = Date.now();
+  let entry = rateLimitStore.get(ip);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { windowStart: now, count: 0 };
+    rateLimitStore.set(ip, entry);
+  }
+  entry.count += 1;
+  // Periodically prune old entries to prevent memory leak.
+  if (rateLimitStore.size > 10000) {
+    for (const [key, val] of rateLimitStore) {
+      if (now - val.windowStart > RATE_LIMIT_WINDOW_MS) rateLimitStore.delete(key);
+    }
+  }
+  return entry.count > RATE_LIMIT_MAX_REQUESTS;
+}
+
 function normalizeOriginList(value) {
   return String(value || "")
     .split(",")
@@ -11,7 +37,9 @@ function normalizeOriginList(value) {
 }
 
 function applyCorsHeaders(req, res) {
-  const configured = normalizeOriginList(process.env.ALLOWED_ORIGIN || "*");
+  const configured = normalizeOriginList(
+    process.env.ALLOWED_ORIGIN || "https://youssef256d.github.io",
+  );
   const requestOrigin = String(req.headers.origin || "").trim();
 
   if (!configured.length || configured.includes("*")) {
@@ -31,6 +59,9 @@ function applyCorsHeaders(req, res) {
 function json(res, statusCode, payload) {
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Cache-Control", "no-store");
   res.end(JSON.stringify(payload));
 }
 
@@ -215,6 +246,7 @@ module.exports = {
   getAuthUser,
   getProfileById,
   getServerEnv,
+  isRateLimited,
   isUuid,
   json,
   parseBearerToken,

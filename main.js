@@ -24760,6 +24760,10 @@ function removeSessionStorageKey(key) {
 }
 
 async function loginAsDemo(email, password) {
+  if (SUPABASE_CONFIG.enabled) {
+    toast("Demo accounts are disabled when Supabase is active. Please log in with your account.");
+    return;
+  }
   const user = getUsers().find((entry) => entry.email === email && entry.password === password);
   if (!user) {
     toast("Demo account unavailable.");

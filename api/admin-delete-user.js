@@ -6,6 +6,7 @@ const {
   getAuthUser,
   getProfileById,
   getServerEnv,
+  isRateLimited,
   isUuid,
   json,
   parseBearerToken,
@@ -23,6 +24,11 @@ module.exports = async (req, res) => {
 
   if (req.method !== "POST") {
     json(res, 405, { ok: false, error: "Method not allowed." });
+    return;
+  }
+
+  if (isRateLimited(req)) {
+    json(res, 429, { ok: false, error: "Too many requests. Please try again later." });
     return;
   }
 
