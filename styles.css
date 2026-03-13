@@ -1848,12 +1848,25 @@ body.theme-comfort .maintenance-badge {
   vertical-align: top;
 }
 
+.admin-users-filter-form {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.admin-user-search-field {
+  grid-column: 1 / -1;
+}
+
+.admin-users-table .col-select {
+  width: 6%;
+}
+
 .admin-users-table .col-account {
-  width: 25%;
+  width: 22%;
 }
 
 .admin-users-table .col-role {
-  width: 12%;
+  width: 10%;
 }
 
 .admin-users-table .col-year {
@@ -1861,15 +1874,29 @@ body.theme-comfort .maintenance-badge {
 }
 
 .admin-users-table .col-semester {
-  width: 14%;
+  width: 13%;
 }
 
 .admin-users-table .col-courses {
-  width: 22%;
+  width: 21%;
 }
 
 .admin-users-table .col-actions {
-  width: 16%;
+  width: 17%;
+}
+
+.admin-user-select-cell {
+  width: 52px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.admin-user-select-cell input[type="checkbox"],
+.admin-question-select-cell input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
 }
 
 .admin-user-account b {
@@ -1901,6 +1928,10 @@ body.theme-comfort .maintenance-badge {
   max-width: 140px;
   width: 100%;
   padding: 0.42rem 0.48rem;
+}
+
+#admin-users-section tbody tr.is-selected td {
+  background: rgba(23, 126, 137, 0.08);
 }
 
 .admin-na {
@@ -6269,6 +6300,7 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
     grid-template-columns: 1fr;
   }
 
+  .admin-users-table .col-select,
   .admin-users-table .col-account,
   .admin-users-table .col-role,
   .admin-users-table .col-year,

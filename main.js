@@ -188,6 +188,11 @@ const state = {
     topic: "",
   },
   adminPage: INITIAL_ADMIN_PAGE,
+  adminUserSearch: "",
+  adminUserFilterYear: "",
+  adminUserFilterSemester: "",
+  adminSelectedUserIds: [],
+  adminUserBulkActionRunning: false,
   adminCurriculumYear: 1,
   adminCurriculumSemester: 1,
   adminCourseSearch: "",
@@ -204,6 +209,7 @@ const state = {
     topicSource: "",
   },
   createTestSource: "all",
+  createTestNameDraft: "",
   analyticsCourse: "",
   sessionPanel: null,
   sessionNavSettingsOpen: false,
@@ -262,6 +268,7 @@ let wasAdminCourseTopicModalOpen = false;
 let wasAdminCourseTopicGroupCreateModalOpen = false;
 let wasAdminCourseTopicInlineCreateOpen = false;
 let adminCourseSearchDebounce = null;
+let adminUserSearchDebounce = null;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -2462,6 +2469,67 @@ function hasCompleteStudentProfile(user) {
   const year = Number(user.academicYear);
   const semester = Number(user.academicSemester);
   return phoneValidation.ok && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
+}
+
+function normalizeAdminUserIdList(ids, allowedSet = null) {
+  const allowed = allowedSet instanceof Set ? allowedSet : null;
+  return [...new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((id) => String(id || "").trim())
+      .filter((id) => id && (!allowed || allowed.has(id))),
+  )];
+}
+
+function canBulkSelectAdminUser(account, actorUser = null) {
+  if (!account) {
+    return false;
+  }
+  const accountId = String(account.id || "").trim();
+  const actorId = String(actorUser?.id || "").trim();
+  if (!accountId) {
+    return false;
+  }
+  if (String(account.role || "").trim().toLowerCase() === "admin") {
+    return false;
+  }
+  if (actorId && accountId === actorId) {
+    return false;
+  }
+  return true;
+}
+
+function matchesAdminUserFilters(account, filters = {}) {
+  if (!account) {
+    return false;
+  }
+  const normalizedSearch = String(filters?.search || "").trim().toLowerCase();
+  const targetYear = normalizeAcademicYearOrNull(filters?.year);
+  const targetSemester = normalizeAcademicSemesterOrNull(filters?.semester);
+  const role = String(account.role || "").trim().toLowerCase();
+  const year = role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
+  const semester = role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+
+  if (targetYear !== null && year !== targetYear) {
+    return false;
+  }
+  if (targetSemester !== null && semester !== targetSemester) {
+    return false;
+  }
+  if (!normalizedSearch) {
+    return true;
+  }
+
+  const searchableParts = [
+    account.name,
+    account.email,
+    account.phone,
+    role,
+    year !== null ? String(year) : "",
+    year !== null ? `year ${year}` : "",
+    semester !== null ? String(semester) : "",
+    semester !== null ? `semester ${semester}` : "",
+  ];
+  return searchableParts.some((part) => String(part || "").trim().toLowerCase().includes(normalizedSearch));
 }
 
 function isAutoApproveStudentAccessEnabled() {
@@ -12104,7 +12172,8 @@ function renderResumeCard(userId) {
   const currentQuestion = Math.max(1, Math.min(totalQuestions, Number(inProgress.currentIndex || 0) + 1));
   const progress = `${currentQuestion}/${totalQuestions}`;
   return `
-    <p>Mode: <b>${escapeHtml(inProgress.mode)}</b> | Progress: <b>${progress}</b></p>
+    <p style="margin-bottom: 0.35rem;"><b>${escapeHtml(getSessionDisplayName(inProgress))}</b></p>
+    <p class="subtle" style="margin-top: 0;">${escapeHtml(getSessionDisplayId(inProgress))} • ${escapeHtml(formatSessionModeLabel(inProgress.mode))} • Progress: <b>${progress}</b></p>
     <button class="btn" data-nav="session">Resume session</button>
   `;
 }
@@ -12174,6 +12243,7 @@ function renderPreviousTestsSection(userOrId) {
   }
 
   const questionsById = Object.fromEntries(getQuestions().map((question) => [question.id, question]));
+  completed.forEach((session) => normalizeSession(session));
   const rows = completed
     .slice(0, 10)
     .map((session) => {
@@ -12181,9 +12251,12 @@ function renderPreviousTestsSection(userOrId) {
       const completedAt = new Date(session.completedAt || session.createdAt).toLocaleString();
       return `
         <tr>
-          <td>${escapeHtml(session.id)}</td>
+          <td>
+            <div><b>${escapeHtml(getSessionDisplayName(session))}</b></div>
+            <small class="subtle">${escapeHtml(getSessionDisplayId(session))}</small>
+          </td>
           <td>${escapeHtml(completedAt)}</td>
-          <td>${escapeHtml(String(session.mode || "tutor").toUpperCase())}</td>
+          <td>${escapeHtml(formatSessionModeLabel(session.mode))}</td>
           <td>${summary.correct}/${summary.total} (${summary.accuracy}%)</td>
           <td>${summary.wrongCount}</td>
           <td>
@@ -12207,7 +12280,7 @@ function renderPreviousTestsSection(userOrId) {
         <table>
           <thead>
             <tr>
-              <th>Session</th>
+              <th>Test</th>
               <th>Date</th>
               <th>Mode</th>
               <th>Score</th>
@@ -12256,6 +12329,7 @@ function wireDashboard() {
         return;
       }
 
+      const autoFinalizedIds = finalizeActiveSessionsForUser(user.id);
       const created = createSessionFromQuestions(pool, {
         mode: "tutor",
         source: "previous-incorrect",
@@ -12269,7 +12343,11 @@ function wireDashboard() {
 
       state.sessionId = created.id;
       navigate("session");
-      toast(`Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved.`);
+      toast(
+        autoFinalizedIds.length
+          ? `Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved. ${autoFinalizedIds.length} previous active block(s) were ended automatically.`
+          : `Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved.`,
+      );
     });
   });
 }
@@ -12309,8 +12387,82 @@ function getCreateTestSourceLabel(source) {
     unused: "Unused only",
     incorrect: "Wrong only",
     flagged: "Flagged only",
+    "previous-incorrect": "Retry wrong",
   };
   return labels[source] || labels.all;
+}
+
+function formatSessionModeLabel(mode) {
+  return mode === "timed" ? "Timed" : "Tutor";
+}
+
+function normalizeSessionName(value, fallback = "") {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (normalized) {
+    return normalized.slice(0, 80);
+  }
+  return String(fallback || "").replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+function buildSessionDisplayId(sessionId) {
+  const normalized = String(sessionId || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!normalized) {
+    return "TEST-UNKNOWN";
+  }
+
+  let parts = normalized.split("-").filter(Boolean);
+  if (parts[0] === "S" && parts.length > 1) {
+    parts = parts.slice(1);
+  }
+  if (parts.length > 3) {
+    parts = [parts[0], ...parts.slice(-2)];
+  }
+  return `TEST-${parts.join("-")}`;
+}
+
+function normalizeSessionTestId(value, sessionId) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim().toUpperCase();
+  return normalized || buildSessionDisplayId(sessionId);
+}
+
+function buildAutoSessionName(options = {}) {
+  const normalizedCourses = [...new Set(
+    (Array.isArray(options.courses) ? options.courses : [])
+      .map((course) => String(course || "").trim())
+      .filter(Boolean),
+  )];
+  const courseLabel = normalizedCourses.length > 1
+    ? "Mixed courses"
+    : (normalizedCourses[0] || String(options.courseLabel || "").trim() || "General test");
+  const sourceLabel = getCreateTestSourceLabel(options.source || "all");
+  const questionCount = Math.max(0, Math.floor(Number(options.questionCount || 0)));
+  const countLabel = questionCount
+    ? `${questionCount} question${questionCount === 1 ? "" : "s"}`
+    : "";
+  return [courseLabel, formatSessionModeLabel(options.mode), sourceLabel, countLabel]
+    .filter(Boolean)
+    .join(" • ");
+}
+
+function buildAutoSessionNameFromSession(session) {
+  return buildAutoSessionName({
+    courses: getSessionCourseList(session),
+    mode: session?.mode,
+    source: session?.source,
+    questionCount: Array.isArray(session?.questionIds) ? session.questionIds.length : 0,
+  });
+}
+
+function getSessionDisplayName(session) {
+  return normalizeSessionName(session?.name, buildAutoSessionNameFromSession(session));
+}
+
+function getSessionDisplayId(session) {
+  return normalizeSessionTestId(session?.testId, session?.id);
 }
 
 function renderCreateTest() {
@@ -12393,6 +12545,8 @@ function renderCreateTest() {
   const sourceFiltered = applySourceFilter(filtered, state.createTestSource, user.id);
   const defaultQuestionCount = Math.max(0, Math.min(500, sourceFiltered.length || 0));
   const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
+  const inProgressName = inProgress ? getSessionDisplayName(inProgress) : "";
+  const inProgressTestId = inProgress ? getSessionDisplayId(inProgress) : "";
 
   return `
     <section class="panel">
@@ -12401,7 +12555,10 @@ function renderCreateTest() {
       ${inProgress
       ? `
         <div class="card" style="margin-top: 0.7rem; display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap;">
-          <span><b>Active block detected</b> (${inProgressCount} questions)</span>
+          <div>
+            <span><b>Active block detected</b></span>
+            <small class="subtle" style="display: block; margin-top: 0.18rem;">${escapeHtml(inProgressName)} • ${escapeHtml(inProgressTestId)} • ${inProgressCount} questions</small>
+          </div>
           <div style="display: flex; gap: 0.55rem; flex-wrap: wrap;">
             <button class="btn" data-nav="session">Resume</button>
             <button class="btn ghost" type="button" data-action="end-active-block" data-session-id="${escapeHtml(inProgress.id)}">End block</button>
@@ -12515,6 +12672,15 @@ function renderCreateTest() {
           <label class="create-test-setup-field">Number of questions
             <input name="count" type="number" min="0" max="500" step="1" value="${defaultQuestionCount}" />
           </label>
+          <label class="create-test-setup-field">Test name (optional)
+            <input
+              name="testName"
+              type="text"
+              maxlength="80"
+              placeholder="Leave blank for an automatic name"
+              value="${escapeHtml(state.createTestNameDraft)}"
+            />
+          </label>
           <label class="create-test-setup-field">Mode
             <select name="mode" id="create-test-mode-select">
               <option value="tutor">Tutor</option>
@@ -12563,6 +12729,7 @@ function wireCreateTest() {
   const summaryEl = document.getElementById("create-test-filter-summary");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
+  const nameInput = blockForm?.querySelector("input[name='testName']");
   const submitButton = blockForm?.querySelector("button[type='submit']");
   const modeSelect = document.getElementById("create-test-mode-select");
   const durationInput = document.getElementById("create-test-duration-input");
@@ -12706,6 +12873,10 @@ function wireCreateTest() {
     syncDurationInputState();
   });
 
+  nameInput?.addEventListener("input", () => {
+    state.createTestNameDraft = String(nameInput.value || "");
+  });
+
   endActiveBlockBtn?.addEventListener("click", () => {
     const user = getCurrentUser();
     const sessionId = String(endActiveBlockBtn.getAttribute("data-session-id") || "").trim();
@@ -12738,6 +12909,9 @@ function wireCreateTest() {
     const mode = String(data.get("mode") || "tutor");
     const source = String(data.get("source") || state.createTestSource || "all");
     state.createTestSource = source;
+    const requestedTestNameRaw = String(data.get("testName") || state.createTestNameDraft || "");
+    const requestedTestName = normalizeSessionName(requestedTestNameRaw);
+    state.createTestNameDraft = requestedTestNameRaw;
     const duration = Math.max(5, Number(data.get("duration") || 20));
     const randomize = data.get("randomize") === "on";
 
@@ -12776,10 +12950,13 @@ function wireCreateTest() {
       pool = shuffle(pool);
     }
 
+    const autoFinalizedIds = finalizeActiveSessionsForUser(user.id);
     const session = createSessionFromQuestions(pool, {
       count,
       mode,
       source,
+      name: requestedTestName,
+      courseLabel: state.qbankFilters.course,
       duration,
       originSessionId: null,
     });
@@ -12788,9 +12965,14 @@ function wireCreateTest() {
       return;
     }
 
+    state.createTestNameDraft = "";
     state.sessionId = session.id;
     navigate("session");
-    toast("Test created.");
+    toast(
+      autoFinalizedIds.length
+        ? `Test created. ${autoFinalizedIds.length} previous active block(s) were ended automatically and moved to previous tests.`
+        : "Test created.",
+    );
   });
 
   const currentUser = getCurrentUser();
@@ -13355,6 +13537,8 @@ function renderSession() {
     0,
     Number(session.timeRemainingSec != null ? session.timeRemainingSec : initialTimedSeconds),
   );
+  const sessionName = getSessionDisplayName(session);
+  const sessionTestId = getSessionDisplayId(session);
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -13444,6 +13628,8 @@ function renderSession() {
           <div class="exam-content exam-content-moodle">
             <aside class="exam-question-meta">
               <h3>Question <b>${session.currentIndex + 1}</b></h3>
+              <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
+              <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
               <p class="exam-question-status ${isSubmitted ? (isCorrect ? "good" : "bad") : "neutral"}">${statusText}</p>
               <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
               ${isTimedMode
@@ -14296,6 +14482,34 @@ function finalizeSession(sessionId) {
   save(STORAGE_KEYS.incorrectQueue, incorrectMap);
 }
 
+function finalizeActiveSessionsForUser(userId) {
+  const targetUserId = String(userId || "").trim();
+  if (!targetUserId) {
+    return [];
+  }
+  const activeSessions = getSessionsForUser(targetUserId)
+    .filter((session) => String(session?.status || "").trim() === "in_progress")
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+  if (!activeSessions.length) {
+    return [];
+  }
+
+  const finalizedIds = [];
+  activeSessions.forEach((session) => {
+    const sessionId = String(session?.id || "").trim();
+    if (!sessionId) {
+      return;
+    }
+    finalizeSession(sessionId);
+    finalizedIds.push(sessionId);
+  });
+
+  if (finalizedIds.includes(String(state.sessionId || "").trim())) {
+    state.sessionId = null;
+  }
+  return finalizedIds;
+}
+
 function addQuestionToIncorrectQueue(userId, questionId) {
   if (!userId || !questionId) {
     return;
@@ -14309,9 +14523,7 @@ function addQuestionToIncorrectQueue(userId, questionId) {
 
 function renderReview() {
   const user = getCurrentUser();
-  const completedSessions = getSessionsForUser(user.id)
-    .filter((session) => session.status === "completed")
-    .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
+  const completedSessions = getCompletedSessionsForUser(user.id);
 
   if (!completedSessions.length) {
     return `
@@ -14386,6 +14598,8 @@ function renderReview() {
     `marker-${normalizeSessionHighlightColor(state.sessionHighlighterColor)}`,
   ].filter(Boolean).join(" ");
   const reviewShellStyleAttr = `--exam-font-scale:${getSessionFontScaleCssValue()};`;
+  const sessionName = getSessionDisplayName(selected);
+  const sessionTestId = getSessionDisplayId(selected);
 
   const sideRows = reviewedEntries
     .map((entry, index) => {
@@ -14462,6 +14676,8 @@ function renderReview() {
           <div class="exam-content exam-content-moodle">
             <aside class="exam-question-meta">
               <h3>Question <b>${state.reviewIndex + 1}</b></h3>
+              <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
+              <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
               <p class="exam-question-status ${isCorrect ? "good" : "bad"}">${statusText}</p>
               <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
               <p class="exam-mark-line subtle">Mode: ${escapeHtml(selected.mode === "timed" ? "Timed" : "Tutor")}</p>
@@ -14544,9 +14760,7 @@ function handleReviewClick(event) {
   }
 
   const user = getCurrentUser();
-  const completedSessions = getSessionsForUser(user.id)
-    .filter((session) => session.status === "completed")
-    .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
+  const completedSessions = getCompletedSessionsForUser(user.id);
   const selected =
     completedSessions.find((session) => session.id === state.reviewSessionId) || completedSessions[0];
   if (!selected) {
@@ -14604,9 +14818,7 @@ function handleReviewKeydown(event) {
   if (event.key === "ArrowRight") {
     event.preventDefault();
     const user = getCurrentUser();
-    const selected = getSessionsForUser(user.id)
-      .filter((session) => session.status === "completed")
-      .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt))
+    const selected = getCompletedSessionsForUser(user.id)
       .find((session) => session.id === state.reviewSessionId);
     if (!selected) {
       return;
@@ -15135,36 +15347,26 @@ function renderAdmin() {
 
   if (activeAdminPage === "dashboard") {
     const users = getUsers();
-    const questions = getQuestions();
-    const sessions = getSessions();
     let students = 0;
     let admins = 0;
+    const academicYearCounts = new Map([
+      [1, 0],
+      [2, 0],
+      [3, 0],
+      [4, 0],
+      [5, 0],
+    ]);
     users.forEach((account) => {
       if (account.role === "admin") {
         admins += 1;
       } else if (account.role === "student") {
         students += 1;
+        const academicYear = normalizeAcademicYearOrNull(account.academicYear);
+        if (academicYear !== null) {
+          academicYearCounts.set(academicYear, (academicYearCounts.get(academicYear) || 0) + 1);
+        }
       }
     });
-    const publishedQuestions = questions.filter((entry) => entry.status === "published").length;
-    const draftQuestions = Math.max(questions.length - publishedQuestions, 0);
-    let completedSessions = 0;
-    let solvedQuestions = 0;
-    let inProgressSessions = 0;
-    sessions.forEach((session) => {
-      if (session.status === "completed") {
-        completedSessions += 1;
-        const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
-        questionIds.forEach((qid) => {
-          if (session.responses?.[qid]) {
-            solvedQuestions += 1;
-          }
-        });
-      } else if (session.status === "in_progress") {
-        inProgressSessions += 1;
-      }
-    });
-    const totalSessions = sessions.length;
     const userStats = buildAdminUserStatistics(users);
     const registrationYearRows = userStats.registrationByYear
       .map((entry) => {
@@ -15206,40 +15408,40 @@ function renderAdmin() {
         `;
       })
       .join("");
+    const dashboardUserCards = [
+      {
+        value: users.length,
+        label: "Total users",
+        detail: `${students} students • ${admins} admins`,
+      },
+      {
+        value: admins,
+        label: "Admins",
+        detail: `${users.length - admins} non-admin users`,
+      },
+      ...[5, 4, 3, 2, 1].map((year) => ({
+        value: academicYearCounts.get(year) || 0,
+        label: `Year ${year}`,
+        detail: `Students assigned to Year ${year}`,
+      })),
+    ]
+      .map((card) => `
+        <article class="card">
+          <p class="metric">
+            ${card.value}
+            <small>${card.label}</small>
+            <small>${card.detail}</small>
+          </p>
+        </article>
+      `)
+      .join("");
 
     pageContent = `
       <section class="card admin-section" id="admin-stats-section">
         <h2 class="title">O6U Admin Dashboard</h2>
-        <p class="subtle">Core totals first, with provider mix and registration history summarized underneath.</p>
+        <p class="subtle">User totals first, with admin counts and academic year distribution summarized underneath.</p>
         <div class="stats-grid" style="margin-top: 0.85rem;">
-          <article class="card">
-            <p class="metric">
-              ${users.length}
-              <small>Total accounts</small>
-              <small>${students} students • ${admins} admins</small>
-            </p>
-          </article>
-          <article class="card">
-            <p class="metric">
-              ${userStats.thisYearRegistrations}
-              <small>Registered in ${userStats.currentYear}</small>
-              <small>${userStats.lastYearRegistrations} registered in ${userStats.currentYear - 1}</small>
-            </p>
-          </article>
-          <article class="card">
-            <p class="metric">
-              ${questions.length}
-              <small>Total questions</small>
-              <small>${publishedQuestions} published • ${draftQuestions} draft${draftQuestions === 1 ? "" : "s"}</small>
-            </p>
-          </article>
-          <article class="card">
-            <p class="metric">
-              ${solvedQuestions}
-              <small>Solved questions</small>
-              <small>${completedSessions} completed • ${inProgressSessions} active • ${totalSessions} total test${totalSessions === 1 ? "" : "s"}</small>
-            </p>
-          </article>
+          ${dashboardUserCards}
         </div>
         <div class="admin-dashboard-breakdowns">
           <article class="card admin-dashboard-breakdown-card">
@@ -15271,10 +15473,37 @@ function renderAdmin() {
       }
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
+    const userSearchQuery = String(state.adminUserSearch || "");
+    const userFilterYear = normalizeAcademicYearOrNull(state.adminUserFilterYear);
+    const userFilterSemester = normalizeAcademicSemesterOrNull(state.adminUserFilterSemester);
+    const filteredUsers = users.filter((account) => matchesAdminUserFilters(account, {
+      search: userSearchQuery,
+      year: userFilterYear,
+      semester: userFilterSemester,
+    }));
+    const visibleSelectableUserIds = filteredUsers
+      .filter((account) => canBulkSelectAdminUser(account, user))
+      .map((account) => String(account.id || "").trim())
+      .filter(Boolean);
+    const visibleSelectableUserIdSet = new Set(visibleSelectableUserIds);
+    const normalizedSelectedUserIds = normalizeAdminUserIdList(state.adminSelectedUserIds, visibleSelectableUserIdSet);
+    const selectionChanged =
+      normalizedSelectedUserIds.length !== (Array.isArray(state.adminSelectedUserIds) ? state.adminSelectedUserIds.length : 0)
+      || normalizedSelectedUserIds.some((id, idx) => id !== state.adminSelectedUserIds[idx]);
+    if (selectionChanged) {
+      state.adminSelectedUserIds = normalizedSelectedUserIds;
+    }
+    const selectedUserSet = new Set(normalizedSelectedUserIds);
+    const selectedUserCount = normalizedSelectedUserIds.length;
+    const allVisibleSelected = Boolean(visibleSelectableUserIds.length) && selectedUserCount === visibleSelectableUserIds.length;
+    const partiallyVisibleSelected = selectedUserCount > 0 && !allVisibleSelected;
+    const bulkDeactivateRunning = Boolean(state.adminUserBulkActionRunning);
+    const resetUserFiltersDisabled = !String(userSearchQuery || "").trim() && userFilterYear === null && userFilterSemester === null;
     const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
-    const accountRows = users
+    const accountRows = filteredUsers
       .map((account) => {
+        const accountId = String(account.id || "").trim();
         const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
         const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
@@ -15293,11 +15522,31 @@ function renderAdmin() {
           visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
         const isSelf = account.id === user.id;
         const isLockedAdmin = isForcedAdminEmail(account.email);
+        const canBulkSelect = canBulkSelectAdminUser(account, user);
+        const isSelected = accountId ? selectedUserSet.has(accountId) : false;
+        const rowClassNames = [];
+        if (isSelected) {
+          rowClassNames.push("is-selected");
+        }
+        const selectionDisabledReason = !canBulkSelect
+          ? (isSelf ? "You cannot deactivate your own account." : "Admin accounts cannot be deactivated.")
+          : "";
         const authProviderIcon = isGoogleAuthUser
           ? '<span class="admin-auth-provider-icon" data-provider="google" title="Google account" aria-label="Google account" role="img"><svg viewBox="0 0 18 18" aria-hidden="true" focusable="false"><path fill="#4285F4" d="M17.64 9.2045c0-.638-.0573-1.2518-.1636-1.8409H9v3.4818h4.8436c-.2086 1.125-.8427 2.0782-1.7963 2.7155v2.2573h2.9082c1.7018-1.5664 2.6845-3.8741 2.6845-6.6137z"></path><path fill="#34A853" d="M9 18c2.43 0 4.4673-.8064 5.9564-2.1818l-2.9082-2.2573c-.8063.54-1.8377.8591-3.0482.8591-2.3441 0-4.3282-1.5832-5.0355-3.71H.9573v2.3305C2.4382 15.9832 5.4818 18 9 18z"></path><path fill="#FBBC05" d="M3.9645 10.71c-.18-.54-.2823-1.1168-.2823-1.71s.1023-1.17.2823-1.71V4.9595H.9573C.3477 6.1732 0 7.5477 0 9s.3477 2.8268.9573 4.0405L3.9645 10.71z"></path><path fill="#EA4335" d="M9 3.5795c1.3214 0 2.5077.4541 3.4405 1.3459l2.5814-2.5814C13.4636.8918 11.43 0 9 0 5.4818 0 2.4382 2.0168.9573 4.9595L3.9645 7.29C4.6718 5.1632 6.6559 3.5795 9 3.5795z"></path></svg></span>'
           : "";
         return `
-          <tr data-user-id="${escapeHtml(account.id)}">
+          <tr data-user-id="${escapeHtml(account.id)}" class="${rowClassNames.join(" ")}">
+            <td class="admin-user-select-cell">
+              <input
+                type="checkbox"
+                data-action="admin-select-user"
+                data-user-id="${escapeHtml(accountId)}"
+                aria-label="Select ${escapeHtml(String(account.name || account.email || "user"))}"
+                ${isSelected ? "checked" : ""}
+                ${bulkDeactivateRunning || !canBulkSelect ? "disabled" : ""}
+                ${selectionDisabledReason ? `title="${escapeHtml(selectionDisabledReason)}"` : ""}
+              />
+            </td>
             <td class="admin-user-account">
               <b>${escapeHtml(account.name)}</b><br />
               <small class="admin-account-email">
@@ -15407,9 +15656,62 @@ function renderAdmin() {
           </div>
         </form>
 
+        <form id="admin-user-filter-form" class="admin-users-filter-form" style="margin-top: 0.95rem;">
+          <div class="form-row">
+            <label class="admin-user-search-field">Search user
+              <input
+                id="admin-user-search"
+                type="search"
+                value="${escapeHtml(userSearchQuery)}"
+                placeholder="Name, email, phone, year, or semester"
+              />
+            </label>
+            <label>Year
+              <select id="admin-user-filter-year" name="academicYear">
+                <option value="" ${userFilterYear === null ? "selected" : ""}>All years</option>
+                ${[1, 2, 3, 4, 5]
+        .map((entry) => `<option value="${entry}" ${userFilterYear === entry ? "selected" : ""}>Year ${entry}</option>`)
+        .join("")}
+              </select>
+            </label>
+            <label>Semester
+              <select id="admin-user-filter-semester" name="academicSemester">
+                <option value="" ${userFilterSemester === null ? "selected" : ""}>All semesters</option>
+                <option value="1" ${userFilterSemester === 1 ? "selected" : ""}>Semester 1</option>
+                <option value="2" ${userFilterSemester === 2 ? "selected" : ""}>Semester 2</option>
+              </select>
+            </label>
+          </div>
+          <div class="stack">
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-users-clear-filters" ${resetUserFiltersDisabled ? "disabled" : ""}>Reset filters</button>
+          </div>
+        </form>
+
+        <div class="admin-question-bulk-bar admin-users-bulk-bar" style="margin-top: 0.74rem;">
+          <label class="admin-question-select-all">
+            <input
+              type="checkbox"
+              data-action="admin-select-all-users"
+              aria-label="Select all users in this filtered list"
+              data-indeterminate="${partiallyVisibleSelected ? "true" : "false"}"
+              ${allVisibleSelected ? "checked" : ""}
+              ${bulkDeactivateRunning || !visibleSelectableUserIds.length ? "disabled" : ""}
+            />
+            <span>Select all in this view</span>
+          </label>
+          <p class="admin-question-selection-count">Selected: <b>${selectedUserCount}</b> • Showing <b>${filteredUsers.length}</b> of ${users.length}</p>
+          <div class="stack">
+            <button class="btn danger admin-btn-sm ${bulkDeactivateRunning ? "is-loading" : ""}" type="button" data-action="admin-bulk-deactivate-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
+              ${bulkDeactivateRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Deactivating...</span>` : "Deactivate selected"}
+            </button>
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-user-selection" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>Clear selection</button>
+          </div>
+        </div>
+
         <div class="table-wrap admin-users-table-wrap" style="margin-top: 0.9rem;">
           <table class="admin-users-table">
             <colgroup>
+              <col class="col-select" />
               <col class="col-account" />
               <col class="col-role" />
               <col class="col-year" />
@@ -15419,6 +15721,7 @@ function renderAdmin() {
             </colgroup>
             <thead>
               <tr>
+                <th class="admin-user-select-cell">Select</th>
                 <th>Account</th>
                 <th>Role</th>
                 <th>Year</th>
@@ -15427,7 +15730,7 @@ function renderAdmin() {
                 <th>Actions</th>
               </tr>
             </thead>
-            <tbody>${accountRows}</tbody>
+            <tbody>${accountRows || `<tr><td colspan="7" class="subtle">No users match the current search, year, and semester filters.</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -16657,6 +16960,14 @@ function wireAdmin() {
         state.adminSelectedQuestionIds = [];
         state.adminBulkActionRunning = false;
         state.adminBulkActionType = "";
+      }
+      if (page !== "users") {
+        state.adminSelectedUserIds = [];
+        state.adminUserBulkActionRunning = false;
+        if (adminUserSearchDebounce) {
+          window.clearTimeout(adminUserSearchDebounce);
+          adminUserSearchDebounce = null;
+        }
       }
       if (page !== "courses") {
         state.adminCourseTopicModalCourse = "";
@@ -18130,6 +18441,233 @@ function wireAdmin() {
     }
   });
 
+  const adminUsersSection = document.getElementById("admin-users-section");
+  const adminUserFilterForm = document.getElementById("admin-user-filter-form");
+  const adminUserSearchInput = document.getElementById("admin-user-search");
+  const adminUserFilterYear = document.getElementById("admin-user-filter-year");
+  const adminUserFilterSemester = document.getElementById("admin-user-filter-semester");
+  const selectAllUsersInput = appEl.querySelector("[data-action='admin-select-all-users']");
+  if (selectAllUsersInput instanceof HTMLInputElement) {
+    selectAllUsersInput.indeterminate = selectAllUsersInput.dataset.indeterminate === "true";
+  }
+
+  const getVisibleSelectableUserIds = () => (
+    adminUsersSection
+      ? Array.from(adminUsersSection.querySelectorAll("input[type='checkbox'][data-action='admin-select-user'][data-user-id]:not(:disabled)"))
+        .map((input) => String(input.getAttribute("data-user-id") || "").trim())
+        .filter(Boolean)
+      : []
+  );
+  const getVisibleSelectableUserIdSet = () => new Set(getVisibleSelectableUserIds());
+  const getSelectedVisibleUserIds = () => normalizeAdminUserIdList(state.adminSelectedUserIds, getVisibleSelectableUserIdSet());
+  const finishAdminUserBulkAction = () => {
+    state.adminUserBulkActionRunning = false;
+    state.skipNextRouteAnimation = true;
+    render();
+  };
+
+  adminUserFilterForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+  });
+
+  const syncAdminUserFilters = () => {
+    state.adminUserFilterYear = String(adminUserFilterYear?.value || "");
+    state.adminUserFilterSemester = String(adminUserFilterSemester?.value || "");
+    state.skipNextRouteAnimation = true;
+    render();
+  };
+  adminUserFilterYear?.addEventListener("change", syncAdminUserFilters);
+  adminUserFilterSemester?.addEventListener("change", syncAdminUserFilters);
+
+  adminUserSearchInput?.addEventListener("input", () => {
+    const nextValue = String(adminUserSearchInput.value || "");
+    state.adminUserSearch = nextValue;
+    if (adminUserSearchDebounce) {
+      window.clearTimeout(adminUserSearchDebounce);
+    }
+    adminUserSearchDebounce = window.setTimeout(() => {
+      adminUserSearchDebounce = null;
+      state.skipNextRouteAnimation = true;
+      render();
+      const nextSearchInput = document.getElementById("admin-user-search");
+      if (nextSearchInput instanceof HTMLInputElement) {
+        nextSearchInput.focus();
+        const cursorPos = nextValue.length;
+        nextSearchInput.setSelectionRange(cursorPos, cursorPos);
+      }
+    }, 140);
+  });
+
+  appEl.querySelector("[data-action='admin-users-clear-filters']")?.addEventListener("click", () => {
+    state.adminUserSearch = "";
+    state.adminUserFilterYear = "";
+    state.adminUserFilterSemester = "";
+    state.adminSelectedUserIds = [];
+    if (adminUserSearchDebounce) {
+      window.clearTimeout(adminUserSearchDebounce);
+      adminUserSearchDebounce = null;
+    }
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  adminUsersSection?.addEventListener("change", (event) => {
+    const targetEl = event.target;
+    if (!(targetEl instanceof Element)) {
+      return;
+    }
+    const checkbox = targetEl.closest("input[type='checkbox'][data-action]");
+    if (!(checkbox instanceof HTMLInputElement)) {
+      return;
+    }
+    const action = String(checkbox.getAttribute("data-action") || "").trim();
+    if (!["admin-select-user", "admin-select-all-users"].includes(action) || state.adminUserBulkActionRunning) {
+      return;
+    }
+    if (action === "admin-select-all-users") {
+      state.adminSelectedUserIds = checkbox.checked ? getVisibleSelectableUserIds() : [];
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const userId = String(checkbox.getAttribute("data-user-id") || "").trim();
+    if (!userId) {
+      return;
+    }
+    const visibleUserIdSet = getVisibleSelectableUserIdSet();
+    if (!visibleUserIdSet.has(userId)) {
+      return;
+    }
+    const selectedSet = new Set(getSelectedVisibleUserIds());
+    if (checkbox.checked) {
+      selectedSet.add(userId);
+    } else {
+      selectedSet.delete(userId);
+    }
+    state.adminSelectedUserIds = normalizeAdminUserIdList([...selectedSet], visibleUserIdSet);
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  adminUsersSection?.addEventListener("click", async (event) => {
+    const targetEl = event.target;
+    if (!(targetEl instanceof Element)) {
+      return;
+    }
+    const actionEl = targetEl.closest("[data-action]");
+    if (!actionEl) {
+      return;
+    }
+    const action = String(actionEl.getAttribute("data-action") || "").trim();
+    if (!["admin-clear-user-selection", "admin-bulk-deactivate-users"].includes(action)) {
+      return;
+    }
+
+    if (action === "admin-clear-user-selection") {
+      if (state.adminUserBulkActionRunning || !state.adminSelectedUserIds.length) {
+        return;
+      }
+      state.adminSelectedUserIds = [];
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+
+    if (state.adminUserBulkActionRunning) {
+      return;
+    }
+    const selectedIds = getSelectedVisibleUserIds();
+    if (!selectedIds.length) {
+      toast("Select at least one user.");
+      return;
+    }
+
+    const selectedIdSet = new Set(selectedIds);
+    const current = getCurrentUser();
+    const users = getUsers();
+    const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
+    const deactivatableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
+    if (!deactivatableUsers.length) {
+      toast("Selected accounts cannot be deactivated.");
+      return;
+    }
+
+    const activeUsers = deactivatableUsers.filter((entry) => isUserAccessApproved(entry));
+    if (!activeUsers.length) {
+      toast("Selected accounts are already deactivated.");
+      return;
+    }
+    if (!window.confirm(`Deactivate ${activeUsers.length} selected account(s)?`)) {
+      return;
+    }
+
+    state.adminUserBulkActionRunning = true;
+    state.skipNextRouteAnimation = true;
+    render();
+
+    try {
+      const profileIds = activeUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
+      const dbResult = await updateRelationalProfileApproval(profileIds, false);
+      const deactivationQueuedForSync = profileIds.length && !dbResult.ok && shouldAllowSupabaseManagedLocalFallback(dbResult.message);
+      if (profileIds.length && !dbResult.ok && !deactivationQueuedForSync) {
+        finishAdminUserBulkAction();
+        toast(`Database update failed. ${dbResult.message}`);
+        return;
+      }
+
+      const updatedProfileIds = new Set(dbResult.updatedIds || []);
+      const skippedProfileIds = new Set(dbResult.skippedIds || []);
+      let deactivatedCount = 0;
+      let skippedCount = 0;
+      users.forEach((entry) => {
+        const entryId = String(entry.id || "").trim();
+        if (!selectedIdSet.has(entryId) || !canBulkSelectAdminUser(entry, current) || !isUserAccessApproved(entry)) {
+          return;
+        }
+        const profileId = String(getUserProfileId(entry) || "").trim();
+        if (isUuidValue(profileId) && !deactivationQueuedForSync && !updatedProfileIds.has(profileId)) {
+          if (skippedProfileIds.has(profileId)) {
+            skippedCount += 1;
+          }
+          return;
+        }
+        entry.isApproved = false;
+        entry.approvedAt = null;
+        entry.approvedBy = null;
+        deactivatedCount += 1;
+      });
+
+      if (!deactivatedCount) {
+        finishAdminUserBulkAction();
+        toast("Selected users could not be deactivated.");
+        return;
+      }
+
+      save(STORAGE_KEYS.users, users);
+      await syncUsersBackupState(users);
+      state.adminSelectedUserIds = [];
+      try {
+        await flushPendingSyncNow({ throwOnRelationalFailure: !deactivationQueuedForSync });
+        finishAdminUserBulkAction();
+        if (deactivationQueuedForSync) {
+          toast(
+            skippedCount
+              ? `${deactivatedCount} account(s) deactivated locally and queued for cloud sync. ${skippedCount} skipped.`
+              : `${deactivatedCount} account(s) deactivated locally and queued for cloud sync.`,
+          );
+        } else {
+          toast(skippedCount ? `${deactivatedCount} account(s) deactivated. ${skippedCount} skipped.` : `${deactivatedCount} account(s) deactivated.`);
+        }
+      } catch (syncError) {
+        finishAdminUserBulkAction();
+        toast(`Accounts updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      }
+    } catch (bulkError) {
+      finishAdminUserBulkAction();
+      toast(`Could not deactivate selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
+    }
+  });
+
   const setEnrollmentSaveButtonBusy = (button, busy, busyLabel = "Saving...") => {
     if (!button) {
       return;
@@ -18169,7 +18707,7 @@ function wireAdmin() {
       const role = users[idx].role;
       const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
       const previousSemester = role === "student" ? normalizeAcademicSemesterOrNull(users[idx].academicSemester) : null;
-      let shouldClearAnalyticsForEnrollmentChange = false;
+      let didEnrollmentTermChange = false;
       if (role === "student") {
         const yearSelect = row.querySelector("select[data-field='academicYear']");
         const semesterSelect = row.querySelector("select[data-field='academicSemester']");
@@ -18185,7 +18723,7 @@ function wireAdmin() {
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
-        shouldClearAnalyticsForEnrollmentChange = previousYear !== year || previousSemester !== semester;
+        didEnrollmentTermChange = previousYear !== year || previousSemester !== semester;
         if (!hasCompleteStudentProfile(users[idx])) {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
@@ -18205,13 +18743,10 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      if (shouldClearAnalyticsForEnrollmentChange) {
-        await clearUserAnalyticsHistory(users[idx].id, getUserProfileId(users[idx]));
-      }
       await flushPendingSyncNow();
       if (mode === "manual") {
-        toast(shouldClearAnalyticsForEnrollmentChange
-          ? "Enrollment saved. Previous analytics were cleared for the new year/semester."
+        toast(didEnrollmentTermChange
+          ? "Enrollment saved. Previous term data was archived for this account and will return if the year/semester is restored."
           : "Enrollment saved.");
       }
       state.skipNextRouteAnimation = true;
@@ -21327,8 +21862,18 @@ function getSessionsForUser(userId) {
   return getSessions().filter((session) => session.userId === userId);
 }
 
+function getAcademicTermScopedSessionsForUser(userId, userOverride = null, questionMetaById = null) {
+  const sessions = getSessionsForUser(userId);
+  const targetUser = userOverride || findUserForAnalytics(userId);
+  if (!targetUser || targetUser.role !== "student") {
+    return sessions;
+  }
+  const map = questionMetaById instanceof Map ? questionMetaById : getAnalyticsQuestionMetaById();
+  return sessions.filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, map));
+}
+
 function getCompletedSessionsForUser(userId) {
-  return getSessionsForUser(userId)
+  return getAcademicTermScopedSessionsForUser(userId)
     .filter((session) => session.status === "completed")
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 }
@@ -21423,6 +21968,7 @@ function createSessionFromQuestions(questions, config = {}) {
   const source = String(config.source || "all");
   const sessionAcademicYear = user.role === "student" ? normalizeAcademicYearOrNull(user.academicYear) : null;
   const sessionAcademicSemester = user.role === "student" ? normalizeAcademicSemesterOrNull(user.academicSemester) : null;
+  const sessionId = makeId("s");
   const sessionCourses = [];
   const seenSessionCourses = new Set();
 
@@ -21446,10 +21992,20 @@ function createSessionFromQuestions(questions, config = {}) {
       sessionCourses.push(mappedCourse);
     }
   });
+  const sessionName = normalizeSessionName(config.name, buildAutoSessionName({
+    courseLabel: config.courseLabel,
+    courses: sessionCourses,
+    mode,
+    source,
+    questionCount: selected.length,
+  }));
+  const sessionTestId = normalizeSessionTestId(config.testId, sessionId);
 
   const session = {
-    id: makeId("s"),
+    id: sessionId,
     userId: user.id,
+    name: sessionName,
+    testId: sessionTestId,
     mode,
     source,
     durationMin: duration,
@@ -21477,7 +22033,7 @@ function createSessionFromQuestions(questions, config = {}) {
 }
 
 function getActiveSession(userId, preferredId = null) {
-  const sessions = getSessionsForUser(userId).filter((session) => session.status === "in_progress");
+  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "in_progress");
   if (!sessions.length) {
     return null;
   }
@@ -23352,7 +23908,7 @@ function applySourceFilter(questions, source, userId) {
     return questions;
   }
 
-  const sessions = getSessionsForUser(userId).filter((session) => session.status === "completed");
+  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "completed");
   const attempted = new Set();
   const incorrect = new Set();
   const flagged = new Set();
@@ -23399,7 +23955,7 @@ function getMissRateByQuestion(userId) {
     return {};
   }
 
-  const sessions = getSessionsForUser(userId).filter((session) => session.status === "completed");
+  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "completed");
   const map = {};
 
   sessions.forEach((session) => {
@@ -23927,6 +24483,18 @@ function normalizeSession(session) {
   }
   if (session.academicSemester !== normalizedSessionSemester) {
     session.academicSemester = normalizedSessionSemester;
+    changed = true;
+  }
+
+  const normalizedTestId = normalizeSessionTestId(session.testId, session.id);
+  if (session.testId !== normalizedTestId) {
+    session.testId = normalizedTestId;
+    changed = true;
+  }
+
+  const normalizedName = normalizeSessionName(session.name, buildAutoSessionNameFromSession(session));
+  if (session.name !== normalizedName) {
+    session.name = normalizedName;
     changed = true;
   }
 
@@ -24595,7 +25163,7 @@ function addCurrentQuestionToFlashcards(userId, questionId) {
 }
 
 function getNotebookEntries(userId) {
-  const sessions = getSessionsForUser(userId);
+  const sessions = getAcademicTermScopedSessionsForUser(userId);
   const entries = [];
   sessions.forEach((session) => {
     session.questionIds.forEach((qid) => {
