@@ -2275,49 +2275,34 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     profileCompleted: nextProfileCompleted,
   });
 
-  const shouldBackfillProfile = role === "student"
-    && (
-      (profilePhone !== resolvedPhone && Boolean(resolvedPhone))
-      || (profileYear === null && year !== null)
-      || (profileSemester === null && semester !== null)
-    );
-  if (shouldBackfillProfile) {
-    const profilePatch = {};
-    if (profilePhone !== resolvedPhone && resolvedPhone) {
-      profilePatch.phone = resolvedPhone;
-    }
-    if (profileYear === null && year !== null) {
-      profilePatch.academic_year = year;
-    }
-    if (profileSemester === null && semester !== null) {
-      profilePatch.academic_semester = semester;
-    }
-    if (Object.keys(profilePatch).length) {
-      client
-        .from("profiles")
-        .update(profilePatch)
-        .eq("id", authUser.id)
-        .then(({ error: patchError }) => {
-          if (patchError) {
-            console.warn("Could not backfill profile completion fields.", patchError.message || patchError);
-            return;
+  const shouldBackfillProfilePhone = role === "student"
+    && profilePhone !== resolvedPhone
+    && Boolean(resolvedPhone);
+  if (shouldBackfillProfilePhone) {
+    client
+      .from("profiles")
+      .update({ phone: resolvedPhone })
+      .eq("id", authUser.id)
+      .then(({ error: patchError }) => {
+        if (patchError) {
+          console.warn("Could not backfill profile phone.", patchError.message || patchError);
+          return;
+        }
+        const currentLocal = getCurrentUser();
+        if (!currentLocal || getUserProfileId(currentLocal) !== authUser.id) {
+          return;
+        }
+        syncUserCourseEnrollmentsToRelational([updatedUser], {
+          assignedByAuthId: isUuidValue(currentLocal?.supabaseAuthId) ? currentLocal.supabaseAuthId : null,
+        }).catch((syncError) => {
+          if (!isMissingRelationError(syncError)) {
+            console.warn("Could not sync enrollment rows after profile phone backfill.", syncError?.message || syncError);
           }
-          const currentLocal = getCurrentUser();
-          if (!currentLocal || getUserProfileId(currentLocal) !== authUser.id) {
-            return;
-          }
-          syncUserCourseEnrollmentsToRelational([updatedUser], {
-            assignedByAuthId: isUuidValue(currentLocal?.supabaseAuthId) ? currentLocal.supabaseAuthId : null,
-          }).catch((syncError) => {
-            if (!isMissingRelationError(syncError)) {
-              console.warn("Could not sync enrollment rows after profile backfill.", syncError?.message || syncError);
-            }
-          });
-        })
-        .catch((patchError) => {
-          console.warn("Could not backfill profile completion fields.", patchError?.message || patchError);
         });
-    }
+      })
+      .catch((patchError) => {
+        console.warn("Could not backfill profile phone.", patchError?.message || patchError);
+      });
   }
   return { user: updatedUser, approvalChecked: true };
 }
@@ -4389,10 +4374,10 @@ async function hydrateRelationalProfiles(currentUser) {
     const inferredCourseYear = normalizeAcademicYearOrNull(inferredFromCourses.year);
     const inferredCourseSemester = normalizeAcademicSemesterOrNull(inferredFromCourses.semester);
     let year = role === "student"
-      ? (profileYear ?? inferredEnrollmentYear ?? inferredCourseYear ?? existingYear)
+      ? (profileYear ?? existingYear ?? inferredEnrollmentYear ?? inferredCourseYear)
       : null;
     let semester = role === "student"
-      ? (profileSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester ?? existingSemester)
+      ? (profileSemester ?? existingSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester)
       : null;
     let assignedCourses = role !== "student"
       ? [...allCourses]
@@ -4447,28 +4432,24 @@ async function hydrateRelationalProfiles(currentUser) {
         const profileYear = normalizeAcademicYearOrNull(profile?.academic_year);
         const profileSemester = normalizeAcademicSemesterOrNull(profile?.academic_semester);
         const profilePhone = String(profile?.phone || "").trim();
-        const missingYearSemester = profileYear === null || profileSemester === null;
         const missingPhone = !validateAndNormalizePhoneNumber(profilePhone).ok;
-        if (!missingYearSemester && !missingPhone) {
+        if (!missingPhone) {
           return null;
         }
         const mappedEntry = mappedByAuthId.get(String(profile.id || "").trim());
         if (!mappedEntry) {
           return null;
         }
-        const mappedYear = normalizeAcademicYearOrNull(mappedEntry.academicYear);
-        const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
         const mappedPhone = String(mappedEntry.phone || "").trim();
         const mappedPhoneValid = validateAndNormalizePhoneNumber(mappedPhone).ok;
-        const canBackfillYearSemester = mappedYear !== null && mappedSemester !== null;
         const canBackfillPhone = mappedPhoneValid;
-        if (!((missingYearSemester && canBackfillYearSemester) || (missingPhone && canBackfillPhone))) {
+        if (!canBackfillPhone) {
           return null;
         }
         return {
           ...mappedEntry,
-          academicYear: canBackfillYearSemester ? mappedYear : profileYear,
-          academicSemester: canBackfillYearSemester ? mappedSemester : profileSemester,
+          academicYear: profileYear,
+          academicSemester: profileSemester,
           phone: canBackfillPhone ? mappedPhone : profilePhone,
         };
       })
@@ -22820,25 +22801,15 @@ function normalizeStudentEnrollmentProfile(user) {
   let year = normalizeAcademicYearOrNull(source.academicYear);
   let semester = normalizeAcademicSemesterOrNull(source.academicSemester);
 
-  // If stored term conflicts with assigned courses, recover term from assigned courses instead of dropping data.
-  if (year !== null && semester !== null && normalizedAssigned.length) {
-    const currentTermCourses = getCurriculumCourses(year, semester);
-    const scopedToCurrentTerm = normalizedAssigned.filter((course) => currentTermCourses.includes(course));
-    if (!scopedToCurrentTerm.length) {
-      const inferredFromAssigned = inferAcademicTermFromCourses(normalizedAssigned);
-      if (inferredFromAssigned.year !== null && inferredFromAssigned.semester !== null) {
-        year = inferredFromAssigned.year;
-        semester = inferredFromAssigned.semester;
-      }
-    }
-  }
-
+  // Only infer missing enrollment pieces. Once a year/semester is explicitly set, keep it authoritative.
   if (year === null || semester === null) {
     const inferred = inferAcademicTermFromCourses(normalizedAssigned);
-    if (year === null && inferred.year !== null) {
+    if (year === null && semester === null) {
       year = inferred.year;
-    }
-    if (semester === null && inferred.semester !== null) {
+      semester = inferred.semester;
+    } else if (year === null && semester !== null && inferred.semester === semester) {
+      year = inferred.year;
+    } else if (semester === null && year !== null && inferred.year === year) {
       semester = inferred.semester;
     }
   }
