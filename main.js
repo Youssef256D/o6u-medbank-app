@@ -10079,10 +10079,6 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     }
     if (!hasPendingUserWrites) {
       await hydrateRelationalProfiles(user);
-      // Keep the legacy cloud user backup merged in as well. Older accounts can
-      // still live there even when relational sync succeeds, and the admin
-      // dashboard reads from the merged local user state.
-      await hydrateUsersFromSupabaseBackup().catch(() => false);
     }
     if (shouldHydrateQuestions) {
       await hydrateRelationalQuestions();
