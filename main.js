@@ -23255,7 +23255,7 @@ function buildQuestionTopicInferenceText(question) {
 }
 
 function inferRecoveredTopicForQuestion(course, question) {
-  const recoveryRules = COURSE_TOPIC_RECOVERY_RULES[extractCourseCodeKey(course)] || [];
+  const recoveryRules = COURSE_TOPIC_RECOVERY_RULES[getCourseTopicRecoveryProfileKey(course)] || [];
   if (!recoveryRules.length) {
     return "";
   }
@@ -23841,6 +23841,24 @@ function extractCourseCodeKey(courseName) {
   return match[1].toLowerCase().replace(/\s+/g, "");
 }
 
+function getCourseTopicRecoveryProfileKey(courseName) {
+  const courseCodeKey = extractCourseCodeKey(courseName);
+  if (courseCodeKey && (COURSE_TOPIC_RECOVERY_SEEDS[courseCodeKey] || COURSE_TOPIC_RECOVERY_RULES[courseCodeKey])) {
+    return courseCodeKey;
+  }
+  const lookupKey = normalizeCourseLookupKey(courseName);
+  if (!lookupKey) {
+    return "";
+  }
+  if (lookupKey.includes("endocrinology") || lookupKey.includes("endocrine")) {
+    return "erp208";
+  }
+  if (lookupKey.includes("neurology") || lookupKey.includes("neurolog") || lookupKey.includes("nervous system")) {
+    return "ner206";
+  }
+  return "";
+}
+
 function normalizeTopicKey(topicName) {
   return String(topicName || "").trim().toLowerCase();
 }
@@ -23854,8 +23872,8 @@ function findMatchingTopicNameInList(topicList, requestedTopic) {
 }
 
 function getCourseTopicRecoverySeed(courseName) {
-  const courseCodeKey = extractCourseCodeKey(courseName);
-  const seededTopics = COURSE_TOPIC_RECOVERY_SEEDS[courseCodeKey];
+  const recoveryProfileKey = getCourseTopicRecoveryProfileKey(courseName);
+  const seededTopics = COURSE_TOPIC_RECOVERY_SEEDS[recoveryProfileKey];
   return Array.isArray(seededTopics) ? [...seededTopics] : [];
 }
 
