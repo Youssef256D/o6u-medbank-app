@@ -85,11 +85,11 @@ const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
 const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
-const RELATIONAL_FLUSH_DEBOUNCE_MS = 300;
-const RELATIONAL_RETRY_FLUSH_MS = 2200;
-const SUPABASE_FLUSH_DEBOUNCE_MS = 260;
-const SUPABASE_RETRY_FLUSH_MS = 3000;
-const SESSION_SYNC_FLUSH_MS = 2000;
+const RELATIONAL_FLUSH_DEBOUNCE_MS = 80;
+const RELATIONAL_RETRY_FLUSH_MS = 800;
+const SUPABASE_FLUSH_DEBOUNCE_MS = 80;
+const SUPABASE_RETRY_FLUSH_MS = 1200;
+const SESSION_SYNC_FLUSH_MS = 600;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 8000;
@@ -98,7 +98,7 @@ const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
-const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 1200;
+const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const SESSION_REALTIME_DEBOUNCE_MS = 900;
@@ -111,20 +111,20 @@ const PRESENCE_HEARTBEAT_MS = 25000;
 const PRESENCE_ONLINE_STALE_MS = 120000;
 const SITE_ACTIVITY_HEARTBEAT_MS = 30000;
 const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
-const SUPABASE_BOOTSTRAP_RETRY_MS = 1200;
+const SUPABASE_BOOTSTRAP_RETRY_MS = 500;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
-const SUPABASE_QUERY_TIMEOUT_MS = 15000;
-const SUPABASE_SESSION_TIMEOUT_MS = 12000;
+const SUPABASE_QUERY_TIMEOUT_MS = 8000;
+const SUPABASE_SESSION_TIMEOUT_MS = 6000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 5000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
 const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 600;
 const SUPABASE_SESSION_RECOVERY_RETRY_MS = 6000;
 const SUPABASE_SESSION_RECOVERY_RETRY_LIMIT = 20;
 const SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS = 30000;
-const ADMIN_REQUEST_TIMEOUT_MS = 15000;
+const ADMIN_REQUEST_TIMEOUT_MS = 8000;
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
-const PROFILE_LOOKUP_TIMEOUT_MS = 5000;
+const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
 const ROUTE_TRANSITION_MS = 420;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
@@ -4329,21 +4329,14 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   return { ok: true, updatedIds, skippedIds, missingIds };
 }
 
-async function syncUsersBackupState(usersPayload) {
+function syncUsersBackupState(usersPayload) {
   if (!supabaseSync.enabled || !isLegacySupabaseStateSyncKey(STORAGE_KEYS.users)) {
     return;
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : getUsers();
-  try {
-    const queued = scheduleSupabaseWrite(STORAGE_KEYS.users, users);
-    if (!queued) {
-      return;
-    }
-    await flushSupabaseWrites();
-  } catch (error) {
-    console.warn("Users backup sync failed.", error?.message || error);
-  }
+  scheduleSupabaseWrite(STORAGE_KEYS.users, users);
+  // The scheduled timer will flush automatically — no need to block.
 }
 
 async function flushPendingAdminActionQueue(options = {}) {
@@ -6717,6 +6710,17 @@ function splitIntoBatches(items, batchSize) {
     batches.push(source.slice(index, index + size));
   }
   return batches;
+}
+
+// Fire-and-forget sync: kicks off background sync without blocking the caller.
+// Use this in user-facing action handlers so the UI responds instantly.
+function flushPendingSyncInBackground(options = {}) {
+  flushPendingSyncNow({
+    throwOnRelationalFailure: false,
+    ...options,
+  }).catch((error) => {
+    console.warn("Background sync failed.", error?.message || error);
+  });
 }
 
 function getErrorMessage(error, fallback = "Unexpected error.") {
@@ -18055,10 +18059,10 @@ function wireAdmin() {
     save(STORAGE_KEYS.systemLogs, []);
     systemLogRuntime.suspend = false;
     appendSystemLog("system.logs", "System logs cleared from admin panel.", {}, { force: true });
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     toast("System logs cleared.");
     state.skipNextRouteAnimation = true;
     render();
+    flushPendingSyncInBackground();
   });
 
   appEl.querySelector("[data-action='refresh-admin-data']")?.addEventListener("click", async () => {
@@ -18180,7 +18184,6 @@ function wireAdmin() {
       return false;
     }
     save(STORAGE_KEYS.siteMaintenance, nextConfig);
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     if (options.logMessage) {
       appendSystemLog("admin.site_maintenance", options.logMessage, options.logDetails || {});
     }
@@ -18191,6 +18194,7 @@ function wireAdmin() {
     state.adminDataSyncError = "";
     state.skipNextRouteAnimation = true;
     render();
+    flushPendingSyncInBackground();
     return true;
   };
 
@@ -18838,14 +18842,10 @@ function wireAdmin() {
     applyCurriculumUpdate(nextCurriculum);
     state.adminCourseSearch = "";
     state.adminCourseFocus = newCourseName;
-    try {
-      await flushPendingSyncNow();
-      toast("Course added.");
-      state.skipNextRouteAnimation = true;
-      render();
-    } catch (syncError) {
-      toast(`Course added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-    }
+    toast("Course added.");
+    state.skipNextRouteAnimation = true;
+    render();
+    flushPendingSyncInBackground();
   });
 
   appEl.querySelectorAll("[data-action='course-topic-manager-close']").forEach((button) => {
@@ -18922,14 +18922,10 @@ function wireAdmin() {
       if (state.adminCourseTopicModalCourse === oldName) {
         state.adminCourseTopicModalCourse = newName;
       }
-      try {
-        await flushPendingSyncNow();
-        toast("Course name updated.");
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Course updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      toast("Course name updated.");
+      state.skipNextRouteAnimation = true;
+      render();
+      flushPendingSyncInBackground();
     });
   });
 
@@ -18965,14 +18961,10 @@ function wireAdmin() {
         state.adminCourseTopicGroupCreateModalOpen = false;
         state.adminCourseTopicInlineCreateOpen = false;
       }
-      try {
-        await flushPendingSyncNow();
-        toast("Course deleted.");
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Course deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      toast("Course deleted.");
+      state.skipNextRouteAnimation = true;
+      render();
+      flushPendingSyncInBackground();
     });
   });
 
@@ -19064,12 +19056,8 @@ function wireAdmin() {
       if (input) {
         input.value = COURSE_NOTEBOOK_LINKS[course] || "";
       }
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast(normalizedLink ? "Ask AI link saved." : "Ask AI link removed.");
-      } catch (syncError) {
-        toast(`Link saved locally, but cloud sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      toast(normalizedLink ? "Ask AI link saved." : "Ask AI link removed.");
+      flushPendingSyncInBackground();
       return;
     }
 
@@ -19100,14 +19088,10 @@ function wireAdmin() {
         state.adminEditQuestionId = null;
       }
       save(STORAGE_KEYS.questions, nextQuestions);
-      try {
-        await flushPendingSyncNow();
-        toast(`Deleted ${removeSet.size} question(s) from ${course}.`);
-        state.skipNextRouteAnimation = true;
-        render();
-      } catch (syncError) {
-        toast(`Questions deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      toast(`Deleted ${removeSet.size} question(s) from ${course}.`);
+      state.skipNextRouteAnimation = true;
+      render();
+      flushPendingSyncInBackground();
       return;
     }
 
@@ -19121,13 +19105,9 @@ function wireAdmin() {
         return;
       }
       applyCourseTopicsUpdate(course, [], { allowQuestionTopicCollapse: true });
+      toast(`Deleted ${existingTopics.length} topic(s) from ${course}.`);
       rerenderCoursesPage();
-      try {
-        await flushPendingSyncNow();
-        toast(`Deleted ${existingTopics.length} topic(s) from ${course}.`);
-      } catch (syncError) {
-        toast(`Topics deleted locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      flushPendingSyncInBackground();
       return;
     }
 
@@ -19158,13 +19138,9 @@ function wireAdmin() {
         setCourseTopicParentGroup(course, topicName, canonicalGroupName);
       }
       state.adminCourseTopicInlineCreateOpen = false;
+      toast(requestedGroupName ? "Topic and subgroup saved." : "Topic added.");
       rerenderCoursesPage();
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast(requestedGroupName ? "Topic and subgroup saved." : "Topic added.");
-      } catch (syncError) {
-        toast(`Topic added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      flushPendingSyncInBackground();
       return;
     }
 
@@ -19214,13 +19190,9 @@ function wireAdmin() {
         toast("No changes to save.");
         return;
       }
+      toast("Topic updated.");
       rerenderCoursesPage();
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: false });
-        toast("Topic updated.");
-      } catch (syncError) {
-        toast(`Topic updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      flushPendingSyncInBackground();
       return;
     }
 
@@ -19233,13 +19205,9 @@ function wireAdmin() {
       topics.filter((_, idx) => idx !== topicIndex),
       { allowQuestionTopicCollapse: true },
     );
+    toast("Topic removed.");
     rerenderCoursesPage();
-    try {
-      await flushPendingSyncNow();
-      toast("Topic removed.");
-    } catch (syncError) {
-      toast(`Topic removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-    }
+    flushPendingSyncInBackground();
   };
   const handleAdminCourseKeydown = (event) => {
     if (event.key === "Escape" && state.adminCourseTopicModalCourse) {
@@ -19464,19 +19432,16 @@ function wireAdmin() {
     }
 
     save(STORAGE_KEYS.users, users);
-    await syncUsersBackupState(users);
-    const authAccessResult = await syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users });
-    try {
-      await flushPendingSyncNow();
-      toast(
-        skippedCount
-          ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).${describeAuthAccessSyncOutcome(authAccessResult)}`
-          : `${approvedCount} pending account(s) approved.${describeAuthAccessSyncOutcome(authAccessResult)}`,
-      );
-      render();
-    } catch (syncError) {
-      toast(`Approval updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-    }
+    toast(
+      skippedCount
+        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped.`
+        : `${approvedCount} pending account(s) approved.`,
+    );
+    render();
+    // Sync in background — don't block the UI.
+    syncUsersBackupState(users).catch(() => { });
+    syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users }).catch(() => { });
+    flushPendingSyncInBackground();
   });
 
   const adminUsersSection = document.getElementById("admin-users-section");
@@ -19692,39 +19657,24 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      await syncUsersBackupState(users);
       const authAccessTargetIds = [...new Set([
         ...updatedProfileIds,
         ...fallbackProfileIds,
       ])];
-      const authAccessResult = await syncSupabaseAuthAccessForTargets(authAccessTargetIds, false, {
+      syncSupabaseAuthAccessForTargets(authAccessTargetIds, false, {
         users,
         queueAll: deactivationQueuedForSync,
-      });
+      }).catch(() => { });
       state.adminSelectedUserIds = [];
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: !hasQueuedFallback });
-        finishAdminUserBulkAction();
-        if (hasQueuedFallback) {
-          toast(
-            [
-              `${deactivatedCount} account(s) suspended locally and queued for cloud sync.`,
-              queuedCount ? `${queuedCount} queued.` : "",
-              skippedCount ? `${skippedCount} skipped.` : "",
-            ].filter(Boolean).join(" ")
-              + describeAuthAccessSyncOutcome(authAccessResult),
-          );
-        } else {
-          toast(
-            skippedCount
-              ? `${deactivatedCount} account(s) suspended. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
-              : `${deactivatedCount} account(s) suspended.${describeAuthAccessSyncOutcome(authAccessResult)}`,
-          );
-        }
-      } catch (syncError) {
-        finishAdminUserBulkAction();
-        toast(`Accounts updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      finishAdminUserBulkAction();
+      toast(
+        skippedCount
+          ? `${deactivatedCount} account(s) suspended. ${skippedCount} skipped.`
+          : `${deactivatedCount} account(s) suspended.`,
+      );
+      // Sync in background — don't block the UI.
+      syncUsersBackupState(users).catch(() => { });
+      flushPendingSyncInBackground();
     } catch (bulkError) {
       finishAdminUserBulkAction();
       toast(`Could not suspend selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
@@ -19806,17 +19756,18 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.users, users);
-      await flushPendingSyncNow();
       if (mode === "manual") {
         toast(didEnrollmentTermChange
-          ? "Enrollment saved. Previous term data was archived for this account and will return if the year/semester is restored."
+          ? "Enrollment saved."
           : "Enrollment saved.");
       }
       state.skipNextRouteAnimation = true;
       render();
+      // Sync in background — don't block the UI.
+      flushPendingSyncInBackground();
       return true;
-    } catch (syncError) {
-      toast(`Enrollment saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+    } catch (error) {
+      toast(`Could not save enrollment: ${getErrorMessage(error, "Save failed.")}`);
       return false;
     } finally {
       row.dataset.enrollmentSaving = "0";
@@ -21341,7 +21292,7 @@ function queuePendingAdminAction(action) {
   });
   nextQueue.push(normalized);
   savePendingAdminActionQueue(nextQueue);
-  schedulePendingAdminActionFlush(1200);
+  schedulePendingAdminActionFlush(300);
   return true;
 }
 
