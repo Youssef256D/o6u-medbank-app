@@ -3619,16 +3619,34 @@ function schedulePostAuthDataWarmup(user) {
 }
 
 function getPendingCloudWriteCount() {
-  return Number(relationalSync.pendingWrites.size || 0)
-    + Number(supabaseSync.pendingWrites.size || 0)
-    + Number(sessionSyncRuntime.dirty ? 1 : 0)
-    + Number(getPendingAdminActionQueue().length || 0);
+  return getPendingCloudWriteBuckets().pendingCount;
 }
+
+// Keys that represent internal sync signals rather than user data changes.
+// These should not be shown in the pending count since they are not
+// meaningful to the user and cause the count to oscillate.
+const INTERNAL_SYNC_SIGNAL_KEYS = new Set([
+  STORAGE_KEYS.studentRefreshTrigger,
+  STORAGE_KEYS.studentRefreshTriggerSeen,
+]);
 
 function getPendingCloudWriteBuckets() {
   const relationalPendingCount = Number(relationalSync.pendingWrites.size || 0)
     + Number(sessionSyncRuntime.dirty ? 1 : 0);
-  const backupPendingCount = Number(supabaseSync.pendingWrites.size || 0);
+  // Only count supabase backup writes that are NOT already covered by
+  // relational sync and are NOT internal signals. This prevents
+  // double-counting the same data and oscillation from refresh signals.
+  let backupPendingCount = 0;
+  for (const [, pending] of supabaseSync.pendingWrites) {
+    const storageKey = String(pending?.storageKey || "").trim();
+    if (INTERNAL_SYNC_SIGNAL_KEYS.has(storageKey)) {
+      continue;
+    }
+    if (storageKey && relationalSync.pendingWrites.has(storageKey)) {
+      continue;
+    }
+    backupPendingCount += 1;
+  }
   const adminPendingCount = Number(getPendingAdminActionQueue().length || 0);
   return {
     relationalPendingCount,
@@ -6647,6 +6665,13 @@ async function flushPendingSyncNow(options = {}) {
   }
   if (getPendingAdminActionQueue().length) {
     await flushPendingAdminActionQueue().catch(() => { });
+  }
+  // Flush any supabase writes that were queued during the admin action or
+  // relational flush (e.g. student refresh signals, backup writes).
+  // Without this second pass, these items linger as "pending" until the
+  // next scheduled timer, causing the count to bounce.
+  if (supabaseSync.pendingWrites.size) {
+    await flushSupabaseWrites();
   }
   await flushPendingNotificationReadSync().catch(() => { });
   await flushPendingNotificationOutbox().catch(() => { });
