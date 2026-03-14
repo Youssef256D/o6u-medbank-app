@@ -387,6 +387,10 @@ const relationalSync = {
   readyCheckedAt: 0,
   readyPromise: null,
   lastReadyError: "",
+  // Timestamp of last local user/profile write. Used to prevent DB hydration
+  // from overwriting locally-changed fields (year, semester, courses) before
+  // the write has propagated to the database.
+  lastUserLocalWriteAt: 0,
 };
 
 const relationalQuestionColumnSupport = {
@@ -2479,8 +2483,19 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     ?? null,
   );
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
-  const year = role === "student" ? (profileYear ?? fallbackYear) : null;
-  const semester = role === "student" ? (profileSemester ?? fallbackSemester) : null;
+  // When local user data was recently modified, prefer local values over DB
+  // to prevent reverting the admin's change before it propagates to Supabase.
+  const preferLocalOverDbForCurrentUser = Boolean(
+    relationalSync.lastUserLocalWriteAt
+    && localUser
+    && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
+  );
+  const year = role === "student"
+    ? (preferLocalOverDbForCurrentUser && fallbackYear !== null ? fallbackYear : (profileYear ?? fallbackYear))
+    : null;
+  const semester = role === "student"
+    ? (preferLocalOverDbForCurrentUser && fallbackSemester !== null ? fallbackSemester : (profileSemester ?? fallbackSemester))
+    : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const metadataPhone = String(
     authUser?.user_metadata?.phone
@@ -3902,6 +3917,7 @@ function resetRelationalSyncState() {
   relationalSync.readyCheckedAt = 0;
   relationalSync.readyPromise = null;
   relationalSync.lastReadyError = "";
+  relationalSync.lastUserLocalWriteAt = 0;
   relationalQuestionColumnSupport.checked = false;
   relationalQuestionColumnSupport.questionImageUrl = false;
   relationalQuestionColumnSupport.explanationImageUrl = false;
@@ -3930,6 +3946,9 @@ function scheduleRelationalWrite(storageKey, value) {
       : value;
   relationalSync.pendingWrites.set(storageKey, snapshot);
   relationalSync.lastQueuedAt = Date.now();
+  if (storageKey === STORAGE_KEYS.users) {
+    relationalSync.lastUserLocalWriteAt = Date.now();
+  }
   scheduleSyncStatusUiRefresh();
   if (relationalSync.flushTimer || relationalSync.flushing) {
     return true;
@@ -4932,19 +4951,33 @@ async function hydrateRelationalProfiles(currentUser) {
       : { year: null, semester: null };
     const inferredCourseYear = normalizeAcademicYearOrNull(inferredFromCourses.year);
     const inferredCourseSemester = normalizeAcademicSemesterOrNull(inferredFromCourses.semester);
+    // When local user data was recently modified but hasn't landed in the DB yet,
+    // prefer the local (existing) values for year/semester/courses to prevent the
+    // DB read from reverting the admin's change.
+    const preferLocalOverDb = Boolean(
+      relationalSync.lastUserLocalWriteAt
+      && existing
+      && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
+    );
     let year = role === "student"
-      ? (profileYear ?? existingYear ?? inferredEnrollmentYear ?? inferredCourseYear)
+      ? (preferLocalOverDb && existingYear !== null
+        ? existingYear
+        : (profileYear ?? existingYear ?? inferredEnrollmentYear ?? inferredCourseYear))
       : null;
     let semester = role === "student"
-      ? (profileSemester ?? existingSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester)
+      ? (preferLocalOverDb && existingSemester !== null
+        ? existingSemester
+        : (profileSemester ?? existingSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester))
       : null;
     let assignedCourses = role !== "student"
       ? [...allCourses]
-      : enrolledCourses.length
-        ? enrolledCourses
-        : existingAssignedCourses.length
-          ? existingAssignedCourses
-          : [];
+      : preferLocalOverDb && existingAssignedCourses.length
+        ? existingAssignedCourses
+        : enrolledCourses.length
+          ? enrolledCourses
+          : existingAssignedCourses.length
+            ? existingAssignedCourses
+            : [];
     if (role === "student") {
       const repairedEnrollment = normalizeStudentEnrollmentProfile({
         academicYear: year,
@@ -7432,6 +7465,8 @@ async function syncProfilesToRelational(usersPayload) {
       "Profile sync timed out.",
     );
   }
+  // Profile data has landed in the DB — safe to allow hydration to use DB values again.
+  relationalSync.lastUserLocalWriteAt = 0;
 
   const enrollmentSyncOptions = {
     assignedByAuthId: isAdminSync && isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
