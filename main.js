@@ -4628,8 +4628,28 @@ async function hydrateRelationalCoursesAndTopics() {
     courseTopicOverrides[courseName] = topicsForCourse.length ? topicsForCourse : ["Clinical Applications"];
   });
 
+  // Merge any locally-pending topic additions that haven't synced yet.
+  const pendingLocalTopics = relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
+    ? COURSE_TOPIC_OVERRIDES
+    : null;
   O6U_CURRICULUM = normalizeCurriculum(curriculum);
   COURSE_TOPIC_OVERRIDES = normalizeCourseTopicMap(courseTopicOverrides);
+  if (pendingLocalTopics && typeof pendingLocalTopics === "object") {
+    Object.entries(pendingLocalTopics).forEach(([courseName, localTopics]) => {
+      if (!Array.isArray(localTopics) || !localTopics.length) {
+        return;
+      }
+      const existing = COURSE_TOPIC_OVERRIDES[courseName] || [];
+      const existingKeys = new Set(existing.map((t) => String(t || "").trim().toLowerCase()));
+      const additions = localTopics.filter((t) => {
+        const key = String(t || "").trim().toLowerCase();
+        return key && !existingKeys.has(key);
+      });
+      if (additions.length) {
+        COURSE_TOPIC_OVERRIDES[courseName] = [...existing, ...additions];
+      }
+    });
+  }
   rebuildCurriculumCatalog();
   saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
@@ -8051,7 +8071,11 @@ async function persistImportedQuestionsNow(questionsPayload) {
 
   const ready = await ensureRelationalSyncReady().catch(() => false);
   if (!ready) {
-    return { ok: false, message: "Relational database sync is unavailable." };
+    // Even if DB sync is unavailable, schedule the data for background sync so topics
+    // and questions are eventually persisted when the connection recovers.
+    scheduleRelationalWrite(STORAGE_KEYS.questions, questions);
+    scheduleRelationalWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    return { ok: false, message: "Relational database sync is unavailable. Changes are queued and will sync when the connection recovers." };
   }
 
   await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
@@ -23987,7 +24011,11 @@ function normalizeCourseTopicList(topics, course) {
   const seen = new Set();
   const normalized = [];
   source.forEach((entry) => {
-    const topic = String(entry || "").trim();
+    let topic = String(entry || "").trim();
+    // Strip surrounding quotes left by improperly formatted CSV imports.
+    if (topic.length >= 2 && topic.startsWith('"') && topic.endsWith('"')) {
+      topic = topic.slice(1, -1).trim();
+    }
     if (!topic) return;
     if (isRemovedTopicName(topic)) return;
     const key = topic.toLowerCase();
@@ -25042,6 +25070,14 @@ function normalizeImportFieldKey(key) {
     .replace(/[^a-z0-9]/g, "");
 }
 
+function stripSurroundingQuotes(text) {
+  const trimmed = String(text || "").trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 function normalizeImportRow(rawRow) {
   const normalized = {};
   if (!rawRow || typeof rawRow !== "object") {
@@ -25055,6 +25091,13 @@ function normalizeImportRow(rawRow) {
     }
     normalized[mappedField] = typeof value === "string" ? value.trim() : value;
   });
+  // Strip surrounding quotes from topic and course names that may have been double-quoted in CSV.
+  if (typeof normalized.topic === "string") {
+    normalized.topic = stripSurroundingQuotes(normalized.topic);
+  }
+  if (typeof normalized.course === "string") {
+    normalized.course = stripSurroundingQuotes(normalized.course);
+  }
 
   if (Array.isArray(rawRow.choices)) {
     rawRow.choices.forEach((choice, index) => {
