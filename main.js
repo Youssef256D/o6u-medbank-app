@@ -4355,6 +4355,8 @@ async function flushPendingAdminActionQueue(options = {}) {
         const batchActionIds = new Set(batch.map((a) => a.id));
         syncedCount += batch.length;
         remainingActions = remainingActions.filter((entry) => !batchActionIds.has(entry.id));
+        savePendingAdminActionQueue(remainingActions);
+        scheduleSyncStatusUiRefresh();
       } else if (handledIds.size > 0) {
         // Partial success — remove actions whose targets were handled.
         for (const action of batch) {
@@ -4363,6 +4365,8 @@ async function flushPendingAdminActionQueue(options = {}) {
             remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
           }
         }
+        savePendingAdminActionQueue(remainingActions);
+        scheduleSyncStatusUiRefresh();
         failureMessage = failureMessage || message || "Could not sync queued account access update.";
         if (shouldStopPendingAdminQueueOnFailure(message)) {
           queueBlockedByGlobalFailure = true;
@@ -4386,6 +4390,8 @@ async function flushPendingAdminActionQueue(options = {}) {
         if (result?.ok || /not found|user not found/i.test(message)) {
           syncedCount += 1;
           remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+          savePendingAdminActionQueue(remainingActions);
+          scheduleSyncStatusUiRefresh();
           continue;
         }
         failureMessage = failureMessage || message || "Could not sync queued password update.";
@@ -4423,6 +4429,8 @@ async function flushPendingAdminActionQueue(options = {}) {
         }
         syncedCount += 1;
         remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+        savePendingAdminActionQueue(remainingActions);
+        scheduleSyncStatusUiRefresh();
       }
     }
 
@@ -6468,14 +6476,18 @@ async function flushRelationalWrites(options = {}) {
   clearRelationalFlushTimer();
   relationalSync.flushing = true;
   scheduleSyncStatusUiRefresh();
+  // Snapshot the keys to sync, but keep them in pendingWrites until each succeeds.
+  // This way the pending count decreases incrementally as each key syncs.
   const entryMap = new Map(relationalSync.pendingWrites.entries());
-  relationalSync.pendingWrites.clear();
   if (entryMap.has(STORAGE_KEYS.curriculum) && entryMap.has(STORAGE_KEYS.courseTopics)) {
-    entryMap.set(STORAGE_KEYS.curriculum, {
+    // Combine curriculum + courseTopics into one sync operation.
+    relationalSync.pendingWrites.delete(STORAGE_KEYS.courseTopics);
+    relationalSync.pendingWrites.set(STORAGE_KEYS.curriculum, {
       [RELATIONAL_COMBINED_COURSE_SYNC_MARKER]: true,
       curriculum: entryMap.get(STORAGE_KEYS.curriculum),
       courseTopics: entryMap.get(STORAGE_KEYS.courseTopics),
     });
+    entryMap.set(STORAGE_KEYS.curriculum, relationalSync.pendingWrites.get(STORAGE_KEYS.curriculum));
     entryMap.delete(STORAGE_KEYS.courseTopics);
   }
   const entries = Array.from(entryMap.entries());
@@ -6488,6 +6500,7 @@ async function flushRelationalWrites(options = {}) {
       try {
         await syncRelationalKey(storageKey, payload);
         succeededCount += 1;
+        relationalSync.pendingWrites.delete(storageKey);
         if (
           storageKey === STORAGE_KEYS.curriculum
           && payload
@@ -6499,9 +6512,9 @@ async function flushRelationalWrites(options = {}) {
         } else {
           syncedStorageKeys.add(storageKey);
         }
+        scheduleSyncStatusUiRefresh();
       } catch (error) {
         console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
-        relationalSync.pendingWrites.set(storageKey, payload);
         relationalSync.lastFailureAt = Date.now();
         relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud sync failed.");
         if (!firstError) {
