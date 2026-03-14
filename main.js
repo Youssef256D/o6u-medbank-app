@@ -404,6 +404,7 @@ let lastRenderedSessionPointer = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
 let adminDashboardPollHandle = null;
+let adminBackgroundSyncHandle = null;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
@@ -8827,8 +8828,14 @@ function bindGlobalEvents() {
       clearLifecycleResumeHandle();
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
       endCurrentUserActivitySession().catch(() => { });
+      // For admin users, keep syncing in the background via a slower interval.
+      const currentUser = getCurrentUser();
+      if (currentUser?.role === "admin") {
+        scheduleAdminBackgroundSync();
+      }
       return;
     }
+    clearAdminBackgroundSync();
     scheduleDeferredAppResume(0);
   });
 
@@ -8920,6 +8927,28 @@ function clearAdminDashboardPolling() {
     window.clearInterval(adminDashboardPollHandle);
     adminDashboardPollHandle = null;
   }
+}
+
+const ADMIN_BACKGROUND_SYNC_INTERVAL_MS = 15000;
+
+function clearAdminBackgroundSync() {
+  if (adminBackgroundSyncHandle) {
+    window.clearInterval(adminBackgroundSyncHandle);
+    adminBackgroundSyncHandle = null;
+  }
+}
+
+function scheduleAdminBackgroundSync() {
+  clearAdminBackgroundSync();
+  adminBackgroundSyncHandle = window.setInterval(() => {
+    const currentUser = getCurrentUser();
+    if (!currentUser || currentUser.role !== "admin" || document.visibilityState !== "hidden") {
+      clearAdminBackgroundSync();
+      return;
+    }
+    // Flush any pending sync writes while the tab is in the background.
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  }, ADMIN_BACKGROUND_SYNC_INTERVAL_MS);
 }
 
 function ensureAdminDashboardPolling() {
