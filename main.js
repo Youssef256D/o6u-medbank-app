@@ -618,27 +618,136 @@ const COURSE_TOPIC_RECOVERY_RULES = {
   erp208: [
     {
       topic: "Breast Surgery",
-      needles: ["breast", "mammograph", "mastect", "mastitis", "fibroadenoma", "nipple", "axilla", "lump"],
+      needles: [
+        "breast",
+        "mammograph",
+        "mastect",
+        "mastitis",
+        "fibroadenoma",
+        "nipple",
+        "axilla",
+        "lump",
+        "gynecomastia",
+        "cooper",
+        "peau d'orange",
+        "peau d orange",
+        "indian file",
+        "ductal",
+        "lobular",
+      ],
     },
     {
       topic: "Endocrine Diseases of the Pancreas",
-      needles: ["diabetes", "dka", "hhs", "insulin", "glucagon", "pancrea", "hypoglycemia", "hyperglycemia"],
+      needles: [
+        "diabetes",
+        "diabetic",
+        "dka",
+        "hhs",
+        "insulin",
+        "glucagon",
+        "pancrea",
+        "hypoglycemia",
+        "hyperglycemia",
+        "polyuria",
+        "polydipsia",
+        "postprandial",
+        "hba1c",
+        "fbs",
+        "whipple",
+        "ketoacidosis",
+        "ketotic",
+        "ketonuria",
+        "insulinoma",
+        "thiazolidinedione",
+        "sulfonylurea",
+        "metformin",
+        "c-peptide",
+      ],
     },
     {
       topic: "Thyroid Gland",
-      needles: ["thyroid", "thyro", "graves", "hashimoto", "myxedema", "goiter", "t3", "t4"],
+      needles: [
+        "thyroid",
+        "thyro",
+        "graves",
+        "hashimoto",
+        "myxedema",
+        "goiter",
+        "t3",
+        "t4",
+        "tsh",
+        "calcitonin",
+        "thyrotox",
+        "hyperthyroid",
+        "hypothyroid",
+      ],
     },
     {
       topic: "Calcium Metabolism and Metabolic Bone Diseases",
-      needles: ["calcium", "parathyroid", "parathormone", "pth", "vitamin d", "osteoporosis", "osteomalacia", "rickets", "bone"],
+      needles: [
+        "calcium",
+        "parathyroid",
+        "parathormone",
+        "pth",
+        "vitamin d",
+        "osteoporosis",
+        "osteomalacia",
+        "rickets",
+        "bone",
+        "tetany",
+        "osteopenia",
+      ],
     },
     {
       topic: "Suprarenal Gland",
-      needles: ["adrenal", "suprarenal", "cushing", "addison", "pheochromocytoma", "aldosterone", "cortisol", "cah"],
+      needles: [
+        "adrenal",
+        "suprarenal",
+        "cushing",
+        "addison",
+        "pheochromocytoma",
+        "aldosterone",
+        "cortisol",
+        "cah",
+        "conn",
+        "hyperaldosteronism",
+        "aldosteronism",
+        "adrenal insufficiency",
+        "adrenocortical",
+        "glucocorticoid",
+        "mineralocorticoid",
+        "dhea",
+        "hyperpigmentation",
+        "hypokal",
+        "hyperkal",
+        "hirsutism",
+      ],
     },
     {
       topic: "Introduction and Pituitary Gland",
-      needles: ["pituitary", "prolactin", "acromegaly", "gigantism", "hypopit", "gh ", "acth", "sella"],
+      needles: [
+        "pituitary",
+        "prolactin",
+        "acromegaly",
+        "gigantism",
+        "hypopit",
+        "gh ",
+        "acth",
+        "sella",
+        "galactorrhea",
+        "vasopressin",
+        "antidiuretic hormone",
+        "adh",
+        "diabetes insipidus",
+        "anterior hypophysis",
+        "posterior pituitary",
+        "inferior petrosal",
+        "somatotroph",
+        "proopiomelanocortin",
+        "cabergoline",
+        "growth hormone",
+        "hypophysis",
+      ],
     },
   ],
   ner206: [
@@ -5128,10 +5237,24 @@ async function hydrateRelationalQuestions() {
   }));
 
   saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions);
-  repairCourseTopicCatalogFromQuestions({ persist: false });
+  const topicRepairResult = repairCourseTopicCatalogFromQuestions({ persist: false });
+  const repairedQuestionsSnapshot = topicRepairResult.questionsChanged
+    ? getQuestions()
+    : normalizedMappedQuestions;
+  if (currentUser?.role === "admin") {
+    if (topicRepairResult.questionsChanged) {
+      scheduleRelationalWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
+    }
+    if (topicRepairResult.topicsChanged) {
+      scheduleRelationalWrite(
+        STORAGE_KEYS.courseTopics,
+        load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
+      );
+    }
+  }
   if (needsChoiceRepairSync && currentUser?.role === "admin") {
     // If DB rows contain placeholder/partial choices while local has real data, push a background repair sync.
-    if (scheduleRelationalWrite(STORAGE_KEYS.questions, normalizedMappedQuestions)) {
+    if (scheduleRelationalWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot)) {
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
         console.warn("Could not repair remote question choices from local cache.", syncError?.message || syncError);
       });
@@ -6429,6 +6552,18 @@ async function fetchRowsPaged(fetchPage, options = {}) {
   return { data: rows, error: null };
 }
 
+async function runRelationalQueryWithTimeout(queryPromise, timeoutMessage = "Supabase query timed out.") {
+  const { data, error } = await runWithTimeoutResult(
+    queryPromise,
+    SUPABASE_QUERY_TIMEOUT_MS,
+    timeoutMessage,
+  );
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+
 function isMissingRelationError(error) {
   const code = String(error?.code || "").trim();
   if (code === "42P01" || code === "PGRST205") {
@@ -6835,13 +6970,13 @@ async function verifyQuestionChoiceSync(client, questionIds, expectedSignatureBy
 
   const remoteRows = [];
   for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error } = await client
-      .from("question_choices")
-      .select("question_id,choice_label,choice_text,is_correct")
-      .in("question_id", questionIdBatch);
-    if (error) {
-      throw error;
-    }
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("question_choices")
+        .select("question_id,choice_label,choice_text,is_correct")
+        .in("question_id", questionIdBatch),
+      "Question choice verification timed out.",
+    );
     if (Array.isArray(data) && data.length) {
       remoteRows.push(...data);
     }
@@ -6882,7 +7017,11 @@ async function getRelationalQuestionColumnSupport(client) {
   }
 
   const checkColumn = async (columnName) => {
-    const { error } = await client.from("questions").select(columnName).limit(1);
+    const { error } = await runWithTimeoutResult(
+      client.from("questions").select(columnName).limit(1),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      `Question column check for ${columnName} timed out.`,
+    );
     if (!error) {
       return true;
     }
@@ -7111,10 +7250,10 @@ async function syncProfilesToRelational(usersPayload) {
   }
 
   for (const rowBatch of splitIntoBatches(rows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    const { error } = await client.from("profiles").upsert(rowBatch, { onConflict: "id" });
-    if (error) {
-      throw error;
-    }
+    await runRelationalQueryWithTimeout(
+      client.from("profiles").upsert(rowBatch, { onConflict: "id" }),
+      "Profile sync timed out.",
+    );
   }
 
   const enrollmentSyncOptions = {
@@ -7143,13 +7282,13 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   }
 
   try {
-    const { data: courses, error: coursesError } = await client
-      .from("courses")
-      .select("id,course_name")
-      .eq("is_active", true);
-    if (coursesError) {
-      throw coursesError;
-    }
+    const courses = await runRelationalQueryWithTimeout(
+      client
+        .from("courses")
+        .select("id,course_name")
+        .eq("is_active", true),
+      "Course lookup timed out during enrollment sync.",
+    );
 
     const courseIdByName = Object.fromEntries(
       (courses || [])
@@ -7187,24 +7326,24 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     });
 
     for (const batch of splitIntoBatches(enrollmentRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      const { error: upsertEnrollmentError } = await client
-        .from("user_course_enrollments")
-        .upsert(batch, { onConflict: "user_id,course_id" });
-      if (upsertEnrollmentError) {
-        throw upsertEnrollmentError;
-      }
+      await runRelationalQueryWithTimeout(
+        client
+          .from("user_course_enrollments")
+          .upsert(batch, { onConflict: "user_id,course_id" }),
+        "Enrollment sync timed out.",
+      );
     }
 
     const userIds = [...new Set(students.map((student) => getUserProfileId(student)).filter(isUuidValue))];
     const existingEnrollmentRows = [];
     for (const userBatch of splitIntoBatches(userIds, RELATIONAL_IN_BATCH_SIZE)) {
-      const { data, error } = await client
-        .from("user_course_enrollments")
-        .select("user_id,course_id")
-        .in("user_id", userBatch);
-      if (error) {
-        throw error;
-      }
+      const data = await runRelationalQueryWithTimeout(
+        client
+          .from("user_course_enrollments")
+          .select("user_id,course_id")
+          .in("user_id", userBatch),
+        "Enrollment verification timed out.",
+      );
       if (Array.isArray(data) && data.length) {
         existingEnrollmentRows.push(...data);
       }
@@ -7228,14 +7367,14 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       const existing = existingCourseIdsByUserId.get(userId) || new Set();
       const removeCourseIds = [...existing].filter((courseId) => !desired.has(courseId));
       for (const courseBatch of splitIntoBatches(removeCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-        const { error: deleteError } = await client
-          .from("user_course_enrollments")
-          .delete()
-          .eq("user_id", userId)
-          .in("course_id", courseBatch);
-        if (deleteError) {
-          throw deleteError;
-        }
+        await runRelationalQueryWithTimeout(
+          client
+            .from("user_course_enrollments")
+            .delete()
+            .eq("user_id", userId)
+            .in("course_id", courseBatch),
+          "Enrollment cleanup timed out.",
+        );
       }
     }
   } catch (error) {
@@ -7273,12 +7412,12 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
 
   if (desiredCourses.length) {
     for (const courseBatch of splitIntoBatches(desiredCourses, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      const { error: upsertCoursesError } = await client
-        .from("courses")
-        .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester" });
-      if (upsertCoursesError) {
-        throw upsertCoursesError;
-      }
+      await runRelationalQueryWithTimeout(
+        client
+          .from("courses")
+          .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester" }),
+        "Course sync timed out.",
+      );
     }
   }
 
@@ -7306,13 +7445,13 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     .filter((course) => !desiredCourseKeys.has(`${course.course_name}::${course.academic_year}::${course.academic_semester}`))
     .map((course) => course.id);
   for (const deactivateBatch of splitIntoBatches(deactivateCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deactivateCoursesError } = await client
-      .from("courses")
-      .update({ is_active: false })
-      .in("id", deactivateBatch);
-    if (deactivateCoursesError) {
-      throw deactivateCoursesError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("courses")
+        .update({ is_active: false })
+        .in("id", deactivateBatch),
+      "Course deactivation sync timed out.",
+    );
   }
 
   const courseRowsByName = {};
@@ -7341,12 +7480,12 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
 
   if (desiredTopicRows.length) {
     for (const topicBatch of splitIntoBatches(desiredTopicRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      const { error: upsertTopicsError } = await client
-        .from("course_topics")
-        .upsert(topicBatch, { onConflict: "course_id,topic_name" });
-      if (upsertTopicsError) {
-        throw upsertTopicsError;
-      }
+      await runRelationalQueryWithTimeout(
+        client
+          .from("course_topics")
+          .upsert(topicBatch, { onConflict: "course_id,topic_name" }),
+        "Course topic sync timed out.",
+      );
     }
   }
 
@@ -7369,13 +7508,13 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     .filter((topic) => !desiredTopicKeys.has(`${topic.course_id}::${topic.topic_name}`))
     .map((topic) => topic.id);
   for (const deactivateBatch of splitIntoBatches(deactivateTopicIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deactivateTopicsError } = await client
-      .from("course_topics")
-      .update({ is_active: false })
-      .in("id", deactivateBatch);
-    if (deactivateTopicsError) {
-      throw deactivateTopicsError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("course_topics")
+        .update({ is_active: false })
+        .in("id", deactivateBatch),
+      "Course topic cleanup timed out.",
+    );
   }
 }
 
@@ -7386,43 +7525,43 @@ async function deleteRelationalQuestionsAndDependents(client, questionIds) {
   }
 
   for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deleteChoicesError } = await client
-      .from("question_choices")
-      .delete()
-      .in("question_id", idBatch);
-    if (deleteChoicesError) {
-      throw deleteChoicesError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("question_choices")
+        .delete()
+        .in("question_id", idBatch),
+      "Question choice cleanup timed out.",
+    );
   }
 
   for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deleteResponsesError } = await client
-      .from("test_responses")
-      .delete()
-      .in("question_id", idBatch);
-    if (deleteResponsesError) {
-      throw deleteResponsesError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("test_responses")
+        .delete()
+        .in("question_id", idBatch),
+      "Question response cleanup timed out.",
+    );
   }
 
   for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deleteItemsError } = await client
-      .from("test_block_items")
-      .delete()
-      .in("question_id", idBatch);
-    if (deleteItemsError) {
-      throw deleteItemsError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("test_block_items")
+        .delete()
+        .in("question_id", idBatch),
+      "Question block-item cleanup timed out.",
+    );
   }
 
   for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: deleteQuestionsError } = await client
-      .from("questions")
-      .delete()
-      .in("id", idBatch);
-    if (deleteQuestionsError) {
-      throw deleteQuestionsError;
-    }
+    await runRelationalQueryWithTimeout(
+      client
+        .from("questions")
+        .delete()
+        .in("id", idBatch),
+      "Question cleanup timed out.",
+    );
   }
 }
 
@@ -7479,13 +7618,13 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   )];
   const existingByExternalId = {};
   for (const externalIdBatch of splitIntoBatches(payloadExternalIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data: existingRows, error: existingRowsError } = await client
-      .from("questions")
-      .select("id,external_id")
-      .in("external_id", externalIdBatch);
-    if (existingRowsError) {
-      throw existingRowsError;
-    }
+    const existingRows = await runRelationalQueryWithTimeout(
+      client
+        .from("questions")
+        .select("id,external_id")
+        .in("external_id", externalIdBatch),
+      "Question lookup timed out.",
+    );
     (existingRows || []).forEach((row) => {
       const externalId = String(row?.external_id || "").trim();
       if (!externalId || !isUuidValue(row?.id)) {
@@ -7584,12 +7723,12 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   });
   if (missingTopics.length) {
     for (const topicBatch of splitIntoBatches(missingTopics, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      const { error: missingTopicsError } = await client
-        .from("course_topics")
-        .upsert(topicBatch, { onConflict: "course_id,topic_name" });
-      if (missingTopicsError) {
-        throw missingTopicsError;
-      }
+      await runRelationalQueryWithTimeout(
+        client
+          .from("course_topics")
+          .upsert(topicBatch, { onConflict: "course_id,topic_name" }),
+        "Missing topic sync timed out.",
+      );
     }
     const refreshedTopics = await fetchRowsPaged((from, to) => (
       client
@@ -7707,22 +7846,22 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   }
 
   for (const upsertBatch of splitIntoBatches(upsertRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    const { error: questionsUpsertError } = await client.from("questions").upsert(upsertBatch, { onConflict: "external_id" });
-    if (questionsUpsertError) {
-      throw questionsUpsertError;
-    }
+    await runRelationalQueryWithTimeout(
+      client.from("questions").upsert(upsertBatch, { onConflict: "external_id" }),
+      "Question sync timed out.",
+    );
   }
 
   const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
   const persistedQuestions = [];
   for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data: persistedBatch, error: persistedQuestionsError } = await client
-      .from("questions")
-      .select("id,external_id")
-      .in("external_id", externalIdBatch);
-    if (persistedQuestionsError) {
-      throw persistedQuestionsError;
-    }
+    const persistedBatch = await runRelationalQueryWithTimeout(
+      client
+        .from("questions")
+        .select("id,external_id")
+        .in("external_id", externalIdBatch),
+      "Question verification timed out.",
+    );
     if (Array.isArray(persistedBatch) && persistedBatch.length) {
       persistedQuestions.push(...persistedBatch);
     }
@@ -7776,10 +7915,10 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
 
   const insertChoiceRows = async (rows) => {
     for (const choiceBatch of splitIntoBatches(rows, RELATIONAL_INSERT_BATCH_SIZE)) {
-      const { error: insertChoicesError } = await client.from("question_choices").insert(choiceBatch);
-      if (insertChoicesError) {
-        throw insertChoicesError;
-      }
+      await runRelationalQueryWithTimeout(
+        client.from("question_choices").insert(choiceBatch),
+        "Question choice sync timed out.",
+      );
     }
   };
 
@@ -7789,13 +7928,13 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       return;
     }
     for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-      const { error: deleteChoicesError } = await client
-        .from("question_choices")
-        .delete()
-        .in("question_id", questionIdBatch);
-      if (deleteChoicesError) {
-        throw deleteChoicesError;
-      }
+      await runRelationalQueryWithTimeout(
+        client
+          .from("question_choices")
+          .delete()
+          .in("question_id", questionIdBatch),
+        "Question choice replacement timed out.",
+      );
     }
 
     await insertChoiceRows(plan.rows || []);
@@ -7817,13 +7956,13 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
 
     const refreshedPersistedQuestions = [];
     for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
-      const { data: persistedBatch, error: persistedQuestionsError } = await client
-        .from("questions")
-        .select("id,external_id")
-        .in("external_id", externalIdBatch);
-      if (persistedQuestionsError) {
-        throw persistedQuestionsError;
-      }
+      const persistedBatch = await runRelationalQueryWithTimeout(
+        client
+          .from("questions")
+          .select("id,external_id")
+          .in("external_id", externalIdBatch),
+        "Question refresh lookup timed out.",
+      );
       if (Array.isArray(persistedBatch) && persistedBatch.length) {
         refreshedPersistedQuestions.push(...persistedBatch);
       }
@@ -7959,22 +8098,22 @@ async function syncSessionsToRelational(sessionsPayload) {
   }));
 
   for (const blockBatch of splitIntoBatches(upsertBlocks, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    const { error: blocksUpsertError } = await client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id" });
-    if (blocksUpsertError) {
-      throw blocksUpsertError;
-    }
+    await runRelationalQueryWithTimeout(
+      client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id" }),
+      "Session block sync timed out.",
+    );
   }
 
   const externalIds = upsertBlocks.map((entry) => entry.external_id).filter(Boolean);
   const persistedBlocks = [];
   for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error: persistedBlocksError } = await client
-      .from("test_blocks")
-      .select("id,external_id")
-      .in("external_id", externalIdBatch);
-    if (persistedBlocksError) {
-      throw persistedBlocksError;
-    }
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("test_blocks")
+        .select("id,external_id")
+        .in("external_id", externalIdBatch),
+      "Session block verification timed out.",
+    );
     if (Array.isArray(data) && data.length) {
       persistedBlocks.push(...data);
     }
@@ -7983,14 +8122,14 @@ async function syncSessionsToRelational(sessionsPayload) {
   const blockIds = Object.values(blockIdByExternalId);
 
   for (const blockIdBatch of splitIntoBatches(blockIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    const { error: responsesDeleteError } = await client.from("test_responses").delete().in("block_id", blockIdBatch);
-    if (responsesDeleteError) {
-      throw responsesDeleteError;
-    }
-    const { error: itemsDeleteError } = await client.from("test_block_items").delete().in("block_id", blockIdBatch);
-    if (itemsDeleteError) {
-      throw itemsDeleteError;
-    }
+    await runRelationalQueryWithTimeout(
+      client.from("test_responses").delete().in("block_id", blockIdBatch),
+      "Session response cleanup timed out.",
+    );
+    await runRelationalQueryWithTimeout(
+      client.from("test_block_items").delete().in("block_id", blockIdBatch),
+      "Session item cleanup timed out.",
+    );
   }
 
   const itemRows = [];
@@ -8024,18 +8163,18 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   if (itemRows.length) {
     for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
-      const { error: itemsInsertError } = await client.from("test_block_items").insert(itemBatch);
-      if (itemsInsertError) {
-        throw itemsInsertError;
-      }
+      await runRelationalQueryWithTimeout(
+        client.from("test_block_items").insert(itemBatch),
+        "Session item sync timed out.",
+      );
     }
   }
   if (responseRows.length) {
     for (const responseBatch of splitIntoBatches(responseRows, RELATIONAL_INSERT_BATCH_SIZE)) {
-      const { error: responsesInsertError } = await client.from("test_responses").insert(responseBatch);
-      if (responsesInsertError) {
-        throw responsesInsertError;
-      }
+      await runRelationalQueryWithTimeout(
+        client.from("test_responses").insert(responseBatch),
+        "Session response sync timed out.",
+      );
     }
   }
 
@@ -20839,7 +20978,35 @@ function normalizePendingAdminActionQueue(entries) {
     .map((entry) => normalizePendingAdminActionEntry(entry))
     .filter(Boolean)
     .sort((a, b) => new Date(a.queuedAt || 0) - new Date(b.queuedAt || 0));
-  return normalized;
+  const targetKeyFor = (entry) => String(
+    entry?.targetAuthId
+    || entry?.targetProfileId
+    || entry?.targetLocalUserId
+    || entry?.email
+    || "",
+  ).trim().toLowerCase();
+  const latestByActionKey = new Map();
+  normalized.forEach((entry) => {
+    const targetKey = targetKeyFor(entry);
+    if (!targetKey) {
+      return;
+    }
+    latestByActionKey.set(`${String(entry.type || "").trim().toLowerCase()}::${targetKey}`, entry);
+  });
+  const collapsed = [...latestByActionKey.values()]
+    .sort((a, b) => new Date(a.queuedAt || 0) - new Date(b.queuedAt || 0));
+  const deleteTargetKeys = new Set(
+    collapsed
+      .filter((entry) => entry.type === "delete-user")
+      .map((entry) => targetKeyFor(entry))
+      .filter(Boolean),
+  );
+  return collapsed.filter((entry) => {
+    if (entry.type === "delete-user") {
+      return true;
+    }
+    return !deleteTargetKeys.has(targetKeyFor(entry));
+  });
 }
 
 function getPendingAdminActionQueue() {
@@ -23570,13 +23737,18 @@ function buildGroupedTopicCatalogForCourse(course) {
 }
 
 function buildQuestionTopicInferenceText(question) {
+  const choiceTexts = normalizeQuestionChoiceEntries(question?.choices).map((choice) => choice?.text);
   return [
+    question?.qbankCourse,
+    question?.course,
     question?.stem,
     question?.system,
     question?.topic,
     question?.qbankTopic,
     question?.objective,
+    question?.explanation,
     question?.references,
+    ...choiceTexts,
     ...(Array.isArray(question?.tags) ? question.tags : []),
   ]
     .map((entry) => String(entry || "").trim().toLowerCase())
