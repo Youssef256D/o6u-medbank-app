@@ -120,6 +120,7 @@ const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
 const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 600;
 const SUPABASE_SESSION_RECOVERY_RETRY_MS = 6000;
 const SUPABASE_SESSION_RECOVERY_RETRY_LIMIT = 20;
+const SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS = 30000;
 const ADMIN_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
@@ -1528,6 +1529,23 @@ async function tryRecoverSupabaseSessionInBackground() {
     const recovered = hasActiveSupabaseSessionForUser();
     if (recovered) {
       clearSupabaseSessionRecoveryRetry();
+      // Re-enable relational sync and flush any pending writes.
+      relationalSync.readyCheckedAt = 0;
+      relationalSync.lastReadyError = "";
+      relationalSync.lastFailureAt = 0;
+      relationalSync.lastFailureMessage = "";
+      supabaseSync.lastFailureAt = 0;
+      supabaseSync.lastFailureMessage = "";
+      supabaseSync.retryAt = 0;
+      ensureRelationalSyncReady({ force: true }).then((ready) => {
+        if (ready && relationalSync.pendingWrites.size) {
+          flushRelationalWrites().catch(() => { });
+        }
+        if (supabaseSync.pendingWrites.size) {
+          flushSupabaseWrites().catch(() => { });
+        }
+      }).catch(() => { });
+      scheduleSyncStatusUiRefresh();
       state.skipNextRouteAnimation = true;
       render();
       return true;
@@ -1557,12 +1575,23 @@ function scheduleSupabaseSessionRecoveryRetry() {
     if (
       !getCurrentUser()
       || hasActiveSupabaseSessionForUser()
-      || supabaseSessionRecoveryRetries >= SUPABASE_SESSION_RECOVERY_RETRY_LIMIT
     ) {
       clearSupabaseSessionRecoveryRetry();
       return;
     }
     supabaseSessionRecoveryRetries += 1;
+    // After the fast-retry phase, switch to slower retries instead of giving up.
+    if (supabaseSessionRecoveryRetries >= SUPABASE_SESSION_RECOVERY_RETRY_LIMIT) {
+      window.clearInterval(supabaseSessionRecoveryHandle);
+      supabaseSessionRecoveryHandle = window.setInterval(() => {
+        if (!getCurrentUser() || hasActiveSupabaseSessionForUser()) {
+          clearSupabaseSessionRecoveryRetry();
+          return;
+        }
+        tryRecoverSupabaseSessionInBackground().catch(() => { });
+      }, SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS);
+      return;
+    }
     tryRecoverSupabaseSessionInBackground().catch(() => { });
   }, SUPABASE_SESSION_RECOVERY_RETRY_MS);
 }
@@ -3885,6 +3914,10 @@ function scheduleRelationalWrite(storageKey, value) {
         console.warn("Relational sync flush failed.", error);
       });
     }, RELATIONAL_RETRY_FLUSH_MS);
+    // Re-trigger session recovery if it's no longer running.
+    if (!supabaseSessionRecoveryHandle && getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
+      scheduleSupabaseSessionRecoveryRetry();
+    }
     ensureRelationalSyncReady().then((ready) => {
       if (!ready) {
         return;
@@ -4019,6 +4052,10 @@ async function ensureRelationalSyncReady(options = {}) {
         relationalSync.lastFailureAt = Date.now();
         relationalSync.lastFailureMessage = relationalSync.lastReadyError;
         relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+        // Re-trigger session recovery if it's no longer running.
+        if (!supabaseSessionRecoveryHandle && getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
+          scheduleSupabaseSessionRecoveryRetry();
+        }
         return false;
       }
     }
@@ -8550,6 +8587,12 @@ async function resumeDeferredAppWork(options = {}) {
   if (activeUser && !hasActiveSupabaseSessionForUser(activeUser)) {
     await tryRecoverSupabaseSessionInBackground().catch(() => false);
     activeUser = getCurrentUser();
+  }
+
+  // Force a fresh readiness check when resuming (e.g., after coming back online).
+  if (activeUser && !relationalSync.enabled && hasActiveSupabaseSessionForUser(activeUser)) {
+    relationalSync.readyCheckedAt = 0;
+    await ensureRelationalSyncReady({ force: true }).catch(() => { });
   }
 
   syncTopbar();
@@ -17815,15 +17858,26 @@ function wireAdmin() {
       render();
       return;
     }
-    const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    let { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
     if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
-      const message = "Supabase session expired. Please log out and sign in again.";
-      state.adminDataSyncError = message;
-      toast(message);
-      state.skipNextRouteAnimation = true;
-      render();
-      return;
+      // Attempt session recovery before giving up.
+      const recovered = await tryRecoverSupabaseSessionInBackground().catch(() => false);
+      if (recovered) {
+        const freshSession = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+        sessionData = freshSession?.data || sessionData;
+      }
+      if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
+        const message = "Supabase session expired. Please log out and sign in again.";
+        state.adminDataSyncError = message;
+        toast(message);
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
     }
+    // Ensure relational sync is re-checked after manual refresh.
+    relationalSync.readyCheckedAt = 0;
+    await ensureRelationalSyncReady({ force: true }).catch(() => { });
     const synced = await refreshAdminDataSnapshot(currentUser, { force: true });
     if (state.adminPage === "activity") {
       await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => { });
