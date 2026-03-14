@@ -3495,6 +3495,21 @@ function isLikelyRecoverableCloudSyncMessage(value) {
   return isLikelyNetworkFetchError({ message: normalized });
 }
 
+function shouldStopPendingAdminQueueOnFailure(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return typeof navigator !== "undefined" && navigator?.onLine === false;
+  }
+  if (isLikelyCloudSyncAuthMessage(normalized) || isLikelyRecoverableCloudSyncMessage(normalized)) {
+    return true;
+  }
+  return normalized.includes("api is unavailable")
+    || normalized.includes("endpoint is configured")
+    || normalized.includes("server configuration is missing")
+    || normalized.includes("method not allowed")
+    || normalized.includes("missing bearer token");
+}
+
 function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync failed.") {
   const rawMessage = typeof errorOrMessage === "string"
     ? String(errorOrMessage || "").trim()
@@ -4155,6 +4170,7 @@ async function flushPendingAdminActionQueue(options = {}) {
   let syncedCount = 0;
   let failureMessage = "";
   let remainingActions = [...queuedActions];
+  let queueBlockedByGlobalFailure = false;
 
   try {
     for (const action of queuedActions) {
@@ -4168,8 +4184,12 @@ async function flushPendingAdminActionQueue(options = {}) {
           remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
           continue;
         }
-        failureMessage = message || "Could not sync queued account access update.";
-        break;
+        failureMessage = failureMessage || message || "Could not sync queued account access update.";
+        if (shouldStopPendingAdminQueueOnFailure(message)) {
+          queueBlockedByGlobalFailure = true;
+          break;
+        }
+        continue;
       }
 
       if (action.type === "set-password") {
@@ -4180,8 +4200,12 @@ async function flushPendingAdminActionQueue(options = {}) {
           remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
           continue;
         }
-        failureMessage = message || "Could not sync queued password update.";
-        break;
+        failureMessage = failureMessage || message || "Could not sync queued password update.";
+        if (shouldStopPendingAdminQueueOnFailure(message)) {
+          queueBlockedByGlobalFailure = true;
+          break;
+        }
+        continue;
       }
 
       if (action.type === "delete-user") {
@@ -4189,16 +4213,24 @@ async function flushPendingAdminActionQueue(options = {}) {
           const authDeleteResult = await deleteSupabaseAuthUserAsAdmin(action.targetAuthId);
           const authDeleteMessage = String(authDeleteResult?.message || "").trim();
           if (!authDeleteResult?.ok && !/not found|user not found/i.test(authDeleteMessage)) {
-            failureMessage = authDeleteMessage || "Could not sync queued user deletion.";
-            break;
+            failureMessage = failureMessage || authDeleteMessage || "Could not sync queued user deletion.";
+            if (shouldStopPendingAdminQueueOnFailure(authDeleteMessage)) {
+              queueBlockedByGlobalFailure = true;
+              break;
+            }
+            continue;
           }
         }
         if (isUuidValue(action.targetProfileId)) {
           const profileDeleteResult = await deleteRelationalProfile(action.targetProfileId);
           const profileDeleteMessage = String(profileDeleteResult?.message || "").trim();
           if (!profileDeleteResult?.ok && !/not found|missing/i.test(profileDeleteMessage)) {
-            failureMessage = profileDeleteMessage || "Could not remove queued user profile from database.";
-            break;
+            failureMessage = failureMessage || profileDeleteMessage || "Could not remove queued user profile from database.";
+            if (shouldStopPendingAdminQueueOnFailure(profileDeleteMessage)) {
+              queueBlockedByGlobalFailure = true;
+              break;
+            }
+            continue;
           }
         }
         syncedCount += 1;
@@ -4213,7 +4245,9 @@ async function flushPendingAdminActionQueue(options = {}) {
         failureMessage || "Queued admin actions are waiting for Supabase.",
         "Queued admin actions are waiting for Supabase.",
       );
-      schedulePendingAdminActionFlush();
+      if (queueBlockedByGlobalFailure || syncedCount < queuedActions.length) {
+        schedulePendingAdminActionFlush();
+      }
       return {
         ok: false,
         deferred: true,
@@ -15744,7 +15778,7 @@ function resolveAdminQuestionListView(questions, allCourses, preferredCourse = "
   const selectedCourseKey = normalizeAdminQuestionFilterToken(selectedCourse);
   const configuredTopics = selectedCourse ? (QBANK_COURSE_TOPICS[selectedCourse] || []) : [];
   const questionTopics = selectedCourseKey ? (topicsByCourseKeyFromQuestions.get(selectedCourseKey) || []) : [];
-  const selectedCourseTopics = configuredTopics.length ? configuredTopics : questionTopics;
+  const selectedCourseTopics = mergeUniqueCourseTopics(selectedCourse, configuredTopics, questionTopics);
   const preferredTopicKey = normalizeAdminQuestionFilterToken(preferredTopic);
   const selectedTopic = selectedCourseTopics.find((topic) => normalizeAdminQuestionFilterToken(topic) === preferredTopicKey) || "";
   const selectedTopicKey = normalizeAdminQuestionFilterToken(selectedTopic);
@@ -23378,6 +23412,23 @@ function syncTopicNewCatalogForCourse(course, previousTopics, nextTopics, option
   return changed;
 }
 
+function getRecoveryNeedlesForProfile(profileKey, extraNeedles = []) {
+  const merged = new Set(
+    (Array.isArray(extraNeedles) ? extraNeedles : [])
+      .map((entry) => String(entry || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  (Array.isArray(COURSE_TOPIC_RECOVERY_RULES[profileKey]) ? COURSE_TOPIC_RECOVERY_RULES[profileKey] : []).forEach((rule) => {
+    (Array.isArray(rule?.needles) ? rule.needles : []).forEach((needle) => {
+      const normalizedNeedle = String(needle || "").toLowerCase();
+      if (normalizedNeedle.trim()) {
+        merged.add(normalizedNeedle);
+      }
+    });
+  });
+  return [...merged];
+}
+
 function getQbankCourseTopicMeta(question) {
   const explicitCourse = String(question.qbankCourse || question.course || "").trim();
   const explicitTopic = String(question.qbankTopic || question.topic || "").trim();
@@ -23402,18 +23453,19 @@ function getQbankCourseTopicMeta(question) {
   const system = String(question.system || "").toLowerCase();
   const topic = String(question.topic || "").toLowerCase();
   const stem = String(question.stem || "").toLowerCase();
-  const text = `${system} ${topic} ${stem}`;
+  const courseText = explicitCourse.toLowerCase();
+  const text = `${courseText} ${system} ${topic} ${stem}`;
 
   const rules = [
     {
       course: "Endocrinology & Reproduction (ERP 208)",
       recoveryProfileKey: "erp208",
-      needles: ["endocrine", "pituitary", "thyroid", "parathyroid", "adrenal", "suprarenal", "diabetes", "pancrea", "reproduc", "dka"],
+      needles: getRecoveryNeedlesForProfile("erp208", ["endocrine", "reproduc"]),
     },
     {
       course: "Nervous System (NER 206)",
       recoveryProfileKey: "ner206",
-      needles: ["neuro", "nerology", "stroke", "seizure", "epilep", "brain", "spinal", "dementia", "parkinson", "myasthenia", "guillain"],
+      needles: getRecoveryNeedlesForProfile("ner206", ["neuro", "nerology", "brain", "spinal", "dementia", "parkinson"]),
     },
     {
       course: "Cardiovascular System (CVS 202)",
@@ -23496,6 +23548,23 @@ function buildQuestionTopicCatalogForCourse(course, questions = []) {
     }
     seen.add(topicKey);
     orderedTopics.push(topic);
+  });
+  return orderedTopics;
+}
+
+function buildGroupedTopicCatalogForCourse(course) {
+  const orderedTopics = [];
+  const seen = new Set();
+  Object.values(getCourseTopicGroups(course) || {}).forEach((topics) => {
+    (Array.isArray(topics) ? topics : []).forEach((topicEntry) => {
+      const topic = String(topicEntry || "").trim();
+      const topicKey = normalizeTopicKey(topic);
+      if (!topic || !topicKey || isRemovedTopicName(topic) || seen.has(topicKey)) {
+        return;
+      }
+      seen.add(topicKey);
+      orderedTopics.push(topic);
+    });
   });
   return orderedTopics;
 }
@@ -23601,18 +23670,20 @@ function repairCourseTopicCatalogFromQuestions(options = {}) {
       (topic, index) => normalizeTopicKey(topic) === normalizeTopicKey(defaultTopics[index]),
     );
     const questionTopics = buildQuestionTopicCatalogForCourse(course, questions);
-    const specificQuestionTopics = questionTopics.filter((topic) => !defaultTopicKeys.has(normalizeTopicKey(topic)));
+    const groupedTopics = buildGroupedTopicCatalogForCourse(course);
+    const recoveredTopics = mergeUniqueCourseTopics(course, questionTopics, groupedTopics);
+    const specificRecoveredTopics = recoveredTopics.filter((topic) => !defaultTopicKeys.has(normalizeTopicKey(topic)));
     const recoverySeed = getCourseTopicRecoverySeed(course);
-    const shouldApplyRecoverySeed = recoverySeed.length && questionTopics.length && (
-      !specificQuestionTopics.length
+    const shouldApplyRecoverySeed = recoverySeed.length && recoveredTopics.length && (
+      !specificRecoveredTopics.length
       || currentHasOnlyDefault
     );
     const nextTopics = orderCourseTopicsWithRecoverySeed(
       course,
       mergeUniqueCourseTopics(
         course,
-        currentHasOnlyDefault && (specificQuestionTopics.length || shouldApplyRecoverySeed) ? [] : currentTopics,
-        shouldApplyRecoverySeed ? specificQuestionTopics : questionTopics,
+        currentHasOnlyDefault && (specificRecoveredTopics.length || shouldApplyRecoverySeed) ? [] : currentTopics,
+        shouldApplyRecoverySeed ? specificRecoveredTopics : recoveredTopics,
         shouldApplyRecoverySeed ? recoverySeed : [],
       ),
     );
