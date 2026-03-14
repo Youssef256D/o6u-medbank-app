@@ -659,6 +659,10 @@ const COURSE_TOPIC_RECOVERY_RULES = {
     },
   ],
 };
+const COURSE_TOPIC_RECOVERY_PROFILE_ALIASES = {
+  sm406: "erp208",
+  sm407: "ner206",
+};
 
 let O6U_CURRICULUM = deepClone(DEFAULT_O6U_CURRICULUM);
 let CURRICULUM_COURSE_LIST = [];
@@ -4906,7 +4910,68 @@ async function hydrateRelationalQuestions() {
     return String(a?.id || "").localeCompare(String(b?.id || ""));
   });
 
-  const normalizedMappedQuestions = mappedQuestions.map((question, index) => ({
+  const remoteExternalIdSet = new Set(
+    mappedQuestions
+      .map((question) => String(question?.id || "").trim())
+      .filter(Boolean),
+  );
+  const remoteDbIdSet = new Set(
+    questionRows
+      .map((question) => String(question?.id || "").trim())
+      .filter((id) => isUuidValue(id)),
+  );
+  const preservedLocalDraftQuestions = currentUser?.role === "admin"
+    ? localQuestionsBefore.filter((question) => {
+      const externalId = String(question?.id || "").trim();
+      const dbId = String(question?.dbId || "").trim();
+      if (!String(question?.stem || "").trim()) {
+        return false;
+      }
+      if (toRelationalQuestionStatus(question?.status) !== "draft") {
+        return false;
+      }
+      if (externalId && remoteExternalIdSet.has(externalId)) {
+        return false;
+      }
+      if (isUuidValue(dbId) && remoteDbIdSet.has(dbId)) {
+        return false;
+      }
+      return true;
+    })
+    : [];
+  const mergedMappedQuestions = preservedLocalDraftQuestions.length
+    ? [...mappedQuestions, ...preservedLocalDraftQuestions]
+    : mappedQuestions;
+  mergedMappedQuestions.sort((a, b) => {
+    if (questionColumnSupport.sortOrder) {
+      const aSort = normalizeQuestionSortOrder(a?.sortOrder);
+      const bSort = normalizeQuestionSortOrder(b?.sortOrder);
+      if (aSort !== null && bSort !== null && aSort !== bSort) {
+        return aSort - bSort;
+      }
+      if (aSort !== null && bSort === null) {
+        return -1;
+      }
+      if (aSort === null && bSort !== null) {
+        return 1;
+      }
+    }
+
+    const aLocalOrder = localQuestionOrderByExternalId.get(String(a?.id || "").trim());
+    const bLocalOrder = localQuestionOrderByExternalId.get(String(b?.id || "").trim());
+    if (aLocalOrder != null && bLocalOrder != null && aLocalOrder !== bLocalOrder) {
+      return aLocalOrder - bLocalOrder;
+    }
+    if (aLocalOrder != null && bLocalOrder == null) {
+      return -1;
+    }
+    if (aLocalOrder == null && bLocalOrder != null) {
+      return 1;
+    }
+    return String(a?.id || "").localeCompare(String(b?.id || ""));
+  });
+
+  const normalizedMappedQuestions = mergedMappedQuestions.map((question, index) => ({
     ...question,
     sortOrder: index + 1,
   }));
@@ -15842,7 +15907,7 @@ function renderAdmin() {
           rowClassNames.push("is-selected");
         }
         const selectionDisabledReason = !canBulkSelect
-          ? (isSelf ? "You cannot deactivate your own account." : "Admin accounts cannot be deactivated.")
+          ? (isSelf ? "You cannot suspend your own account." : "Admin accounts cannot be suspended.")
           : "";
         const authProviderIcon = isGoogleAuthUser
           ? '<span class="admin-auth-provider-icon" data-provider="google" title="Google account" aria-label="Google account" role="img"><svg viewBox="0 0 18 18" aria-hidden="true" focusable="false"><path fill="#4285F4" d="M17.64 9.2045c0-.638-.0573-1.2518-.1636-1.8409H9v3.4818h4.8436c-.2086 1.125-.8427 2.0782-1.7963 2.7155v2.2573h2.9082c1.7018-1.5664 2.6845-3.8741 2.6845-6.6137z"></path><path fill="#34A853" d="M9 18c2.43 0 4.4673-.8064 5.9564-2.1818l-2.9082-2.2573c-.8063.54-1.8377.8591-3.0482.8591-2.3441 0-4.3282-1.5832-5.0355-3.71H.9573v2.3305C2.4382 15.9832 5.4818 18 9 18z"></path><path fill="#FBBC05" d="M3.9645 10.71c-.18-.54-.2823-1.1168-.2823-1.71s.1023-1.17.2823-1.71V4.9595H.9573C.3477 6.1732 0 7.5477 0 9s.3477 2.8268.9573 4.0405L3.9645 10.71z"></path><path fill="#EA4335" d="M9 3.5795c1.3214 0 2.5077.4541 3.4405 1.3459l2.5814-2.5814C13.4636.8918 11.43 0 9 0 5.4818 0 2.4382 2.0168.9573 4.9595L3.9645 7.29C4.6718 5.1632 6.6559 3.5795 9 3.5795z"></path></svg></span>'
@@ -16028,7 +16093,7 @@ function renderAdmin() {
           <p class="admin-question-selection-count">Selected: <b>${selectedUserCount}</b> • Showing <b>${filteredUsers.length}</b> of ${users.length}</p>
           <div class="stack">
             <button class="btn danger admin-btn-sm ${bulkDeactivateRunning ? "is-loading" : ""}" type="button" data-action="admin-bulk-deactivate-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
-              ${bulkDeactivateRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Deactivating...</span>` : "Deactivate selected"}
+              ${bulkDeactivateRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Suspending...</span>` : "Suspend selected"}
             </button>
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-user-selection" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>Clear selection</button>
           </div>
@@ -18926,16 +18991,16 @@ function wireAdmin() {
     const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
     const deactivatableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
     if (!deactivatableUsers.length) {
-      toast("Selected accounts cannot be deactivated.");
+      toast("Selected accounts cannot be suspended.");
       return;
     }
 
     const activeUsers = deactivatableUsers.filter((entry) => isUserAccessApproved(entry));
     if (!activeUsers.length) {
-      toast("Selected accounts are already deactivated.");
+      toast("Selected accounts are already suspended.");
       return;
     }
-    if (!window.confirm(`Deactivate ${activeUsers.length} selected account(s)?`)) {
+    if (!window.confirm(`Suspend ${activeUsers.length} selected account(s)?`)) {
       return;
     }
 
@@ -18947,23 +19012,30 @@ function wireAdmin() {
       const profileIds = activeUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
       const dbResult = await updateRelationalProfileApproval(profileIds, false);
       const deactivationQueuedForSync = profileIds.length && !dbResult.ok && shouldAllowSupabaseManagedLocalFallback(dbResult.message);
-      if (profileIds.length && !dbResult.ok && !deactivationQueuedForSync) {
+      const updatedProfileIds = new Set(dbResult.updatedIds || []);
+      const skippedProfileIds = new Set(dbResult.skippedIds || []);
+      const fallbackProfileIds = new Set(
+        profileIds.filter((profileId) => !updatedProfileIds.has(profileId) && (
+          deactivationQueuedForSync
+          || skippedProfileIds.has(profileId)
+        )),
+      );
+      const hasQueuedFallback = deactivationQueuedForSync || fallbackProfileIds.size > 0;
+      if (profileIds.length && !dbResult.ok && !updatedProfileIds.size && !fallbackProfileIds.size) {
         finishAdminUserBulkAction();
         toast(`Database update failed. ${dbResult.message}`);
         return;
       }
-
-      const updatedProfileIds = new Set(dbResult.updatedIds || []);
-      const skippedProfileIds = new Set(dbResult.skippedIds || []);
       let deactivatedCount = 0;
       let skippedCount = 0;
+      let queuedCount = 0;
       users.forEach((entry) => {
         const entryId = String(entry.id || "").trim();
         if (!selectedIdSet.has(entryId) || !canBulkSelectAdminUser(entry, current) || !isUserAccessApproved(entry)) {
           return;
         }
         const profileId = String(getUserProfileId(entry) || "").trim();
-        if (isUuidValue(profileId) && !deactivationQueuedForSync && !updatedProfileIds.has(profileId)) {
+        if (isUuidValue(profileId) && !updatedProfileIds.has(profileId) && !fallbackProfileIds.has(profileId)) {
           if (skippedProfileIds.has(profileId)) {
             skippedCount += 1;
           }
@@ -18972,37 +19044,46 @@ function wireAdmin() {
         entry.isApproved = false;
         entry.approvedAt = null;
         entry.approvedBy = null;
+        if (isUuidValue(profileId) && fallbackProfileIds.has(profileId)) {
+          queuedCount += 1;
+        }
         deactivatedCount += 1;
       });
 
       if (!deactivatedCount) {
         finishAdminUserBulkAction();
-        toast("Selected users could not be deactivated.");
+        toast("Selected users could not be suspended.");
         return;
       }
 
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users);
-      const authAccessTargetIds = deactivationQueuedForSync ? profileIds : [...updatedProfileIds];
+      const authAccessTargetIds = [...new Set([
+        ...updatedProfileIds,
+        ...fallbackProfileIds,
+      ])];
       const authAccessResult = await syncSupabaseAuthAccessForTargets(authAccessTargetIds, false, {
         users,
         queueAll: deactivationQueuedForSync,
       });
       state.adminSelectedUserIds = [];
       try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: !deactivationQueuedForSync });
+        await flushPendingSyncNow({ throwOnRelationalFailure: !hasQueuedFallback });
         finishAdminUserBulkAction();
-        if (deactivationQueuedForSync) {
+        if (hasQueuedFallback) {
           toast(
-            skippedCount
-              ? `${deactivatedCount} account(s) deactivated locally and queued for cloud sync. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
-              : `${deactivatedCount} account(s) deactivated locally and queued for cloud sync.${describeAuthAccessSyncOutcome(authAccessResult)}`,
+            [
+              `${deactivatedCount} account(s) suspended locally and queued for cloud sync.`,
+              queuedCount ? `${queuedCount} queued.` : "",
+              skippedCount ? `${skippedCount} skipped.` : "",
+            ].filter(Boolean).join(" ")
+              + describeAuthAccessSyncOutcome(authAccessResult),
           );
         } else {
           toast(
             skippedCount
-              ? `${deactivatedCount} account(s) deactivated. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
-              : `${deactivatedCount} account(s) deactivated.${describeAuthAccessSyncOutcome(authAccessResult)}`,
+              ? `${deactivatedCount} account(s) suspended. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
+              : `${deactivatedCount} account(s) suspended.${describeAuthAccessSyncOutcome(authAccessResult)}`,
           );
         }
       } catch (syncError) {
@@ -19011,7 +19092,7 @@ function wireAdmin() {
       }
     } catch (bulkError) {
       finishAdminUserBulkAction();
-      toast(`Could not deactivate selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
+      toast(`Could not suspend selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
     }
   });
 
@@ -23150,11 +23231,13 @@ function getQbankCourseTopicMeta(question) {
   const rules = [
     {
       course: "Endocrinology & Reproduction (ERP 208)",
+      recoveryProfileKey: "erp208",
       needles: ["endocrine", "pituitary", "thyroid", "parathyroid", "adrenal", "suprarenal", "diabetes", "pancrea", "reproduc", "dka"],
     },
     {
       course: "Nervous System (NER 206)",
-      needles: ["neuro", "stroke", "seizure", "epilep", "brain", "spinal", "dementia", "parkinson", "myasthenia", "guillain"],
+      recoveryProfileKey: "ner206",
+      needles: ["neuro", "nerology", "stroke", "seizure", "epilep", "brain", "spinal", "dementia", "parkinson", "myasthenia", "guillain"],
     },
     {
       course: "Cardiovascular System (CVS 202)",
@@ -23188,7 +23271,9 @@ function getQbankCourseTopicMeta(question) {
 
   for (const rule of rules) {
     if (hasAny(text, rule.needles)) {
-      const mappedCourse = QBANK_COURSE_TOPICS[rule.course] ? rule.course : CURRICULUM_COURSE_LIST[0] || rule.course;
+      const mappedCourse = rule.recoveryProfileKey
+        ? getPreferredConfiguredCourseForRecoveryProfile(rule.recoveryProfileKey, rule.course)
+        : (QBANK_COURSE_TOPICS[rule.course] ? rule.course : CURRICULUM_COURSE_LIST[0] || rule.course);
       return {
         course: mappedCourse,
         topic: resolveDefaultTopic(mappedCourse, sanitizedExplicitTopic),
@@ -23843,6 +23928,9 @@ function extractCourseCodeKey(courseName) {
 
 function getCourseTopicRecoveryProfileKey(courseName) {
   const courseCodeKey = extractCourseCodeKey(courseName);
+  if (courseCodeKey && COURSE_TOPIC_RECOVERY_PROFILE_ALIASES[courseCodeKey]) {
+    return COURSE_TOPIC_RECOVERY_PROFILE_ALIASES[courseCodeKey];
+  }
   if (courseCodeKey && (COURSE_TOPIC_RECOVERY_SEEDS[courseCodeKey] || COURSE_TOPIC_RECOVERY_RULES[courseCodeKey])) {
     return courseCodeKey;
   }
@@ -23853,10 +23941,42 @@ function getCourseTopicRecoveryProfileKey(courseName) {
   if (lookupKey.includes("endocrinology") || lookupKey.includes("endocrine")) {
     return "erp208";
   }
-  if (lookupKey.includes("neurology") || lookupKey.includes("neurolog") || lookupKey.includes("nervous system")) {
+  if (
+    lookupKey.includes("neurology")
+    || lookupKey.includes("neurolog")
+    || lookupKey.includes("nerology")
+    || lookupKey.includes("nervous system")
+  ) {
     return "ner206";
   }
   return "";
+}
+
+function getPreferredConfiguredCourseForRecoveryProfile(profileKey, fallbackCourse = "") {
+  const normalizedProfileKey = String(profileKey || "").trim().toLowerCase();
+  const normalizedFallbackCourse = String(fallbackCourse || "").trim();
+  if (!normalizedProfileKey) {
+    return normalizedFallbackCourse || CURRICULUM_COURSE_LIST[0] || "";
+  }
+  const matchingCourses = CURRICULUM_COURSE_LIST.filter(
+    (course) => getCourseTopicRecoveryProfileKey(course) === normalizedProfileKey,
+  );
+  if (!matchingCourses.length) {
+    return QBANK_COURSE_TOPICS[normalizedFallbackCourse]
+      ? normalizedFallbackCourse
+      : (normalizedFallbackCourse || CURRICULUM_COURSE_LIST[0] || "");
+  }
+  const aliasedCourses = matchingCourses.filter((course) => {
+    const courseCodeKey = extractCourseCodeKey(course);
+    return courseCodeKey && courseCodeKey !== normalizedProfileKey;
+  });
+  if (aliasedCourses.length) {
+    return aliasedCourses[aliasedCourses.length - 1];
+  }
+  if (normalizedFallbackCourse && matchingCourses.includes(normalizedFallbackCourse)) {
+    return normalizedFallbackCourse;
+  }
+  return matchingCourses[matchingCourses.length - 1] || normalizedFallbackCourse;
 }
 
 function normalizeTopicKey(topicName) {
