@@ -4320,23 +4320,54 @@ async function flushPendingAdminActionQueue(options = {}) {
   let queueBlockedByGlobalFailure = false;
 
   try {
-    for (const action of queuedActions) {
-      if (action.type === "set-access") {
-        const result = await setSupabaseAuthUserAccessAsAdmin([action.targetAuthId], action.approved);
-        const message = String(result?.message || "").trim();
-        const targetHandled = result?.ok
-          || (Array.isArray(result?.notFoundIds) && result.notFoundIds.includes(action.targetAuthId));
-        if (targetHandled) {
-          syncedCount += 1;
-          remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
-          continue;
+    // Batch all set-access actions by approved value and send as single API calls.
+    const setAccessApproveActions = queuedActions.filter((a) => a.type === "set-access" && a.approved === true);
+    const setAccessRevokeActions = queuedActions.filter((a) => a.type === "set-access" && a.approved !== true);
+    const otherActions = queuedActions.filter((a) => a.type !== "set-access");
+
+    for (const batch of [setAccessApproveActions, setAccessRevokeActions]) {
+      if (!batch.length || queueBlockedByGlobalFailure) {
+        continue;
+      }
+      const batchIds = batch.map((a) => a.targetAuthId).filter((id) => isUuidValue(id));
+      const batchApproved = batch[0].approved;
+      if (!batchIds.length) {
+        continue;
+      }
+      const result = await setSupabaseAuthUserAccessAsAdmin(batchIds, batchApproved);
+      const message = String(result?.message || "").trim();
+      const handledIds = new Set([
+        ...(Array.isArray(result?.updatedIds) ? result.updatedIds : []),
+        ...(Array.isArray(result?.notFoundIds) ? result.notFoundIds : []),
+      ]);
+      if (result?.ok) {
+        // All succeeded — remove all actions in this batch.
+        const batchActionIds = new Set(batch.map((a) => a.id));
+        syncedCount += batch.length;
+        remainingActions = remainingActions.filter((entry) => !batchActionIds.has(entry.id));
+      } else if (handledIds.size > 0) {
+        // Partial success — remove actions whose targets were handled.
+        for (const action of batch) {
+          if (handledIds.has(action.targetAuthId)) {
+            syncedCount += 1;
+            remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+          }
         }
         failureMessage = failureMessage || message || "Could not sync queued account access update.";
         if (shouldStopPendingAdminQueueOnFailure(message)) {
           queueBlockedByGlobalFailure = true;
-          break;
         }
-        continue;
+      } else {
+        failureMessage = failureMessage || message || "Could not sync queued account access update.";
+        if (shouldStopPendingAdminQueueOnFailure(message)) {
+          queueBlockedByGlobalFailure = true;
+        }
+      }
+    }
+
+    for (const action of otherActions) {
+      if (queueBlockedByGlobalFailure) {
+        break;
       }
 
       if (action.type === "set-password") {
