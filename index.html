@@ -55,7 +55,18 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=2026-03-13.01" />
+  <script>
+    (() => {
+      const appVersion = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "").trim();
+      const versionSuffix = appVersion ? `?v=${encodeURIComponent(appVersion)}` : "";
+      const stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = `styles.css${versionSuffix}`;
+      stylesheet.dataset.appAsset = "styles";
+      document.head.appendChild(stylesheet);
+      window.__APP_VERSION_SUFFIX__ = versionSuffix;
+    })();
+  </script>
 </head>
 
 <body>
@@ -135,7 +146,15 @@
     <div class="toast"></div>
   </template>
 
-  <script defer src="bootstrap.js?v=2026-03-13.01"></script>
+  <script>
+    (() => {
+      const script = document.createElement("script");
+      script.src = `bootstrap.js${String(window.__APP_VERSION_SUFFIX__ || "")}`;
+      script.defer = true;
+      script.dataset.appAsset = "bootstrap";
+      document.body.appendChild(script);
+    })();
+  </script>
 </body>
 
 </html>

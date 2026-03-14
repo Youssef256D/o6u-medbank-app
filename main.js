@@ -443,6 +443,7 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
+let lifecycleResumeHandle = null;
 let adminQuestionsLastHydratedAt = 0;
 const presenceRuntime = {
   timer: null,
@@ -1367,6 +1368,26 @@ function scheduleSupabaseBootstrapRetry() {
     tryBootstrapSupabaseInBackground().catch(() => { });
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
+
+window.__MCQ_ON_SUPABASE_SDK_READY__ = function handleSupabaseSdkReady() {
+  if (!SUPABASE_CONFIG.enabled || !window.supabase?.createClient) {
+    return;
+  }
+  if (supabaseAuth.initializing) {
+    window.setTimeout(() => {
+      window.__MCQ_ON_SUPABASE_SDK_READY__?.();
+    }, 160);
+    return;
+  }
+  if ((supabaseAuth.enabled || supabaseSync.enabled) && supabaseAuth.initialized) {
+    clearSupabaseBootstrapRetry();
+    return;
+  }
+  tryBootstrapSupabaseInBackground().catch((error) => {
+    console.warn("Supabase SDK bootstrap after load failed.", error?.message || error);
+    scheduleSupabaseBootstrapRetry();
+  });
+};
 
 function clearSupabaseSessionRecoveryRetry() {
   if (supabaseSessionRecoveryHandle) {
@@ -3430,6 +3451,99 @@ function getPendingCloudWriteCount() {
     + Number(getPendingAdminActionQueue().length || 0);
 }
 
+function getPendingCloudWriteBuckets() {
+  const relationalPendingCount = Number(relationalSync.pendingWrites.size || 0)
+    + Number(sessionSyncRuntime.dirty ? 1 : 0);
+  const backupPendingCount = Number(supabaseSync.pendingWrites.size || 0);
+  const adminPendingCount = Number(getPendingAdminActionQueue().length || 0);
+  return {
+    relationalPendingCount,
+    backupPendingCount,
+    adminPendingCount,
+    pendingCount: relationalPendingCount + backupPendingCount + adminPendingCount,
+  };
+}
+
+function isLikelyCloudSyncAuthMessage(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /no active supabase session|supabase session expired|session does not match|unauthorized|signed-in supabase admin account|log out and log in again|log in again/.test(normalized);
+}
+
+function isLikelyRecoverableCloudSyncMessage(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return typeof navigator !== "undefined" && navigator?.onLine === false;
+  }
+  if (normalized.includes("offline")) {
+    return true;
+  }
+  if (normalized.includes("cloud session was interrupted")) {
+    return true;
+  }
+  if (normalized.includes("waiting for supabase")) {
+    return true;
+  }
+  if (normalized.includes("retry automatically") || normalized.includes("retrying automatically")) {
+    return true;
+  }
+  if (normalized.includes("timed out")) {
+    return true;
+  }
+  return isLikelyNetworkFetchError({ message: normalized });
+}
+
+function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync failed.") {
+  const rawMessage = typeof errorOrMessage === "string"
+    ? String(errorOrMessage || "").trim()
+    : getErrorMessage(errorOrMessage, fallback);
+  const normalized = String(rawMessage || "").trim();
+  if (!normalized) {
+    return fallback;
+  }
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return "You are offline. Changes are saved locally and will retry automatically.";
+  }
+  if (isLikelyCloudSyncAuthMessage(normalized)) {
+    return "Supabase admin session needs attention. Log out and sign in again.";
+  }
+  if (isLikelyRecoverableCloudSyncMessage(normalized)) {
+    return "Temporary network issue contacting Supabase. Changes are saved locally and will retry automatically.";
+  }
+  return normalized;
+}
+
+function getCloudSyncFailureState(rawFailureMessage) {
+  const message = String(rawFailureMessage || "").trim()
+    ? normalizeCloudSyncFailureMessage(rawFailureMessage, "")
+    : "";
+  return {
+    message,
+    recoverable: Boolean(message) && isLikelyRecoverableCloudSyncMessage(message),
+  };
+}
+
+function getRelevantCloudSyncFailureMessage(pendingBuckets) {
+  const candidates = [];
+  if ((pendingBuckets?.relationalPendingCount || 0) > 0) {
+    candidates.push(relationalSync.lastFailureMessage, relationalSync.lastReadyError);
+  }
+  if ((pendingBuckets?.backupPendingCount || 0) > 0) {
+    candidates.push(supabaseSync.lastFailureMessage);
+  }
+  if ((pendingBuckets?.adminPendingCount || 0) > 0) {
+    candidates.push(adminActionRuntime.lastFailureMessage);
+  }
+  candidates.push(
+    relationalSync.lastFailureMessage,
+    supabaseSync.lastFailureMessage,
+    adminActionRuntime.lastFailureMessage,
+  );
+  return candidates.find((entry) => String(entry || "").trim()) || "";
+}
+
 function formatRelativeSyncTime(timestamp) {
   const ts = Number(timestamp || 0);
   if (!ts) {
@@ -3463,8 +3577,9 @@ function getCloudSyncStatusModel(user = null) {
 
   const hasAuthClient = Boolean(getSupabaseAuthClient());
   const hasActiveSupabaseSession = Boolean(getActiveSupabaseAuthUserId());
-  const pendingCount = getPendingCloudWriteCount();
-  const syncingNow = Boolean(relationalSync.flushing || supabaseSync.flushing);
+  const pendingBuckets = getPendingCloudWriteBuckets();
+  const pendingCount = pendingBuckets.pendingCount;
+  const syncingNow = Boolean(relationalSync.flushing || supabaseSync.flushing || adminActionRuntime.flushing);
   const lastSuccessAt = Math.max(
     Number(relationalSync.lastSuccessAt || 0),
     Number(supabaseSync.lastSuccessAt || 0),
@@ -3477,12 +3592,8 @@ function getCloudSyncStatusModel(user = null) {
     Number(supabaseSync.lastFailureAt || 0),
     Number(adminActionRuntime.lastFailureAt || 0),
   );
-  const failureMessage = String(
-    relationalSync.lastFailureMessage
-    || supabaseSync.lastFailureMessage
-    || adminActionRuntime.lastFailureMessage
-    || (pendingCount ? relationalSync.lastReadyError : ""),
-  ).trim();
+  const failureState = getCloudSyncFailureState(getRelevantCloudSyncFailureMessage(pendingBuckets));
+  const failureMessage = failureState.message;
   const retryAt = Math.max(
     Number(relationalSync.retryAt || 0),
     Number(supabaseSync.retryAt || 0),
@@ -3509,19 +3620,20 @@ function getCloudSyncStatusModel(user = null) {
   if (pendingCount > 0) {
     const retryWaitMs = retryAt > Date.now() ? (retryAt - Date.now()) : 0;
     const retryLabel = retryWaitMs > 0 ? `Retrying in ${Math.ceil(retryWaitMs / 1000)}s.` : "Retrying automatically.";
+    const canAppendRetryLabel = Boolean(failureMessage) && !/retry/i.test(failureMessage.toLowerCase());
     return {
-      tone: failureMessage ? "warning" : "pending",
+      tone: failureMessage && !failureState.recoverable ? "warning" : "pending",
       label: `Pending ${pendingCount} change${pendingCount === 1 ? "" : "s"}`,
       detail: failureMessage
-        ? `${failureMessage} ${retryLabel}`.trim()
+        ? `${failureMessage}${canAppendRetryLabel ? ` ${retryLabel}` : ""}`.trim()
         : "Your edits are safe locally and will sync to Supabase shortly.",
       pendingCount,
     };
   }
   if (failureMessage && (Date.now() - lastFailureAt) <= 120000) {
     return {
-      tone: "warning",
-      label: "Cloud had a sync issue",
+      tone: failureState.recoverable ? "pending" : "warning",
+      label: failureState.recoverable ? "Cloud retrying" : "Cloud had a sync issue",
       detail: failureMessage,
       pendingCount: 0,
     };
@@ -3821,9 +3933,11 @@ async function ensureRelationalSyncReady(options = {}) {
         relationalSync.enabled = false;
         relationalSync.readyCheckedAt = Date.now();
         const details = getErrorMessage(checkError, "");
-        relationalSync.lastReadyError = details
-          ? `Cannot access ${check.table}: ${details}`
-          : `Cannot access ${check.table}.`;
+        relationalSync.lastReadyError = isLikelyNetworkFetchError(checkError)
+          ? normalizeCloudSyncFailureMessage(checkError, `Cannot access ${check.table}.`)
+          : (details
+            ? `Cannot access ${check.table}: ${details}`
+            : `Cannot access ${check.table}.`);
         relationalSync.lastFailureAt = Date.now();
         relationalSync.lastFailureMessage = relationalSync.lastReadyError;
         relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
@@ -4095,7 +4209,10 @@ async function flushPendingAdminActionQueue(options = {}) {
     savePendingAdminActionQueue(remainingActions);
     if (remainingActions.length) {
       adminActionRuntime.lastFailureAt = Date.now();
-      adminActionRuntime.lastFailureMessage = failureMessage || "Queued admin actions are waiting for Supabase.";
+      adminActionRuntime.lastFailureMessage = normalizeCloudSyncFailureMessage(
+        failureMessage || "Queued admin actions are waiting for Supabase.",
+        "Queued admin actions are waiting for Supabase.",
+      );
       schedulePendingAdminActionFlush();
       return {
         ok: false,
@@ -5992,7 +6109,7 @@ async function flushSupabaseWrites() {
     if (error) {
       console.warn("Supabase sync error:", error.message);
       supabaseSync.lastFailureAt = Date.now();
-      supabaseSync.lastFailureMessage = String(error.message || "Supabase sync failed.").trim();
+      supabaseSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
       supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
       restoreRowsToPending();
       if (!supabaseSync.flushTimer) {
@@ -6011,7 +6128,7 @@ async function flushSupabaseWrites() {
   } catch (error) {
     console.warn("Supabase sync error:", getErrorMessage(error, "Supabase sync failed."));
     supabaseSync.lastFailureAt = Date.now();
-    supabaseSync.lastFailureMessage = getErrorMessage(error, "Supabase sync failed.");
+    supabaseSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
     supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
     restoreRowsToPending();
     if (!supabaseSync.flushTimer) {
@@ -6126,7 +6243,7 @@ async function flushRelationalWrites(options = {}) {
       console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
       relationalSync.pendingWrites.set(storageKey, payload);
       relationalSync.lastFailureAt = Date.now();
-      relationalSync.lastFailureMessage = getErrorMessage(error, "Relational sync failed.");
+      relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud sync failed.");
       if (!firstError) {
         firstError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
       }
@@ -8237,6 +8354,69 @@ function hydrateThemePreference() {
   applyTheme(getStoredThemePreference());
 }
 
+function clearLifecycleResumeHandle() {
+  if (lifecycleResumeHandle) {
+    window.clearTimeout(lifecycleResumeHandle);
+    lifecycleResumeHandle = null;
+  }
+}
+
+async function resumeDeferredAppWork(options = {}) {
+  clearLifecycleResumeHandle();
+  if (!options?.allowWhenHidden && document.visibilityState === "hidden") {
+    return false;
+  }
+
+  let activeUser = getCurrentUser();
+  if (activeUser && !hasActiveSupabaseSessionForUser(activeUser)) {
+    await tryRecoverSupabaseSessionInBackground().catch(() => false);
+    activeUser = getCurrentUser();
+  }
+
+  syncTopbar();
+  syncPresenceRuntime(activeUser);
+  syncSiteActivityRuntime(activeUser);
+
+  if (activeUser?.role === "admin" && state.route === "admin") {
+    if (ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())) {
+      ensureAdminDashboardPolling();
+    }
+    if (state.adminPage === "activity") {
+      ensureAdminPresencePolling();
+    }
+  }
+
+  scheduleNotificationRealtimeHydration(0);
+  scheduleSessionRealtimeHydration(0);
+  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+
+  if (
+    activeUser
+    && SUPABASE_CONFIG.enabled
+    && !hasActiveSupabaseSessionForUser(activeUser)
+    && !lifecycleResumeHandle
+  ) {
+    lifecycleResumeHandle = window.setTimeout(() => {
+      lifecycleResumeHandle = null;
+      resumeDeferredAppWork().catch((error) => {
+        console.warn("Deferred app resume failed.", error?.message || error);
+      });
+    }, 1200);
+  }
+
+  return true;
+}
+
+function scheduleDeferredAppResume(delayMs = 0) {
+  clearLifecycleResumeHandle();
+  lifecycleResumeHandle = window.setTimeout(() => {
+    lifecycleResumeHandle = null;
+    resumeDeferredAppWork().catch((error) => {
+      console.warn("Deferred app resume failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
 function bindGlobalEvents() {
   if (globalEventsBound) {
     return;
@@ -8398,19 +8578,16 @@ function bindGlobalEvents() {
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
+      clearLifecycleResumeHandle();
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
       endCurrentUserActivitySession().catch(() => { });
       return;
     }
-    if (getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
-      tryRecoverSupabaseSessionInBackground().catch(() => { });
-    }
-    scheduleNotificationRealtimeHydration(0);
-    scheduleSessionRealtimeHydration(0);
-    syncSiteActivityRuntime(getCurrentUser());
+    scheduleDeferredAppResume(0);
   });
 
   window.addEventListener("pagehide", () => {
+    clearLifecycleResumeHandle();
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
@@ -8422,13 +8599,12 @@ function bindGlobalEvents() {
     clearAdminDashboardPolling();
   });
 
+  window.addEventListener("pageshow", () => {
+    scheduleDeferredAppResume(0);
+  });
+
   window.addEventListener("online", () => {
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-    if (getCurrentUser() && !hasActiveSupabaseSessionForUser()) {
-      tryRecoverSupabaseSessionInBackground().catch(() => { });
-    }
-    scheduleSessionRealtimeHydration(0);
-    syncSiteActivityRuntime(getCurrentUser());
+    scheduleDeferredAppResume(0);
   });
 
   window.addEventListener("hashchange", () => {

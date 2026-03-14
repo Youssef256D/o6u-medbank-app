@@ -1,10 +1,13 @@
-const CACHE_NAME = "o6u-medbank-static-v2026-03-13-01";
+const serviceWorkerUrl = new URL(self.location.href);
+const cacheVersion = String(serviceWorkerUrl.searchParams.get("v") || "").trim();
+const versionSuffix = cacheVersion ? `?v=${encodeURIComponent(cacheVersion)}` : "";
+const CACHE_NAME = `o6u-medbank-static-v${(cacheVersion || "runtime").replace(/\./g, "-")}`;
 
 const PRECACHE_URLS = [
-  "./styles.css?v=2026-03-13.01",
-  "./bootstrap.js?v=2026-03-13.01",
-  "./main.js?v=2026-03-13.01",
-  "./supabase.config.js?v=2026-03-13.01",
+  `./styles.css${versionSuffix}`,
+  `./bootstrap.js${versionSuffix}`,
+  `./main.js${versionSuffix}`,
+  `./supabase.config.js${versionSuffix}`,
   "./manifest.webmanifest",
   "./robots.txt",
   "./sitemap.xml",

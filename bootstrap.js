@@ -50,6 +50,7 @@
   ]);
   let appLoadPromise = null;
   let appPrefetchTriggered = false;
+  let supabaseSdkLoadPromise = null;
 
   function parseOAuthHashParams(hashValue) {
     const rawHash = String(hashValue || "").replace(/^#/, "").trim();
@@ -284,8 +285,14 @@
 
     appLoadPromise = Promise.resolve()
       .then(() => loadScript(`supabase.config.js${versionSuffix}`, { defer: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
-      .then(() => loadScriptWithFallback(SUPABASE_SDK_SOURCES, { async: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
       .then(() => loadScript(`main.js${versionSuffix}`, { defer: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
+      .then(() => {
+        if (window.supabase?.createClient) {
+          notifySupabaseSdkReady();
+          return;
+        }
+        ensureSupabaseSdkLoaded();
+      })
       .catch((error) => {
         appLoadPromise = null;
         console.error("Deferred app bootstrap failed.", error);
@@ -293,6 +300,38 @@
       });
 
     return appLoadPromise;
+  }
+
+  function notifySupabaseSdkReady() {
+    if (typeof window.__MCQ_ON_SUPABASE_SDK_READY__ !== "function") {
+      return;
+    }
+    try {
+      window.__MCQ_ON_SUPABASE_SDK_READY__();
+    } catch (error) {
+      console.warn("Supabase SDK ready hook failed.", error?.message || error);
+    }
+  }
+
+  function ensureSupabaseSdkLoaded() {
+    if (window.supabase?.createClient) {
+      notifySupabaseSdkReady();
+      return Promise.resolve();
+    }
+    if (supabaseSdkLoadPromise) {
+      return supabaseSdkLoadPromise;
+    }
+    supabaseSdkLoadPromise = loadScriptWithFallback(SUPABASE_SDK_SOURCES, { async: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS })
+      .then(() => {
+        notifySupabaseSdkReady();
+      })
+      .catch((error) => {
+        console.warn("Supabase SDK did not finish loading during bootstrap.", error?.message || error);
+      })
+      .finally(() => {
+        supabaseSdkLoadPromise = null;
+      });
+    return supabaseSdkLoadPromise;
   }
 
   function ensureAppLoaded(options = {}) {
