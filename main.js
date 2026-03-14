@@ -4354,9 +4354,6 @@ async function flushPendingAdminActionQueue(options = {}) {
         failureMessage || "Queued admin actions are waiting for Supabase.",
         "Queued admin actions are waiting for Supabase.",
       );
-      if (queueBlockedByGlobalFailure || syncedCount < queuedActions.length) {
-        schedulePendingAdminActionFlush();
-      }
       return {
         ok: false,
         deferred: true,
@@ -4373,6 +4370,12 @@ async function flushPendingAdminActionQueue(options = {}) {
   } finally {
     adminActionRuntime.flushing = false;
     scheduleSyncStatusUiRefresh();
+    // Schedule retry after flushing = false, so schedulePendingAdminActionFlush actually works.
+    // Previously this was called inside the try block while flushing was still true, causing the
+    // guard check to bail out immediately and leaving the queue stuck with no retry timer.
+    if (getPendingAdminActionQueue().length && !adminActionRuntime.flushTimer) {
+      schedulePendingAdminActionFlush();
+    }
   }
 }
 
@@ -6381,61 +6384,64 @@ async function flushRelationalWrites(options = {}) {
   let succeededCount = 0;
   const syncedStorageKeys = new Set();
 
-  for (const [storageKey, payload] of entries) {
-    try {
-      await syncRelationalKey(storageKey, payload);
-      succeededCount += 1;
-      if (
-        storageKey === STORAGE_KEYS.curriculum
-        && payload
-        && typeof payload === "object"
-        && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
-      ) {
-        syncedStorageKeys.add(STORAGE_KEYS.curriculum);
-        syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
-      } else {
-        syncedStorageKeys.add(storageKey);
-      }
-    } catch (error) {
-      console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
-      relationalSync.pendingWrites.set(storageKey, payload);
-      relationalSync.lastFailureAt = Date.now();
-      relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud sync failed.");
-      if (!firstError) {
-        firstError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
+  try {
+    for (const [storageKey, payload] of entries) {
+      try {
+        await syncRelationalKey(storageKey, payload);
+        succeededCount += 1;
+        if (
+          storageKey === STORAGE_KEYS.curriculum
+          && payload
+          && typeof payload === "object"
+          && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+        ) {
+          syncedStorageKeys.add(STORAGE_KEYS.curriculum);
+          syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
+        } else {
+          syncedStorageKeys.add(storageKey);
+        }
+      } catch (error) {
+        console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+        relationalSync.pendingWrites.set(storageKey, payload);
+        relationalSync.lastFailureAt = Date.now();
+        relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud sync failed.");
+        if (!firstError) {
+          firstError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
+        }
       }
     }
-  }
 
-  if (succeededCount > 0) {
-    relationalSync.lastSuccessAt = Date.now();
-    const shouldBroadcastStudentRefresh = (
-      getCurrentUser()?.role === "admin"
-      && [...syncedStorageKeys].some((storageKey) => AUTO_STUDENT_REFRESH_SYNC_KEYS.has(storageKey))
-    );
-    if (shouldBroadcastStudentRefresh) {
-      queueStudentRefreshSignal({
-        changedKeys: [...syncedStorageKeys],
-        reason: "admin_sync",
-        flushNow: false,
-      });
+    if (succeededCount > 0) {
+      relationalSync.lastSuccessAt = Date.now();
+      const shouldBroadcastStudentRefresh = (
+        getCurrentUser()?.role === "admin"
+        && [...syncedStorageKeys].some((storageKey) => AUTO_STUDENT_REFRESH_SYNC_KEYS.has(storageKey))
+      );
+      if (shouldBroadcastStudentRefresh) {
+        queueStudentRefreshSignal({
+          changedKeys: [...syncedStorageKeys],
+          reason: "admin_sync",
+          flushNow: false,
+        });
+      }
     }
+    if (!relationalSync.pendingWrites.size) {
+      relationalSync.retryAt = 0;
+      relationalSync.lastFailureAt = 0;
+      relationalSync.lastFailureMessage = "";
+    }
+  } finally {
+    relationalSync.flushing = false;
+    if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
+      relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+      relationalSync.flushTimer = window.setTimeout(() => {
+        flushRelationalWrites().catch((error) => {
+          console.warn("Relational retry flush failed.", error);
+        });
+      }, RELATIONAL_RETRY_FLUSH_MS);
+    }
+    scheduleSyncStatusUiRefresh();
   }
-  relationalSync.flushing = false;
-  if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
-    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
-    relationalSync.flushTimer = window.setTimeout(() => {
-      flushRelationalWrites().catch((error) => {
-        console.warn("Relational retry flush failed.", error);
-      });
-    }, RELATIONAL_RETRY_FLUSH_MS);
-  } else if (!relationalSync.pendingWrites.size) {
-    relationalSync.retryAt = 0;
-    relationalSync.lastFailureAt = 0;
-    relationalSync.lastFailureMessage = "";
-  }
-
-  scheduleSyncStatusUiRefresh();
 
   if (firstError && throwOnFailure) {
     throw firstError;
