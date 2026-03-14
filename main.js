@@ -97,10 +97,12 @@ const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
+const STUDENT_ACCESS_POLL_MS = 6000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 1200;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const SESSION_REALTIME_DEBOUNCE_MS = 900;
+const PROFILE_ACCESS_REALTIME_DEBOUNCE_MS = 180;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
 const NOTIFICATION_YEAR_EXTERNAL_ID_SEPARATOR = "::";
@@ -132,6 +134,7 @@ const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
 const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
+const ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE = "Your account has been deactivated. Please contact support.";
 const THEME_PREFERENCE_KEY = "mcq_theme_preference";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
@@ -191,6 +194,7 @@ const state = {
   adminUserSearch: "",
   adminUserFilterYear: "",
   adminUserFilterSemester: "",
+  adminAddUserPanelOpen: false,
   adminSelectedUserIds: [],
   adminUserBulkActionRunning: false,
   adminCurriculumYear: 1,
@@ -294,7 +298,6 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
 ]);
 const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
 const ASK_AI_WINDOW_NAME = "o6u-medbank-ask-ai";
-const ASK_AI_DEFAULT_URL = "https://notebooklm.google.com/";
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -416,6 +419,11 @@ let sessionRealtimeSubscribed = false;
 let sessionRealtimeHydrateTimer = null;
 let sessionRealtimeHydrateInFlight = false;
 let sessionRealtimeHydrateQueued = false;
+let profileAccessRealtimeChannel = null;
+let profileAccessRealtimeSubscriptionKey = "";
+let profileAccessRealtimeHydrateTimer = null;
+let profileAccessRealtimeHydrateInFlight = false;
+let profileAccessRealtimeHydrateQueued = false;
 let studentNotificationPollHandle = null;
 let studentDataAutoRefreshPollHandle = null;
 let studentDataAutoRefreshInFlight = false;
@@ -423,11 +431,14 @@ let studentForceRefreshPollHandle = null;
 let studentForceRefreshInFlight = false;
 let studentBackgroundRefreshPollHandle = null;
 let studentBackgroundRefreshInFlight = false;
+let studentAccessPollHandle = null;
+let studentAccessPollInFlight = false;
 let siteMaintenanceGateRefreshHandle = null;
 let siteMaintenanceGateRefreshInFlight = false;
 let supabaseSessionRecoveryHandle = null;
 let supabaseSessionRecoveryRetries = 0;
 let supabaseSessionRecoveryInFlight = false;
+let suppressSupabaseSignedOutRecovery = false;
 let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
@@ -586,6 +597,68 @@ const REMOVED_CURRICULUM_COURSES = ["Skills (selected topic)", "Elective (select
 const REMOVED_CURRICULUM_COURSE_KEYS = new Set(REMOVED_CURRICULUM_COURSES.map((course) => course.toLowerCase()));
 const REMOVED_TOPIC_NAMES = ["Module Overview", "Model Overview"];
 const REMOVED_TOPIC_KEYS = new Set(REMOVED_TOPIC_NAMES.map((topic) => topic.toLowerCase()));
+const COURSE_TOPIC_RECOVERY_SEEDS = {
+  erp208: [
+    "Introduction and Pituitary Gland",
+    "Thyroid Gland",
+    "Calcium Metabolism and Metabolic Bone Diseases",
+    "Suprarenal Gland",
+    "Endocrine Diseases of the Pancreas",
+    "Breast Surgery",
+  ],
+  ner206: [
+    "Neuroanatomy",
+    "Stroke",
+    "Seizure Disorders",
+    "Neuromuscular Disorders",
+  ],
+};
+const COURSE_TOPIC_RECOVERY_RULES = {
+  erp208: [
+    {
+      topic: "Breast Surgery",
+      needles: ["breast", "mammograph", "mastect", "mastitis", "fibroadenoma", "nipple", "axilla", "lump"],
+    },
+    {
+      topic: "Endocrine Diseases of the Pancreas",
+      needles: ["diabetes", "dka", "hhs", "insulin", "glucagon", "pancrea", "hypoglycemia", "hyperglycemia"],
+    },
+    {
+      topic: "Thyroid Gland",
+      needles: ["thyroid", "thyro", "graves", "hashimoto", "myxedema", "goiter", "t3", "t4"],
+    },
+    {
+      topic: "Calcium Metabolism and Metabolic Bone Diseases",
+      needles: ["calcium", "parathyroid", "parathormone", "pth", "vitamin d", "osteoporosis", "osteomalacia", "rickets", "bone"],
+    },
+    {
+      topic: "Suprarenal Gland",
+      needles: ["adrenal", "suprarenal", "cushing", "addison", "pheochromocytoma", "aldosterone", "cortisol", "cah"],
+    },
+    {
+      topic: "Introduction and Pituitary Gland",
+      needles: ["pituitary", "prolactin", "acromegaly", "gigantism", "hypopit", "gh ", "acth", "sella"],
+    },
+  ],
+  ner206: [
+    {
+      topic: "Stroke",
+      needles: ["stroke", "cva", "hemipleg", "aphasia", "thrombolysis", "thrombectomy", "ischemic", "intracerebral hemorrhage", "subarachnoid"],
+    },
+    {
+      topic: "Seizure Disorders",
+      needles: ["seizure", "epilep", "convulsion", "status epilepticus", "tonic-clonic", "absence seizure", "postictal"],
+    },
+    {
+      topic: "Neuromuscular Disorders",
+      needles: ["myasthenia", "guillain", "neuromuscular", "muscular dystrophy", "peripheral neuropathy", "als", "motor neuron", "nmj"],
+    },
+    {
+      topic: "Neuroanatomy",
+      needles: ["neuroanatom", "cranial nerve", "brainstem", "spinal cord", "tract", "cerebell", "basal ganglia", "cortex"],
+    },
+  ],
+};
 
 let O6U_CURRICULUM = deepClone(DEFAULT_O6U_CURRICULUM);
 let CURRICULUM_COURSE_LIST = [];
@@ -1212,6 +1285,12 @@ async function init() {
 
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
+  }
+  const topicRepairResult = repairCourseTopicCatalogFromQuestions({
+    persist: getCurrentUser()?.role === "admin",
+  });
+  if (topicRepairResult.questionsChanged || topicRepairResult.topicsChanged) {
+    render();
   }
   if (supabaseAuth.enabled || supabaseSync.enabled) {
     clearSupabaseBootstrapRetry();
@@ -1904,11 +1983,13 @@ async function initSupabaseAuth() {
 
       if (event === "SIGNED_OUT") {
         const preservedLocalUser = getCurrentUser();
+        const skipRecovery = suppressSupabaseSignedOutRecovery;
+        suppressSupabaseSignedOutRecovery = false;
         resetPostAuthWarmupRuntimeState();
         supabaseAuth.activeUserId = "";
         setGoogleOAuthPendingState(false);
         setPasswordRecoveryPendingState(false);
-        const recoveredSessionUser = await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
+        const recoveredSessionUser = skipRecovery ? null : await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
         if (recoveredSessionUser) {
           clearSupabaseSessionRecoveryRetry();
           const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
@@ -1927,6 +2008,8 @@ async function initSupabaseAuth() {
         if (shouldPreserveLocalSession) {
           clearNotificationRealtimeSubscription();
           clearSessionRealtimeSubscription();
+          clearProfileAccessRealtimeSubscription();
+          clearStudentAccessPolling();
           clearAdminPresencePolling();
           clearAdminDashboardPolling();
           syncPresenceRuntime(null);
@@ -1949,6 +2032,8 @@ async function initSupabaseAuth() {
         }
         clearNotificationRealtimeSubscription();
         clearSessionRealtimeSubscription();
+        clearProfileAccessRealtimeSubscription();
+        clearStudentAccessPolling();
         clearSupabaseSessionRecoveryRetry();
         resetRelationalSyncState();
         resetSupabaseSyncRuntimeState();
@@ -1995,6 +2080,8 @@ async function initSupabaseAuth() {
     setPasswordRecoveryPendingState(false);
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    clearProfileAccessRealtimeSubscription();
+    clearStudentAccessPolling();
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
     supabaseAuth.activeUserId = "";
@@ -2237,21 +2324,15 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     academicYear: normalizeAcademicYearOrNull(profile.academic_year ?? localUser?.academicYear),
     academicSemester: normalizeAcademicSemesterOrNull(profile.academic_semester ?? localUser?.academicSemester),
   });
-  const needsAutoApprovalOverride = role === "student" && profileApproved === false && autoApprovalFallback;
   const resolvedApproval = role === "admin"
     ? true
-    : needsAutoApprovalOverride
-      ? true
-      : (
-        profileApproved !== null
-          ? profileApproved
-          : localApproval !== null
-            ? localApproval
-            : autoApprovalFallback
-      );
-  if (needsAutoApprovalOverride && isUuidValue(authUser?.id)) {
-    updateRelationalProfileApproval([authUser.id], true).catch(() => { });
-  }
+    : (
+      profileApproved !== null
+        ? profileApproved
+        : localApproval !== null
+          ? localApproval
+          : autoApprovalFallback
+    );
   const profileHasStudentCompletion = role !== "student"
     ? true
     : validateAndNormalizePhoneNumber(resolvedPhone).ok && Number(year) >= 1 && Number(semester) >= 1;
@@ -3959,6 +4040,20 @@ async function flushPendingAdminActionQueue(options = {}) {
 
   try {
     for (const action of queuedActions) {
+      if (action.type === "set-access") {
+        const result = await setSupabaseAuthUserAccessAsAdmin([action.targetAuthId], action.approved);
+        const message = String(result?.message || "").trim();
+        const targetHandled = result?.ok
+          || (Array.isArray(result?.notFoundIds) && result.notFoundIds.includes(action.targetAuthId));
+        if (targetHandled) {
+          syncedCount += 1;
+          remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+          continue;
+        }
+        failureMessage = message || "Could not sync queued account access update.";
+        break;
+      }
+
       if (action.type === "set-password") {
         const result = await setSupabaseAuthUserPasswordAsAdmin(action.targetAuthId, action.password);
         const message = String(result?.message || "").trim();
@@ -4817,6 +4912,7 @@ async function hydrateRelationalQuestions() {
   }));
 
   saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions);
+  repairCourseTopicCatalogFromQuestions({ persist: false });
   if (needsChoiceRepairSync && currentUser?.role === "admin") {
     // If DB rows contain placeholder/partial choices while local has real data, push a background repair sync.
     if (scheduleRelationalWrite(STORAGE_KEYS.questions, normalizedMappedQuestions)) {
@@ -7934,6 +8030,8 @@ function seedData() {
   if (!load(STORAGE_KEYS.systemLogs, null)) {
     save(STORAGE_KEYS.systemLogs, []);
   }
+
+  repairCourseTopicCatalogFromQuestions({ persist: false });
 }
 
 function getStoredThemePreference() {
@@ -8514,6 +8612,206 @@ function ensureStudentBackgroundRefreshPolling(user = null) {
         studentBackgroundRefreshInFlight = false;
       });
   }, STUDENT_BACKGROUND_SYNC_POLL_MS);
+}
+
+async function enforceCurrentStudentAccessStatus(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  const client = getRelationalClient();
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(profileId)
+    || !client
+    || !hasActiveSupabaseSessionForUser(currentUser)
+  ) {
+    return { checked: false, active: true };
+  }
+
+  const { data, error } = await runWithTimeoutResult(
+    client
+      .from("profiles")
+      .select("approved")
+      .eq("id", profileId)
+      .maybeSingle(),
+    PROFILE_LOOKUP_TIMEOUT_MS,
+    "Profile access check timed out.",
+  );
+  if (error || !data) {
+    return { checked: false, active: true, error: error || null };
+  }
+  if (data.approved === false) {
+    await logoutDueToAccessRevocation();
+    return { checked: true, active: false, revoked: true };
+  }
+  return { checked: true, active: true };
+}
+
+function clearProfileAccessRealtimeHydrateTimer() {
+  if (profileAccessRealtimeHydrateTimer) {
+    window.clearTimeout(profileAccessRealtimeHydrateTimer);
+    profileAccessRealtimeHydrateTimer = null;
+  }
+}
+
+function clearStudentAccessPolling() {
+  if (studentAccessPollHandle) {
+    window.clearInterval(studentAccessPollHandle);
+    studentAccessPollHandle = null;
+  }
+  studentAccessPollInFlight = false;
+}
+
+async function runProfileAccessRealtimeCheck() {
+  if (profileAccessRealtimeHydrateInFlight) {
+    profileAccessRealtimeHydrateQueued = true;
+    return;
+  }
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+
+  profileAccessRealtimeHydrateInFlight = true;
+  try {
+    await enforceCurrentStudentAccessStatus(user);
+  } catch (error) {
+    console.warn("Profile access realtime check failed.", error?.message || error);
+  } finally {
+    profileAccessRealtimeHydrateInFlight = false;
+    if (profileAccessRealtimeHydrateQueued) {
+      profileAccessRealtimeHydrateQueued = false;
+      scheduleProfileAccessRealtimeCheck(80);
+    }
+  }
+}
+
+function scheduleProfileAccessRealtimeCheck(delayMs = PROFILE_ACCESS_REALTIME_DEBOUNCE_MS) {
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+  clearProfileAccessRealtimeHydrateTimer();
+  profileAccessRealtimeHydrateTimer = window.setTimeout(() => {
+    profileAccessRealtimeHydrateTimer = null;
+    runProfileAccessRealtimeCheck().catch((error) => {
+      console.warn("Profile access refresh failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function clearProfileAccessRealtimeSubscription() {
+  clearProfileAccessRealtimeHydrateTimer();
+  profileAccessRealtimeHydrateQueued = false;
+  profileAccessRealtimeHydrateInFlight = false;
+  profileAccessRealtimeSubscriptionKey = "";
+  const activeChannel = profileAccessRealtimeChannel;
+  profileAccessRealtimeChannel = null;
+  if (!activeChannel) {
+    return;
+  }
+  const client = getSupabaseAuthClient();
+  if (client && typeof client.removeChannel === "function") {
+    Promise.resolve(client.removeChannel(activeChannel)).catch(() => {
+      if (typeof activeChannel.unsubscribe === "function") {
+        try {
+          activeChannel.unsubscribe();
+        } catch {
+          // Ignore realtime unsubscribe errors.
+        }
+      }
+    });
+    return;
+  }
+  if (typeof activeChannel.unsubscribe === "function") {
+    try {
+      activeChannel.unsubscribe();
+    } catch {
+      // Ignore realtime unsubscribe errors.
+    }
+  }
+}
+
+function ensureProfileAccessRealtimeSubscription(user = null) {
+  const currentUser = user || getCurrentUser();
+  const client = getSupabaseAuthClient();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+    clearProfileAccessRealtimeSubscription();
+    return;
+  }
+
+  const nextKey = `student:${profileId}`;
+  if (profileAccessRealtimeChannel && profileAccessRealtimeSubscriptionKey === nextKey) {
+    return;
+  }
+
+  clearProfileAccessRealtimeSubscription();
+  const channel = client.channel(`profile-access-live:${nextKey}`);
+  channel.on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "profiles",
+      filter: `id=eq.${profileId}`,
+    },
+    () => {
+      scheduleProfileAccessRealtimeCheck();
+    },
+  );
+
+  channel.subscribe((status) => {
+    if (status === "SUBSCRIBED") {
+      scheduleProfileAccessRealtimeCheck(0);
+    }
+  });
+
+  profileAccessRealtimeChannel = channel;
+  profileAccessRealtimeSubscriptionKey = nextKey;
+}
+
+function ensureStudentAccessPolling(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    clearStudentAccessPolling();
+    return;
+  }
+  const needsImmediateCheck = !studentAccessPollHandle;
+  if (!studentAccessPollHandle) {
+    studentAccessPollHandle = window.setInterval(() => {
+      const activeUser = getCurrentUser();
+      const activeProfileId = getCurrentSessionProfileId(activeUser);
+      if (!activeUser || activeUser.role !== "student" || !isUuidValue(activeProfileId)) {
+        clearStudentAccessPolling();
+        return;
+      }
+      if (studentAccessPollInFlight) {
+        return;
+      }
+      studentAccessPollInFlight = true;
+      enforceCurrentStudentAccessStatus(activeUser)
+        .catch((error) => {
+          console.warn("Student access polling failed.", error?.message || error);
+        })
+        .finally(() => {
+          studentAccessPollInFlight = false;
+        });
+    }, STUDENT_ACCESS_POLL_MS);
+  }
+  if (needsImmediateCheck && !studentAccessPollInFlight) {
+    studentAccessPollInFlight = true;
+    enforceCurrentStudentAccessStatus(currentUser)
+      .catch((error) => {
+        console.warn("Initial student access check failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentAccessPollInFlight = false;
+      });
+  }
 }
 
 function clearStudentForceRefreshPolling() {
@@ -10597,6 +10895,8 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
 function syncTopbar() {
   const user = getCurrentUser();
   const authRestorePending = isSupabaseAuthRestorePending(user);
+  ensureProfileAccessRealtimeSubscription(user);
+  ensureStudentAccessPolling(user);
   ensureNotificationsRealtimeSubscription(user);
   ensureStudentNotificationPolling(user);
   ensureSessionRealtimeSubscription(user);
@@ -11239,7 +11539,11 @@ function wireAuth(mode) {
             const canUseCachedFallback = canUseLocalPasswordFallback(localDemoUser)
               || shouldAllowSupabaseManagedLocalFallback(error);
             if (!canUseCachedFallback) {
-              toast(error?.message || "Supabase sign-in is required for this account. Check your credentials and try again.");
+              toast(
+                isSupabaseAccessRevokedMessage(error)
+                  ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
+                  : (error?.message || "Supabase sign-in is required for this account. Check your credentials and try again."),
+              );
               return;
             }
             if (routeUserToProfileCompletion(localDemoUser)) {
@@ -11267,7 +11571,7 @@ function wireAuth(mode) {
             toast("This account uses Google sign-in. Use Continue with Google.");
             return;
           }
-          toast(error?.message || "Invalid credentials.");
+          toast(isSupabaseAccessRevokedMessage(error) ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE : (error?.message || "Invalid credentials."));
           return;
         }
 
@@ -11295,7 +11599,7 @@ function wireAuth(mode) {
         navigate(user.role === "admin" ? "admin" : "dashboard");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
-        toast(error?.message || "Login failed. Please try again.");
+        toast(isSupabaseAccessRevokedMessage(error) ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE : (error?.message || "Login failed. Please try again."));
       } finally {
         lockAuthForm(form, false);
       }
@@ -13532,6 +13836,8 @@ function renderSession() {
   const mappedCourse = getQbankCourseTopicMeta(question).course;
   const questionCourse = String(question.qbankCourse || question.course || "").trim();
   const currentCourse = mappedCourse || questionCourse;
+  const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
+  const hasAskAiLink = Boolean(askAiUrl);
   const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
   const countdownSeconds = Math.max(
     0,
@@ -13647,7 +13953,10 @@ function renderSession() {
                     type="button"
                     class="exam-ask-ai-btn"
                     data-action="open-course-ai"
-                    title="${currentCourse ? `Open Ask AI for ${escapeHtml(currentCourse)}` : "Open Ask AI"}"
+                    title="${hasAskAiLink
+      ? (currentCourse ? `Open Ask AI for ${escapeHtml(currentCourse)}` : "Open Ask AI")
+      : "Ask AI is unavailable until an admin assigns a link."}"
+                    ${hasAskAiLink ? "" : "disabled"}
                   >
                     <span class="exam-ask-ai-spark" aria-hidden="true">✦</span>
                     <span>Ask AI</span>
@@ -13965,6 +14274,10 @@ async function handleSessionClick(event) {
       return;
     }
     const notebookUrl = resolveAskAiNotebookUrlForQuestion(question);
+    if (!notebookUrl) {
+      toast("Ask AI is unavailable until an admin assigns a link.");
+      return;
+    }
     const opened = openAskAiNotebook(notebookUrl);
     if (!opened) {
       toast("Popup blocked, so Ask AI tab did not open. Allow popups and try again.");
@@ -15620,41 +15933,54 @@ function renderAdmin() {
             </label>
           </div>
         </div>
-        <form id="admin-add-user-form" style="margin-top: 0.85rem;">
-          <div class="form-row">
-            <label>Full name <input name="name" required /></label>
-            <label>Email <input type="email" name="email" required /></label>
+        <details id="admin-add-user-disclosure" class="admin-user-create-panel" style="margin-top: 0.85rem;" ${state.adminAddUserPanelOpen ? "open" : ""}>
+          <summary class="admin-user-create-toggle">
+            <span class="admin-user-create-toggle-main">
+              <span class="admin-user-create-chevron" aria-hidden="true"></span>
+              <span class="admin-user-create-toggle-copy">
+                <b>Add new user</b>
+                <small>Create a student or admin account only when needed.</small>
+              </span>
+            </span>
+          </summary>
+          <div class="admin-user-create-panel-body">
+            <form id="admin-add-user-form">
+              <div class="form-row">
+                <label>Full name <input name="name" required /></label>
+                <label>Email <input type="email" name="email" required /></label>
+              </div>
+              <div class="form-row">
+                <label>Password <input type="password" name="password" minlength="6" required /></label>
+                <label>Role
+                  <select name="role">
+                    <option value="student">Student</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+              </div>
+              <div class="form-row">
+                <label>Year
+                  <select name="academicYear">
+                    <option value="1">Year 1</option>
+                    <option value="2">Year 2</option>
+                    <option value="3">Year 3</option>
+                    <option value="4">Year 4</option>
+                    <option value="5">Year 5</option>
+                  </select>
+                </label>
+                <label>Semester
+                  <select name="academicSemester">
+                    <option value="1">Semester 1</option>
+                    <option value="2">Semester 2</option>
+                  </select>
+                </label>
+              </div>
+              <div class="stack">
+                <button class="btn" type="submit">Add user</button>
+              </div>
+            </form>
           </div>
-          <div class="form-row">
-            <label>Password <input type="password" name="password" minlength="6" required /></label>
-            <label>Role
-              <select name="role">
-                <option value="student">Student</option>
-                <option value="admin">Admin</option>
-              </select>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Year
-              <select name="academicYear">
-                <option value="1">Year 1</option>
-                <option value="2">Year 2</option>
-                <option value="3">Year 3</option>
-                <option value="4">Year 4</option>
-                <option value="5">Year 5</option>
-              </select>
-            </label>
-            <label>Semester
-              <select name="academicSemester">
-                <option value="1">Semester 1</option>
-                <option value="2">Semester 2</option>
-              </select>
-            </label>
-          </div>
-          <div class="stack">
-            <button class="btn" type="submit">Add user</button>
-          </div>
-        </form>
+        </details>
 
         <form id="admin-user-filter-form" class="admin-users-filter-form" style="margin-top: 0.95rem;">
           <div class="form-row">
@@ -18094,7 +18420,7 @@ function wireAdmin() {
       if (!window.confirm(`Delete all topics from "${course}"? Questions will be reassigned to the default topic.`)) {
         return;
       }
-      applyCourseTopicsUpdate(course, []);
+      applyCourseTopicsUpdate(course, [], { allowQuestionTopicCollapse: true });
       rerenderCoursesPage();
       try {
         await flushPendingSyncNow();
@@ -18205,6 +18531,7 @@ function wireAdmin() {
     applyCourseTopicsUpdate(
       course,
       topics.filter((_, idx) => idx !== topicIndex),
+      { allowQuestionTopicCollapse: true },
     );
     rerenderCoursesPage();
     try {
@@ -18291,6 +18618,14 @@ function wireAdmin() {
     root.addEventListener("keydown", handleAdminCourseKeydown);
   });
 
+  const addUserDisclosure = document.getElementById("admin-add-user-disclosure");
+  addUserDisclosure?.addEventListener("toggle", () => {
+    if (!(addUserDisclosure instanceof HTMLDetailsElement)) {
+      return;
+    }
+    state.adminAddUserPanelOpen = addUserDisclosure.open;
+  });
+
   const addUserForm = document.getElementById("admin-add-user-form");
   addUserForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -18347,12 +18682,14 @@ function wireAdmin() {
       createdAt: nowISO(),
     });
     save(STORAGE_KEYS.users, users);
+    state.adminAddUserPanelOpen = false;
     try {
       await flushPendingSyncNow();
       toast("User added.");
       render();
     } catch (syncError) {
       toast(`User added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      render();
     }
   });
 
@@ -18428,12 +18765,13 @@ function wireAdmin() {
 
     save(STORAGE_KEYS.users, users);
     await syncUsersBackupState(users);
+    const authAccessResult = await syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users });
     try {
       await flushPendingSyncNow();
       toast(
         skippedCount
-          ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).`
-          : `${approvedCount} pending account(s) approved.`,
+          ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped (missing database profile).${describeAuthAccessSyncOutcome(authAccessResult)}`
+          : `${approvedCount} pending account(s) approved.${describeAuthAccessSyncOutcome(authAccessResult)}`,
       );
       render();
     } catch (syncError) {
@@ -18645,6 +18983,11 @@ function wireAdmin() {
 
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users);
+      const authAccessTargetIds = deactivationQueuedForSync ? profileIds : [...updatedProfileIds];
+      const authAccessResult = await syncSupabaseAuthAccessForTargets(authAccessTargetIds, false, {
+        users,
+        queueAll: deactivationQueuedForSync,
+      });
       state.adminSelectedUserIds = [];
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: !deactivationQueuedForSync });
@@ -18652,11 +18995,15 @@ function wireAdmin() {
         if (deactivationQueuedForSync) {
           toast(
             skippedCount
-              ? `${deactivatedCount} account(s) deactivated locally and queued for cloud sync. ${skippedCount} skipped.`
-              : `${deactivatedCount} account(s) deactivated locally and queued for cloud sync.`,
+              ? `${deactivatedCount} account(s) deactivated locally and queued for cloud sync. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
+              : `${deactivatedCount} account(s) deactivated locally and queued for cloud sync.${describeAuthAccessSyncOutcome(authAccessResult)}`,
           );
         } else {
-          toast(skippedCount ? `${deactivatedCount} account(s) deactivated. ${skippedCount} skipped.` : `${deactivatedCount} account(s) deactivated.`);
+          toast(
+            skippedCount
+              ? `${deactivatedCount} account(s) deactivated. ${skippedCount} skipped.${describeAuthAccessSyncOutcome(authAccessResult)}`
+              : `${deactivatedCount} account(s) deactivated.${describeAuthAccessSyncOutcome(authAccessResult)}`,
+          );
         }
       } catch (syncError) {
         finishAdminUserBulkAction();
@@ -18982,12 +19329,20 @@ function wireAdmin() {
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
       await syncUsersBackupState(users);
+      const authAccessResult = await syncSupabaseAuthAccessForTargets(
+        isUuidValue(targetProfileId) ? [targetProfileId] : [],
+        nextApproved,
+        {
+          users,
+          queueAll: approvalQueuedForSync,
+        },
+      );
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: !approvalQueuedForSync });
         toast(
           approvalQueuedForSync
-            ? (nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync.")
-            : (nextApproved ? "Account approved." : "Account suspended."),
+            ? `${nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync."}${describeAuthAccessSyncOutcome(authAccessResult)}`
+            : `${nextApproved ? "Account approved." : "Account suspended."}${describeAuthAccessSyncOutcome(authAccessResult)}`,
         );
         render();
       } catch (syncError) {
@@ -20154,6 +20509,22 @@ function normalizePendingAdminActionEntry(entry) {
       queuedAt: normalizedQueuedAt,
     };
   }
+  if (type === "set-access") {
+    if (!isUuidValue(targetAuthId) || typeof entry.approved !== "boolean") {
+      return null;
+    }
+    return {
+      id: String(entry.id || makeId("admin_action")).trim() || makeId("admin_action"),
+      type,
+      targetAuthId,
+      targetProfileId: isUuidValue(targetProfileId) ? targetProfileId : targetAuthId,
+      targetLocalUserId,
+      email: String(entry.email || "").trim().toLowerCase(),
+      password: "",
+      approved: Boolean(entry.approved),
+      queuedAt: normalizedQueuedAt,
+    };
+  }
   if (type === "delete-user") {
     if (!targetLocalUserId && !isUuidValue(targetAuthId) && !isUuidValue(targetProfileId)) {
       return null;
@@ -20210,7 +20581,7 @@ function queuePendingAdminAction(action) {
   }
   const existingQueue = getPendingAdminActionQueue();
   if (
-    normalized.type === "set-password"
+    ["set-password", "set-access"].includes(normalized.type)
     && existingQueue.some((entry) => entry.type === "delete-user" && isSamePendingAdminActionTarget(entry, normalized))
   ) {
     return true;
@@ -20242,6 +20613,82 @@ function clearPendingAdminActionsForTarget(action) {
   }
   savePendingAdminActionQueue(nextQueue);
   return true;
+}
+
+function queuePendingAccessSyncActions(targetAuthIds, approved, usersByProfileId = new Map()) {
+  const ids = [...new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  ids.forEach((targetAuthId) => {
+    const matchingUser = usersByProfileId instanceof Map ? usersByProfileId.get(targetAuthId) : null;
+    queuePendingAdminAction({
+      type: "set-access",
+      targetAuthId,
+      targetProfileId: targetAuthId,
+      targetLocalUserId: String(matchingUser?.id || "").trim(),
+      email: String(matchingUser?.email || "").trim().toLowerCase(),
+      approved,
+    });
+  });
+  return ids;
+}
+
+async function syncSupabaseAuthAccessForTargets(targetAuthIds, approved, options = {}) {
+  const ids = [...new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  if (!ids.length) {
+    return { ok: true, updatedIds: [], notFoundIds: [], failedIds: [], queuedIds: [], message: "" };
+  }
+
+  const usersList = Array.isArray(options?.users) ? options.users : getUsers();
+  const usersByProfileId = new Map(
+    usersList
+      .map((entry) => [String(getUserProfileId(entry) || "").trim(), entry])
+      .filter(([profileId]) => isUuidValue(profileId)),
+  );
+  const queueFailures = options?.queueFailures !== false;
+  const queueAll = Boolean(options?.queueAll);
+  if (queueAll) {
+    const queuedIds = queuePendingAccessSyncActions(ids, approved, usersByProfileId);
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, queuedIds, message: "Account access changes were queued for Supabase sync." };
+  }
+
+  const result = await setSupabaseAuthUserAccessAsAdmin(ids, approved);
+  const updatedIds = [...new Set((Array.isArray(result?.updatedIds) ? result.updatedIds : []).filter((entry) => ids.includes(entry)))];
+  const notFoundIds = [...new Set((Array.isArray(result?.notFoundIds) ? result.notFoundIds : []).filter((entry) => ids.includes(entry)))];
+  const failedIds = [...new Set(
+    (Array.isArray(result?.failedIds) ? result.failedIds : ids.filter((entry) => !updatedIds.includes(entry) && !notFoundIds.includes(entry)))
+      .filter((entry) => ids.includes(entry)),
+  )];
+  const queuedIds = queueFailures && failedIds.length
+    ? queuePendingAccessSyncActions(failedIds, approved, usersByProfileId)
+    : [];
+  return {
+    ok: Boolean(result?.ok) && !failedIds.length,
+    updatedIds,
+    notFoundIds,
+    failedIds,
+    queuedIds,
+    message: String(result?.message || "").trim(),
+  };
+}
+
+function describeAuthAccessSyncOutcome(result) {
+  const queuedCount = Array.isArray(result?.queuedIds) ? result.queuedIds.length : 0;
+  const failedCount = Array.isArray(result?.failedIds) ? result.failedIds.length : 0;
+  const unsyncedCount = Math.max(0, failedCount - queuedCount);
+  if (unsyncedCount) {
+    return ` Auth access sync failed for ${unsyncedCount} account(s).`;
+  }
+  if (queuedCount) {
+    return ` Auth access sync queued for ${queuedCount} account(s).`;
+  }
+  return "";
 }
 
 function getPendingDeletedAdminTargets() {
@@ -21370,6 +21817,26 @@ function isInvalidJwtMessage(message) {
     || (text.includes("jwt") && text.includes("malformed"));
 }
 
+function isSupabaseAccessRevokedMessage(errorOrMessage) {
+  const code = String(errorOrMessage?.code || "").trim().toLowerCase();
+  if (code === "user_banned") {
+    return true;
+  }
+  const text = String(
+    typeof errorOrMessage === "string"
+      ? errorOrMessage
+      : (errorOrMessage?.message || errorOrMessage?.error_description || errorOrMessage?.error || ""),
+  ).trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return text.includes("user_banned")
+    || text.includes("user is banned")
+    || text.includes("banned user")
+    || text.includes("account has been disabled")
+    || text.includes("account is disabled");
+}
+
 function normalizeApiBaseUrl(baseUrl) {
   const raw = String(baseUrl || "").trim();
   if (!raw) {
@@ -21855,6 +22322,230 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
     return { ok: false, message: "Could not update Supabase user password." };
   } catch (error) {
     return { ok: false, message: error?.message || "Unexpected error during Supabase password update." };
+  }
+}
+
+async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
+  const ids = [...new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  if (!ids.length) {
+    return { ok: true, updatedIds: [], notFoundIds: [], failedIds: [], message: "" };
+  }
+  if (typeof approved !== "boolean") {
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: "approved must be a boolean value." };
+  }
+
+  const normalizeAccessResult = (payload, fallbackMessage = "") => {
+    const updatedIds = [...new Set(
+      (Array.isArray(payload?.updatedIds) ? payload.updatedIds : [])
+        .map((entry) => String(entry || "").trim())
+        .filter((entry) => isUuidValue(entry) && ids.includes(entry)),
+    )];
+    const notFoundIds = [...new Set(
+      (Array.isArray(payload?.notFoundIds) ? payload.notFoundIds : [])
+        .map((entry) => String(entry || "").trim())
+        .filter((entry) => isUuidValue(entry) && ids.includes(entry)),
+    )];
+    const explicitFailedIds = [...new Set(
+      (Array.isArray(payload?.failedIds) ? payload.failedIds : [])
+        .map((entry) => String(entry || "").trim())
+        .filter((entry) => isUuidValue(entry) && ids.includes(entry)),
+    )];
+    const failedIds = explicitFailedIds.length
+      ? explicitFailedIds
+      : ids.filter((entry) => !updatedIds.includes(entry) && !notFoundIds.includes(entry));
+    const message = String(payload?.error || payload?.message || fallbackMessage || "").trim();
+    return {
+      ok: !failedIds.length,
+      updatedIds,
+      notFoundIds,
+      failedIds,
+      message,
+    };
+  };
+
+  const authClient = getSupabaseAuthClient();
+  if (!authClient) {
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: "Supabase auth client is not available." };
+  }
+
+  try {
+    const serverSetAccessUrl = buildServerApiUrl("/admin-set-user-access");
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    if (!serverSetAccessUrl && !hasLegacySupabaseFunction) {
+      return {
+        ok: false,
+        updatedIds: [],
+        notFoundIds: [],
+        failedIds: ids,
+        message: "No admin access endpoint is configured in this app.",
+      };
+    }
+    const actingUser = getCurrentUser();
+    const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!actingUser || actingUser.role !== "admin") {
+      return {
+        ok: false,
+        updatedIds: [],
+        notFoundIds: [],
+        failedIds: ids,
+        message: "Account access updates require a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tokenResult = await getValidSupabaseAccessToken(authClient);
+      if (!tokenResult.ok) {
+        return {
+          ok: false,
+          updatedIds: [],
+          notFoundIds: [],
+          failedIds: ids,
+          message: tokenResult.message || "Could not verify Supabase session.",
+        };
+      }
+      const actingProfileId = String(tokenResult.sessionUserId || "").trim();
+      if (!isUuidValue(actingProfileId)) {
+        return {
+          ok: false,
+          updatedIds: [],
+          notFoundIds: [],
+          failedIds: ids,
+          message: "Account access updates require a signed-in Supabase admin account. Log out and sign in again.",
+        };
+      }
+      supabaseAuth.activeUserId = actingProfileId;
+      if (tokenResult.sessionUserId && tokenResult.sessionUserId !== actingProfileId) {
+        return {
+          ok: false,
+          updatedIds: [],
+          notFoundIds: [],
+          failedIds: ids,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+      if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
+        return {
+          ok: false,
+          updatedIds: [],
+          notFoundIds: [],
+          failedIds: ids,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+
+      let response = null;
+      let payload = null;
+      let details = "";
+      let serverErrorMessage = "";
+
+      if (serverSetAccessUrl) {
+        try {
+          response = await fetchWithTimeout(serverSetAccessUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenResult.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetAuthIds: ids, approved }),
+          });
+          payload = await readJsonResponseSafe(response);
+          details = await getResponseDetails(response, payload);
+        } catch (serverError) {
+          response = null;
+          payload = null;
+          details = "";
+          serverErrorMessage = getErrorMessage(serverError, "Server API request failed.");
+        }
+
+        const canFallbackToLegacy = Boolean(response)
+          && hasLegacySupabaseFunction
+          && (
+            response.status === 404
+            || response.status === 405
+            || response.status === 501
+            || response.status >= 500
+            || /missing required environment variable/i.test(details)
+          );
+        if (canFallbackToLegacy || (!response && hasLegacySupabaseFunction)) {
+          response = null;
+          payload = null;
+          details = "";
+        }
+      }
+
+      if (!response) {
+        if (!hasLegacySupabaseFunction) {
+          return {
+            ok: false,
+            updatedIds: [],
+            notFoundIds: [],
+            failedIds: ids,
+            message: serverErrorMessage || "Admin access API is unavailable. Configure serverApiBaseUrl and retry.",
+          };
+        }
+        response = await fetchWithTimeout(`${SUPABASE_CONFIG.url}/functions/v1/admin-set-user-access`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            apikey: SUPABASE_CONFIG.anonKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ targetAuthIds: ids, approved }),
+        });
+        payload = await readJsonResponseSafe(response);
+        details = await getResponseDetails(response, payload);
+      }
+
+      const normalizedResult = normalizeAccessResult(payload, details || `Admin access request failed (${response.status}).`);
+      if (response.ok) {
+        return normalizedResult;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        if (attempt === 0 && isInvalidJwtMessage(details)) {
+          await runWithTimeoutResult(
+            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            "Supabase session refresh timed out.",
+          );
+          continue;
+        }
+        if (attempt === 0 && !details) {
+          await runWithTimeoutResult(
+            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            "Supabase session refresh timed out.",
+          );
+          continue;
+        }
+        const authMessage = isInvalidJwtMessage(details)
+          ? "Supabase session expired. Log out and log in again with your Supabase admin account."
+          : (details || "Unauthorized. Log out and log in again with your Supabase admin account.");
+        return {
+          ok: false,
+          updatedIds: normalizedResult.updatedIds,
+          notFoundIds: normalizedResult.notFoundIds,
+          failedIds: normalizedResult.failedIds,
+          message: authMessage,
+        };
+      }
+
+      return {
+        ok: false,
+        updatedIds: normalizedResult.updatedIds,
+        notFoundIds: normalizedResult.notFoundIds,
+        failedIds: normalizedResult.failedIds,
+        message: normalizedResult.message,
+      };
+    }
+
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: "Could not update Supabase user access." };
+  } catch (error) {
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: error?.message || "Unexpected error during Supabase auth access update." };
   }
 }
 
@@ -22518,14 +23209,174 @@ function resolveDefaultTopic(course, preferredTopic = "") {
   const topics = (QBANK_COURSE_TOPICS[course] || getDefaultTopicsForCourse(course)).filter(
     (topic) => !isRemovedTopicName(topic),
   );
-  if (preferredTopic && !isRemovedTopicName(preferredTopic) && topics.includes(preferredTopic)) {
-    return preferredTopic;
+  const canonicalTopic = findMatchingTopicNameInList(topics, preferredTopic);
+  if (canonicalTopic && !isRemovedTopicName(canonicalTopic)) {
+    return canonicalTopic;
   }
   return topics[0] || "Clinical Applications";
 }
 
 function hasAny(text, needles) {
   return needles.some((needle) => text.includes(needle));
+}
+
+function buildQuestionTopicCatalogForCourse(course, questions = []) {
+  const orderedTopics = [];
+  const seen = new Set();
+  (Array.isArray(questions) ? questions : []).forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    if (meta.course !== course) {
+      return;
+    }
+    const topic = String(meta.topic || question?.qbankTopic || question?.topic || "").trim();
+    const topicKey = normalizeTopicKey(topic);
+    if (!topic || !topicKey || isRemovedTopicName(topic) || seen.has(topicKey)) {
+      return;
+    }
+    seen.add(topicKey);
+    orderedTopics.push(topic);
+  });
+  return orderedTopics;
+}
+
+function buildQuestionTopicInferenceText(question) {
+  return [
+    question?.stem,
+    question?.system,
+    question?.topic,
+    question?.qbankTopic,
+    question?.objective,
+    question?.references,
+    ...(Array.isArray(question?.tags) ? question.tags : []),
+  ]
+    .map((entry) => String(entry || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function inferRecoveredTopicForQuestion(course, question) {
+  const recoveryRules = COURSE_TOPIC_RECOVERY_RULES[extractCourseCodeKey(course)] || [];
+  if (!recoveryRules.length) {
+    return "";
+  }
+  const text = buildQuestionTopicInferenceText(question);
+  if (!text) {
+    return "";
+  }
+  const matchedRule = recoveryRules.find((rule) => hasAny(text, rule.needles || []));
+  return String(matchedRule?.topic || "").trim();
+}
+
+function repairQuestionTopicAssignmentsForCourse(course, questions) {
+  const defaultTopicKeys = new Set(getDefaultTopicsForCourse(course).map((topic) => normalizeTopicKey(topic)));
+  const recoverySeed = getCourseTopicRecoverySeed(course);
+  if (!recoverySeed.length) {
+    return false;
+  }
+  let changed = false;
+  (Array.isArray(questions) ? questions : []).forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    if (meta.course !== course) {
+      return;
+    }
+    const currentTopic = String(question?.qbankTopic || question?.topic || "").trim();
+    const currentTopicKey = normalizeTopicKey(currentTopic);
+    const canonicalSeedTopic = findMatchingTopicNameInList(recoverySeed, currentTopic);
+    if (canonicalSeedTopic) {
+      if (question.qbankTopic !== canonicalSeedTopic || question.topic !== canonicalSeedTopic) {
+        question.qbankTopic = canonicalSeedTopic;
+        question.topic = canonicalSeedTopic;
+        changed = true;
+      }
+      return;
+    }
+    if (currentTopicKey && !defaultTopicKeys.has(currentTopicKey)) {
+      return;
+    }
+    const inferredTopic = inferRecoveredTopicForQuestion(course, question);
+    if (!inferredTopic) {
+      return;
+    }
+    if (question.qbankTopic !== inferredTopic || question.topic !== inferredTopic) {
+      question.qbankTopic = inferredTopic;
+      question.topic = inferredTopic;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function repairCourseTopicCatalogFromQuestions(options = {}) {
+  const questions = getQuestions();
+  if (!questions.length) {
+    return { questionsChanged: false, topicsChanged: false, repairedCourses: [] };
+  }
+
+  const persist = Boolean(options?.persist);
+  const repairedCourses = new Set();
+  let questionsChanged = false;
+  let topicsChanged = false;
+
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    if (repairQuestionTopicAssignmentsForCourse(course, questions)) {
+      questionsChanged = true;
+      repairedCourses.add(course);
+    }
+  });
+
+  if (questionsChanged) {
+    if (persist) {
+      save(STORAGE_KEYS.questions, questions);
+    } else {
+      saveLocalOnly(STORAGE_KEYS.questions, questions);
+    }
+  }
+
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    const defaultTopics = getDefaultTopicsForCourse(course);
+    const defaultTopicKeys = new Set(defaultTopics.map((topic) => normalizeTopicKey(topic)));
+    const currentTopics = normalizeCourseTopicList(COURSE_TOPIC_OVERRIDES[course] || [], course);
+    const currentHasOnlyDefault = currentTopics.length === defaultTopics.length && currentTopics.every(
+      (topic, index) => normalizeTopicKey(topic) === normalizeTopicKey(defaultTopics[index]),
+    );
+    const questionTopics = buildQuestionTopicCatalogForCourse(course, questions);
+    const specificQuestionTopics = questionTopics.filter((topic) => !defaultTopicKeys.has(normalizeTopicKey(topic)));
+    const recoverySeed = getCourseTopicRecoverySeed(course);
+    const shouldApplyRecoverySeed = recoverySeed.length && questionTopics.length && (
+      !specificQuestionTopics.length
+      || currentHasOnlyDefault
+    );
+    const nextTopics = orderCourseTopicsWithRecoverySeed(
+      course,
+      mergeUniqueCourseTopics(
+        course,
+        currentHasOnlyDefault && (specificQuestionTopics.length || shouldApplyRecoverySeed) ? [] : currentTopics,
+        shouldApplyRecoverySeed ? specificQuestionTopics : questionTopics,
+        shouldApplyRecoverySeed ? recoverySeed : [],
+      ),
+    );
+    if (JSON.stringify(nextTopics) === JSON.stringify(currentTopics)) {
+      return;
+    }
+    COURSE_TOPIC_OVERRIDES[course] = nextTopics;
+    topicsChanged = true;
+    repairedCourses.add(course);
+  });
+
+  if (topicsChanged) {
+    rebuildCurriculumCatalog();
+    if (persist) {
+      save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    } else {
+      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    }
+  }
+
+  return {
+    questionsChanged,
+    topicsChanged,
+    repairedCourses: [...repairedCourses],
+  };
 }
 
 function deepClone(value) {
@@ -22990,6 +23841,66 @@ function extractCourseCodeKey(courseName) {
   return match[1].toLowerCase().replace(/\s+/g, "");
 }
 
+function normalizeTopicKey(topicName) {
+  return String(topicName || "").trim().toLowerCase();
+}
+
+function findMatchingTopicNameInList(topicList, requestedTopic) {
+  const requestedKey = normalizeTopicKey(requestedTopic);
+  if (!requestedKey) {
+    return "";
+  }
+  return (Array.isArray(topicList) ? topicList : []).find((topic) => normalizeTopicKey(topic) === requestedKey) || "";
+}
+
+function getCourseTopicRecoverySeed(courseName) {
+  const courseCodeKey = extractCourseCodeKey(courseName);
+  const seededTopics = COURSE_TOPIC_RECOVERY_SEEDS[courseCodeKey];
+  return Array.isArray(seededTopics) ? [...seededTopics] : [];
+}
+
+function mergeUniqueCourseTopics(course, ...lists) {
+  const merged = [];
+  const seen = new Set();
+  lists.flat().forEach((entry) => {
+    const topic = String(entry || "").trim();
+    const topicKey = normalizeTopicKey(topic);
+    if (!topic || !topicKey || isRemovedTopicName(topic) || seen.has(topicKey)) {
+      return;
+    }
+    seen.add(topicKey);
+    merged.push(topic);
+  });
+  return normalizeCourseTopicList(merged, course);
+}
+
+function orderCourseTopicsWithRecoverySeed(course, topics) {
+  const normalizedTopics = normalizeCourseTopicList(topics, course);
+  const seededTopics = getCourseTopicRecoverySeed(course);
+  if (!seededTopics.length) {
+    return normalizedTopics;
+  }
+  const remainingByKey = new Map(normalizedTopics.map((topic) => [normalizeTopicKey(topic), topic]));
+  const ordered = [];
+  seededTopics.forEach((topic) => {
+    const topicKey = normalizeTopicKey(topic);
+    if (!remainingByKey.has(topicKey)) {
+      return;
+    }
+    ordered.push(remainingByKey.get(topicKey));
+    remainingByKey.delete(topicKey);
+  });
+  normalizedTopics.forEach((topic) => {
+    const topicKey = normalizeTopicKey(topic);
+    if (!remainingByKey.has(topicKey)) {
+      return;
+    }
+    ordered.push(remainingByKey.get(topicKey));
+    remainingByKey.delete(topicKey);
+  });
+  return ordered.length ? ordered : getDefaultTopicsForCourse(course);
+}
+
 function getCourseNotebookLinkForCourse(courseName) {
   const course = String(courseName || "").trim();
   if (!course) {
@@ -23027,25 +23938,14 @@ function getCourseNotebookLinkForCourse(courseName) {
   return "";
 }
 
-function getAnyCourseNotebookLink() {
-  for (const rawLink of Object.values(COURSE_NOTEBOOK_LINKS || {})) {
-    const normalized = normalizeCourseNotebookLink(rawLink);
-    if (normalized) {
-      return normalized;
-    }
-  }
-  return "";
-}
-
 function resolveAskAiNotebookUrlForQuestion(question) {
   const mappedCourse = getQbankCourseTopicMeta(question).course;
   const questionCourse = String(question?.qbankCourse || question?.course || "").trim();
   const preferredCourse = String(mappedCourse || questionCourse || "").trim();
-  const resolvedUrl = getCourseNotebookLinkForCourse(preferredCourse)
-    || getCourseNotebookLinkForCourse(questionCourse)
-    || getAnyCourseNotebookLink()
-    || ASK_AI_DEFAULT_URL;
-  return normalizeCourseNotebookLink(resolvedUrl) || ASK_AI_DEFAULT_URL;
+  return normalizeCourseNotebookLink(
+    getCourseNotebookLinkForCourse(preferredCourse)
+    || getCourseNotebookLinkForCourse(questionCourse),
+  );
 }
 
 function rebuildCurriculumCatalog() {
@@ -23236,14 +24136,28 @@ function applyCourseTopicsUpdate(course, nextTopics, options = {}) {
   if (!course || !CURRICULUM_COURSE_LIST.includes(course)) {
     return;
   }
+  const renamedFrom = String(options?.renamedFrom || "").trim();
+  const renamedTo = String(options?.renamedTo || "").trim();
+  const allowQuestionTopicCollapse = Boolean(options?.allowQuestionTopicCollapse);
+  const questions = getQuestions();
+  const requestedTopics = normalizeCourseTopicList(nextTopics, course);
+  const preservedQuestionTopics = allowQuestionTopicCollapse
+    ? []
+    : buildQuestionTopicCatalogForCourse(course, questions).map((topic) => {
+      if (renamedFrom && renamedTo && normalizeTopicKey(topic) === normalizeTopicKey(renamedFrom)) {
+        return renamedTo;
+      }
+      return topic;
+    });
   const previousTopics = [...(QBANK_COURSE_TOPICS[course] || [])];
-  COURSE_TOPIC_OVERRIDES[course] = normalizeCourseTopicList(nextTopics, course);
+  COURSE_TOPIC_OVERRIDES[course] = allowQuestionTopicCollapse
+    ? requestedTopics
+    : mergeUniqueCourseTopics(course, requestedTopics, preservedQuestionTopics);
   rebuildCurriculumCatalog();
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   syncTopicNewCatalogForCourse(course, previousTopics, COURSE_TOPIC_OVERRIDES[course], options);
   syncCourseTopicGroupsForCourse(course, options);
 
-  const questions = getQuestions();
   let questionsChanged = false;
   questions.forEach((question) => {
     const mappedCourse = String(question.qbankCourse || question.course || "").trim();
@@ -23255,7 +24169,17 @@ function applyCourseTopicsUpdate(course, nextTopics, options = {}) {
       question.course = course;
       questionsChanged = true;
     }
-    const normalizedTopic = resolveDefaultTopic(course, question.qbankTopic);
+    let nextTopic = String(question.qbankTopic || question.topic || "").trim();
+    if (renamedFrom && renamedTo && normalizeTopicKey(nextTopic) === normalizeTopicKey(renamedFrom)) {
+      nextTopic = renamedTo;
+    }
+    const canonicalTopic = findMatchingTopicNameInList(COURSE_TOPIC_OVERRIDES[course] || [], nextTopic);
+    const normalizedTopic = canonicalTopic
+      || (
+        allowQuestionTopicCollapse
+          ? resolveDefaultTopic(course, nextTopic)
+          : (nextTopic && !isRemovedTopicName(nextTopic) ? nextTopic : resolveDefaultTopic(course, nextTopic))
+      );
     if (question.qbankTopic !== normalizedTopic || question.topic !== normalizedTopic) {
       question.qbankTopic = normalizedTopic;
       question.topic = normalizedTopic;
@@ -25320,15 +26244,26 @@ async function loginAsDemo(email, password) {
   navigate(user.role === "admin" ? "admin" : "dashboard");
 }
 
-async function logout() {
-  const actor = getCurrentUser();
-  appendSystemLog("auth.logout", `User logged out: ${String(actor?.email || actor?.id || "unknown")}`, {
-    userId: String(actor?.id || ""),
-    role: String(actor?.role || ""),
-  }, { force: true });
+async function logout(options = {}) {
+  const actor = options?.actor || getCurrentUser();
+  const route = options?.route === "login" ? "login" : "landing";
+  const notice = typeof options?.message === "string" ? String(options.message || "").trim() : "Logged out.";
+  const isAccessRevoked = options?.reason === "access-revoked";
+  appendSystemLog(
+    isAccessRevoked ? "auth.access_revoked" : "auth.logout",
+    `${isAccessRevoked ? "User access revoked" : "User logged out"}: ${String(actor?.email || actor?.id || "unknown")}`,
+    {
+      userId: String(actor?.id || ""),
+      role: String(actor?.role || ""),
+    },
+    { force: true },
+  );
   const offlinePromise = markCurrentUserOffline().catch(() => { });
   const activityEndPromise = endCurrentUserActivitySession().catch(() => { });
   const authClient = getSupabaseAuthClient();
+  if (authClient) {
+    suppressSupabaseSignedOutRecovery = true;
+  }
   const signOutPromise = authClient
     ? authClient.auth.signOut().catch((error) => {
       console.warn("Supabase sign-out failed.", error?.message || error);
@@ -25340,6 +26275,8 @@ async function logout() {
   clearSupabaseSessionRecoveryRetry();
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
+  clearProfileAccessRealtimeSubscription();
+  clearStudentAccessPolling();
   clearStudentForceRefreshPolling();
   clearStudentBackgroundRefreshPolling();
   clearAdminPresencePolling();
@@ -25357,9 +26294,19 @@ async function logout() {
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
-  navigate("landing");
-  toast("Logged out.");
+  navigate(route);
+  if (notice) {
+    toast(notice);
+  }
   Promise.allSettled([offlinePromise, activityEndPromise, signOutPromise]).catch(() => { });
+}
+
+async function logoutDueToAccessRevocation(message = ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE) {
+  await logout({
+    route: "login",
+    message,
+    reason: "access-revoked",
+  });
 }
 
 function selectHtml(name, options, selected) {
@@ -25481,6 +26428,8 @@ function renderBootstrapFallback() {
   try {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    clearProfileAccessRealtimeSubscription();
+    clearStudentAccessPolling();
     setGoogleOAuthPendingState(false);
     clearAdminDashboardPolling();
     document.body.classList.remove("is-routing");

@@ -1853,6 +1853,70 @@ body.theme-comfort .maintenance-badge {
   gap: 0.72rem;
 }
 
+.admin-user-create-panel {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+}
+
+.admin-user-create-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  cursor: pointer;
+  padding: 0.78rem 0.9rem;
+  list-style: none;
+}
+
+.admin-user-create-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.admin-user-create-toggle-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.admin-user-create-chevron {
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 180ms ease;
+  color: var(--brand-strong);
+  flex: 0 0 auto;
+}
+
+.admin-user-create-panel[open] .admin-user-create-chevron {
+  transform: rotate(135deg);
+}
+
+.admin-user-create-toggle-copy {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.admin-user-create-toggle-copy small {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.admin-user-create-panel-body {
+  padding: 0 0.9rem 0.9rem;
+  border-top: 1px solid var(--line);
+}
+
+.admin-user-create-panel-body form {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding-top: 0.82rem;
+}
+
 .admin-user-search-field {
   grid-column: 1 / -1;
 }

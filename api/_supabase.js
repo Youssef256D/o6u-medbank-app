@@ -2,6 +2,7 @@
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
 
 // Simple in-memory rate limiter: max requests per IP within a sliding window.
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
@@ -240,6 +241,31 @@ async function updateAuthUserPassword(env, targetAuthId, password) {
   };
 }
 
+async function updateAuthUserAccess(env, targetAuthId, approved) {
+  const response = await fetch(`${env.supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(targetAuthId)}`, {
+    method: "PUT",
+    headers: {
+      apikey: env.serviceRoleKey,
+      Authorization: `Bearer ${env.serviceRoleKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ban_duration: approved ? "none" : ACCOUNT_DEACTIVATION_BAN_DURATION,
+    }),
+  });
+  const payload = await readJsonSafe(response);
+  const errorMessage = String(
+    payload?.msg || payload?.error_description || payload?.error || payload?.message || "",
+  ).trim();
+  const isNotFound = response.status === 404 || /not found/i.test(errorMessage);
+  return {
+    ok: response.ok,
+    notFound: isNotFound,
+    status: response.status,
+    error: errorMessage,
+  };
+}
+
 module.exports = {
   applyCorsHeaders,
   deleteAuthUser,
@@ -251,5 +277,6 @@ module.exports = {
   json,
   parseBearerToken,
   parseJsonBody,
+  updateAuthUserAccess,
   updateAuthUserPassword,
 };
