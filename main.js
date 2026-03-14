@@ -3433,6 +3433,16 @@ function queueSessionStateForCloud() {
 async function flushSessionStateSync() {
   clearSessionSyncTimer();
   if (sessionSyncRuntime.flushing || !queueSessionStateForCloud()) {
+    // If dirty but could not queue (e.g. relational sync not ready), schedule a retry
+    // so the session state eventually syncs once the connection is restored.
+    if (sessionSyncRuntime.dirty && !sessionSyncRuntime.flushing && !sessionSyncRuntime.timer) {
+      sessionSyncRuntime.timer = window.setTimeout(() => {
+        sessionSyncRuntime.timer = null;
+        flushSessionStateSync().catch((error) => {
+          console.warn("Deferred session sync failed.", error?.message || error);
+        });
+      }, SESSION_SYNC_FLUSH_MS);
+    }
     return;
   }
 
@@ -6541,6 +6551,15 @@ async function flushPendingSyncNow(options = {}) {
   const throwOnRelationalFailure = options?.throwOnRelationalFailure !== false;
   clearSessionSyncTimer();
   queueSessionStateForCloud();
+  // If session is still dirty (relational sync not ready), schedule a retry so it eventually syncs.
+  if (sessionSyncRuntime.dirty && !sessionSyncRuntime.flushing && !sessionSyncRuntime.timer) {
+    sessionSyncRuntime.timer = window.setTimeout(() => {
+      sessionSyncRuntime.timer = null;
+      flushSessionStateSync().catch((error) => {
+        console.warn("Deferred session sync failed.", error?.message || error);
+      });
+    }, SESSION_SYNC_FLUSH_MS);
+  }
   if (relationalSync.flushing) {
     for (let attempt = 0; attempt < 30 && relationalSync.flushing; attempt += 1) {
       // Wait briefly for an in-flight flush to finish before forcing another write-through.
