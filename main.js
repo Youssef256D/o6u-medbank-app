@@ -2072,7 +2072,12 @@ async function initSupabaseAuth() {
 
     const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
       const sessionUserId = String(session?.user?.id || "").trim();
-      supabaseAuth.activeUserId = isUuidValue(sessionUserId) ? sessionUserId : "";
+      // Only update activeUserId when we have a valid session or on explicit sign-out
+      // that won't be recovered. This prevents the status indicator from flapping
+      // orange/green during transient SIGNED_OUT events (e.g. token refresh).
+      if (isUuidValue(sessionUserId)) {
+        supabaseAuth.activeUserId = sessionUserId;
+      }
       if (session?.user) {
         clearSupabaseSessionRecoveryRetry();
         if (event === "TOKEN_REFRESHED") {
@@ -2150,7 +2155,10 @@ async function initSupabaseAuth() {
         const skipRecovery = suppressSupabaseSignedOutRecovery;
         suppressSupabaseSignedOutRecovery = false;
         resetPostAuthWarmupRuntimeState();
-        supabaseAuth.activeUserId = "";
+        // Do NOT clear activeUserId yet — keep it so the sync status indicator
+        // stays green/stable while we attempt session recovery. Only clear it
+        // after we confirm recovery failed, to prevent orange/green flapping.
+        const previousActiveUserId = supabaseAuth.activeUserId;
         setGoogleOAuthPendingState(false);
         setPasswordRecoveryPendingState(false);
         const recoveredSessionUser = skipRecovery ? null : await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
@@ -2194,6 +2202,8 @@ async function initSupabaseAuth() {
           render();
           return;
         }
+        // Recovery failed and no local session to preserve — clear activeUserId now.
+        supabaseAuth.activeUserId = "";
         clearNotificationRealtimeSubscription();
         clearSessionRealtimeSubscription();
         clearProfileAccessRealtimeSubscription();
@@ -3700,11 +3710,9 @@ function getRelevantCloudSyncFailureMessage(pendingBuckets) {
   if ((pendingBuckets?.adminPendingCount || 0) > 0) {
     candidates.push(adminActionRuntime.lastFailureMessage);
   }
-  candidates.push(
-    relationalSync.lastFailureMessage,
-    supabaseSync.lastFailureMessage,
-    adminActionRuntime.lastFailureMessage,
-  );
+  // Only include failure messages from engines that have pending work.
+  // Previously, stale failure messages from engines with nothing pending
+  // would keep the sync indicator stuck on "pending" or "warning".
   return candidates.find((entry) => String(entry || "").trim()) || "";
 }
 
@@ -3795,6 +3803,15 @@ function getCloudSyncStatusModel(user = null) {
     };
   }
   if (failureMessage && (Date.now() - lastFailureAt) <= 120000) {
+    // If there was a recent failure but last success is even more recent, show synced.
+    if (lastSuccessAt && lastSuccessAt >= lastFailureAt) {
+      return {
+        tone: "synced",
+        label: `Synced ${formatRelativeSyncTime(lastSuccessAt)}`,
+        detail: `Last successful sync: ${new Date(lastSuccessAt).toLocaleTimeString()}.`,
+        pendingCount: 0,
+      };
+    }
     return {
       tone: failureState.recoverable ? "pending" : "warning",
       label: failureState.recoverable ? "Cloud retrying" : "Cloud had a sync issue",
@@ -4436,6 +4453,11 @@ async function flushPendingAdminActionQueue(options = {}) {
 
     savePendingAdminActionQueue(remainingActions);
     if (remainingActions.length) {
+      // Update lastSuccessAt even for partial success so the status model
+      // can show progress rather than appearing completely stuck.
+      if (syncedCount > 0) {
+        adminActionRuntime.lastSuccessAt = Date.now();
+      }
       adminActionRuntime.lastFailureAt = Date.now();
       adminActionRuntime.lastFailureMessage = normalizeCloudSyncFailureMessage(
         failureMessage || "Queued admin actions are waiting for Supabase.",
@@ -6595,6 +6617,34 @@ async function flushPendingSyncNow(options = {}) {
   }
   await flushPendingNotificationReadSync().catch(() => { });
   await flushPendingNotificationOutbox().catch(() => { });
+  // Clear stale failure messages when all pending writes have been flushed.
+  // This ensures the status indicator returns to green ("Synced") immediately
+  // instead of showing a lingering "Cloud retrying" or "Pending" state.
+  const allSynced = !relationalSync.pendingWrites.size
+    && !supabaseSync.pendingWrites.size
+    && !getPendingAdminActionQueue().length
+    && !sessionSyncRuntime.dirty;
+  if (allSynced) {
+    const nowTs = Date.now();
+    if (relationalSync.lastFailureMessage) {
+      relationalSync.lastFailureAt = 0;
+      relationalSync.lastFailureMessage = "";
+      relationalSync.retryAt = 0;
+      relationalSync.lastSuccessAt = Math.max(relationalSync.lastSuccessAt, nowTs);
+    }
+    if (supabaseSync.lastFailureMessage) {
+      supabaseSync.lastFailureAt = 0;
+      supabaseSync.lastFailureMessage = "";
+      supabaseSync.retryAt = 0;
+      supabaseSync.lastSuccessAt = Math.max(supabaseSync.lastSuccessAt, nowTs);
+    }
+    if (adminActionRuntime.lastFailureMessage) {
+      adminActionRuntime.lastFailureAt = 0;
+      adminActionRuntime.lastFailureMessage = "";
+      adminActionRuntime.retryAt = 0;
+      adminActionRuntime.lastSuccessAt = Math.max(adminActionRuntime.lastSuccessAt, nowTs);
+    }
+  }
   scheduleSyncStatusUiRefresh();
   if (relationalError && throwOnRelationalFailure) {
     throw relationalError;
