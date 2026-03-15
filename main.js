@@ -26,6 +26,7 @@ const STORAGE_KEYS = {
   studentRefreshTrigger: "mcq_student_refresh_trigger",
   studentRefreshTriggerSeen: "mcq_student_refresh_trigger_seen",
   pendingAdminActions: "mcq_pending_admin_actions",
+  pendingQuestionDeletions: "mcq_pending_question_deletions",
 };
 
 const appEl = document.getElementById("app");
@@ -8076,24 +8077,11 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   });
 
   if (!payloadExternalIds.length) {
-    if (currentUser.role !== "admin") {
-      return;
-    }
-    const existingResult = await fetchRowsPaged((from, to) => (
-      client
-        .from("questions")
-        .select("id")
-        .order("id", { ascending: true })
-        .range(from, to)
-    ));
-    if (existingResult.error) {
-      throw existingResult.error;
-    }
-    const existingQuestionIds = (existingResult.data || [])
-      .map((row) => String(row?.id || "").trim())
-      .filter(isUuidValue);
-    await deleteRelationalQuestionsAndDependents(client, existingQuestionIds);
-    saveLocalOnly(STORAGE_KEYS.questions, []);
+    // Safety: NEVER delete all questions from DB when local payload is empty.
+    // An empty local array is almost always a data-loss scenario (localStorage
+    // cleared, race condition, partial load) — not an intentional "delete all".
+    // Explicit per-course or bulk deletes are tracked via the deletion queue.
+    console.warn("syncQuestionsToRelational: payload is empty — skipping sync to prevent accidental DB wipe.");
     return;
   }
 
@@ -8135,41 +8123,41 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       persistedQuestions.push(...persistedBatch);
     }
   }
+  // Only delete questions that were *explicitly* deleted by the admin via the
+  // UI (single delete, bulk delete, "Delete all questions" per course).
+  // Previously this code diffed local vs DB and deleted anything missing
+  // locally, which caused catastrophic data loss when local storage was
+  // incomplete (e.g., race condition, localStorage cleared, partial load).
   if (currentUser.role === "admin") {
-    const externalIdSet = new Set(payloadExternalIds);
-    const persistedQuestionIdSet = new Set(
-      (persistedQuestions || [])
-        .map((entry) => String(entry?.id || "").trim())
-        .filter(isUuidValue),
-    );
-    const existingQuestionsResult = await fetchRowsPaged((from, to) => (
-      client
-        .from("questions")
-        .select("id,external_id")
-        .order("id", { ascending: true })
-        .range(from, to)
-    ));
-    if (existingQuestionsResult.error) {
-      throw existingQuestionsResult.error;
+    const pendingDeletions = getPendingQuestionDeletions();
+    if (pendingDeletions.length) {
+      // Look up the DB UUIDs for the external IDs queued for deletion.
+      const deleteDbIds = [];
+      const processedExternalIds = [];
+      for (const extIdBatch of splitIntoBatches(pendingDeletions, RELATIONAL_IN_BATCH_SIZE)) {
+        const matchRows = await runRelationalQueryWithTimeout(
+          client
+            .from("questions")
+            .select("id,external_id")
+            .in("external_id", extIdBatch),
+          "Question deletion lookup timed out.",
+        );
+        (matchRows || []).forEach((row) => {
+          if (isUuidValue(row?.id)) {
+            deleteDbIds.push(row.id);
+          }
+          const extId = String(row?.external_id || "").trim();
+          if (extId) {
+            processedExternalIds.push(extId);
+          }
+        });
+      }
+      if (deleteDbIds.length) {
+        await deleteRelationalQuestionsAndDependents(client, deleteDbIds);
+      }
+      // Clear the processed deletions (and any external IDs not found in DB).
+      clearQuestionDeletions(pendingDeletions);
     }
-    const existingQuestions = Array.isArray(existingQuestionsResult.data) ? existingQuestionsResult.data : [];
-    const deleteIds = existingQuestions
-      .filter((row) => {
-        const rowId = String(row?.id || "").trim();
-        const rowExternalId = String(row?.external_id || "").trim();
-        if (!isUuidValue(rowId)) {
-          return false;
-        }
-        if (persistedQuestionIdSet.has(rowId)) {
-          return false;
-        }
-        if (rowExternalId && externalIdSet.has(rowExternalId)) {
-          return false;
-        }
-        return true;
-      })
-      .map((row) => row.id);
-    await deleteRelationalQuestionsAndDependents(client, deleteIds);
   }
   const dbIdByExternalId = Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id]));
 
@@ -19114,6 +19102,7 @@ function wireAdmin() {
         return;
       }
       const removeSet = new Set(courseQuestions.map((question) => question.id));
+      queueQuestionDeletions([...removeSet]);
       const nextQuestions = questions.filter((question) => !removeSet.has(question.id));
       if (state.adminEditQuestionId && removeSet.has(state.adminEditQuestionId)) {
         state.adminEditQuestionId = null;
@@ -20644,6 +20633,7 @@ function wireAdmin() {
 
         if (actionType === "delete") {
           const nextQuestions = questions.filter((entry) => !selectedSet.has(String(entry.id || "").trim()));
+          queueQuestionDeletions([...selectedSet]);
           save(STORAGE_KEYS.questions, nextQuestions);
           if (state.adminEditQuestionId && selectedSet.has(String(state.adminEditQuestionId || "").trim())) {
             state.adminEditQuestionId = null;
@@ -20739,6 +20729,7 @@ function wireAdmin() {
 
     try {
       const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
+      queueQuestionDeletions([qid]);
       save(STORAGE_KEYS.questions, questions);
       state.adminSelectedQuestionIds = normalizeQuestionIdList(
         state.adminSelectedQuestionIds,
@@ -21356,6 +21347,37 @@ function normalizePendingAdminActionQueue(entries) {
     }
     return !deleteTargetKeys.has(targetKeyFor(entry));
   });
+}
+
+// --- Pending question deletion tracking ---
+// Tracks external IDs of questions explicitly deleted by the admin so
+// syncQuestionsToRelational can remove only those rows from the DB instead
+// of diffing the full local array against the DB (which caused accidental
+// mass deletion when local storage was incomplete).
+
+function getPendingQuestionDeletions() {
+  const raw = load(STORAGE_KEYS.pendingQuestionDeletions, []);
+  return Array.isArray(raw) ? [...new Set(raw.filter((id) => typeof id === "string" && id.trim()))] : [];
+}
+
+function savePendingQuestionDeletions(ids) {
+  const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id.trim()))];
+  saveLocalOnly(STORAGE_KEYS.pendingQuestionDeletions, unique);
+}
+
+function queueQuestionDeletions(externalIds) {
+  const current = getPendingQuestionDeletions();
+  const next = [...new Set([...current, ...(Array.isArray(externalIds) ? externalIds : []).filter((id) => typeof id === "string" && id.trim())])];
+  savePendingQuestionDeletions(next);
+}
+
+function clearQuestionDeletions(externalIds) {
+  const removeSet = new Set((Array.isArray(externalIds) ? externalIds : []).filter(Boolean));
+  if (!removeSet.size) {
+    return;
+  }
+  const current = getPendingQuestionDeletions();
+  savePendingQuestionDeletions(current.filter((id) => !removeSet.has(id)));
 }
 
 function getPendingAdminActionQueue() {
