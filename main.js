@@ -5007,9 +5007,15 @@ async function hydrateRelationalProfiles(currentUser) {
       phone: resolvedPhone,
       role,
       verified: true,
-      isApproved: Boolean(profile.approved),
-      approvedAt: profile.approved ? existing?.approvedAt || profile.created_at || nowISO() : null,
-      approvedBy: existing?.approvedBy || null,
+      isApproved: preferLocalOverDb && existing && typeof existing.isApproved === "boolean"
+        ? existing.isApproved
+        : Boolean(profile.approved),
+      approvedAt: (preferLocalOverDb && existing && existing.isApproved)
+        ? (existing.approvedAt || profile.created_at || nowISO())
+        : (profile.approved ? (existing?.approvedAt || profile.created_at || nowISO()) : null),
+      approvedBy: (preferLocalOverDb && existing && existing.isApproved)
+        ? (existing.approvedBy || null)
+        : (existing?.approvedBy || null),
       assignedCourses,
       academicYear: year,
       academicSemester: semester,
@@ -7479,7 +7485,7 @@ async function syncProfilesToRelational(usersPayload) {
       const hasExplicitApproval = typeof user.isApproved === "boolean";
       const shouldPersistApproval = isAdminSync || hasExplicitApproval || shouldAutoApproveStudentAccess(user);
       if (shouldPersistApproval) {
-        baseRow.approved = Boolean(isAdminSync ? isUserAccessApproved(user) : user.isApproved);
+        baseRow.approved = Boolean(user.isApproved);
       }
       return baseRow;
     })
