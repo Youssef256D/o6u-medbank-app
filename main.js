@@ -17842,7 +17842,7 @@ function renderAdmin() {
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
           <div id="admin-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: false })}</div>
-          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy || !canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
+          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${!canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
             ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh from cloud"}
           </button>
           <button class="btn ghost admin-btn-sm ${adminForceRefreshBusy ? "is-loading" : ""}" type="button" data-action="admin-force-student-refresh" ${adminForceRefreshBusy || !canForceStudentRefresh ? "disabled" : ""} ${!canForceStudentRefresh ? 'title="Supabase app-state sync must be active to broadcast this action."' : ""}>
@@ -18130,6 +18130,12 @@ function wireAdmin() {
         return;
       }
     }
+    // Clear all pending writes so the DB is treated as authoritative.
+    // This prevents stale local data from blocking or overwriting the refresh.
+    relationalSync.pendingWrites.clear();
+    clearRelationalFlushTimer();
+    // Reset the refreshing flag if a previous refresh got stuck.
+    state.adminDataRefreshing = false;
     // Ensure relational sync is re-checked after manual refresh.
     relationalSync.readyCheckedAt = 0;
     await ensureRelationalSyncReady({ force: true }).catch(() => { });
