@@ -6969,22 +6969,33 @@ async function uploadQuestionImageDataUrlToStorage(dataUrl, options = {}) {
   const fileId = sanitizeStoragePathSegment(makeId("qimg"), "qimg");
   const filePath = `questions/${userScope}/${Date.now()}-${fileId}.${extension}`;
 
-  const { error: uploadError } = await client.storage
-    .from(bucket)
-    .upload(filePath, blob, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: normalizedType || undefined,
-    });
+  const inlineUploadResult = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .upload(filePath, blob, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000),
+    "Image upload timed out.",
+  );
+  const uploadError = inlineUploadResult?.error || null;
   if (uploadError) {
     return { ok: false, message: getErrorMessage(uploadError, "Could not upload question image.") };
   }
 
   let lastSignedError = null;
   for (const expiresIn of QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS) {
-    const { data: signedData, error: signedError } = await client.storage
-      .from(bucket)
-      .createSignedUrl(filePath, expiresIn);
+    const inlineSignedResult = await runWithTimeoutResult(
+      client.storage
+        .from(bucket)
+        .createSignedUrl(filePath, expiresIn),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      "Signed URL generation timed out.",
+    );
+    const signedData = inlineSignedResult?.data || null;
+    const signedError = inlineSignedResult?.error || null;
     if (!signedError && signedData?.signedUrl) {
       return { ok: true, url: signedData.signedUrl };
     }
@@ -7332,13 +7343,18 @@ async function uploadQuestionImageFile(file) {
   const fileId = sanitizeStoragePathSegment(makeId("qimg"), "qimg");
   const filePath = `questions/${userScope}/${Date.now()}-${fileId}.${extension}`;
 
-  const { error: uploadError } = await client.storage
-    .from(bucket)
-    .upload(filePath, file, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: normalizedType || undefined,
-    });
+  const uploadResult = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000),
+    "Image upload timed out.",
+  );
+  const uploadError = uploadResult?.error || null;
 
   if (uploadError) {
     const bucketMissing = isStorageBucketMissingError(uploadError);
@@ -7363,9 +7379,15 @@ async function uploadQuestionImageFile(file) {
 
   let lastSignedError = null;
   for (const expiresIn of QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS) {
-    const { data: signedData, error: signedError } = await client.storage
-      .from(bucket)
-      .createSignedUrl(filePath, expiresIn);
+    const signedResult = await runWithTimeoutResult(
+      client.storage
+        .from(bucket)
+        .createSignedUrl(filePath, expiresIn),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      "Signed URL generation timed out.",
+    );
+    const signedData = signedResult?.data || null;
+    const signedError = signedResult?.error || null;
     if (!signedError && signedData?.signedUrl) {
       return { ok: true, url: signedData.signedUrl };
     }
