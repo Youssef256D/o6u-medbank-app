@@ -26662,7 +26662,7 @@ function buildAskAiPromptText(question) {
     })
     .filter(Boolean);
   const lines = [
-    "Please explain this MCQ and the reasoning behind the best answer.",
+    "Please explain this MCQ and the reasoning behind the best answer. Mention the source with the pages.",
     "",
     meta.course ? `Course: ${meta.course}` : "",
     meta.topic ? `Topic: ${meta.topic}` : "",
