@@ -2800,6 +2800,7 @@ body.theme-comfort .maintenance-badge {
   flex-direction: column;
   margin: 0 auto;
   width: min(1180px, calc(100vw - 2rem));
+  max-height: calc(100vh - max(1.6rem, env(safe-area-inset-top)) - max(2rem, env(safe-area-inset-bottom)) - 1rem);
   padding: 0.95rem;
   border: 1px solid var(--line);
   border-radius: 24px;
@@ -2831,8 +2832,13 @@ body.theme-comfort .maintenance-badge {
 }
 
 .admin-course-topic-modal-body {
-  overflow: visible;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding-right: 0.1rem;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .admin-course-details-modal {
