@@ -16726,8 +16726,11 @@ function renderAdmin() {
           </label>
           <p class="admin-question-selection-count">Selected: <b>${selectedUserCount}</b> • Showing <b>${filteredUsers.length}</b> of ${users.length}</p>
           <div class="stack">
-            <button class="btn danger admin-btn-sm ${bulkDeactivateRunning ? "is-loading" : ""}" type="button" data-action="admin-bulk-deactivate-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
-              ${bulkDeactivateRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Suspending...</span>` : "Suspend selected"}
+            <button class="btn admin-btn-sm ${bulkDeactivateRunning && state.adminBulkActionType === "approve" ? "is-loading" : ""}" type="button" data-action="admin-bulk-approve-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
+              ${bulkDeactivateRunning && state.adminBulkActionType === "approve" ? `<span class="inline-loader" aria-hidden="true"></span><span>Approving...</span>` : "Approve selected"}
+            </button>
+            <button class="btn danger admin-btn-sm ${bulkDeactivateRunning && state.adminBulkActionType !== "approve" ? "is-loading" : ""}" type="button" data-action="admin-bulk-deactivate-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
+              ${bulkDeactivateRunning && state.adminBulkActionType !== "approve" ? `<span class="inline-loader" aria-hidden="true"></span><span>Suspending...</span>` : "Suspend selected"}
             </button>
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-user-selection" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>Clear selection</button>
           </div>
@@ -19471,6 +19474,7 @@ function wireAdmin() {
   const getSelectedVisibleUserIds = () => normalizeAdminUserIdList(state.adminSelectedUserIds, getVisibleSelectableUserIdSet());
   const finishAdminUserBulkAction = () => {
     state.adminUserBulkActionRunning = false;
+    state.adminBulkActionType = "";
     state.skipNextRouteAnimation = true;
     render();
   };
@@ -19568,7 +19572,7 @@ function wireAdmin() {
       return;
     }
     const action = String(actionEl.getAttribute("data-action") || "").trim();
-    if (!["admin-clear-user-selection", "admin-bulk-deactivate-users"].includes(action)) {
+    if (!["admin-clear-user-selection", "admin-bulk-deactivate-users", "admin-bulk-approve-users"].includes(action)) {
       return;
     }
 
@@ -19591,17 +19595,96 @@ function wireAdmin() {
       return;
     }
 
+    const isApproveAction = action === "admin-bulk-approve-users";
     const selectedIdSet = new Set(selectedIds);
     const current = getCurrentUser();
     const users = getUsers();
     const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
-    const deactivatableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
-    if (!deactivatableUsers.length) {
-      toast("Selected accounts cannot be suspended.");
+    const actionableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
+    if (!actionableUsers.length) {
+      toast(isApproveAction ? "Selected accounts cannot be approved." : "Selected accounts cannot be suspended.");
       return;
     }
 
-    const activeUsers = deactivatableUsers.filter((entry) => isUserAccessApproved(entry));
+    if (isApproveAction) {
+      // Approve selected users
+      const unapprovedUsers = actionableUsers.filter((entry) => !isUserAccessApproved(entry));
+      if (!unapprovedUsers.length) {
+        toast("Selected accounts are already approved.");
+        return;
+      }
+      const eligibleUsers = unapprovedUsers.filter((entry) => entry.role === "admin" || hasCompleteStudentProfile(entry));
+      if (!eligibleUsers.length) {
+        toast("Selected users must complete phone number, year, and semester before approval.");
+        return;
+      }
+      if (!window.confirm(`Approve ${eligibleUsers.length} selected account(s)?`)) {
+        return;
+      }
+
+      state.adminUserBulkActionRunning = true;
+      state.adminBulkActionType = "approve";
+      state.skipNextRouteAnimation = true;
+      render();
+
+      try {
+        const profileIds = eligibleUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
+        const dbResult = await updateRelationalProfileApproval(profileIds, true);
+        if (profileIds.length && !dbResult.ok) {
+          finishAdminUserBulkAction();
+          toast(`Database update failed. ${dbResult.message}`);
+          return;
+        }
+
+        const approvedProfileIds = new Set(dbResult.updatedIds || []);
+        const skippedProfileIds = new Set(dbResult.skippedIds || []);
+        const eligibleIdSet = new Set(eligibleUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
+        let approvedCount = 0;
+        let skippedCount = 0;
+        users.forEach((entry) => {
+          const entryId = String(entry.id || "").trim();
+          if (!eligibleIdSet.has(entryId) || isUserAccessApproved(entry)) {
+            return;
+          }
+          const authId = getUserProfileId(entry);
+          if (isUuidValue(authId) && !approvedProfileIds.has(authId)) {
+            if (skippedProfileIds.has(authId)) {
+              skippedCount += 1;
+            }
+            return;
+          }
+          entry.isApproved = true;
+          entry.approvedAt = nowISO();
+          entry.approvedBy = current?.email || "admin";
+          approvedCount += 1;
+        });
+        if (!approvedCount) {
+          finishAdminUserBulkAction();
+          toast("Selected users could not be approved.");
+          return;
+        }
+
+        save(STORAGE_KEYS.users, users);
+        state.adminSelectedUserIds = [];
+        finishAdminUserBulkAction();
+        toast(
+          skippedCount
+            ? `${approvedCount} account(s) approved. ${skippedCount} skipped.`
+            : `${approvedCount} account(s) approved.`,
+        );
+        // Sync in background — don't block the UI.
+        syncUsersBackupState(users).catch(() => { });
+        syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users }).catch(() => { });
+        flushPendingSyncInBackground();
+      } catch (bulkError) {
+        finishAdminUserBulkAction();
+        toast(`Could not approve selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
+      }
+      return;
+    }
+
+    // Suspend selected users
+    const activeUsers = actionableUsers.filter((entry) => isUserAccessApproved(entry));
     if (!activeUsers.length) {
       toast("Selected accounts are already suspended.");
       return;
@@ -19611,6 +19694,7 @@ function wireAdmin() {
     }
 
     state.adminUserBulkActionRunning = true;
+    state.adminBulkActionType = "suspend";
     state.skipNextRouteAnimation = true;
     render();
 
