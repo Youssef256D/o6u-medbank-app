@@ -11112,6 +11112,12 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       return usersRecovered;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing || isQuestionSyncBusy()) {
+      // When force-refreshing, drop pending question writes so the DB is treated
+      // as authoritative. This prevents stale local data from overwriting restored
+      // or updated questions in the database.
+      if (force && relationalSync.pendingWrites.has(STORAGE_KEYS.questions)) {
+        relationalSync.pendingWrites.delete(STORAGE_KEYS.questions);
+      }
       await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     }
 
@@ -11122,7 +11128,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions)
       || relationalSync.flushing
       || isQuestionSyncBusy();
-    const shouldHydrateQuestions = !hasPendingQuestionWrites && (
+    const shouldHydrateQuestions = (force || !hasPendingQuestionWrites) && (
       includeHeavyData
       || state.adminPage === "questions"
       || state.adminPage === "bulk-import"
