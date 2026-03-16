@@ -96,7 +96,7 @@ const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 8000;
 const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
-const STUDENT_FORCE_REFRESH_POLL_MS = 5000;
+const STUDENT_FORCE_REFRESH_POLL_MS = 2000;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
@@ -4728,7 +4728,12 @@ async function hydrateRelationalCoursesAndTopics() {
       curriculum[year][semester].push(courseName);
     }
     const topicsForCourse = (topicMapByCourseId[course.id] || []).filter(Boolean);
-    courseTopicOverrides[courseName] = topicsForCourse.length ? topicsForCourse : ["Clinical Applications"];
+    // Fall back to the existing local topics when Supabase returns none for
+    // this course (e.g. during a deactivation race or a partial sync failure).
+    const existingLocalTopics = Array.isArray(COURSE_TOPIC_OVERRIDES[courseName]) && COURSE_TOPIC_OVERRIDES[courseName].length
+      ? COURSE_TOPIC_OVERRIDES[courseName]
+      : ["Clinical Applications"];
+    courseTopicOverrides[courseName] = topicsForCourse.length ? topicsForCourse : existingLocalTopics;
   });
 
   // Merge any locally-pending topic additions that haven't synced yet.
@@ -8015,6 +8020,31 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     }
     topics = Array.isArray(refreshedTopics.data) ? refreshedTopics.data : [];
     rebuildCourseTopicIndexes();
+
+    // Persist auto-created topics into COURSE_TOPIC_OVERRIDES so that a
+    // subsequent syncCoursesTopicsToRelational call does not deactivate them.
+    const courseNameById = Object.fromEntries(
+      (courses || []).map((c) => [c.id, c.course_name]),
+    );
+    let addedTopicsToOverrides = false;
+    missingTopics.forEach((newTopic) => {
+      const courseName = courseNameById[newTopic.course_id];
+      if (!courseName) return;
+      const existing = COURSE_TOPIC_OVERRIDES[courseName] || [];
+      const existingKeys = new Set(
+        existing.map((t) => String(t || "").trim().toLowerCase()),
+      );
+      const key = String(newTopic.topic_name || "").trim().toLowerCase();
+      if (key && !existingKeys.has(key)) {
+        COURSE_TOPIC_OVERRIDES[courseName] = [...existing, newTopic.topic_name];
+        addedTopicsToOverrides = true;
+      }
+    });
+    if (addedTopicsToOverrides) {
+      rebuildCurriculumCatalog();
+      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+      scheduleRelationalWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    }
   }
 
   const questionSortOrderByExternalId = new Map(
