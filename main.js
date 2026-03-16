@@ -96,13 +96,14 @@ const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const STUDENT_DATA_REFRESH_MS = 8000;
 const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
-const STUDENT_FORCE_REFRESH_POLL_MS = 2000;
+const STUDENT_FORCE_REFRESH_POLL_MS = 500;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const SESSION_REALTIME_DEBOUNCE_MS = 900;
+const CONTENT_REALTIME_DEBOUNCE_MS = 300;
 const PROFILE_ACCESS_REALTIME_DEBOUNCE_MS = 180;
 const NOTIFICATION_FALLBACK_POLL_MS = 5000;
 const NOTIFICATION_YEAR_EXTERNAL_ID_PREFIX = "year";
@@ -426,6 +427,11 @@ let sessionRealtimeSubscribed = false;
 let sessionRealtimeHydrateTimer = null;
 let sessionRealtimeHydrateInFlight = false;
 let sessionRealtimeHydrateQueued = false;
+let contentRealtimeChannel = null;
+let contentRealtimeSubscriptionKey = "";
+let contentRealtimeSubscribed = false;
+let contentRealtimeHydrateTimer = null;
+let contentRealtimeHydrateInFlight = false;
 let profileAccessRealtimeChannel = null;
 let profileAccessRealtimeSubscriptionKey = "";
 let profileAccessRealtimeHydrateTimer = null;
@@ -2185,6 +2191,7 @@ async function initSupabaseAuth() {
         if (shouldPreserveLocalSession) {
           clearNotificationRealtimeSubscription();
           clearSessionRealtimeSubscription();
+          clearContentRealtimeSubscription();
           clearProfileAccessRealtimeSubscription();
           clearStudentAccessPolling();
           clearAdminPresencePolling();
@@ -2211,6 +2218,7 @@ async function initSupabaseAuth() {
         supabaseAuth.activeUserId = "";
         clearNotificationRealtimeSubscription();
         clearSessionRealtimeSubscription();
+        clearContentRealtimeSubscription();
         clearProfileAccessRealtimeSubscription();
         clearStudentAccessPolling();
         clearSupabaseSessionRecoveryRetry();
@@ -2259,6 +2267,7 @@ async function initSupabaseAuth() {
     setPasswordRecoveryPendingState(false);
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearStudentAccessPolling();
     supabaseAuth.enabled = false;
@@ -6611,7 +6620,7 @@ async function flushRelationalWrites(options = {}) {
         queueStudentRefreshSignal({
           changedKeys: [...syncedStorageKeys],
           reason: "admin_sync",
-          flushNow: false,
+          flushNow: true,
         });
       }
     }
@@ -9067,6 +9076,7 @@ function bindGlobalEvents() {
     flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
     endCurrentUserActivitySession().catch(() => { });
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
@@ -10041,6 +10051,117 @@ function ensureSessionRealtimeSubscription(user = null) {
   sessionRealtimeSubscriptionKey = nextKey;
 }
 
+function clearContentRealtimeHydrateTimer() {
+  if (contentRealtimeHydrateTimer) {
+    window.clearTimeout(contentRealtimeHydrateTimer);
+    contentRealtimeHydrateTimer = null;
+  }
+}
+
+function clearContentRealtimeSubscription() {
+  clearContentRealtimeHydrateTimer();
+  contentRealtimeHydrateInFlight = false;
+  contentRealtimeSubscriptionKey = "";
+  contentRealtimeSubscribed = false;
+  const activeChannel = contentRealtimeChannel;
+  contentRealtimeChannel = null;
+  if (!activeChannel) {
+    return;
+  }
+  const client = getSupabaseAuthClient();
+  if (client && typeof client.removeChannel === "function") {
+    Promise.resolve(client.removeChannel(activeChannel)).catch(() => {
+      if (typeof activeChannel.unsubscribe === "function") {
+        try {
+          activeChannel.unsubscribe();
+        } catch {
+          // Ignore realtime unsubscribe errors.
+        }
+      }
+    });
+    return;
+  }
+  if (typeof activeChannel.unsubscribe === "function") {
+    try {
+      activeChannel.unsubscribe();
+    } catch {
+      // Ignore realtime unsubscribe errors.
+    }
+  }
+}
+
+async function runContentRealtimeHydration() {
+  if (contentRealtimeHydrateInFlight) {
+    return;
+  }
+  const user = getCurrentUser();
+  if (!user || user.role !== "student") {
+    return;
+  }
+  contentRealtimeHydrateInFlight = true;
+  try {
+    await refreshStudentDataSnapshot(user, { force: true, rerender: true });
+  } finally {
+    contentRealtimeHydrateInFlight = false;
+  }
+}
+
+function scheduleContentRealtimeHydration(delayMs = CONTENT_REALTIME_DEBOUNCE_MS) {
+  clearContentRealtimeHydrateTimer();
+  contentRealtimeHydrateTimer = window.setTimeout(() => {
+    contentRealtimeHydrateTimer = null;
+    runContentRealtimeHydration().catch((error) => {
+      console.warn("Realtime content refresh failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function ensureContentRealtimeSubscription(user = null) {
+  const currentUser = user || getCurrentUser();
+  const client = getSupabaseAuthClient();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+    clearContentRealtimeSubscription();
+    return;
+  }
+
+  const nextKey = `student:${profileId}`;
+  if (contentRealtimeChannel && contentRealtimeSubscriptionKey === nextKey) {
+    return;
+  }
+
+  clearContentRealtimeSubscription();
+  const channel = client.channel(`content-live:${nextKey}`);
+  // Subscribe to question row changes so students see new/updated questions immediately.
+  channel.on(
+    "postgres_changes",
+    { event: "*", schema: "public", table: "questions" },
+    () => {
+      scheduleContentRealtimeHydration();
+    },
+  );
+  // Subscribe to topic changes so newly-added topics appear without any poll delay.
+  channel.on(
+    "postgres_changes",
+    { event: "*", schema: "public", table: "course_topics" },
+    () => {
+      scheduleContentRealtimeHydration();
+    },
+  );
+
+  channel.subscribe((status) => {
+    contentRealtimeSubscribed = status === "SUBSCRIBED";
+    if (status === "SUBSCRIBED") {
+      // Fetch immediately on subscription to catch any changes that happened
+      // between page load and realtime becoming active.
+      scheduleContentRealtimeHydration(0);
+    }
+  });
+
+  contentRealtimeChannel = channel;
+  contentRealtimeSubscriptionKey = nextKey;
+}
+
 function shouldTreatPresenceAsOnline(row) {
   const lastSeenMs = new Date(row?.last_seen_at || 0).getTime();
   return Boolean(row?.is_online) && Number.isFinite(lastSeenMs) && (Date.now() - lastSeenMs) <= PRESENCE_ONLINE_STALE_MS;
@@ -11000,10 +11121,11 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions) || relationalSync.flushing;
     let completedFullSync = false;
     if (needsFullSync) {
-      await hydrateRelationalCoursesAndTopics();
-      if (!hasPendingUserWrites) {
-        await hydrateRelationalProfiles(user);
-      }
+      // Run courses/topics and profiles in parallel — they are independent DB reads.
+      await Promise.all([
+        hydrateRelationalCoursesAndTopics(),
+        hasPendingUserWrites ? Promise.resolve() : hydrateRelationalProfiles(user),
+      ]);
       if (!hasPendingQuestionWrites) {
         await hydrateRelationalQuestions();
       }
@@ -11012,15 +11134,18 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     if (completedFullSync) {
       state.studentDataLastFullSyncAt = now;
     }
-    await hydrateRelationalNotifications(user);
-    await hydrateSupabaseSyncKeys([
-      STORAGE_KEYS.siteMaintenance,
-      STORAGE_KEYS.courseTopicGroups,
-      STORAGE_KEYS.courseNotebookLinks,
-      STORAGE_KEYS.topicNewCatalog,
-      STORAGE_KEYS.autoApproveStudentAccess,
-      STORAGE_KEYS.studentRefreshTrigger,
-    ]).catch(() => ({ hadRemoteData: false }));
+    // Run notifications and Supabase state keys in parallel — they are independent.
+    await Promise.all([
+      hydrateRelationalNotifications(user),
+      hydrateSupabaseSyncKeys([
+        STORAGE_KEYS.siteMaintenance,
+        STORAGE_KEYS.courseTopicGroups,
+        STORAGE_KEYS.courseNotebookLinks,
+        STORAGE_KEYS.topicNewCatalog,
+        STORAGE_KEYS.autoApproveStudentAccess,
+        STORAGE_KEYS.studentRefreshTrigger,
+      ]).catch(() => ({ hadRemoteData: false })),
+    ]);
     if (shouldForceStudentRefreshFromAdminTrigger(user)) {
       return true;
     }
@@ -11646,6 +11771,7 @@ function syncTopbar() {
   ensureStudentNotificationPolling(user);
   ensureSessionRealtimeSubscription(user);
   ensureStudentSessionPolling(user);
+  ensureContentRealtimeSubscription(user);
   ensureStudentForceRefreshPolling(user);
   ensureStudentBackgroundRefreshPolling(user);
   const isAdmin = user?.role === "admin";
@@ -27264,6 +27390,7 @@ async function logout(options = {}) {
   clearSupabaseSessionRecoveryRetry();
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
+  clearContentRealtimeSubscription();
   clearProfileAccessRealtimeSubscription();
   clearStudentAccessPolling();
   clearStudentForceRefreshPolling();
@@ -27417,6 +27544,7 @@ function renderBootstrapFallback() {
   try {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearStudentAccessPolling();
     setGoogleOAuthPendingState(false);
