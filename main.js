@@ -358,6 +358,9 @@ const supabaseSync = {
   tableName: "",
   storageKeyColumn: "",
   pendingWrites: new Map(),
+  inFlightPayloadSignatures: new Map(),
+  lastSyncedPayloadSignatures: new Map(),
+  writeAccessDenied: false,
   flushTimer: null,
   flushing: false,
   lastSuccessAt: 0,
@@ -377,6 +380,8 @@ const supabaseAuth = {
 const relationalSync = {
   enabled: false,
   pendingWrites: new Map(),
+  inFlightPayloadSignatures: new Map(),
+  lastSyncedPayloadSignatures: new Map(),
   flushTimer: null,
   flushing: false,
   lastQueuedAt: 0,
@@ -457,6 +462,8 @@ let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
 let lifecycleResumeHandle = null;
+let studentBootRefreshPromise = null;
+let studentBootRefreshKey = "";
 let adminQuestionsLastHydratedAt = 0;
 const presenceRuntime = {
   timer: null,
@@ -1414,23 +1421,13 @@ async function init() {
     scheduleFullSupabaseSync();
   }
 
-  // After the Supabase bootstrap finishes, the studentRefreshTrigger has been
-  // fetched from the server with the latest token the admin published.
-  // If the token is new (admin added questions/topics while the user was away),
-  // kick off a full data refresh immediately — without a page reload — so the
-  // user sees fresh content on this very page load instead of waiting for the
-  // background poll to fire several seconds later.
   const bootUser = getCurrentUser();
   if (bootUser?.role === "student") {
     const hasFreshAdminContent = shouldForceStudentRefreshFromAdminTrigger(bootUser, { reload: false });
-    if (hasFreshAdminContent) {
-      // Don't await — let the boot continue rendering while the DB fetch
-      // runs in the background.  rerender:true ensures the UI updates as
-      // soon as the fresh topics and questions arrive.
-      refreshStudentDataSnapshot(bootUser, { force: true, rerender: true }).catch((err) => {
-        console.warn("Boot-time admin content refresh failed.", err?.message || err);
-      });
-    }
+    scheduleStudentBootRefresh(bootUser, {
+      rerender: true,
+      reason: hasFreshAdminContent ? "boot admin trigger" : "page load",
+    }).catch(() => false);
   }
 
   const topicRepairResult = repairCourseTopicCatalogFromQuestions({
@@ -1626,6 +1623,10 @@ async function tryRecoverSupabaseSessionInBackground() {
           flushSupabaseWrites().catch(() => { });
         }
       }).catch(() => { });
+      scheduleStudentBootRefresh(getCurrentUser(), {
+        rerender: true,
+        reason: "session recovery",
+      }).catch(() => false);
       scheduleSyncStatusUiRefresh();
       state.skipNextRouteAnimation = true;
       render();
@@ -3640,6 +3641,50 @@ function isPostAuthDataWarmupActive(user = null) {
   return postAuthWarmupRuntime.key === `${profileId}:${currentUser.role}`;
 }
 
+function scheduleStudentBootRefresh(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(profileId)
+    || !hasSupabaseManagedIdentity(currentUser)
+  ) {
+    return Promise.resolve(false);
+  }
+
+  const key = profileId;
+  if (studentBootRefreshPromise && studentBootRefreshKey === key) {
+    return studentBootRefreshPromise;
+  }
+
+  const rerender = options?.rerender !== false;
+  const reason = String(options?.reason || "boot").trim() || "boot";
+  studentBootRefreshKey = key;
+  studentBootRefreshPromise = Promise.resolve().then(async () => {
+    const latestUser = getCurrentUser();
+    const latestProfileId = String(getUserProfileId(latestUser) || "").trim();
+    if (!latestUser || latestUser.role !== "student" || latestProfileId !== profileId) {
+      return false;
+    }
+    return refreshStudentDataSnapshot(latestUser, {
+      force: true,
+      rerender,
+      requireFreshContent: true,
+    });
+  }).catch((error) => {
+    console.warn(`Student ${reason} refresh failed.`, error?.message || error);
+    return false;
+  }).finally(() => {
+    if (studentBootRefreshKey === key) {
+      studentBootRefreshKey = "";
+      studentBootRefreshPromise = null;
+    }
+  });
+
+  return studentBootRefreshPromise;
+}
+
 function schedulePostAuthDataWarmup(user) {
   const currentUser = user || getCurrentUser();
   const profileId = String(getUserProfileId(currentUser) || "").trim();
@@ -3664,19 +3709,29 @@ function schedulePostAuthDataWarmup(user) {
   postAuthWarmupRuntime.promise = Promise.resolve().then(async () => {
     if (currentUser.role === "admin") {
       flushPendingAdminActionQueue({ user: currentUser }).catch(() => { });
-    }
-    await hydrateRelationalState(currentUser).catch((hydrateError) => {
-      console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
-    });
-    await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
-      console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-    });
-
-    if (currentUser.role === "admin") {
+      await hydrateRelationalState(currentUser).catch((hydrateError) => {
+        console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
+      });
+      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+        console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+      });
       state.adminDataLastSyncAt = Date.now();
       state.adminDataSyncError = "";
     } else if (currentUser.role === "student") {
-      state.studentDataLastSyncAt = Date.now();
+      await scheduleStudentBootRefresh(currentUser, {
+        rerender: false,
+        reason: "post-auth warmup",
+      }).catch(() => false);
+      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+        console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+      });
+    } else {
+      await hydrateRelationalState(currentUser).catch((hydrateError) => {
+        console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
+      });
+      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+        console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+      });
     }
 
     const latestUser = getCurrentUser();
@@ -3803,6 +3858,24 @@ function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync
     return "Temporary network issue contacting Supabase. Changes are saved locally and will retry automatically.";
   }
   return normalized;
+}
+
+function isNonRetryableSupabaseBackupWriteError(errorOrMessage) {
+  const rawCode = String(errorOrMessage?.code || errorOrMessage?.status || "").trim();
+  if (rawCode === "42501" || rawCode === "401") {
+    return true;
+  }
+  const normalized = typeof errorOrMessage === "string"
+    ? String(errorOrMessage || "").trim().toLowerCase()
+    : String(getErrorMessage(errorOrMessage, "") || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("row-level security policy")
+    || normalized.includes("violates row level security policy")
+    || normalized.includes("permission denied")
+    || normalized.includes("unauthorized")
+    || normalized.includes("invalid jwt");
 }
 
 function getCloudSyncFailureState(rawFailureMessage) {
@@ -4028,6 +4101,8 @@ function clearRelationalFlushTimer() {
 function resetRelationalSyncState() {
   relationalSync.enabled = false;
   relationalSync.pendingWrites.clear();
+  relationalSync.inFlightPayloadSignatures.clear();
+  relationalSync.lastSyncedPayloadSignatures.clear();
   relationalSync.flushing = false;
   relationalSync.lastQueuedAt = 0;
   relationalSync.lastSuccessAt = 0;
@@ -4049,6 +4124,44 @@ function resetRelationalSyncState() {
   scheduleSyncStatusUiRefresh();
 }
 
+function getSyncPayloadSignature(value) {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? "__undefined__" : serialized;
+  } catch {
+    return String(value);
+  }
+}
+
+function getPendingRelationalPayloadForStorageKey(storageKey) {
+  const directPayload = relationalSync.pendingWrites.get(storageKey);
+  if (directPayload !== undefined) {
+    if (
+      storageKey === STORAGE_KEYS.curriculum
+      && directPayload
+      && typeof directPayload === "object"
+      && directPayload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+    ) {
+      return directPayload.curriculum;
+    }
+    return directPayload;
+  }
+
+  if (storageKey !== STORAGE_KEYS.courseTopics) {
+    return undefined;
+  }
+
+  const combinedPayload = relationalSync.pendingWrites.get(STORAGE_KEYS.curriculum);
+  if (
+    combinedPayload
+    && typeof combinedPayload === "object"
+    && combinedPayload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+  ) {
+    return combinedPayload.courseTopics;
+  }
+  return undefined;
+}
+
 function scheduleRelationalWrite(storageKey, value) {
   if (!RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
     return false;
@@ -4066,6 +4179,24 @@ function scheduleRelationalWrite(storageKey, value) {
     value && typeof value === "object"
       ? deepClone(value)
       : value;
+  const nextSignature = getSyncPayloadSignature(snapshot);
+  const pendingPayload = getPendingRelationalPayloadForStorageKey(storageKey);
+  if (pendingPayload !== undefined && getSyncPayloadSignature(pendingPayload) === nextSignature) {
+    return true;
+  }
+  const inFlightSignature = relationalSync.inFlightPayloadSignatures.get(storageKey);
+  if (inFlightSignature && inFlightSignature === nextSignature) {
+    return true;
+  }
+  const lastSyncedSignature = relationalSync.lastSyncedPayloadSignatures.get(storageKey);
+  if (
+    !relationalSync.flushing
+    && pendingPayload === undefined
+    && lastSyncedSignature
+    && lastSyncedSignature === nextSignature
+  ) {
+    return true;
+  }
   relationalSync.pendingWrites.set(storageKey, snapshot);
   relationalSync.lastQueuedAt = Date.now();
   if (storageKey === STORAGE_KEYS.users) {
@@ -6460,11 +6591,14 @@ async function hydrateQuestionsFromSupabaseBackup() {
 }
 
 function scheduleSupabaseWrite(storageKey, value) {
-  if (!supabaseSync.enabled || !isLegacySupabaseStateSyncKey(storageKey)) {
+  if (!supabaseSync.enabled || supabaseSync.writeAccessDenied || !isLegacySupabaseStateSyncKey(storageKey)) {
     return false;
   }
 
   const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role === "student" || !hasActiveSupabaseSessionForUser(currentUser)) {
+    return false;
+  }
   const scope = getSyncScopeForUser(currentUser);
   const remoteKey = buildRemoteSyncKey(storageKey, scope);
   if (!remoteKey) {
@@ -6472,6 +6606,24 @@ function scheduleSupabaseWrite(storageKey, value) {
   }
 
   const payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
+  const nextSignature = getSyncPayloadSignature(payload);
+  const pendingWrite = supabaseSync.pendingWrites.get(remoteKey);
+  if (pendingWrite && getSyncPayloadSignature(pendingWrite.payload) === nextSignature) {
+    return true;
+  }
+  const inFlightSignature = supabaseSync.inFlightPayloadSignatures.get(remoteKey);
+  if (inFlightSignature && inFlightSignature === nextSignature) {
+    return true;
+  }
+  const lastSyncedSignature = supabaseSync.lastSyncedPayloadSignatures.get(remoteKey);
+  if (
+    !supabaseSync.flushing
+    && !pendingWrite
+    && lastSyncedSignature
+    && lastSyncedSignature === nextSignature
+  ) {
+    return true;
+  }
   supabaseSync.pendingWrites.set(remoteKey, { storageKey, payload });
   scheduleSyncStatusUiRefresh();
   if (supabaseSync.flushTimer) {
@@ -6534,11 +6686,17 @@ async function flushSupabaseWrites() {
 
   supabaseSync.flushing = true;
   scheduleSyncStatusUiRefresh();
-  const rows = Array.from(supabaseSync.pendingWrites.entries()).map(([remoteStorageKey, pending]) => ({
-    [supabaseSync.storageKeyColumn]: remoteStorageKey,
-    payload: pending.payload,
-    updated_at: nowISO(),
-  }));
+  const rows = Array.from(supabaseSync.pendingWrites.entries()).map(([remoteStorageKey, pending]) => {
+    supabaseSync.inFlightPayloadSignatures.set(
+      remoteStorageKey,
+      getSyncPayloadSignature(pending.payload),
+    );
+    return {
+      [supabaseSync.storageKeyColumn]: remoteStorageKey,
+      payload: pending.payload,
+      updated_at: nowISO(),
+    };
+  });
   supabaseSync.pendingWrites.clear();
   clearSupabaseFlushTimer();
 
@@ -6563,10 +6721,17 @@ async function flushSupabaseWrites() {
       "Supabase backup sync timed out.",
     );
     if (error) {
+      const isNonRetryable = isNonRetryableSupabaseBackupWriteError(error);
       console.warn("Supabase sync error:", error.message);
       supabaseSync.lastFailureAt = Date.now();
-      supabaseSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
-      supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+      supabaseSync.lastFailureMessage = isNonRetryable
+        ? ""
+        : normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
+      supabaseSync.retryAt = isNonRetryable ? 0 : Date.now() + SUPABASE_RETRY_FLUSH_MS;
+      if (isNonRetryable) {
+        supabaseSync.writeAccessDenied = true;
+        return;
+      }
       restoreRowsToPending();
       if (!supabaseSync.flushTimer) {
         supabaseSync.flushTimer = window.setTimeout(() => {
@@ -6581,11 +6746,30 @@ async function flushSupabaseWrites() {
     supabaseSync.lastFailureAt = 0;
     supabaseSync.lastFailureMessage = "";
     supabaseSync.retryAt = 0;
+    supabaseSync.writeAccessDenied = false;
+    rows.forEach((row) => {
+      const remoteStorageKey = row[supabaseSync.storageKeyColumn];
+      if (!remoteStorageKey) {
+        return;
+      }
+      supabaseSync.lastSyncedPayloadSignatures.set(
+        remoteStorageKey,
+        getSyncPayloadSignature(row.payload),
+      );
+      supabaseSync.inFlightPayloadSignatures.delete(remoteStorageKey);
+    });
   } catch (error) {
+    const isNonRetryable = isNonRetryableSupabaseBackupWriteError(error);
     console.warn("Supabase sync error:", getErrorMessage(error, "Supabase sync failed."));
     supabaseSync.lastFailureAt = Date.now();
-    supabaseSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
-    supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+    supabaseSync.lastFailureMessage = isNonRetryable
+      ? ""
+      : normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
+    supabaseSync.retryAt = isNonRetryable ? 0 : Date.now() + SUPABASE_RETRY_FLUSH_MS;
+    if (isNonRetryable) {
+      supabaseSync.writeAccessDenied = true;
+      return;
+    }
     restoreRowsToPending();
     if (!supabaseSync.flushTimer) {
       supabaseSync.flushTimer = window.setTimeout(() => {
@@ -6595,6 +6779,7 @@ async function flushSupabaseWrites() {
       }, SUPABASE_RETRY_FLUSH_MS);
     }
   } finally {
+    supabaseSync.inFlightPayloadSignatures.clear();
     supabaseSync.flushing = false;
     scheduleSyncStatusUiRefresh();
   }
@@ -6609,6 +6794,9 @@ function clearSupabaseFlushTimer() {
 
 function resetSupabaseSyncRuntimeState() {
   supabaseSync.pendingWrites.clear();
+  supabaseSync.inFlightPayloadSignatures.clear();
+  supabaseSync.lastSyncedPayloadSignatures.clear();
+  supabaseSync.writeAccessDenied = false;
   supabaseSync.flushing = false;
   supabaseSync.lastSuccessAt = 0;
   supabaseSync.lastFailureAt = 0;
@@ -6668,18 +6856,42 @@ async function flushRelationalWrites(options = {}) {
   // Snapshot the keys to sync, but keep them in pendingWrites until each succeeds.
   // This way the pending count decreases incrementally as each key syncs.
   const entryMap = new Map(relationalSync.pendingWrites.entries());
+  relationalSync.inFlightPayloadSignatures.clear();
   if (entryMap.has(STORAGE_KEYS.curriculum) && entryMap.has(STORAGE_KEYS.courseTopics)) {
     // Combine curriculum + courseTopics into one sync operation.
+    const combinedCourseSyncPayload = {
+      curriculum: entryMap.get(STORAGE_KEYS.curriculum),
+      courseTopics: entryMap.get(STORAGE_KEYS.courseTopics),
+    };
     relationalSync.pendingWrites.delete(STORAGE_KEYS.courseTopics);
     relationalSync.pendingWrites.set(STORAGE_KEYS.curriculum, {
       [RELATIONAL_COMBINED_COURSE_SYNC_MARKER]: true,
-      curriculum: entryMap.get(STORAGE_KEYS.curriculum),
-      courseTopics: entryMap.get(STORAGE_KEYS.courseTopics),
+      curriculum: combinedCourseSyncPayload.curriculum,
+      courseTopics: combinedCourseSyncPayload.courseTopics,
     });
     entryMap.set(STORAGE_KEYS.curriculum, relationalSync.pendingWrites.get(STORAGE_KEYS.curriculum));
     entryMap.delete(STORAGE_KEYS.courseTopics);
   }
   const entries = Array.from(entryMap.entries());
+  entries.forEach(([storageKey, payload]) => {
+    if (
+      storageKey === STORAGE_KEYS.curriculum
+      && payload
+      && typeof payload === "object"
+      && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+    ) {
+      relationalSync.inFlightPayloadSignatures.set(
+        STORAGE_KEYS.curriculum,
+        getSyncPayloadSignature(payload.curriculum),
+      );
+      relationalSync.inFlightPayloadSignatures.set(
+        STORAGE_KEYS.courseTopics,
+        getSyncPayloadSignature(payload.courseTopics),
+      );
+      return;
+    }
+    relationalSync.inFlightPayloadSignatures.set(storageKey, getSyncPayloadSignature(payload));
+  });
   let firstError = null;
   let succeededCount = 0;
   const syncedStorageKeys = new Set();
@@ -6696,9 +6908,21 @@ async function flushRelationalWrites(options = {}) {
           && typeof payload === "object"
           && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
         ) {
+          relationalSync.lastSyncedPayloadSignatures.set(
+            STORAGE_KEYS.curriculum,
+            getSyncPayloadSignature(payload.curriculum),
+          );
+          relationalSync.lastSyncedPayloadSignatures.set(
+            STORAGE_KEYS.courseTopics,
+            getSyncPayloadSignature(payload.courseTopics),
+          );
+          relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.curriculum);
+          relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.courseTopics);
           syncedStorageKeys.add(STORAGE_KEYS.curriculum);
           syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
         } else {
+          relationalSync.lastSyncedPayloadSignatures.set(storageKey, getSyncPayloadSignature(payload));
+          relationalSync.inFlightPayloadSignatures.delete(storageKey);
           syncedStorageKeys.add(storageKey);
         }
         scheduleSyncStatusUiRefresh();
@@ -6732,6 +6956,7 @@ async function flushRelationalWrites(options = {}) {
       relationalSync.lastFailureMessage = "";
     }
   } finally {
+    relationalSync.inFlightPayloadSignatures.clear();
     relationalSync.flushing = false;
     if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
       relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
@@ -11522,6 +11747,8 @@ function render() {
     state.studentDataRefreshing = false;
     state.studentDataLastSyncAt = 0;
     state.studentDataLastFullSyncAt = 0;
+    studentBootRefreshKey = "";
+    studentBootRefreshPromise = null;
   }
   syncPresenceRuntime(user);
   syncSiteActivityRuntime(user);
