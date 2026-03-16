@@ -14710,10 +14710,15 @@ function renderSession() {
   const correctChoiceIds = getNormalizedQuestionCorrectChoiceIds(question);
   const choiceType = correctChoiceIds.length > 1 ? "checkbox" : "radio";
   const isSubmitted = response.submitted;
+  const hasAnswer = response.selected.length > 0;
   const isCorrect = isSubmittedResponseCorrect(question, response);
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
-  const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
-  const isTimedMode = session.mode === "timed";
+  const statusText = isSubmitted
+    ? "Answer submitted"
+    : (hasAnswer ? "Answer saved" : "Not yet answered");
+  const markLineText = isSubmitted
+    ? `Marked ${markText} out of 1.00`
+    : "Marked out of 1.00";
   const normalizedHighlighterColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
   const shellClassNames = [
     "exam-shell",
@@ -14729,13 +14734,6 @@ function renderSession() {
   const currentCourse = mappedCourse || questionCourse;
   const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
   const hasAskAiLink = Boolean(askAiUrl);
-  const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
-  const countdownSeconds = Math.max(
-    0,
-    Number(session.timeRemainingSec != null ? session.timeRemainingSec : initialTimedSeconds),
-  );
-  const sessionName = getSessionDisplayName(session);
-  const sessionTestId = getSessionDisplayId(session);
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -14823,18 +14821,16 @@ function renderSession() {
       <div class="${shellClassNames}" style="${shellStyleAttr}">
         <section class="exam-main exam-main-simple">
           <div class="exam-content exam-content-moodle">
-            <aside class="exam-question-meta">
-              <h3>Question <b>${session.currentIndex + 1}</b></h3>
-              <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
-              <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
-              <p class="exam-question-status ${isSubmitted ? (isCorrect ? "good" : "bad") : "neutral"}">${statusText}</p>
-              <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
-              ${isTimedMode
-      ? `<p class="countdown exam-countdown" title="Timed mode (${session.durationMin} minutes)">Time left: <span id="countdown">${formatDuration(countdownSeconds)}</span></p>`
-      : `<p class="exam-mark-line subtle">Mode: Tutor</p>`
-    }
-              <button class="exam-meta-link" data-action="toggle-flag">⚑ ${response.flagged ? "Unflag question" : "Flag question"}</button>
-              <span class="exam-meta-badge">v1 (latest)</span>
+            <aside class="exam-question-meta exam-question-meta-moodle">
+              <div class="exam-question-meta-primary">
+                <h3 class="exam-question-title-moodle"><span>Question</span> <b>${session.currentIndex + 1}</b></h3>
+                <p class="exam-question-status exam-question-status-moodle">${statusText}</p>
+                <p class="exam-mark-line exam-mark-line-moodle">${markLineText}</p>
+                <button class="exam-meta-link exam-meta-link-moodle" data-action="toggle-flag">
+                  <span aria-hidden="true">⚑</span>
+                  <span>${response.flagged ? "Unflag question" : "Flag question"}</span>
+                </button>
+              </div>
             </aside>
 
             <section class="exam-question-stage">

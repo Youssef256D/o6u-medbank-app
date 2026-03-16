@@ -4166,9 +4166,35 @@ th {
   gap: 0.6rem;
 }
 
+.exam-question-meta-moodle {
+  gap: 0.9rem;
+}
+
+.exam-question-meta-primary {
+  display: grid;
+  gap: 0.78rem;
+}
+
 .exam-question-meta h3 {
   margin: 0;
   font-size: calc(1.14rem * var(--exam-font-scale));
+}
+
+.exam-question-title-moodle {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+  line-height: 1;
+}
+
+.exam-question-title-moodle span {
+  font-weight: 500;
+}
+
+.exam-question-title-moodle b {
+  font-size: calc(2.2rem * var(--exam-font-scale));
+  line-height: 0.9;
 }
 
 .exam-question-status {
@@ -4176,6 +4202,13 @@ th {
   font-weight: 500;
   font-size: calc(0.96rem * var(--exam-font-scale));
   line-height: 1;
+}
+
+.exam-question-status-moodle {
+  max-width: 8ch;
+  color: #2e3338;
+  font-size: calc(0.98rem * var(--exam-font-scale));
+  line-height: 1.45;
 }
 
 .exam-question-status.good {
@@ -4196,6 +4229,11 @@ th {
   font-size: calc(0.96rem * var(--exam-font-scale));
 }
 
+.exam-mark-line-moodle {
+  max-width: 10ch;
+  line-height: 1.45;
+}
+
 .exam-meta-link {
   border: 0;
   padding: 0;
@@ -4206,6 +4244,14 @@ th {
   font-weight: 500;
   cursor: pointer;
   font-size: 0.9rem;
+}
+
+.exam-meta-link-moodle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  text-align: left;
+  line-height: 1.35;
 }
 
 .exam-meta-link.muted {
@@ -6511,6 +6557,11 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
   .exam-question-meta {
     order: 2;
     position: static;
+  }
+
+  .exam-question-status-moodle,
+  .exam-mark-line-moodle {
+    max-width: none;
   }
 
   .exam-nav-panel {
