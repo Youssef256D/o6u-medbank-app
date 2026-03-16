@@ -4696,7 +4696,7 @@ async function hydrateRelationalState(user) {
 async function hydrateRelationalCoursesAndTopics() {
   const client = getRelationalClient();
   if (!client || !relationalSync.enabled) {
-    return;
+    return false;
   }
 
   const coursesResult = await fetchRowsPaged((from, to) => (
@@ -4710,7 +4710,8 @@ async function hydrateRelationalCoursesAndTopics() {
       .range(from, to)
   ));
   if (coursesResult.error) {
-    return;
+    console.warn("Could not hydrate relational courses.", coursesResult.error?.message || coursesResult.error);
+    return false;
   }
   const courses = Array.isArray(coursesResult.data) ? coursesResult.data : [];
 
@@ -4724,7 +4725,8 @@ async function hydrateRelationalCoursesAndTopics() {
       .range(from, to)
   ));
   if (topicsResult.error) {
-    return;
+    console.warn("Could not hydrate relational course topics.", topicsResult.error?.message || topicsResult.error);
+    return false;
   }
   const topics = Array.isArray(topicsResult.data) ? topicsResult.data : [];
 
@@ -4791,6 +4793,7 @@ async function hydrateRelationalCoursesAndTopics() {
   saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
+  return true;
 }
 
 async function fetchEnrollmentCourseMapForUsers(userIds) {
@@ -5137,7 +5140,7 @@ async function hydrateRelationalProfiles(currentUser) {
 async function hydrateRelationalQuestions() {
   const client = getRelationalClient();
   if (!client || !relationalSync.enabled) {
-    return;
+    return false;
   }
 
   const users = getUsers();
@@ -5152,7 +5155,8 @@ async function hydrateRelationalQuestions() {
     client.from("courses").select("id,course_name").range(from, to)
   ));
   if (coursesResult.error) {
-    return;
+    console.warn("Could not hydrate relational questions: courses lookup failed.", coursesResult.error?.message || coursesResult.error);
+    return false;
   }
   const courseRows = Array.isArray(coursesResult.data) ? coursesResult.data : [];
 
@@ -5160,7 +5164,8 @@ async function hydrateRelationalQuestions() {
     client.from("course_topics").select("id,course_id,topic_name").range(from, to)
   ));
   if (topicsResult.error) {
-    return;
+    console.warn("Could not hydrate relational questions: topics lookup failed.", topicsResult.error?.message || topicsResult.error);
+    return false;
   }
   const topicRows = Array.isArray(topicsResult.data) ? topicsResult.data : [];
   let questionColumnSupport = relationalQuestionColumnSupport;
@@ -5199,7 +5204,8 @@ async function hydrateRelationalQuestions() {
 
   let questionsResult = await fetchRowsPaged((from, to) => buildQuestionsQuery(from, to));
   if (questionsResult.error) {
-    return;
+    console.warn("Could not hydrate relational questions.", questionsResult.error?.message || questionsResult.error);
+    return false;
   }
   const remoteQuestionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
   if (!remoteQuestionRows.length) {
@@ -5216,23 +5222,23 @@ async function hydrateRelationalQuestions() {
         if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
           questionsResult = retryResult;
         } else {
-          return;
+          return false;
         }
       } catch (syncError) {
         console.warn("Questions backfill failed.", syncError?.message || syncError);
-        return;
+        return false;
       }
     } else if (currentUser?.role === "student") {
       if (hasLocalQuestions) {
-        return;
+        return true;
       }
       const recoveredFromBackup = await hydrateQuestionsFromSupabaseBackup().catch(() => false);
       if (recoveredFromBackup) {
-        return;
+        return true;
       }
-      return;
+      return false;
     } else if (hasLocalQuestions) {
-      return;
+      return true;
     }
   }
 
@@ -5245,7 +5251,8 @@ async function hydrateRelationalQuestions() {
       .select("question_id,choice_label,choice_text,is_correct")
       .in("question_id", questionIdBatch);
     if (error) {
-      return;
+      console.warn("Could not hydrate question choices.", error?.message || error);
+      return false;
     }
     if (Array.isArray(data) && data.length) {
       choiceRows.push(...data);
@@ -5477,6 +5484,7 @@ async function hydrateRelationalQuestions() {
       });
     }
   }
+  return true;
 }
 
 async function hydrateRelationalNotifications(currentUser) {
@@ -11100,6 +11108,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   }
   const force = Boolean(options?.force);
+  const requireFreshContent = Boolean(options?.requireFreshContent);
   const rerender = options?.rerender !== false;
   if (!force && !shouldRefreshStudentData(user)) {
     return true;
@@ -11115,6 +11124,9 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     const ready = await ensureRelationalSyncReady({ force });
     if (!ready) {
       const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user);
+      if (fallbackRefreshed && requireFreshContent) {
+        return false;
+      }
       state.studentDataLastSyncAt = Date.now();
       if (!fallbackRefreshed) {
         return false;
@@ -11142,14 +11154,19 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     let completedFullSync = false;
     if (needsFullSync) {
       // Run courses/topics and profiles in parallel — they are independent DB reads.
-      await Promise.all([
+      const [coursesAndTopicsHydrated] = await Promise.all([
         hydrateRelationalCoursesAndTopics(),
         hasPendingUserWrites ? Promise.resolve() : hydrateRelationalProfiles(user),
       ]);
+      const hasFreshCoursesAndTopics = coursesAndTopicsHydrated !== false;
+      let hasFreshQuestions = true;
       if (!hasPendingQuestionWrites) {
-        await hydrateRelationalQuestions();
+        hasFreshQuestions = (await hydrateRelationalQuestions()) !== false;
       }
-      completedFullSync = !hasPendingUserWrites && !hasPendingQuestionWrites;
+      completedFullSync = hasFreshCoursesAndTopics && hasFreshQuestions && !hasPendingUserWrites && !hasPendingQuestionWrites;
+      if (requireFreshContent && (!hasFreshCoursesAndTopics || !hasFreshQuestions)) {
+        return false;
+      }
     }
     if (completedFullSync) {
       state.studentDataLastFullSyncAt = now;
@@ -11184,6 +11201,9 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return true;
   } catch (error) {
     const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user).catch(() => false);
+    if (fallbackRefreshed && requireFreshContent) {
+      return false;
+    }
     state.studentDataLastSyncAt = Date.now();
     if (fallbackRefreshed) {
       if (
@@ -13559,7 +13579,11 @@ async function refreshStudentAnalyticsNow(options = {}) {
     return false;
   }
 
-  const ok = await refreshStudentDataSnapshot(user, { force: true, rerender: true });
+  const ok = await refreshStudentDataSnapshot(user, {
+    force: true,
+    rerender: true,
+    requireFreshContent: true,
+  });
   if (!options?.silent) {
     if (ok) {
       toast("Analytics refreshed.");
@@ -13569,7 +13593,7 @@ async function refreshStudentAnalyticsNow(options = {}) {
       toast(
         noSession
           ? "Supabase session expired. Log out and log in again, then refresh analytics."
-          : "Could not refresh cloud data. Showing local analytics.",
+          : "Could not refresh the latest cloud questions and topics. Please retry.",
       );
     }
   }
