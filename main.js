@@ -1413,6 +1413,26 @@ async function init() {
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
   }
+
+  // After the Supabase bootstrap finishes, the studentRefreshTrigger has been
+  // fetched from the server with the latest token the admin published.
+  // If the token is new (admin added questions/topics while the user was away),
+  // kick off a full data refresh immediately — without a page reload — so the
+  // user sees fresh content on this very page load instead of waiting for the
+  // background poll to fire several seconds later.
+  const bootUser = getCurrentUser();
+  if (bootUser?.role === "student") {
+    const hasFreshAdminContent = shouldForceStudentRefreshFromAdminTrigger(bootUser, { reload: false });
+    if (hasFreshAdminContent) {
+      // Don't await — let the boot continue rendering while the DB fetch
+      // runs in the background.  rerender:true ensures the UI updates as
+      // soon as the fresh topics and questions arrive.
+      refreshStudentDataSnapshot(bootUser, { force: true, rerender: true }).catch((err) => {
+        console.warn("Boot-time admin content refresh failed.", err?.message || err);
+      });
+    }
+  }
+
   const topicRepairResult = repairCourseTopicCatalogFromQuestions({
     persist: getCurrentUser()?.role === "admin",
   });
