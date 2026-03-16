@@ -400,6 +400,8 @@ const relationalQuestionColumnSupport = {
   questionImageUrl: false,
   explanationImageUrl: false,
   sortOrder: false,
+  questionType: false,
+  modelAnswer: false,
 };
 
 let timerHandle = null;
@@ -3970,6 +3972,8 @@ function resetRelationalSyncState() {
   relationalQuestionColumnSupport.questionImageUrl = false;
   relationalQuestionColumnSupport.explanationImageUrl = false;
   relationalQuestionColumnSupport.sortOrder = false;
+  relationalQuestionColumnSupport.questionType = false;
+  relationalQuestionColumnSupport.modelAnswer = false;
   clearRelationalFlushTimer();
   resetSessionSyncRuntime();
   scheduleSyncStatusUiRefresh();
@@ -5184,6 +5188,8 @@ async function hydrateRelationalQuestions() {
     ...(questionColumnSupport.sortOrder ? ["sort_order"] : []),
     ...(questionColumnSupport.questionImageUrl ? ["question_image_url"] : []),
     ...(questionColumnSupport.explanationImageUrl ? ["explanation_image_url"] : []),
+    ...(questionColumnSupport.questionType ? ["question_type"] : []),
+    ...(questionColumnSupport.modelAnswer ? ["model_answer"] : []),
   ].join(",");
 
   const buildQuestionsQuery = (from, to) => {
@@ -5308,7 +5314,7 @@ async function hydrateRelationalQuestions() {
       .filter((choice) => Boolean(choice.is_correct))
       .map((choice) => String(choice.choice_label || "").toUpperCase());
     const choices = resolvedChoices;
-    if (choices.length < 2) {
+    if (choices.length < 2 && question.question_type !== "written") {
       skippedMalformedQuestionIds.push(externalId || String(question.id || ""));
       return null;
     }
@@ -5349,6 +5355,12 @@ async function hydrateRelationalQuestions() {
       questionImage: questionImageFromDb || String(existingQuestion?.questionImage || "").trim(),
       explanationImage: explanationImageFromDb || String(existingQuestion?.explanationImage || "").trim(),
       status: toRelationalQuestionStatus(question.status),
+      questionType: questionColumnSupport.questionType
+        ? (question.question_type === "written" ? "written" : "mcq")
+        : "mcq",
+      modelAnswer: questionColumnSupport.modelAnswer
+        ? String(question.model_answer || "").trim()
+        : "",
     };
   }).filter(Boolean);
 
@@ -7228,7 +7240,10 @@ function buildQuestionChoiceSyncPlan(sourceQuestions, idMap = {}) {
 
     const normalizedChoices = normalizeQuestionChoiceEntries(question?.choices);
     if (normalizedChoices.length < 2) {
-      skippedQuestionIds.push(externalId || mappedDbId);
+      // Written questions have no choices — skip silently (not a sync error)
+      if (question?.questionType !== "written") {
+        skippedQuestionIds.push(externalId || mappedDbId);
+      }
       return;
     }
     const normalizedCorrect = resolveQuestionCorrectAnswers(question?.correct, [], normalizedChoices);
@@ -7325,6 +7340,8 @@ async function getRelationalQuestionColumnSupport(client) {
   relationalQuestionColumnSupport.questionImageUrl = await checkColumn("question_image_url");
   relationalQuestionColumnSupport.explanationImageUrl = await checkColumn("explanation_image_url");
   relationalQuestionColumnSupport.sortOrder = await checkColumn("sort_order");
+  relationalQuestionColumnSupport.questionType = await checkColumn("question_type");
+  relationalQuestionColumnSupport.modelAnswer = await checkColumn("model_answer");
   relationalQuestionColumnSupport.checked = true;
   return relationalQuestionColumnSupport;
 }
@@ -8130,6 +8147,12 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       ...(questionColumnSupport.sortOrder
         ? { sort_order: questionSortOrderByExternalId.get(externalId) || null }
         : {}),
+      ...(questionColumnSupport.questionType
+        ? { question_type: question.questionType === "written" ? "written" : "mcq" }
+        : {}),
+      ...(questionColumnSupport.modelAnswer
+        ? { model_answer: String(question.modelAnswer || "").trim() || null }
+        : {}),
       difficulty: toRelationalDifficulty(question.difficulty),
       status: toRelationalQuestionStatus(question.status),
     });
@@ -8477,6 +8500,7 @@ async function syncSessionsToRelational(sessionsPayload) {
         notes: String(response.notes || "") || null,
         submitted: Boolean(response.submitted),
         answered_at: response.submitted ? session.updatedAt || nowISO() : null,
+        written_answer: String(response.writtenAnswer || "") || null,
       });
     });
   });
@@ -14707,12 +14731,15 @@ function renderSession() {
   }
 
   const stemLines = splitStemLines(question.stem);
+  const isWritten = question.questionType === "written";
   const correctChoiceIds = getNormalizedQuestionCorrectChoiceIds(question);
   const choiceType = correctChoiceIds.length > 1 ? "checkbox" : "radio";
   const isSubmitted = response.submitted;
   const isCorrect = isSubmittedResponseCorrect(question, response);
-  const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
-  const statusText = isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded";
+  const markText = isWritten ? "—" : (isSubmitted && isCorrect ? "1.00" : "0.00");
+  const statusText = isWritten
+    ? (isSubmitted ? "Reviewed" : "Not submitted")
+    : (isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded");
   const isTimedMode = session.mode === "timed";
   const normalizedHighlighterColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
   const shellClassNames = [
@@ -14741,23 +14768,29 @@ function renderSession() {
     .map((qid, index) => {
       const entry = session.responses[qid];
       const navQuestion = questionsById.get(qid) || null;
+      const navIsWritten = navQuestion?.questionType === "written";
       const isSubmittedEntry = Boolean(entry?.submitted);
-      const isCorrectEntry = isSubmittedEntry && isSubmittedResponseCorrect(navQuestion, entry);
-      const isWrongEntry = isSubmittedEntry && !isCorrectEntry;
+      const isCorrectEntry = isSubmittedEntry && !navIsWritten && isSubmittedResponseCorrect(navQuestion, entry);
+      const isWrongEntry = isSubmittedEntry && !navIsWritten && !isCorrectEntry;
+      const navHasAnswer = navIsWritten
+        ? Boolean(String(entry?.writtenAnswer || "").trim())
+        : entry.selected.length > 0;
       const currentClass = index === session.currentIndex ? "is-current" : "";
       const flaggedClass = entry.flagged ? "is-flagged" : "";
-      const answeredClass = entry.selected.length > 0 ? "is-answered" : "";
-      const unansweredClass = entry.selected.length === 0 ? "is-unanswered" : "";
-      const correctnessClass = isCorrectEntry ? "is-correct" : (isWrongEntry ? "is-wrong" : "");
+      const answeredClass = navHasAnswer ? "is-answered" : "";
+      const unansweredClass = !navHasAnswer ? "is-unanswered" : "";
+      const correctnessClass = navIsWritten ? "" : (isCorrectEntry ? "is-correct" : (isWrongEntry ? "is-wrong" : ""));
       const statusLabel = entry.flagged
         ? "flagged"
-        : isCorrectEntry
-          ? "correct"
-          : isWrongEntry
-            ? "incorrect"
-            : entry.selected.length > 0
-              ? "answered"
-              : "unanswered";
+        : navIsWritten
+          ? (navHasAnswer ? "answered" : "unanswered")
+          : isCorrectEntry
+            ? "correct"
+            : isWrongEntry
+              ? "incorrect"
+              : navHasAnswer
+                ? "answered"
+                : "unanswered";
       return `
         <button
           type="button"
@@ -14772,7 +14805,9 @@ function renderSession() {
     })
     .join("");
 
-  const choicesHtml = question.choices
+  const choicesHtml = isWritten
+    ? renderWrittenAnswerEditor(currentQid, response, isSubmitted)
+    : question.choices
     .map((choice) => {
       const selected = response.selected.includes(choice.id);
       const struck = response.struck.includes(choice.id);
@@ -14827,8 +14862,8 @@ function renderSession() {
               <h3>Question <b>${session.currentIndex + 1}</b></h3>
               <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
               <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
-              <p class="exam-question-status ${isSubmitted ? (isCorrect ? "good" : "bad") : "neutral"}">${statusText}</p>
-              <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
+              <p class="exam-question-status ${isWritten ? (isSubmitted ? "neutral" : "neutral") : (isSubmitted ? (isCorrect ? "good" : "bad") : "neutral")}">${statusText}</p>
+              <p class="exam-mark-line">Mark ${markText}${isWritten ? "" : " out of 1.00"}</p>
               ${isTimedMode
       ? `<p class="countdown exam-countdown" title="Timed mode (${session.durationMin} minutes)">Time left: <span id="countdown">${formatDuration(countdownSeconds)}</span></p>`
       : `<p class="exam-mark-line subtle">Mode: Tutor</p>`
@@ -14887,7 +14922,7 @@ function renderSession() {
                   >${isSubmitted ? "Next" : "Check"}</button>
                 </div>
               </article>
-              ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
+              ${isSubmitted ? renderInlineExplanationPane(question, isCorrect, isWritten) : ""}
             </section>
 
             <aside class="exam-nav-panel">
@@ -14996,6 +15031,28 @@ function wireSession() {
       upsertSession(latest);
       state.skipNextRouteAnimation = true;
       render();
+    });
+  });
+
+  // Wire written answer editor: auto-save on input, rich toolbar buttons
+  const writtenEditor = appEl.querySelector(".exam-written-editor[data-qid]");
+  if (writtenEditor) {
+    writtenEditor.addEventListener("input", () => {
+      const latest = getSessionById(session.id);
+      if (!latest || latest.status !== "in_progress") return;
+      const qid = writtenEditor.dataset.qid;
+      if (qid && latest.responses[qid]) {
+        latest.responses[qid].writtenAnswer = writtenEditor.innerHTML;
+        latest.updatedAt = nowISO();
+        upsertSession(latest);
+      }
+    });
+  }
+  appEl.querySelectorAll(".exam-rich-btn[data-rich-cmd]").forEach((btn) => {
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault(); // keep focus in editor
+      document.execCommand(btn.dataset.richCmd, false, null);
+      writtenEditor?.focus();
     });
   });
 
@@ -15318,17 +15375,22 @@ async function handleSessionClick(event) {
       render();
       return;
     }
-    if (!response.selected.length) {
+    const question = getQuestions().find((entry) => entry.id === qid);
+    const isWrittenQuestion = question?.questionType === "written";
+    if (!isWrittenQuestion && !response.selected.length) {
       toast("Select an answer before submitting.");
       return;
     }
     response.submitted = true;
-    const question = getQuestions().find((entry) => entry.id === qid);
-    const correct = isSubmittedResponseCorrect(question, response);
-    if (!correct) {
-      addQuestionToIncorrectQueue(session.userId, qid);
+    if (isWrittenQuestion) {
+      toast("Answer submitted. See model answer below.");
+    } else {
+      const correct = isSubmittedResponseCorrect(question, response);
+      if (!correct) {
+        addQuestionToIncorrectQueue(session.userId, qid);
+      }
+      toast(correct ? "Correct." : "Incorrect.");
     }
-    toast(correct ? "Correct." : "Incorrect.");
   }
 
   if (action === "reset-answer") {
@@ -15352,9 +15414,18 @@ async function handleSessionClick(event) {
   }
 
   if (action === "submit-session") {
+    const sessionQuestionsById = new Map(getQuestions().map((q) => [q.id, q]));
     const unansweredQuestionNumbers = session.questionIds
-      .map((qid, index) => ({ index, response: session.responses[qid] }))
-      .filter(({ response }) => !Array.isArray(response?.selected) || response.selected.length === 0)
+      .map((qid, index) => {
+        const q = sessionQuestionsById.get(qid);
+        const r = session.responses[qid];
+        const isWrittenQ = q?.questionType === "written";
+        const hasAns = isWrittenQ
+          ? Boolean(String(r?.writtenAnswer || "").trim())
+          : Array.isArray(r?.selected) && r.selected.length > 0;
+        return { index, hasAns };
+      })
+      .filter(({ hasAns }) => !hasAns)
       .map(({ index }) => index + 1);
     if (unansweredQuestionNumbers.length) {
       const preview = unansweredQuestionNumbers.slice(0, 15).join(", ");
@@ -15369,8 +15440,13 @@ async function handleSessionClick(event) {
     }
 
     session.questionIds.forEach((qid) => {
+      const q = sessionQuestionsById.get(qid);
       const response = session.responses[qid];
-      if (response?.selected?.length) {
+      const isWrittenQ = q?.questionType === "written";
+      const hasAns = isWrittenQ
+        ? Boolean(String(response?.writtenAnswer || "").trim())
+        : Array.isArray(response?.selected) && response.selected.length > 0;
+      if (hasAns) {
         response.submitted = true;
       }
     });
@@ -15675,6 +15751,10 @@ function finalizeSession(sessionId) {
 
   for (const qid of session.questionIds) {
     const question = getQuestions().find((entry) => entry.id === qid);
+    // Written questions are not graded — skip the incorrect queue
+    if (question?.questionType === "written") {
+      continue;
+    }
     const response = session.responses[qid];
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
@@ -15753,6 +15833,7 @@ function renderReview() {
       flagged: false,
       struck: [],
       notes: "",
+      writtenAnswer: "",
       timeSpentSec: 0,
       highlightedLines: [],
       highlightedLineColors: {},
@@ -15760,15 +15841,20 @@ function renderReview() {
       textHighlights: buildEmptyTextHighlightStore(),
       submitted: true,
     };
-    const hasAnswer = response.selected.length > 0;
+    const entryIsWritten = question?.questionType === "written";
+    const hasAnswer = entryIsWritten
+      ? Boolean(String(response.writtenAnswer || "").trim())
+      : response.selected.length > 0;
     const isCorrect = isSubmittedResponseCorrect(question, response);
-    const isWrong = Boolean(question && !isCorrect);
-    return { qid, question, response, hasAnswer, isCorrect, isWrong };
+    const isWrong = entryIsWritten ? false : Boolean(question && !isCorrect);
+    return { qid, question, response, hasAnswer, isCorrect, isWrong, isWritten: entryIsWritten };
   });
 
+  const gradableEntries = reviewedEntries.filter((entry) => !entry.isWritten);
   const total = reviewedEntries.length;
-  const correctCount = reviewedEntries.filter((entry) => entry.isCorrect).length;
-  const accuracy = total ? Math.round((correctCount / total) * 100) : 0;
+  const gradableTotal = gradableEntries.length;
+  const correctCount = gradableEntries.filter((entry) => entry.isCorrect).length;
+  const accuracy = gradableTotal ? Math.round((correctCount / gradableTotal) * 100) : 0;
 
   if (!Number.isFinite(state.reviewIndex)) {
     state.reviewIndex = 0;
@@ -15788,8 +15874,11 @@ function renderReview() {
   const question = current.question;
   const response = current.response;
   const isCorrect = current.isCorrect;
-  const markText = isCorrect ? "1.00" : "0.00";
-  const statusText = isCorrect ? "Correct" : "Incorrect";
+  const reviewIsWritten = current.isWritten;
+  const markText = reviewIsWritten ? "—" : (isCorrect ? "1.00" : "0.00");
+  const statusText = reviewIsWritten
+    ? (current.hasAnswer ? "Reviewed" : "Not answered")
+    : (isCorrect ? "Correct" : "Incorrect");
   const stemLines = splitStemLines(question?.stem || "Question content is not available.");
   const correctChoiceIds = Array.isArray(question?.correct) ? question.correct : [];
   const questionChoices = Array.isArray(question?.choices) ? question.choices : [];
@@ -15810,16 +15899,18 @@ function renderReview() {
       const currentClass = index === state.reviewIndex ? "is-current" : "";
       const flaggedClass = entry.response.flagged ? "is-flagged" : "";
       const answeredClass = entry.hasAnswer ? "is-answered" : "is-unanswered";
-      const correctnessClass = entry.isCorrect ? "is-correct" : entry.isWrong ? "is-wrong" : "";
+      const correctnessClass = entry.isWritten ? "" : (entry.isCorrect ? "is-correct" : entry.isWrong ? "is-wrong" : "");
       const statusLabel = entry.response.flagged
         ? "flagged"
-        : entry.isCorrect
-          ? "correct"
-          : entry.isWrong
-            ? "incorrect"
-            : entry.hasAnswer
-              ? "answered"
-              : "unanswered";
+        : entry.isWritten
+          ? (entry.hasAnswer ? "answered" : "unanswered")
+          : entry.isCorrect
+            ? "correct"
+            : entry.isWrong
+              ? "incorrect"
+              : entry.hasAnswer
+                ? "answered"
+                : "unanswered";
       return `
         <button
           type="button"
@@ -15834,8 +15925,11 @@ function renderReview() {
     })
     .join("");
 
-  const choicesHtml = question
-    ? questionChoices
+  const choicesHtml = !question
+    ? `<p class="subtle">This question was removed from the bank and cannot be rendered.</p>`
+    : reviewIsWritten
+      ? `<div class="exam-written-editor is-readonly" contenteditable="false">${String(response.writtenAnswer || "") || "<em class='subtle'>No answer was written.</em>"}</div>`
+      : questionChoices
       .map((choice) => {
         const selectedChoice = response.selected.includes(choice.id);
         const choiceText = String(choice.text || "");
@@ -15868,8 +15962,7 @@ function renderReview() {
             </div>
           `;
       })
-      .join("")
-    : `<p class="subtle">This question was removed from the bank and cannot be rendered.</p>`;
+      .join("");
   const isFirstReviewQuestion = state.reviewIndex <= 0;
   const isLastReviewQuestion = state.reviewIndex >= total - 1;
 
@@ -15882,10 +15975,10 @@ function renderReview() {
               <h3>Question <b>${state.reviewIndex + 1}</b></h3>
               <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
               <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
-              <p class="exam-question-status ${isCorrect ? "good" : "bad"}">${statusText}</p>
-              <p class="exam-mark-line">Mark ${markText} out of 1.00</p>
+              <p class="exam-question-status ${reviewIsWritten ? "neutral" : (isCorrect ? "good" : "bad")}">${statusText}</p>
+              <p class="exam-mark-line">Mark ${markText}${reviewIsWritten ? "" : " out of 1.00"}</p>
               <p class="exam-mark-line subtle">Mode: ${escapeHtml(selected.mode === "timed" ? "Timed" : "Tutor")}</p>
-              <p class="exam-mark-line subtle">Block score: ${correctCount}/${total} (${accuracy}%)</p>
+              <p class="exam-mark-line subtle">Block score: ${correctCount}/${gradableTotal} (${accuracy}%)</p>
               <span class="exam-meta-link muted">${response.flagged ? "⚑ Flagged question" : "⚑ Not flagged"}</span>
               <span class="exam-meta-badge">v1 (latest)</span>
             </aside>
@@ -15930,7 +16023,7 @@ function renderReview() {
                   </div>
                 </div>
               </article>
-              ${renderReviewFeedbackPane(question, response, isCorrect)}
+              ${renderReviewFeedbackPane(question, response, isCorrect, reviewIsWritten)}
             </section>
 
             <aside class="exam-nav-panel">
@@ -16043,7 +16136,7 @@ function handleReviewKeydown(event) {
   }
 }
 
-function renderReviewFeedbackPane(question, response, isCorrect) {
+function renderReviewFeedbackPane(question, response, isCorrect, isWritten = false) {
   if (!question) {
     return `
       <section class="exam-feedback-block bad">
@@ -16053,6 +16146,11 @@ function renderReviewFeedbackPane(question, response, isCorrect) {
         <p class="exam-review-rationale">This question no longer exists in the bank and cannot be reviewed.</p>
       </section>
     `;
+  }
+
+  // Written questions: always show model answer (no correct/incorrect concept)
+  if (isWritten) {
+    return renderInlineExplanationPane(question, false, true);
   }
 
   if (response.selected.length) {
@@ -17303,6 +17401,8 @@ function renderAdmin() {
     });
     const answerKey = String(editing?.correct?.[0] || "A").toUpperCase();
     const saveQuestionLabel = editing ? "Save changes" : "Save question";
+    const editingType = (editing?.questionType === "written") ? "written" : "mcq";
+    const editingModelAnswer = String(editing?.modelAnswer || "");
 
     pageContent = `
       <section class="card admin-section" id="admin-questions-section">
@@ -17438,6 +17538,14 @@ function renderAdmin() {
                       </select>
                     </label>
                   </div>
+                  <div class="form-row admin-question-type-row">
+                    <label>Question Type
+                      <select name="questionType" id="admin-question-type">
+                        <option value="mcq" ${editingType === "mcq" ? "selected" : ""}>MCQ (Multiple Choice)</option>
+                        <option value="written" ${editingType === "written" ? "selected" : ""}>Written (Free Response)</option>
+                      </select>
+                    </label>
+                  </div>
                   <label>Question stem
                     <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
                   </label>
@@ -17458,26 +17566,46 @@ function renderAdmin() {
                       `
           : ""
         }
-                  <div class="form-row">
-                    <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" required /></label>
-                    <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" required /></label>
-                  </div>
-                  <div class="form-row">
-                    <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" /></label>
-                    <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" /></label>
-                  </div>
-                  <div class="form-row">
-                    <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
-                    <label>Correct answer
-                      <select name="correct">
-                        ${["A", "B", "C", "D", "E"]
+                  <div class="admin-mcq-fields" ${editingType === "written" ? "hidden" : ""}>
+                    <div class="form-row">
+                      <label>Choice A <input name="choiceA" value="${escapeHtml(choicesById.A || "")}" /></label>
+                      <label>Choice B <input name="choiceB" value="${escapeHtml(choicesById.B || "")}" /></label>
+                    </div>
+                    <div class="form-row">
+                      <label>Choice C <input name="choiceC" value="${escapeHtml(choicesById.C || "")}" /></label>
+                      <label>Choice D <input name="choiceD" value="${escapeHtml(choicesById.D || "")}" /></label>
+                    </div>
+                    <div class="form-row">
+                      <label>Choice E <input name="choiceE" value="${escapeHtml(choicesById.E || "")}" /></label>
+                      <label>Correct answer
+                        <select name="correct">
+                          ${["A", "B", "C", "D", "E"]
           .map((letter) => `<option value="${letter}" ${answerKey === letter ? "selected" : ""}>${letter}</option>`)
           .join("")}
-                      </select>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="admin-written-fields" ${editingType === "mcq" ? "hidden" : ""}>
+                    <label>Model Answer
+                      <div class="admin-rich-toolbar">
+                        <button type="button" class="admin-rich-btn" data-rich-cmd="bold" title="Bold"><b>B</b></button>
+                        <button type="button" class="admin-rich-btn" data-rich-cmd="italic" title="Italic"><i>I</i></button>
+                        <button type="button" class="admin-rich-btn" data-rich-cmd="insertUnorderedList" title="Bullet list">• List</button>
+                        <button type="button" class="admin-rich-btn" data-rich-cmd="insertOrderedList" title="Numbered list">1. List</button>
+                      </div>
+                      <div
+                        id="admin-model-answer-editor"
+                        class="admin-rich-editor"
+                        contenteditable="true"
+                        aria-label="Model answer"
+                        aria-multiline="true"
+                      >${editingModelAnswer}</div>
+                      <input type="hidden" name="modelAnswer" id="admin-model-answer-hidden" value="${escapeHtml(editingModelAnswer)}" />
                     </label>
                   </div>
                   <label>Explanation
-                    <textarea name="explanation" required>${escapeHtml(editing?.explanation || "")}</textarea>
+                    <textarea name="explanation">${escapeHtml(editing?.explanation || "")}</textarea>
                   </label>
                   <div class="form-row">
                     <label>References <input name="references" value="${escapeHtml(editing?.references || "")}" /></label>
@@ -21173,6 +21301,35 @@ function wireAdmin() {
   });
 
   const form = document.getElementById("admin-question-form");
+
+  // Written question type toggle: show/hide MCQ vs Written fields
+  const adminTypeSelect = document.getElementById("admin-question-type");
+  const adminMcqFields = form?.querySelector(".admin-mcq-fields");
+  const adminWrittenFields = form?.querySelector(".admin-written-fields");
+  adminTypeSelect?.addEventListener("change", () => {
+    const isWritten = adminTypeSelect.value === "written";
+    adminMcqFields?.toggleAttribute("hidden", isWritten);
+    adminWrittenFields?.toggleAttribute("hidden", !isWritten);
+  });
+
+  // Sync contenteditable model answer editor → hidden input so FormData picks it up
+  const adminModelAnswerEditor = document.getElementById("admin-model-answer-editor");
+  const adminModelAnswerHidden = document.getElementById("admin-model-answer-hidden");
+  adminModelAnswerEditor?.addEventListener("input", () => {
+    if (adminModelAnswerHidden) {
+      adminModelAnswerHidden.value = adminModelAnswerEditor.innerHTML;
+    }
+  });
+
+  // Rich text toolbar for admin model answer editor
+  form?.querySelectorAll(".admin-rich-btn[data-rich-cmd]").forEach((btn) => {
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault(); // prevent losing focus from editor
+      document.execCommand(btn.dataset.richCmd, false, null);
+      adminModelAnswerEditor?.focus();
+    });
+  });
+
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.adminQuestionSaveRunning) {
@@ -21212,13 +21369,15 @@ function wireAdmin() {
         }
       }
 
+      const questionType = data.get("questionType") === "written" ? "written" : "mcq";
+
       const choices = normalizeQuestionChoiceEntries(
         QUESTION_CHOICE_LABELS.map((label) => ({
           id: label,
           text: String(data.get(`choice${label}`) || "").trim(),
         })),
       );
-      if (choices.length < 2) {
+      if (questionType === "mcq" && choices.length < 2) {
         toast("Enter at least 2 answer choices.");
         state.adminQuestionSaveRunning = false;
         state.skipNextRouteAnimation = true;
@@ -21226,9 +21385,11 @@ function wireAdmin() {
         return;
       }
       const selectedCorrect = normalizeQuestionChoiceLabel(String(data.get("correct") || "A"));
-      const correct = choices.some((choice) => choice.id === selectedCorrect)
+      const correct = questionType === "mcq" && choices.some((choice) => choice.id === selectedCorrect)
         ? [selectedCorrect]
-        : [choices[0].id];
+        : questionType === "mcq" && choices.length
+          ? [choices[0].id]
+          : [];
 
       const payload = {
         id: existingId || makeId("q"),
@@ -21245,14 +21406,18 @@ function wireAdmin() {
         author: getCurrentUser().name,
         dateAdded: new Date().toISOString().slice(0, 10),
         stem: String(data.get("stem") || "").trim(),
-        choices,
-        correct,
+        choices: questionType === "written" ? [] : choices,
+        correct: questionType === "written" ? [] : correct,
         explanation: String(data.get("explanation") || "").trim(),
         objective: "",
         references: String(data.get("references") || "").trim(),
         questionImage,
         explanationImage: String(data.get("explanationImage") || "").trim(),
         status: String(data.get("status") || "published"),
+        questionType,
+        modelAnswer: questionType === "written"
+          ? String(data.get("modelAnswer") || "").trim()
+          : "",
       };
 
       if (!QBANK_COURSE_TOPICS[payload.qbankCourse]?.includes(payload.qbankTopic)) {
@@ -26635,6 +26800,7 @@ function normalizeSession(session) {
         flagged: false,
         struck: [],
         notes: "",
+        writtenAnswer: "",
         timeSpentSec: 0,
         highlightedLines: [],
         highlightedLineColors: {},
@@ -26644,6 +26810,13 @@ function normalizeSession(session) {
       };
       changed = true;
       return;
+    }
+
+    // Ensure writtenAnswer field exists on existing responses
+    const existingResponse = session.responses[qid];
+    if (existingResponse.writtenAnswer === undefined || existingResponse.writtenAnswer === null) {
+      existingResponse.writtenAnswer = "";
+      changed = true;
     }
 
     const response = session.responses[qid];
@@ -26966,7 +27139,52 @@ function renderQuestionStemVisual(question) {
   `;
 }
 
-function renderInlineExplanationPane(question, isCorrect) {
+function renderWrittenAnswerEditor(questionId, response, isSubmitted) {
+  const currentAnswer = String(response.writtenAnswer || "");
+  return `
+    <div class="exam-written-answer-wrap">
+      ${isSubmitted ? "" : `
+        <div class="exam-written-toolbar">
+          <button type="button" class="exam-rich-btn" data-rich-cmd="bold" title="Bold"><b>B</b></button>
+          <button type="button" class="exam-rich-btn" data-rich-cmd="italic" title="Italic"><i>I</i></button>
+          <button type="button" class="exam-rich-btn" data-rich-cmd="insertUnorderedList" title="Bullet list">• List</button>
+          <button type="button" class="exam-rich-btn" data-rich-cmd="insertOrderedList" title="Numbered list">1. List</button>
+        </div>
+      `}
+      <div
+        id="exam-written-answer-${escapeHtml(questionId)}"
+        class="exam-written-editor${isSubmitted ? " is-readonly" : ""}"
+        contenteditable="${isSubmitted ? "false" : "true"}"
+        data-action="written-answer-input"
+        data-qid="${escapeHtml(questionId)}"
+        aria-label="Your written answer"
+        aria-multiline="true"
+        spellcheck="true"
+      >${currentAnswer}</div>
+    </div>
+  `;
+}
+
+function renderInlineExplanationPane(question, isCorrect, isWritten = false) {
+  if (isWritten) {
+    const modelAnswer = String(question?.modelAnswer || "").trim();
+    return `
+      <section class="exam-feedback-block neutral">
+        <header class="exam-feedback-head">
+          <h4>Model Answer</h4>
+        </header>
+        ${modelAnswer
+          ? `<div class="exam-review-rationale exam-model-answer">${modelAnswer}</div>`
+          : `<p class="exam-review-rationale subtle">No model answer has been provided for this question.</p>`
+        }
+        ${question?.explanation
+          ? `<p class="exam-review-rationale">${escapeHtml(question.explanation)}</p>`
+          : ""
+        }
+      </section>
+    `;
+  }
+
   const choices = Array.isArray(question?.choices) ? question.choices : [];
   const correctIds = Array.isArray(question?.correct) ? question.correct : [];
   const correctAnswerText = choices
@@ -27511,6 +27729,10 @@ function isResponseSelectionCorrect(question, response) {
 
 function isSubmittedResponseCorrect(question, response) {
   if (!question || !response || !response.submitted) {
+    return false;
+  }
+  // Written questions are self-check only — never counted as correct/incorrect
+  if (question.questionType === "written") {
     return false;
   }
   return isResponseSelectionCorrect(question, response);
