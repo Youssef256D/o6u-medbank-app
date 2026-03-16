@@ -4166,9 +4166,45 @@ th {
   gap: 0.6rem;
 }
 
+.exam-question-meta-moodle {
+  gap: 0.9rem;
+}
+
+.exam-question-meta-primary,
+.exam-question-meta-secondary {
+  display: grid;
+}
+
+.exam-question-meta-primary {
+  gap: 0.78rem;
+}
+
+.exam-question-meta-secondary {
+  gap: 0.45rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(31, 64, 112, 0.14);
+}
+
 .exam-question-meta h3 {
   margin: 0;
   font-size: calc(1.14rem * var(--exam-font-scale));
+}
+
+.exam-question-title-moodle {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+  line-height: 1;
+}
+
+.exam-question-title-moodle span {
+  font-weight: 500;
+}
+
+.exam-question-title-moodle b {
+  font-size: calc(2.2rem * var(--exam-font-scale));
+  line-height: 0.9;
 }
 
 .exam-question-status {
@@ -4176,6 +4212,13 @@ th {
   font-weight: 500;
   font-size: calc(0.96rem * var(--exam-font-scale));
   line-height: 1;
+}
+
+.exam-question-status-moodle {
+  max-width: 8ch;
+  color: #2e3338;
+  font-size: calc(0.98rem * var(--exam-font-scale));
+  line-height: 1.45;
 }
 
 .exam-question-status.good {
@@ -4196,6 +4239,11 @@ th {
   font-size: calc(0.96rem * var(--exam-font-scale));
 }
 
+.exam-mark-line-moodle {
+  max-width: 10ch;
+  line-height: 1.45;
+}
+
 .exam-meta-link {
   border: 0;
   padding: 0;
@@ -4206,6 +4254,14 @@ th {
   font-weight: 500;
   cursor: pointer;
   font-size: 0.9rem;
+}
+
+.exam-meta-link-moodle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  text-align: left;
+  line-height: 1.35;
 }
 
 .exam-meta-link.muted {
@@ -6313,6 +6369,10 @@ body.theme-dark .exam-meta-link.muted {
   color: #cbd6e6;
 }
 
+body.theme-dark .exam-question-meta-secondary {
+  border-top-color: rgba(255, 255, 255, 0.12);
+}
+
 body.theme-dark .exam-question-meta .exam-meta-link {
   color: #ffcccc;
 }
@@ -6325,6 +6385,10 @@ body.theme-comfort .exam-nav-link,
 body.theme-comfort .exam-meta-link,
 body.theme-comfort .exam-meta-link.muted {
   color: #715640;
+}
+
+body.theme-comfort .exam-question-meta-secondary {
+  border-top-color: rgba(99, 74, 54, 0.14);
 }
 
 body.theme-comfort .exam-question-meta .exam-meta-link {
@@ -6511,6 +6575,11 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
   .exam-question-meta {
     order: 2;
     position: static;
+  }
+
+  .exam-question-status-moodle,
+  .exam-mark-line-moodle {
+    max-width: none;
   }
 
   .exam-nav-panel {
@@ -7050,17 +7119,38 @@ html body :is(.title,
 /* ─── Written Questions ──────────────────────────────────────── */
 
 /* Rich text toolbar (shared by admin modal + student session) */
-.admin-rich-toolbar,
-.exam-written-toolbar {
-  display: flex;
-  gap: 0.35rem;
-  margin-bottom: 0.4rem;
-  flex-wrap: wrap;
+.admin-field-label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 0.35rem;
+  font-size: 0.92rem;
 }
 
-.admin-rich-btn,
+.admin-model-answer-field {
+  margin-bottom: 0.5rem;
+}
+
+/* Rich text toolbars (admin + student) */
+[class*="rich-toolbar"] {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.45rem;
+  background: var(--bg-subtle, #f5f5f5);
+  border: 1px solid var(--border, #d0d0d0);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+}
+
+[class*="rich-toolbar"] + .admin-rich-editor {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+[class*="rich-btn"],
 .exam-rich-btn {
-  padding: 0.18rem 0.55rem;
+  padding: 0.2rem 0.45rem;
   font-size: 0.82rem;
   border: 1px solid var(--border, #d0d0d0);
   border-radius: 3px;
@@ -7069,14 +7159,36 @@ html body :is(.title,
   color: var(--text, #1a1a1a);
   line-height: 1.4;
   user-select: none;
+  min-width: 26px;
+  text-align: center;
 }
 
-.admin-rich-btn:hover,
+[class*="rich-btn"]:hover,
 .exam-rich-btn:hover {
-  background: var(--bg-subtle, #f0f0f0);
+  background: var(--accent, #4a90d9);
+  color: #fff;
+  border-color: var(--accent, #4a90d9);
 }
 
-/* Admin model-answer contenteditable */
+[class*="rich-sep"] {
+  width: 1px;
+  height: 1.15rem;
+  background: var(--border, #d0d0d0);
+  margin: 0 0.1rem;
+  flex-shrink: 0;
+}
+
+[class*="rich-format-select"] {
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--border, #d0d0d0);
+  border-radius: 3px;
+  background: var(--bg-card, #fff);
+  color: var(--text, #1a1a1a);
+  cursor: pointer;
+}
+
+/* Admin contenteditable editors */
 .admin-rich-editor {
   min-height: 110px;
   border: 1px solid var(--border, #d0d0d0);
@@ -7094,6 +7206,22 @@ html body :is(.title,
 .admin-rich-editor:focus {
   border-color: var(--accent, #4a90d9);
   box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
+}
+
+.admin-rich-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted, #999);
+  pointer-events: none;
+}
+
+.admin-rich-editor h3,
+.admin-rich-editor h4 {
+  margin: 0.3em 0;
+}
+
+.admin-rich-editor a {
+  color: var(--accent, #4a90d9);
+  text-decoration: underline;
 }
 
 /* Student written answer container */

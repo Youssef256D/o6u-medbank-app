@@ -14730,17 +14730,23 @@ function renderSession() {
     `;
   }
 
-  const stemLines = splitStemLines(question.stem);
+  const stemIsHtml = stemHasHtml(question.stem);
+  const stemLines = stemIsHtml ? [] : splitStemLines(question.stem);
   const isWritten = question.questionType === "written";
   const correctChoiceIds = getNormalizedQuestionCorrectChoiceIds(question);
   const choiceType = correctChoiceIds.length > 1 ? "checkbox" : "radio";
   const isSubmitted = response.submitted;
+  const hasAnswer = isWritten
+    ? Boolean(String(response.writtenAnswer || "").trim())
+    : response.selected.length > 0;
   const isCorrect = isSubmittedResponseCorrect(question, response);
   const markText = isWritten ? "—" : (isSubmitted && isCorrect ? "1.00" : "0.00");
-  const statusText = isWritten
-    ? (isSubmitted ? "Reviewed" : "Not submitted")
-    : (isSubmitted ? (isCorrect ? "Correct" : "Incorrect") : "Not graded");
-  const isTimedMode = session.mode === "timed";
+  const statusText = isSubmitted
+    ? "Answer submitted"
+    : (hasAnswer ? "Answer saved" : "Not yet answered");
+  const markLineText = !isSubmitted || isWritten
+    ? "Marked out of 1.00"
+    : `Marked ${markText} out of 1.00`;
   const normalizedHighlighterColor = normalizeSessionHighlightColor(state.sessionHighlighterColor);
   const shellClassNames = [
     "exam-shell",
@@ -14756,13 +14762,6 @@ function renderSession() {
   const currentCourse = mappedCourse || questionCourse;
   const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
   const hasAskAiLink = Boolean(askAiUrl);
-  const initialTimedSeconds = Math.max(0, Number(session.durationMin || 0) * 60);
-  const countdownSeconds = Math.max(
-    0,
-    Number(session.timeRemainingSec != null ? session.timeRemainingSec : initialTimedSeconds),
-  );
-  const sessionName = getSessionDisplayName(session);
-  const sessionTestId = getSessionDisplayId(session);
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -14858,18 +14857,16 @@ function renderSession() {
       <div class="${shellClassNames}" style="${shellStyleAttr}">
         <section class="exam-main exam-main-simple">
           <div class="exam-content exam-content-moodle">
-            <aside class="exam-question-meta">
-              <h3>Question <b>${session.currentIndex + 1}</b></h3>
-              <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
-              <p class="exam-mark-line subtle">${escapeHtml(sessionTestId)}</p>
-              <p class="exam-question-status ${isWritten ? (isSubmitted ? "neutral" : "neutral") : (isSubmitted ? (isCorrect ? "good" : "bad") : "neutral")}">${statusText}</p>
-              <p class="exam-mark-line">Mark ${markText}${isWritten ? "" : " out of 1.00"}</p>
-              ${isTimedMode
-      ? `<p class="countdown exam-countdown" title="Timed mode (${session.durationMin} minutes)">Time left: <span id="countdown">${formatDuration(countdownSeconds)}</span></p>`
-      : `<p class="exam-mark-line subtle">Mode: Tutor</p>`
-    }
-              <button class="exam-meta-link" data-action="toggle-flag">⚑ ${response.flagged ? "Unflag question" : "Flag question"}</button>
-              <span class="exam-meta-badge">v1 (latest)</span>
+            <aside class="exam-question-meta exam-question-meta-moodle">
+              <div class="exam-question-meta-primary">
+                <h3 class="exam-question-title-moodle"><span>Question</span> <b>${session.currentIndex + 1}</b></h3>
+                <p class="exam-question-status exam-question-status-moodle">${statusText}</p>
+                <p class="exam-mark-line exam-mark-line-moodle">${markLineText}</p>
+                <button class="exam-meta-link exam-meta-link-moodle" data-action="toggle-flag">
+                  <span aria-hidden="true">⚑</span>
+                  <span>${response.flagged ? "Unflag question" : "Flag question"}</span>
+                </button>
+              </div>
             </aside>
 
             <section class="exam-question-stage">
@@ -14898,7 +14895,9 @@ function renderSession() {
                 </div>
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
-                  ${stemLines
+                  ${stemIsHtml
+      ? question.stem
+      : stemLines
       .map((line, index) => {
         const lineText = String(line || "");
         const lineHighlightColor = normalizeSessionHighlightColor(response.highlightedLineColors?.[index], "");
@@ -15879,7 +15878,8 @@ function renderReview() {
   const statusText = reviewIsWritten
     ? (current.hasAnswer ? "Reviewed" : "Not answered")
     : (isCorrect ? "Correct" : "Incorrect");
-  const stemLines = splitStemLines(question?.stem || "Question content is not available.");
+  const reviewStemIsHtml = stemHasHtml(question?.stem);
+  const stemLines = reviewStemIsHtml ? [] : splitStemLines(question?.stem || "Question content is not available.");
   const correctChoiceIds = Array.isArray(question?.correct) ? question.correct : [];
   const questionChoices = Array.isArray(question?.choices) ? question.choices : [];
   const choiceType = question && correctChoiceIds.length > 1 ? "checkbox" : "radio";
@@ -15987,7 +15987,9 @@ function renderReview() {
               <article class="exam-question-block exam-question-card">
                 ${renderQuestionStemVisual(question)}
                 <div class="exam-stem">
-                  ${stemLines
+                  ${reviewStemIsHtml
+      ? (question?.stem || "Question content is not available.")
+      : stemLines
       .map((line, index) => {
         const lineText = String(line || "");
         const lineHighlightColor = normalizeSessionHighlightColor(response.highlightedLineColors?.[index], "");
@@ -16169,7 +16171,7 @@ function renderReviewFeedbackPane(question, response, isCorrect, isWritten = fal
       <header class="exam-feedback-head">
         <h4>Your answer is incorrect (not submitted).</h4>
       </header>
-      <p class="exam-review-rationale">${escapeHtml(question.explanation)}</p>
+      <div class="exam-review-rationale">${question.explanation}</div>
       <p class="exam-feedback-answer">The correct answer is: ${escapeHtml(correctAnswerText || correctIds.join(", "))}</p>
     </section>
   `;
@@ -17403,6 +17405,32 @@ function renderAdmin() {
     const saveQuestionLabel = editing ? "Save changes" : "Save question";
     const editingType = (editing?.questionType === "written") ? "written" : "mcq";
     const editingModelAnswer = String(editing?.modelAnswer || "");
+    const adminRichToolbarHtml = `
+      <div class="admin-rich-toolbar">
+        <select class="admin-rich-format-select" data-rich-block="true" title="Text format">
+          <option value="p">Normal</option>
+          <option value="h3">Heading</option>
+          <option value="h4">Subheading</option>
+        </select>
+        <span class="admin-rich-sep"></span>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="bold" title="Bold"><b>B</b></button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="italic" title="Italic"><i>I</i></button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="underline" title="Underline"><u>U</u></button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+        <span class="admin-rich-sep"></span>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="insertUnorderedList" title="Bullet list">• List</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="insertOrderedList" title="Numbered list">1. List</button>
+        <span class="admin-rich-sep"></span>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="justifyLeft" title="Align left">⫷</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="justifyCenter" title="Align center">☰</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="justifyRight" title="Align right">⫸</button>
+        <span class="admin-rich-sep"></span>
+        <button type="button" class="admin-rich-btn" data-rich-action="link" title="Insert link">🔗</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="unlink" title="Remove link">⛓️‍💥</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="insertHorizontalRule" title="Horizontal rule">―</button>
+        <button type="button" class="admin-rich-btn" data-rich-cmd="removeFormat" title="Clear formatting">⌧</button>
+      </div>
+    `;
 
     pageContent = `
       <section class="card admin-section" id="admin-questions-section">
@@ -17546,9 +17574,19 @@ function renderAdmin() {
                       </select>
                     </label>
                   </div>
-                  <label>Question stem
-                    <textarea name="stem" required>${escapeHtml(editing?.stem || "")}</textarea>
-                  </label>
+                  <div class="admin-model-answer-field">
+                    <span class="admin-field-label">Question stem</span>
+                    ${adminRichToolbarHtml.replace(/admin-rich-/g, "admin-stem-rich-")}
+                    <div
+                      id="admin-stem-editor"
+                      class="admin-rich-editor"
+                      contenteditable="true"
+                      aria-label="Question stem"
+                      aria-multiline="true"
+                      data-placeholder="Enter the question stem..."
+                    >${editing?.stem || ""}</div>
+                    <input type="hidden" name="stem" id="admin-stem-hidden" value="${escapeHtml(editing?.stem || "")}" />
+                  </div>
                   <div class="form-row">
                     <label>Question image URL
                       <input name="questionImage" value="${escapeHtml(editing?.questionImage || "")}" placeholder="https://example.com/figure.png" />
@@ -17587,13 +17625,9 @@ function renderAdmin() {
                     </div>
                   </div>
                   <div class="admin-written-fields" ${editingType === "mcq" ? "hidden" : ""}>
-                    <label>Model Answer
-                      <div class="admin-rich-toolbar">
-                        <button type="button" class="admin-rich-btn" data-rich-cmd="bold" title="Bold"><b>B</b></button>
-                        <button type="button" class="admin-rich-btn" data-rich-cmd="italic" title="Italic"><i>I</i></button>
-                        <button type="button" class="admin-rich-btn" data-rich-cmd="insertUnorderedList" title="Bullet list">• List</button>
-                        <button type="button" class="admin-rich-btn" data-rich-cmd="insertOrderedList" title="Numbered list">1. List</button>
-                      </div>
+                    <div class="admin-model-answer-field">
+                      <span class="admin-field-label">Model Answer</span>
+                      ${adminRichToolbarHtml}
                       <div
                         id="admin-model-answer-editor"
                         class="admin-rich-editor"
@@ -17602,11 +17636,21 @@ function renderAdmin() {
                         aria-multiline="true"
                       >${editingModelAnswer}</div>
                       <input type="hidden" name="modelAnswer" id="admin-model-answer-hidden" value="${escapeHtml(editingModelAnswer)}" />
-                    </label>
+                    </div>
                   </div>
-                  <label>Explanation
-                    <textarea name="explanation">${escapeHtml(editing?.explanation || "")}</textarea>
-                  </label>
+                  <div class="admin-model-answer-field">
+                    <span class="admin-field-label">Explanation</span>
+                    ${adminRichToolbarHtml.replace(/admin-rich-/g, "admin-expl-rich-")}
+                    <div
+                      id="admin-explanation-editor"
+                      class="admin-rich-editor"
+                      contenteditable="true"
+                      aria-label="Explanation"
+                      aria-multiline="true"
+                      data-placeholder="Enter the explanation..."
+                    >${editing?.explanation || ""}</div>
+                    <input type="hidden" name="explanation" id="admin-explanation-hidden" value="${escapeHtml(editing?.explanation || "")}" />
+                  </div>
                   <div class="form-row">
                     <label>References <input name="references" value="${escapeHtml(editing?.references || "")}" /></label>
                     <label>Explanation image URL <input name="explanationImage" value="${escapeHtml(editing?.explanationImage || "")}" /></label>
@@ -21312,21 +21356,53 @@ function wireAdmin() {
     adminWrittenFields?.toggleAttribute("hidden", !isWritten);
   });
 
-  // Sync contenteditable model answer editor → hidden input so FormData picks it up
-  const adminModelAnswerEditor = document.getElementById("admin-model-answer-editor");
-  const adminModelAnswerHidden = document.getElementById("admin-model-answer-hidden");
-  adminModelAnswerEditor?.addEventListener("input", () => {
-    if (adminModelAnswerHidden) {
-      adminModelAnswerHidden.value = adminModelAnswerEditor.innerHTML;
-    }
-  });
+  // Wire all admin rich text editors (stem, explanation, model answer)
+  const adminEditorPairs = [
+    { editor: document.getElementById("admin-stem-editor"), hidden: document.getElementById("admin-stem-hidden") },
+    { editor: document.getElementById("admin-explanation-editor"), hidden: document.getElementById("admin-explanation-hidden") },
+    { editor: document.getElementById("admin-model-answer-editor"), hidden: document.getElementById("admin-model-answer-hidden") },
+  ];
 
-  // Rich text toolbar for admin model answer editor
-  form?.querySelectorAll(".admin-rich-btn[data-rich-cmd]").forEach((btn) => {
-    btn.addEventListener("mousedown", (e) => {
-      e.preventDefault(); // prevent losing focus from editor
-      document.execCommand(btn.dataset.richCmd, false, null);
-      adminModelAnswerEditor?.focus();
+  adminEditorPairs.forEach(({ editor, hidden }) => {
+    if (!editor) return;
+
+    // Sync contenteditable → hidden input so FormData picks it up
+    editor.addEventListener("input", () => {
+      if (hidden) hidden.value = editor.innerHTML;
+    });
+
+    // Find the toolbar that is a sibling of this editor (inside same parent)
+    const toolbar = editor.parentElement?.querySelector('[class*="rich-toolbar"]');
+    if (!toolbar) return;
+
+    // execCommand buttons
+    toolbar.querySelectorAll("[data-rich-cmd]").forEach((btn) => {
+      btn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        document.execCommand(btn.dataset.richCmd, false, null);
+        editor.focus();
+      });
+    });
+
+    // Format block (heading) dropdown
+    toolbar.querySelectorAll("[data-rich-block]").forEach((select) => {
+      select.addEventListener("change", (e) => {
+        e.preventDefault();
+        document.execCommand("formatBlock", false, select.value);
+        editor.focus();
+      });
+    });
+
+    // Insert link action
+    toolbar.querySelectorAll("[data-rich-action='link']").forEach((btn) => {
+      btn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const url = window.prompt("Enter URL:");
+        if (url) {
+          document.execCommand("createLink", false, url);
+        }
+        editor.focus();
+      });
     });
   });
 
@@ -26995,6 +27071,10 @@ function splitStemLines(stem) {
     .filter(Boolean);
 }
 
+function stemHasHtml(stem) {
+  return /<[a-z][\s\S]*?>/i.test(String(stem || ""));
+}
+
 function buildAskAiPromptText(question) {
   const meta = getQbankCourseTopicMeta(question || {});
   const stem = String(question?.stem || "").trim();
@@ -27178,7 +27258,7 @@ function renderInlineExplanationPane(question, isCorrect, isWritten = false) {
           : `<p class="exam-review-rationale subtle">No model answer has been provided for this question.</p>`
         }
         ${question?.explanation
-          ? `<p class="exam-review-rationale">${escapeHtml(question.explanation)}</p>`
+          ? `<div class="exam-review-rationale">${question.explanation}</div>`
           : ""
         }
       </section>
@@ -27197,7 +27277,7 @@ function renderInlineExplanationPane(question, isCorrect, isWritten = false) {
       <header class="exam-feedback-head">
         <h4>${isCorrect ? "Your answer is correct." : "Your answer is incorrect."}</h4>
       </header>
-      <p class="exam-review-rationale">${escapeHtml(question.explanation)}</p>
+      <div class="exam-review-rationale">${question.explanation}</div>
       <p class="exam-feedback-answer">The correct answer is: ${escapeHtml(correctAnswerText || correctIds.join(", "))}</p>
     </section>
   `;
@@ -27365,7 +27445,7 @@ function renderSessionPanel(session, question, response) {
         <p><b>Status:</b> ${wasCorrect ? "Correct" : "Incorrect"}</p>
         <hr />
         <p><b>Tutor explanation:</b></p>
-        <p class="subtle">${escapeHtml(question.explanation)}</p>
+        <div class="subtle">${question.explanation}</div>
         <p><b>Study tip:</b></p>
         <p class="subtle">Before selecting an option, summarize the key finding in one sentence, then eliminate choices that do not directly explain that finding.</p>
       </div>
