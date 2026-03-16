@@ -20284,26 +20284,25 @@ function wireAdmin() {
       users[idx].approvedAt = nextApproved ? nowISO() : null;
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
       save(STORAGE_KEYS.users, users);
-      await syncUsersBackupState(users);
-      const authAccessResult = await syncSupabaseAuthAccessForTargets(
+      // Optimistic feedback: update the UI instantly so the admin can
+      // approve the next user without waiting for the network round-trips.
+      toast(
+        approvalQueuedForSync
+          ? `${nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync."}`
+          : `${nextApproved ? "Account approved." : "Account suspended."}`,
+      );
+      render();
+      // Fire all network work in the background — don't block the handler.
+      syncUsersBackupState(users).catch(() => {});
+      syncSupabaseAuthAccessForTargets(
         isUuidValue(targetProfileId) ? [targetProfileId] : [],
         nextApproved,
         {
           users,
           queueAll: approvalQueuedForSync,
         },
-      );
-      try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: !approvalQueuedForSync });
-        toast(
-          approvalQueuedForSync
-            ? `${nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync."}${describeAuthAccessSyncOutcome(authAccessResult)}`
-            : `${nextApproved ? "Account approved." : "Account suspended."}${describeAuthAccessSyncOutcome(authAccessResult)}`,
-        );
-        render();
-      } catch (syncError) {
-        toast(`Account updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
-      }
+      ).catch(() => {});
+      flushPendingSyncInBackground();
     });
   });
 
