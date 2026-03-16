@@ -1439,7 +1439,17 @@ async function init() {
   if (topicRepairResult.questionsChanged || topicRepairResult.topicsChanged) {
     render();
   }
-  if (supabaseAuth.enabled || supabaseSync.enabled) {
+  const activeBootUser = getCurrentUser();
+  const shouldKeepCloudReconnectTrying = Boolean(
+    shouldAttemptSupabaseReconnect(activeBootUser)
+    && !hasActiveSupabaseSessionForUser(activeBootUser),
+  );
+  if (shouldAttemptSupabaseReconnect(activeBootUser)) {
+    ensureSupabaseCloudReconnect(activeBootUser, {
+      preferBootstrap: !supabaseAuth.enabled || !supabaseSync.enabled,
+    });
+  }
+  if ((supabaseAuth.enabled || supabaseSync.enabled) && !shouldKeepCloudReconnectTrying) {
     clearSupabaseBootstrapRetry();
   } else if (SUPABASE_CONFIG.enabled && !window.supabase?.createClient) {
     scheduleSupabaseBootstrapRetry();
@@ -1456,6 +1466,16 @@ function clearSupabaseBootstrapRetry() {
     window.clearInterval(supabaseBootstrapRetryHandle);
     supabaseBootstrapRetryHandle = null;
   }
+}
+
+function shouldAttemptSupabaseReconnect(user = null) {
+  const currentUser = user || getCurrentUser();
+  return Boolean(
+    currentUser
+    && hasSupabaseManagedIdentity(currentUser)
+    && SUPABASE_CONFIG.enabled
+    && window.supabase?.createClient,
+  );
 }
 
 async function tryBootstrapSupabaseInBackground() {
@@ -1509,6 +1529,35 @@ function scheduleSupabaseBootstrapRetry() {
     supabaseBootstrapRetries += 1;
     tryBootstrapSupabaseInBackground().catch(() => { });
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
+}
+
+function ensureSupabaseCloudReconnect(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  if (!shouldAttemptSupabaseReconnect(currentUser)) {
+    return false;
+  }
+  if (hasActiveSupabaseSessionForUser(currentUser)) {
+    clearSupabaseBootstrapRetry();
+    clearSupabaseSessionRecoveryRetry();
+    return true;
+  }
+
+  const preferBootstrap = Boolean(options?.preferBootstrap);
+  const hasAuthClient = Boolean(getSupabaseAuthClient());
+  const needsBootstrap = preferBootstrap || !supabaseAuth.initialized || !supabaseAuth.enabled || !hasAuthClient;
+  if (needsBootstrap) {
+    scheduleSupabaseBootstrapRetry();
+    tryBootstrapSupabaseInBackground().catch((error) => {
+      console.warn("Supabase cloud reconnect bootstrap failed.", error?.message || error);
+    });
+    return false;
+  }
+
+  scheduleSupabaseSessionRecoveryRetry();
+  tryRecoverSupabaseSessionInBackground().catch((error) => {
+    console.warn("Supabase cloud reconnect recovery failed.", error?.message || error);
+  });
+  return false;
 }
 
 window.__MCQ_ON_SUPABASE_SDK_READY__ = function handleSupabaseSdkReady() {
@@ -2293,6 +2342,10 @@ async function initSupabaseAuth() {
     supabaseAuth.enabled = false;
     supabaseAuth.client = null;
     supabaseAuth.activeUserId = "";
+    if (shouldAttemptSupabaseReconnect(getCurrentUser())) {
+      scheduleSupabaseBootstrapRetry();
+    }
+    scheduleSyncStatusUiRefresh();
   } finally {
     supabaseAuth.initialized = true;
     supabaseAuth.initializing = false;
@@ -3834,7 +3887,28 @@ function getCloudSyncStatusModel(user = null) {
     Number(supabaseSync.retryAt || 0),
     Number(adminActionRuntime.retryAt || 0),
   );
+  const isSupabaseReconnectPending = Boolean(
+    shouldAttemptSupabaseReconnect(currentUser)
+    && (
+      !hasActiveSupabaseSession
+      || !supabaseAuth.enabled
+      || !supabaseAuth.initialized
+      || supabaseAuth.initializing
+      || supabaseBootstrapInFlight
+      || supabaseSessionRecoveryInFlight
+      || supabaseBootstrapRetryHandle
+      || supabaseSessionRecoveryHandle
+    ),
+  );
 
+  if (isSupabaseReconnectPending) {
+    return {
+      tone: "pending",
+      label: "Connecting to cloud...",
+      detail: "Trying to restore your Supabase session and fetch the latest data.",
+      pendingCount,
+    };
+  }
   if (!hasAuthClient || !hasActiveSupabaseSession) {
     return {
       tone: "offline",
@@ -8870,6 +8944,9 @@ async function resumeDeferredAppWork(options = {}) {
 
   let activeUser = getCurrentUser();
   if (activeUser && !hasActiveSupabaseSessionForUser(activeUser)) {
+    ensureSupabaseCloudReconnect(activeUser, {
+      preferBootstrap: !supabaseAuth.enabled || !getSupabaseAuthClient(),
+    });
     await tryRecoverSupabaseSessionInBackground().catch(() => false);
     activeUser = getCurrentUser();
   }
@@ -8903,6 +8980,9 @@ async function resumeDeferredAppWork(options = {}) {
     && !hasActiveSupabaseSessionForUser(activeUser)
     && !lifecycleResumeHandle
   ) {
+    ensureSupabaseCloudReconnect(activeUser, {
+      preferBootstrap: !supabaseAuth.enabled || !getSupabaseAuthClient(),
+    });
     lifecycleResumeHandle = window.setTimeout(() => {
       lifecycleResumeHandle = null;
       resumeDeferredAppWork().catch((error) => {
