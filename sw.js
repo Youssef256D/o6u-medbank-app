@@ -4,6 +4,8 @@ const versionSuffix = cacheVersion ? `?v=${encodeURIComponent(cacheVersion)}` : 
 const CACHE_NAME = `o6u-medbank-static-v${(cacheVersion || "runtime").replace(/\./g, "-")}`;
 
 const PRECACHE_URLS = [
+  "./",
+  "./index.html",
   `./styles.css${versionSuffix}`,
   `./bootstrap.js${versionSuffix}`,
   `./main.js${versionSuffix}`,
@@ -46,7 +48,14 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request, { cache: "no-store" }));
+    event.respondWith(
+      fetch(request, { cache: "no-store" }).catch(async () => (
+        (await caches.match("./"))
+        || (await caches.match("./index.html"))
+        || (await caches.match(request))
+        || Response.error()
+      )),
+    );
     return;
   }
 
@@ -77,7 +86,7 @@ self.addEventListener("fetch", (event) => {
         const clone = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
         return response;
-      });
+      }).catch(() => caches.match(request));
     }),
   );
 });

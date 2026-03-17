@@ -382,6 +382,7 @@ const relationalSync = {
   pendingWrites: new Map(),
   inFlightPayloadSignatures: new Map(),
   lastSyncedPayloadSignatures: new Map(),
+  blockedStorageKeys: new Set(),
   flushTimer: null,
   flushing: false,
   lastQueuedAt: 0,
@@ -394,6 +395,7 @@ const relationalSync = {
   readyCheckedAt: 0,
   readyPromise: null,
   lastReadyError: "",
+  enrollmentWriteAccessDenied: false,
   // Timestamp of last local user/profile write. Used to prevent DB hydration
   // from overwriting locally-changed fields (year, semester, courses) before
   // the write has propagated to the database.
@@ -3840,6 +3842,43 @@ function shouldStopPendingAdminQueueOnFailure(value) {
     || normalized.includes("missing bearer token");
 }
 
+function shouldAutoRetryPendingAdminQueueOnFailure(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return typeof navigator !== "undefined" ? navigator?.onLine === false : false;
+  }
+  if (isLikelyCloudSyncAuthMessage(normalized)) {
+    return false;
+  }
+  if (
+    normalized.includes("api is unavailable")
+    || normalized.includes("endpoint is configured")
+    || normalized.includes("server configuration is missing")
+    || normalized.includes("method not allowed")
+    || normalized.includes("missing bearer token")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isNonRetryableCloudSyncPermissionError(errorOrMessage) {
+  const rawCode = String(errorOrMessage?.code || errorOrMessage?.status || "").trim();
+  if (rawCode === "42501" || rawCode === "403") {
+    return true;
+  }
+  const normalized = typeof errorOrMessage === "string"
+    ? String(errorOrMessage || "").trim().toLowerCase()
+    : String(getErrorMessage(errorOrMessage, "") || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("row-level security policy")
+    || normalized.includes("violates row level security policy")
+    || normalized.includes("permission denied")
+    || normalized.includes("forbidden");
+}
+
 function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync failed.") {
   const rawMessage = typeof errorOrMessage === "string"
     ? String(errorOrMessage || "").trim()
@@ -3854,6 +3893,9 @@ function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync
   if (isLikelyCloudSyncAuthMessage(normalized)) {
     return "Supabase admin session needs attention. Log out and sign in again.";
   }
+  if (isNonRetryableCloudSyncPermissionError(normalized)) {
+    return "Supabase write access is blocked by row-level security or permissions. Changes stay local until access is restored.";
+  }
   if (isLikelyRecoverableCloudSyncMessage(normalized)) {
     return "Temporary network issue contacting Supabase. Changes are saved locally and will retry automatically.";
   }
@@ -3862,20 +3904,18 @@ function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync
 
 function isNonRetryableSupabaseBackupWriteError(errorOrMessage) {
   const rawCode = String(errorOrMessage?.code || errorOrMessage?.status || "").trim();
-  if (rawCode === "42501" || rawCode === "401") {
+  if (rawCode === "401") {
     return true;
   }
   const normalized = typeof errorOrMessage === "string"
     ? String(errorOrMessage || "").trim().toLowerCase()
     : String(getErrorMessage(errorOrMessage, "") || "").trim().toLowerCase();
-  if (!normalized) {
-    return false;
+  if (isLikelyCloudSyncAuthMessage(normalized)) {
+    return true;
   }
-  return normalized.includes("row-level security policy")
-    || normalized.includes("violates row level security policy")
-    || normalized.includes("permission denied")
-    || normalized.includes("unauthorized")
-    || normalized.includes("invalid jwt");
+  return isNonRetryableCloudSyncPermissionError(normalized)
+    || normalized.includes("invalid jwt")
+    || normalized.includes("missing bearer token");
 }
 
 function getCloudSyncFailureState(rawFailureMessage) {
@@ -4002,7 +4042,9 @@ function getCloudSyncStatusModel(user = null) {
   if (pendingCount > 0) {
     const retryWaitMs = retryAt > Date.now() ? (retryAt - Date.now()) : 0;
     const retryLabel = retryWaitMs > 0 ? `Retrying in ${Math.ceil(retryWaitMs / 1000)}s.` : "Retrying automatically.";
-    const canAppendRetryLabel = Boolean(failureMessage) && !/retry/i.test(failureMessage.toLowerCase());
+    const canAppendRetryLabel = Boolean(failureMessage)
+      && (retryWaitMs > 0 || failureState.recoverable)
+      && !/retry/i.test(failureMessage.toLowerCase());
     return {
       tone: failureMessage && !failureState.recoverable ? "warning" : "pending",
       label: `Pending ${pendingCount} change${pendingCount === 1 ? "" : "s"}`,
@@ -4103,6 +4145,7 @@ function resetRelationalSyncState() {
   relationalSync.pendingWrites.clear();
   relationalSync.inFlightPayloadSignatures.clear();
   relationalSync.lastSyncedPayloadSignatures.clear();
+  relationalSync.blockedStorageKeys.clear();
   relationalSync.flushing = false;
   relationalSync.lastQueuedAt = 0;
   relationalSync.lastSuccessAt = 0;
@@ -4114,6 +4157,7 @@ function resetRelationalSyncState() {
   relationalSync.readyCheckedAt = 0;
   relationalSync.readyPromise = null;
   relationalSync.lastReadyError = "";
+  relationalSync.enrollmentWriteAccessDenied = false;
   relationalSync.lastUserLocalWriteAt = 0;
   relationalQuestionColumnSupport.checked = false;
   relationalQuestionColumnSupport.questionImageUrl = false;
@@ -4164,6 +4208,9 @@ function getPendingRelationalPayloadForStorageKey(storageKey) {
 
 function scheduleRelationalWrite(storageKey, value) {
   if (!RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
+    return false;
+  }
+  if (relationalSync.blockedStorageKeys.has(storageKey)) {
     return false;
   }
   const currentUser = getCurrentUser();
@@ -4237,6 +4284,22 @@ function scheduleRelationalWrite(storageKey, value) {
   }, RELATIONAL_FLUSH_DEBOUNCE_MS);
 
   return true;
+}
+
+function markRelationalWriteAccessDenied(storageKeys, errorOrMessage) {
+  const keys = [...new Set((Array.isArray(storageKeys) ? storageKeys : [storageKeys])
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean))];
+  keys.forEach((storageKey) => {
+    relationalSync.pendingWrites.delete(storageKey);
+    relationalSync.inFlightPayloadSignatures.delete(storageKey);
+    relationalSync.blockedStorageKeys.add(storageKey);
+  });
+  relationalSync.lastFailureAt = Date.now();
+  relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(errorOrMessage, "Cloud sync access is blocked.");
+  relationalSync.retryAt = 0;
+  clearRelationalFlushTimer();
+  scheduleSyncStatusUiRefresh();
 }
 
 async function ensureRelationalSyncReady(options = {}) {
@@ -4610,6 +4673,7 @@ async function flushPendingAdminActionQueue(options = {}) {
   let failureMessage = "";
   let remainingActions = [...queuedActions];
   let queueBlockedByGlobalFailure = false;
+  let shouldRetryRemainingActions = false;
 
   try {
     // Batch all set-access actions by approved value and send as single API calls.
@@ -4728,6 +4792,10 @@ async function flushPendingAdminActionQueue(options = {}) {
         failureMessage || "Queued admin actions are waiting for Supabase.",
         "Queued admin actions are waiting for Supabase.",
       );
+      shouldRetryRemainingActions = shouldAutoRetryPendingAdminQueueOnFailure(adminActionRuntime.lastFailureMessage);
+      if (!shouldRetryRemainingActions) {
+        adminActionRuntime.retryAt = 0;
+      }
       return {
         ok: false,
         deferred: true,
@@ -4747,7 +4815,7 @@ async function flushPendingAdminActionQueue(options = {}) {
     // Schedule retry after flushing = false, so schedulePendingAdminActionFlush actually works.
     // Previously this was called inside the try block while flushing was still true, causing the
     // guard check to bail out immediately and leaving the queue stuck with no retry timer.
-    if (getPendingAdminActionQueue().length && !adminActionRuntime.flushTimer) {
+    if (getPendingAdminActionQueue().length && !adminActionRuntime.flushTimer && shouldRetryRemainingActions) {
       schedulePendingAdminActionFlush();
     }
   }
@@ -6928,6 +6996,20 @@ async function flushRelationalWrites(options = {}) {
         scheduleSyncStatusUiRefresh();
       } catch (error) {
         console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+        const isNonRetryable = isNonRetryableCloudSyncPermissionError(error);
+        if (isNonRetryable) {
+          if (
+            storageKey === STORAGE_KEYS.curriculum
+            && payload
+            && typeof payload === "object"
+            && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+          ) {
+            markRelationalWriteAccessDenied([STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics], error);
+          } else {
+            markRelationalWriteAccessDenied(storageKey, error);
+          }
+          continue;
+        }
         relationalSync.lastFailureAt = Date.now();
         relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Cloud sync failed.");
         if (!firstError) {
@@ -7891,6 +7973,9 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   if (!students.length) {
     return;
   }
+  if (relationalSync.enrollmentWriteAccessDenied) {
+    return;
+  }
 
   try {
     const courses = await runRelationalQueryWithTimeout(
@@ -7988,8 +8073,17 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
         );
       }
     }
+    relationalSync.enrollmentWriteAccessDenied = false;
   } catch (error) {
     if (isMissingRelationError(error)) {
+      return;
+    }
+    if (isNonRetryableCloudSyncPermissionError(error)) {
+      relationalSync.enrollmentWriteAccessDenied = true;
+      relationalSync.lastFailureAt = Date.now();
+      relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(error, "Enrollment sync access is blocked.");
+      relationalSync.retryAt = 0;
+      scheduleSyncStatusUiRefresh();
       return;
     }
     throw error;
