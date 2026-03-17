@@ -116,6 +116,8 @@ const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 500;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 8000;
+const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
+const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
 const SUPABASE_SESSION_TIMEOUT_MS = 6000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 5000;
@@ -3581,23 +3583,31 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
 }
 
 async function detectSupabaseStorageShape(client) {
-  const candidates = [
-    { tableName: "app_state", storageKeyColumn: "storage_key" },
-    { tableName: "appstate", storageKeyColumn: "storagekey" },
-  ];
+  const probeCandidate = async (candidate) => runWithTimeoutResult(
+    client
+      .from(candidate.tableName)
+      .select(candidate.storageKeyColumn)
+      .limit(1),
+    SUPABASE_STORAGE_SHAPE_TIMEOUT_MS,
+    "Supabase storage check timed out.",
+  );
 
-  for (const candidate of candidates) {
-    const { error } = await runWithTimeoutResult(
-      client
-        .from(candidate.tableName)
-        .select(candidate.storageKeyColumn)
-        .limit(1),
-      SUPABASE_QUERY_TIMEOUT_MS,
-      "Supabase storage check timed out.",
-    );
-    if (!error) {
-      return candidate;
-    }
+  const primaryCandidate = { tableName: "app_state", storageKeyColumn: "storage_key" };
+  const primaryProbe = await probeCandidate(primaryCandidate);
+  if (!primaryProbe.error) {
+    return primaryCandidate;
+  }
+  if (!isMissingRelationError(primaryProbe.error)) {
+    throw primaryProbe.error;
+  }
+
+  const legacyCandidate = { tableName: "appstate", storageKeyColumn: "storagekey" };
+  const legacyProbe = await probeCandidate(legacyCandidate);
+  if (!legacyProbe.error) {
+    return legacyCandidate;
+  }
+  if (!isMissingRelationError(legacyProbe.error)) {
+    throw legacyProbe.error;
   }
 
   return null;
@@ -6088,6 +6098,11 @@ async function hydrateRelationalNotifications(currentUser) {
   }
 
   const selectColumns = "id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active";
+  const notificationFetchOptions = {
+    pageSize: 100,
+    timeoutMs: NOTIFICATION_HYDRATE_TIMEOUT_MS,
+    timeoutMessage: "Notification query timed out.",
+  };
   let notificationRows = [];
   if (user.role === "admin") {
     const notificationsResult = await fetchRowsPaged((from, to) => (
@@ -6098,7 +6113,7 @@ async function hydrateRelationalNotifications(currentUser) {
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
         .range(from, to)
-    ));
+    ), notificationFetchOptions);
     if (notificationsResult.error) {
       if (!isMissingRelationError(notificationsResult.error)) {
         console.warn("Could not hydrate notifications.", notificationsResult.error?.message || notificationsResult.error);
@@ -6118,7 +6133,7 @@ async function hydrateRelationalNotifications(currentUser) {
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
         .range(from, to)
-    ));
+    ), notificationFetchOptions);
     if (globalNotificationsResult.error) {
       globalQueryError = globalNotificationsResult.error;
       if (!isMissingRelationError(globalNotificationsResult.error)) {
@@ -6143,7 +6158,7 @@ async function hydrateRelationalNotifications(currentUser) {
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
         .range(from, to);
-    });
+    }, notificationFetchOptions);
     if (directNotificationsResult.error) {
       directQueryError = directNotificationsResult.error;
       if (!isMissingRelationError(directNotificationsResult.error)) {
@@ -6177,11 +6192,15 @@ async function hydrateRelationalNotifications(currentUser) {
   let readStateUnavailable = false;
   if (user.role !== "admin" && notificationDbIds.length) {
     for (const idBatch of splitIntoBatches(notificationDbIds, RELATIONAL_IN_BATCH_SIZE)) {
-      const { data: readRows, error: readError } = await client
-        .from("notification_reads")
-        .select("notification_id,user_id")
-        .eq("user_id", sessionProfileId)
-        .in("notification_id", idBatch);
+      const { data: readRows, error: readError } = await runWithTimeoutResult(
+        client
+          .from("notification_reads")
+          .select("notification_id,user_id")
+          .eq("user_id", sessionProfileId)
+          .in("notification_id", idBatch),
+        NOTIFICATION_HYDRATE_TIMEOUT_MS,
+        "Notification read-state query timed out.",
+      );
       if (readError) {
         if (!isMissingRelationError(readError)) {
           console.warn("Could not hydrate notification read state.", readError?.message || readError);
@@ -7528,14 +7547,16 @@ function getErrorMessage(error, fallback = "Unexpected error.") {
 
 async function fetchRowsPaged(fetchPage, options = {}) {
   const pageSize = Math.max(1, Number(options?.pageSize) || 1000);
+  const timeoutMs = Math.max(1, Number(options?.timeoutMs) || SUPABASE_QUERY_TIMEOUT_MS);
+  const timeoutMessage = String(options?.timeoutMessage || "Supabase query timed out.").trim() || "Supabase query timed out.";
   const rows = [];
   let from = 0;
 
   while (true) {
     const { data, error } = await runWithTimeoutResult(
       fetchPage(from, from + pageSize - 1),
-      SUPABASE_QUERY_TIMEOUT_MS,
-      "Supabase query timed out.",
+      timeoutMs,
+      timeoutMessage,
     );
     if (error) {
       return { data: null, error };
