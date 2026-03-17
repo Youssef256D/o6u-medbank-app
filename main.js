@@ -8554,6 +8554,37 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   }
 
   try {
+    const requestedUserIds = [...studentsByUserId.keys()];
+    const profileIdsToVerify = [...new Set([
+      ...requestedUserIds,
+      ...(isUuidValue(options.assignedByAuthId) ? [String(options.assignedByAuthId).trim()] : []),
+    ])];
+    const existingProfileIds = new Set();
+    for (const profileBatch of splitIntoBatches(profileIdsToVerify, ENROLLMENT_SYNC_USER_BATCH_SIZE)) {
+      const data = await runRelationalQueryWithTimeout(
+        client
+          .from("profiles")
+          .select("id")
+          .in("id", profileBatch),
+        "Profile verification timed out during enrollment sync.",
+        ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
+      );
+      (Array.isArray(data) ? data : []).forEach((row) => {
+        const profileId = String(row?.id || "").trim();
+        if (isUuidValue(profileId)) {
+          existingProfileIds.add(profileId);
+        }
+      });
+    }
+
+    const userIds = requestedUserIds.filter((userId) => existingProfileIds.has(userId));
+    if (!userIds.length) {
+      return;
+    }
+    const validAssignedByAuthId = isUuidValue(options.assignedByAuthId) && existingProfileIds.has(String(options.assignedByAuthId).trim())
+      ? String(options.assignedByAuthId).trim()
+      : null;
+
     const courses = await runRelationalQueryWithTimeout(
       client
         .from("courses")
@@ -8589,7 +8620,6 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       desiredCourseIdsByUserId.set(userId, desiredCourseIds);
     });
 
-    const userIds = [...studentsByUserId.keys()];
     const existingEnrollmentRows = [];
     for (const userBatch of splitIntoBatches(userIds, ENROLLMENT_SYNC_USER_BATCH_SIZE)) {
       const data = await runRelationalQueryWithTimeout(
@@ -8629,7 +8659,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
         enrollmentRows.push({
           user_id: userId,
           course_id: courseId,
-          assigned_by: isUuidValue(options.assignedByAuthId) ? options.assignedByAuthId : null,
+          assigned_by: validAssignedByAuthId,
         });
       });
     });
