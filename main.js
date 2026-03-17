@@ -281,6 +281,7 @@ let adminUserSearchDebounce = null;
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
   anonKey: window.__SUPABASE_CONFIG?.anonKey || "",
+  legacyAnonKey: window.__SUPABASE_CONFIG?.legacyAnonKey || window.__SUPABASE_CONFIG?.anonKey || "",
   enabled: window.__SUPABASE_CONFIG?.enabled !== false,
   serverApiBaseUrl: window.__SUPABASE_CONFIG?.serverApiBaseUrl || "",
   authRedirectUrl: window.__SUPABASE_CONFIG?.authRedirectUrl || "",
@@ -423,6 +424,17 @@ let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
 let supabaseAuthStateUnsubscribe = null;
+const supabaseAuthStateRuntime = {
+  chain: Promise.resolve(),
+  subscriptionVersion: 0,
+};
+const supabaseAuthRequestRuntime = {
+  chain: Promise.resolve(),
+};
+const questionImageRuntime = {
+  entries: new Map(),
+  renderHandle: null,
+};
 let notificationRealtimeChannel = null;
 let notificationRealtimeSubscriptionKey = "";
 let notificationRealtimeSubscribed = false;
@@ -504,6 +516,7 @@ const adminActionRuntime = {
   lastFailureAt: 0,
   lastFailureMessage: "",
   retryAt: 0,
+  blockedQueueSignature: "",
 };
 const postAuthWarmupRuntime = {
   key: "",
@@ -1952,7 +1965,7 @@ async function resolveSupabaseAuthCallback(authClient) {
   let callbackFailed = false;
   if (code) {
     if (typeof authClient.auth.exchangeCodeForSession === "function") {
-      const { error } = await authClient.auth.exchangeCodeForSession(code);
+      const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.exchangeCodeForSession(code));
       if (error) {
         console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
         setGoogleOAuthPendingState(false);
@@ -1970,10 +1983,10 @@ async function resolveSupabaseAuthCallback(authClient) {
     }
   } else if (accessToken && refreshToken) {
     if (typeof authClient.auth.setSession === "function") {
-      const { error } = await authClient.auth.setSession({
+      const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.setSession({
         access_token: accessToken,
         refresh_token: refreshToken,
-      });
+      }));
       if (error) {
         console.warn("Supabase OAuth token callback failed.", error?.message || error);
         setGoogleOAuthPendingState(false);
@@ -2018,6 +2031,229 @@ function getKnownAuthProviderByEmail(email) {
   return getAuthProviderFromUser(knownUser);
 }
 
+function cloneSupabaseAuthSession(session) {
+  if (!session) {
+    return null;
+  }
+  return {
+    ...session,
+    user: session.user ? { ...session.user } : session.user,
+  };
+}
+
+function queueSupabaseAuthStateChange(subscriptionVersion, event, session) {
+  const queuedSession = cloneSupabaseAuthSession(session);
+  window.setTimeout(() => {
+    if (subscriptionVersion !== supabaseAuthStateRuntime.subscriptionVersion) {
+      return;
+    }
+    supabaseAuthStateRuntime.chain = supabaseAuthStateRuntime.chain
+      .catch(() => { })
+      .then(async () => {
+        if (subscriptionVersion !== supabaseAuthStateRuntime.subscriptionVersion) {
+          return;
+        }
+        await handleSupabaseAuthStateChange(event, queuedSession);
+      })
+      .catch((error) => {
+        console.warn("Supabase auth state change handling failed.", error?.message || error);
+      });
+  }, 0);
+}
+
+async function handleSupabaseAuthStateChange(event, session) {
+  const sessionUserId = String(session?.user?.id || "").trim();
+  // Only update activeUserId when we have a valid session or on explicit sign-out
+  // that won't be recovered. This prevents the status indicator from flapping
+  // orange/green during transient SIGNED_OUT events (e.g. token refresh).
+  if (isUuidValue(sessionUserId)) {
+    supabaseAuth.activeUserId = sessionUserId;
+  }
+  if (session?.user) {
+    clearSupabaseSessionRecoveryRetry();
+    const hadBlockedAdminAuthQueue = Boolean(
+      adminActionRuntime.blockedQueueSignature
+      && isLikelyCloudSyncAuthMessage(adminActionRuntime.lastFailureMessage),
+    );
+    if (hadBlockedAdminAuthQueue) {
+      adminActionRuntime.blockedQueueSignature = "";
+      adminActionRuntime.lastFailureAt = 0;
+      adminActionRuntime.lastFailureMessage = "";
+      adminActionRuntime.retryAt = 0;
+      scheduleSyncStatusUiRefresh();
+    }
+    if (event === "TOKEN_REFRESHED") {
+      if (hadBlockedAdminAuthQueue && getCurrentUser()?.role === "admin" && getPendingAdminActionQueue().length) {
+        schedulePendingAdminActionFlush(300);
+      }
+      return;
+    }
+    if (event === "PASSWORD_RECOVERY") {
+      setGoogleOAuthPendingState(false);
+      setPasswordRecoveryPendingState(true);
+    }
+    let localUser = upsertLocalUserFromAuth(session.user);
+    const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
+    localUser = profileSync.user;
+    if (localUser?.id) {
+      saveLocalOnly(STORAGE_KEYS.currentUserId, localUser.id);
+    }
+    const hasRecoveryFlag = isPasswordRecoveryPendingState();
+    const shouldHonorRecoveryRoute = event === "PASSWORD_RECOVERY" || (hasRecoveryFlag && state.route === "reset-password");
+    if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
+      setPasswordRecoveryPendingState(false);
+    }
+    if (shouldHonorRecoveryRoute) {
+      if (state.route !== "reset-password") {
+        navigate("reset-password");
+      } else {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+      return;
+    }
+    const completionRoute = getStudentProfileCompletionRoute(localUser);
+    if (localUser && completionRoute) {
+      setGoogleOAuthPendingState(false);
+      if (state.route !== completionRoute) {
+        navigate(completionRoute);
+      } else {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+      return;
+    }
+    if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
+      setGoogleOAuthPendingState(false);
+      removeStorageKey(STORAGE_KEYS.currentUserId);
+      if (event !== "SIGNED_OUT") {
+        queueSupabaseAuthRequest(supabaseAuth.client, () => supabaseAuth.client.auth.signOut()).catch((signOutError) => {
+          console.warn("Supabase sign-out failed for pending account.", signOutError?.message || signOutError);
+        });
+      }
+      toast("Your account is pending admin approval.");
+      if (state.route !== "login") {
+        navigate("login");
+        return;
+      }
+      render();
+      return;
+    }
+    if (hadBlockedAdminAuthQueue && localUser?.role === "admin" && getPendingAdminActionQueue().length) {
+      schedulePendingAdminActionFlush(300);
+    }
+    if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
+      return;
+    }
+    schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+      console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+    });
+    if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
+      const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
+      navigate(postAuthRoute);
+      return;
+    }
+    state.skipNextRouteAnimation = true;
+    render();
+    return;
+  }
+
+  if (event === "SIGNED_OUT") {
+    const preservedLocalUser = getCurrentUser();
+    const skipRecovery = suppressSupabaseSignedOutRecovery;
+    suppressSupabaseSignedOutRecovery = false;
+    resetPostAuthWarmupRuntimeState();
+    // Do NOT clear activeUserId yet — keep it so the sync status indicator
+    // stays green/stable while we attempt session recovery. Only clear it
+    // after we confirm recovery failed, to prevent orange/green flapping.
+    setGoogleOAuthPendingState(false);
+    setPasswordRecoveryPendingState(false);
+    const recoveredSessionUser = skipRecovery ? null : await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
+    if (recoveredSessionUser) {
+      clearSupabaseSessionRecoveryRetry();
+      const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
+      supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
+      let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
+      const recoveredProfileSync = await refreshLocalUserFromRelationalProfile(recoveredSessionUser, recoveredLocalUser);
+      recoveredLocalUser = recoveredProfileSync.user;
+      if (recoveredLocalUser?.id) {
+        saveLocalOnly(STORAGE_KEYS.currentUserId, recoveredLocalUser.id);
+      }
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const shouldPreserveLocalSession = shouldPreserveSupabaseLocalSessionAfterSignedOut(preservedLocalUser);
+    if (shouldPreserveLocalSession) {
+      clearNotificationRealtimeSubscription();
+      clearSessionRealtimeSubscription();
+      clearContentRealtimeSubscription();
+      clearProfileAccessRealtimeSubscription();
+      clearStudentAccessPolling();
+      clearAdminPresencePolling();
+      clearAdminDashboardPolling();
+      syncPresenceRuntime(null);
+      resetSiteActivityRuntime();
+      relationalSync.enabled = false;
+      relationalSync.readyCheckedAt = 0;
+      relationalSync.readyPromise = null;
+      relationalSync.lastReadyError = "Cloud session was interrupted. Retrying automatically while your local session stays active.";
+      relationalSync.lastFailureAt = Date.now();
+      relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+      relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+      supabaseSync.lastFailureAt = Date.now();
+      supabaseSync.lastFailureMessage = "Cloud session was interrupted. Changes stay local until reconnection succeeds.";
+      supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+      scheduleSyncStatusUiRefresh();
+      scheduleSupabaseSessionRecoveryRetry();
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    // Recovery failed and no local session to preserve — clear activeUserId now.
+    supabaseAuth.activeUserId = "";
+    clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
+    clearProfileAccessRealtimeSubscription();
+    clearStudentAccessPolling();
+    clearSupabaseSessionRecoveryRetry();
+    resetRelationalSyncState();
+    resetSupabaseSyncRuntimeState();
+    clearAdminPresencePolling();
+    clearAdminDashboardPolling();
+    syncPresenceRuntime(null);
+    resetSiteActivityRuntime();
+    state.adminDataRefreshing = false;
+    state.adminDataLastSyncAt = 0;
+    state.adminDataSyncError = "";
+    state.adminForceRefreshRunning = false;
+    state.adminPresenceLoading = false;
+    state.adminPresenceError = "";
+    state.adminPresenceRows = [];
+    state.adminPresenceLastSyncAt = 0;
+    removeStorageKey(STORAGE_KEYS.currentUserId);
+    const privateRoutes = new Set([
+      "complete-profile",
+      "dashboard",
+      "notifications",
+      "create-test",
+      "qbank",
+      "builder",
+      "session",
+      "review",
+      "analytics",
+      "profile",
+      "admin",
+    ]);
+    if (privateRoutes.has(state.route)) {
+      navigate("login");
+      return;
+    }
+    render();
+  }
+}
+
 async function initSupabaseAuth() {
   supabaseAuth.initializing = true;
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
@@ -2050,16 +2286,18 @@ async function initSupabaseAuth() {
       return "error";
     });
 
-    let sessionResult = await runWithTimeoutResult(
-      supabaseAuth.client.auth.getSession(),
+    let sessionResult = await runSupabaseAuthRequestWithTimeout(
+      supabaseAuth.client,
+      () => supabaseAuth.client.auth.getSession(),
       SUPABASE_SESSION_TIMEOUT_MS,
       "Supabase session bootstrap timed out.",
     );
     if (!sessionResult?.error && callbackStatus === "processed" && !sessionResult?.data?.session?.user) {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 250));
-        sessionResult = await runWithTimeoutResult(
-          supabaseAuth.client.auth.getSession(),
+        sessionResult = await runSupabaseAuthRequestWithTimeout(
+          supabaseAuth.client,
+          () => supabaseAuth.client.auth.getSession(),
           SUPABASE_SESSION_TIMEOUT_MS,
           "Supabase session bootstrap timed out.",
         );
@@ -2069,8 +2307,9 @@ async function initSupabaseAuth() {
       }
     }
     if (!sessionResult?.error && !sessionResult?.data?.session?.user) {
-      const refreshedSessionResult = await runWithTimeoutResult(
-        supabaseAuth.client.auth.refreshSession().catch(() => null),
+      const refreshedSessionResult = await runSupabaseAuthRequestWithTimeout(
+        supabaseAuth.client,
+        () => supabaseAuth.client.auth.refreshSession().catch(() => null),
         SUPABASE_SESSION_TIMEOUT_MS,
         "Supabase session refresh timed out.",
       );
@@ -2121,7 +2360,7 @@ async function initSupabaseAuth() {
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         setGoogleOAuthPendingState(false);
         removeStorageKey(STORAGE_KEYS.currentUserId);
-        await supabaseAuth.client.auth.signOut().catch(() => { });
+        await queueSupabaseAuthRequest(supabaseAuth.client, () => supabaseAuth.client.auth.signOut()).catch(() => { });
         toast("Your account is pending admin approval.");
         if (state.route !== "login") {
           navigate("login");
@@ -2145,6 +2384,9 @@ async function initSupabaseAuth() {
       }
     }
 
+    supabaseAuthStateRuntime.subscriptionVersion += 1;
+    const authStateSubscriptionVersion = supabaseAuthStateRuntime.subscriptionVersion;
+
     if (supabaseAuthStateUnsubscribe) {
       try {
         supabaseAuthStateUnsubscribe();
@@ -2154,181 +2396,9 @@ async function initSupabaseAuth() {
       supabaseAuthStateUnsubscribe = null;
     }
 
-    const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange(async (event, session) => {
-      const sessionUserId = String(session?.user?.id || "").trim();
-      // Only update activeUserId when we have a valid session or on explicit sign-out
-      // that won't be recovered. This prevents the status indicator from flapping
-      // orange/green during transient SIGNED_OUT events (e.g. token refresh).
-      if (isUuidValue(sessionUserId)) {
-        supabaseAuth.activeUserId = sessionUserId;
-      }
-      if (session?.user) {
-        clearSupabaseSessionRecoveryRetry();
-        if (event === "TOKEN_REFRESHED") {
-          return;
-        }
-        if (event === "PASSWORD_RECOVERY") {
-          setGoogleOAuthPendingState(false);
-          setPasswordRecoveryPendingState(true);
-        }
-        let localUser = upsertLocalUserFromAuth(session.user);
-        const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
-        localUser = profileSync.user;
-        if (localUser?.id) {
-          saveLocalOnly(STORAGE_KEYS.currentUserId, localUser.id);
-        }
-        const hasRecoveryFlag = isPasswordRecoveryPendingState();
-        const shouldHonorRecoveryRoute = event === "PASSWORD_RECOVERY" || (hasRecoveryFlag && state.route === "reset-password");
-        if (hasRecoveryFlag && !shouldHonorRecoveryRoute) {
-          setPasswordRecoveryPendingState(false);
-        }
-        if (shouldHonorRecoveryRoute) {
-          if (state.route !== "reset-password") {
-            navigate("reset-password");
-          } else {
-            state.skipNextRouteAnimation = true;
-            render();
-          }
-          return;
-        }
-        const completionRoute = getStudentProfileCompletionRoute(localUser);
-        if (localUser && completionRoute) {
-          setGoogleOAuthPendingState(false);
-          if (state.route !== completionRoute) {
-            navigate(completionRoute);
-          } else {
-            state.skipNextRouteAnimation = true;
-            render();
-          }
-          return;
-        }
-        if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
-          setGoogleOAuthPendingState(false);
-          removeStorageKey(STORAGE_KEYS.currentUserId);
-          if (event !== "SIGNED_OUT") {
-            supabaseAuth.client.auth.signOut().catch((signOutError) => {
-              console.warn("Supabase sign-out failed for pending account.", signOutError?.message || signOutError);
-            });
-          }
-          toast("Your account is pending admin approval.");
-          if (state.route !== "login") {
-            navigate("login");
-            return;
-          }
-          render();
-          return;
-        }
-        if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
-          return;
-        }
-        schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
-          console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
-        });
-        if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
-          const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
-          navigate(postAuthRoute);
-          return;
-        }
-        state.skipNextRouteAnimation = true;
-        render();
-        return;
-      }
-
-      if (event === "SIGNED_OUT") {
-        const preservedLocalUser = getCurrentUser();
-        const skipRecovery = suppressSupabaseSignedOutRecovery;
-        suppressSupabaseSignedOutRecovery = false;
-        resetPostAuthWarmupRuntimeState();
-        // Do NOT clear activeUserId yet — keep it so the sync status indicator
-        // stays green/stable while we attempt session recovery. Only clear it
-        // after we confirm recovery failed, to prevent orange/green flapping.
-        const previousActiveUserId = supabaseAuth.activeUserId;
-        setGoogleOAuthPendingState(false);
-        setPasswordRecoveryPendingState(false);
-        const recoveredSessionUser = skipRecovery ? null : await tryRecoverSessionAfterSignedOutEvent(supabaseAuth.client);
-        if (recoveredSessionUser) {
-          clearSupabaseSessionRecoveryRetry();
-          const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
-          supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
-          let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
-          const recoveredProfileSync = await refreshLocalUserFromRelationalProfile(recoveredSessionUser, recoveredLocalUser);
-          recoveredLocalUser = recoveredProfileSync.user;
-          if (recoveredLocalUser?.id) {
-            saveLocalOnly(STORAGE_KEYS.currentUserId, recoveredLocalUser.id);
-          }
-          state.skipNextRouteAnimation = true;
-          render();
-          return;
-        }
-        const shouldPreserveLocalSession = shouldPreserveSupabaseLocalSessionAfterSignedOut(preservedLocalUser);
-        if (shouldPreserveLocalSession) {
-          clearNotificationRealtimeSubscription();
-          clearSessionRealtimeSubscription();
-          clearContentRealtimeSubscription();
-          clearProfileAccessRealtimeSubscription();
-          clearStudentAccessPolling();
-          clearAdminPresencePolling();
-          clearAdminDashboardPolling();
-          syncPresenceRuntime(null);
-          resetSiteActivityRuntime();
-          relationalSync.enabled = false;
-          relationalSync.readyCheckedAt = 0;
-          relationalSync.readyPromise = null;
-          relationalSync.lastReadyError = "Cloud session was interrupted. Retrying automatically while your local session stays active.";
-          relationalSync.lastFailureAt = Date.now();
-          relationalSync.lastFailureMessage = relationalSync.lastReadyError;
-          relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
-          supabaseSync.lastFailureAt = Date.now();
-          supabaseSync.lastFailureMessage = "Cloud session was interrupted. Changes stay local until reconnection succeeds.";
-          supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
-          scheduleSyncStatusUiRefresh();
-          scheduleSupabaseSessionRecoveryRetry();
-          state.skipNextRouteAnimation = true;
-          render();
-          return;
-        }
-        // Recovery failed and no local session to preserve — clear activeUserId now.
-        supabaseAuth.activeUserId = "";
-        clearNotificationRealtimeSubscription();
-        clearSessionRealtimeSubscription();
-        clearContentRealtimeSubscription();
-        clearProfileAccessRealtimeSubscription();
-        clearStudentAccessPolling();
-        clearSupabaseSessionRecoveryRetry();
-        resetRelationalSyncState();
-        resetSupabaseSyncRuntimeState();
-        clearAdminPresencePolling();
-        clearAdminDashboardPolling();
-        syncPresenceRuntime(null);
-        resetSiteActivityRuntime();
-        state.adminDataRefreshing = false;
-        state.adminDataLastSyncAt = 0;
-        state.adminDataSyncError = "";
-        state.adminForceRefreshRunning = false;
-        state.adminPresenceLoading = false;
-        state.adminPresenceError = "";
-        state.adminPresenceRows = [];
-        state.adminPresenceLastSyncAt = 0;
-        removeStorageKey(STORAGE_KEYS.currentUserId);
-        const privateRoutes = new Set([
-          "complete-profile",
-          "dashboard",
-          "notifications",
-          "create-test",
-          "qbank",
-          "builder",
-          "session",
-          "review",
-          "analytics",
-          "profile",
-          "admin",
-        ]);
-        if (privateRoutes.has(state.route)) {
-          navigate("login");
-          return;
-        }
-        render();
-      }
+    const { data: authStateData } = supabaseAuth.client.auth.onAuthStateChange((event, session) => {
+      // Supabase auth can deadlock if its APIs are awaited inside this callback.
+      queueSupabaseAuthStateChange(authStateSubscriptionVersion, event, session);
     });
     const subscription = authStateData?.subscription;
     if (subscription && typeof subscription.unsubscribe === "function") {
@@ -2361,8 +2431,9 @@ async function tryRecoverSessionAfterSignedOutEvent(authClient) {
     return null;
   }
   for (let attempt = 0; attempt < SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS; attempt += 1) {
-    const sessionResult = await runWithTimeoutResult(
-      authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+    const sessionResult = await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => authClient.auth.getSession().catch(() => ({ data: { session: null } })),
       SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS,
       "Supabase session recovery timed out.",
     );
@@ -2372,10 +2443,11 @@ async function tryRecoverSessionAfterSignedOutEvent(authClient) {
     }
 
     const refreshToken = String(sessionResult?.data?.session?.refresh_token || "").trim();
-    await runWithTimeoutResult(
-      refreshToken
+    await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => (refreshToken
         ? authClient.auth.refreshSession({ refresh_token: refreshToken }).catch(() => null)
-        : authClient.auth.refreshSession().catch(() => null),
+        : authClient.auth.refreshSession().catch(() => null)),
       SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS,
       "Supabase session refresh timed out.",
     );
@@ -2412,6 +2484,28 @@ function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
 
 function isTimeoutResultError(error) {
   return String(error?.code || "").trim().toUpperCase() === "TIMEOUT";
+}
+
+function queueSupabaseAuthRequest(authClient, requestFactory) {
+  if (!authClient?.auth || typeof requestFactory !== "function") {
+    return Promise.resolve(null);
+  }
+  const queued = supabaseAuthRequestRuntime.chain
+    .catch(() => { })
+    .then(() => requestFactory());
+  // Supabase auth operations share a storage lock. Keep them serialized so a
+  // timed-out request cannot leave a still-running lock behind and race the
+  // next getSession/refreshSession/signOut call.
+  supabaseAuthRequestRuntime.chain = queued.catch(() => { });
+  return queued;
+}
+
+function runSupabaseAuthRequestWithTimeout(authClient, requestFactory, timeoutMs, timeoutMessage) {
+  return runWithTimeoutResult(
+    queueSupabaseAuthRequest(authClient, requestFactory),
+    timeoutMs,
+    timeoutMessage,
+  );
 }
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = ADMIN_REQUEST_TIMEOUT_MS) {
@@ -3641,6 +3735,7 @@ function resetPendingAdminActionRuntimeState() {
   adminActionRuntime.lastFailureAt = 0;
   adminActionRuntime.lastFailureMessage = "";
   adminActionRuntime.retryAt = 0;
+  adminActionRuntime.blockedQueueSignature = "";
   clearPendingAdminActionFlushTimer();
   scheduleSyncStatusUiRefresh();
 }
@@ -4371,8 +4466,9 @@ async function ensureRelationalSyncReady(options = {}) {
   const readCurrentSession = async () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const { data, error } = await runWithTimeoutResult(
-          client.auth.getSession(),
+        const { data, error } = await runSupabaseAuthRequestWithTimeout(
+          client,
+          () => client.auth.getSession(),
           SUPABASE_SESSION_TIMEOUT_MS,
           "Supabase session check timed out.",
         );
@@ -4410,21 +4506,24 @@ async function ensureRelationalSyncReady(options = {}) {
   };
   const refreshCurrentSession = async () => {
     try {
-      const { data } = await runWithTimeoutResult(
-        client.auth.getSession().catch(() => ({ data: { session: null } })),
+      const { data } = await runSupabaseAuthRequestWithTimeout(
+        client,
+        () => client.auth.getSession().catch(() => ({ data: { session: null } })),
         SUPABASE_SESSION_TIMEOUT_MS,
         "Supabase session refresh timed out.",
       );
       const refreshToken = String(data?.session?.refresh_token || "").trim();
       if (refreshToken) {
-        await runWithTimeoutResult(
-          client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => { }),
+        await runSupabaseAuthRequestWithTimeout(
+          client,
+          () => client.auth.refreshSession({ refresh_token: refreshToken }).catch(() => { }),
           SUPABASE_SESSION_TIMEOUT_MS,
           "Supabase session refresh timed out.",
         );
       } else {
-        await runWithTimeoutResult(
-          client.auth.refreshSession().catch(() => { }),
+        await runSupabaseAuthRequestWithTimeout(
+          client,
+          () => client.auth.refreshSession().catch(() => { }),
           SUPABASE_SESSION_TIMEOUT_MS,
           "Supabase session refresh timed out.",
         );
@@ -4744,12 +4843,20 @@ async function flushPendingAdminActionQueue(options = {}) {
     adminActionRuntime.lastFailureAt = 0;
     adminActionRuntime.lastFailureMessage = "";
     adminActionRuntime.retryAt = 0;
+    adminActionRuntime.blockedQueueSignature = "";
     clearPendingAdminActionFlushTimer();
     scheduleSyncStatusUiRefresh();
     return { ok: true, deferred: false, syncedCount: 0, message: "" };
   }
   if (adminActionRuntime.flushing) {
     return { ok: false, deferred: true, syncedCount: 0, message: "Admin action sync is already in progress." };
+  }
+  const queueSignature = getPendingAdminActionQueueSignature(queuedActions);
+  if (
+    adminActionRuntime.blockedQueueSignature
+    && adminActionRuntime.blockedQueueSignature !== queueSignature
+  ) {
+    adminActionRuntime.blockedQueueSignature = "";
   }
 
   const currentUser = options?.user || getCurrentUser();
@@ -4765,6 +4872,20 @@ async function flushPendingAdminActionQueue(options = {}) {
     adminActionRuntime.lastFailureMessage = "You are offline. Queued admin actions will retry automatically.";
     schedulePendingAdminActionFlush();
     return { ok: false, deferred: true, syncedCount: 0, message: adminActionRuntime.lastFailureMessage };
+  }
+  if (
+    options?.force !== true
+    && adminActionRuntime.blockedQueueSignature
+    && adminActionRuntime.blockedQueueSignature === queueSignature
+  ) {
+    adminActionRuntime.retryAt = 0;
+    scheduleSyncStatusUiRefresh();
+    return {
+      ok: false,
+      deferred: true,
+      syncedCount: 0,
+      message: adminActionRuntime.lastFailureMessage || "Queued admin actions are waiting for a refreshed Supabase admin session.",
+    };
   }
 
   adminActionRuntime.flushing = true;
@@ -4911,6 +5032,11 @@ async function flushPendingAdminActionQueue(options = {}) {
         "Queued admin actions are waiting for Supabase.",
       );
       shouldRetryRemainingActions = shouldAutoRetryPendingAdminQueueOnFailure(adminActionRuntime.lastFailureMessage);
+      adminActionRuntime.blockedQueueSignature = (
+        !shouldRetryRemainingActions && shouldStopPendingAdminQueueOnFailure(adminActionRuntime.lastFailureMessage)
+      )
+        ? getPendingAdminActionQueueSignature(remainingActions)
+        : "";
       if (!shouldRetryRemainingActions) {
         adminActionRuntime.retryAt = 0;
       }
@@ -4926,6 +5052,7 @@ async function flushPendingAdminActionQueue(options = {}) {
     adminActionRuntime.lastFailureAt = 0;
     adminActionRuntime.lastFailureMessage = "";
     adminActionRuntime.retryAt = 0;
+    adminActionRuntime.blockedQueueSignature = "";
     return { ok: true, deferred: false, syncedCount, message: "" };
   } finally {
     adminActionRuntime.flushing = false;
@@ -7471,6 +7598,214 @@ async function createInlineQuestionImageFallback(
 
 function isInlineImageDataUrl(value) {
   return /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,/i.test(String(value || "").trim());
+}
+
+function decodeSupabaseStorageObjectPath(pathname) {
+  return String(pathname || "")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+function parseSupabaseStorageObjectSource(value) {
+  const raw = String(value || "").trim();
+  if (!raw || isInlineImageDataUrl(raw)) {
+    return null;
+  }
+
+  if (/^supabase-storage:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      const bucket = String(parsed.hostname || "").trim();
+      const objectPath = decodeSupabaseStorageObjectPath(parsed.pathname);
+      if (bucket && objectPath) {
+        return {
+          bucket,
+          objectPath,
+          isPublic: false,
+        };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  let supabaseOrigin = "";
+  try {
+    supabaseOrigin = new URL(normalizeApiBaseUrl(SUPABASE_CONFIG.url || "")).origin;
+  } catch {
+    supabaseOrigin = "";
+  }
+  if (!supabaseOrigin || parsedUrl.origin !== supabaseOrigin) {
+    return null;
+  }
+
+  const normalizedPathname = String(parsedUrl.pathname || "").replace(/^\/+/, "");
+  const signedMatch = normalizedPathname.match(/^storage\/v1\/object\/sign\/([^/]+)\/(.+)$/i);
+  if (signedMatch) {
+    return {
+      bucket: decodeURIComponent(String(signedMatch[1] || "").trim()),
+      objectPath: decodeSupabaseStorageObjectPath(signedMatch[2]),
+      isPublic: false,
+    };
+  }
+
+  const authenticatedMatch = normalizedPathname.match(/^storage\/v1\/object\/authenticated\/([^/]+)\/(.+)$/i);
+  if (authenticatedMatch) {
+    return {
+      bucket: decodeURIComponent(String(authenticatedMatch[1] || "").trim()),
+      objectPath: decodeSupabaseStorageObjectPath(authenticatedMatch[2]),
+      isPublic: false,
+    };
+  }
+
+  const publicMatch = normalizedPathname.match(/^storage\/v1\/object\/public\/([^/]+)\/(.+)$/i);
+  if (publicMatch) {
+    return {
+      bucket: decodeURIComponent(String(publicMatch[1] || "").trim()),
+      objectPath: decodeSupabaseStorageObjectPath(publicMatch[2]),
+      isPublic: true,
+    };
+  }
+
+  return null;
+}
+
+function buildSupabaseStorageObjectCacheKey(bucket, objectPath) {
+  return `${String(bucket || "").trim()}::${String(objectPath || "").trim()}`;
+}
+
+function scheduleQuestionImageRuntimeRender() {
+  if (questionImageRuntime.renderHandle) {
+    return;
+  }
+  questionImageRuntime.renderHandle = window.setTimeout(() => {
+    questionImageRuntime.renderHandle = null;
+    state.skipNextRouteAnimation = true;
+    render();
+  }, 0);
+}
+
+function resetQuestionImageRuntimeState() {
+  if (questionImageRuntime.renderHandle) {
+    window.clearTimeout(questionImageRuntime.renderHandle);
+    questionImageRuntime.renderHandle = null;
+  }
+  questionImageRuntime.entries.clear();
+}
+
+function ensureSupabaseStorageObjectSignedUrl(source) {
+  const descriptor = parseSupabaseStorageObjectSource(source);
+  if (!descriptor || descriptor.isPublic) {
+    return Promise.resolve("");
+  }
+
+  const cacheKey = buildSupabaseStorageObjectCacheKey(descriptor.bucket, descriptor.objectPath);
+  const cachedEntry = questionImageRuntime.entries.get(cacheKey);
+  if (cachedEntry?.url) {
+    return Promise.resolve(cachedEntry.url);
+  }
+  if (cachedEntry?.promise) {
+    return cachedEntry.promise;
+  }
+  if (cachedEntry?.lastAttemptAt && (Date.now() - cachedEntry.lastAttemptAt) < 30000) {
+    return Promise.resolve("");
+  }
+
+  const client = getRelationalClient() || getSupabaseAuthClient();
+  if (!client?.storage) {
+    questionImageRuntime.entries.set(cacheKey, {
+      url: "",
+      promise: null,
+      lastAttemptAt: Date.now(),
+    });
+    return Promise.resolve("");
+  }
+
+  const entry = {
+    url: "",
+    promise: null,
+    lastAttemptAt: Date.now(),
+  };
+  const promise = (async () => {
+    let resolvedUrl = "";
+    for (const expiresIn of QUESTION_IMAGE_SIGNED_URL_EXPIRY_OPTIONS) {
+      const signedResult = await runWithTimeoutResult(
+        client.storage
+          .from(descriptor.bucket)
+          .createSignedUrl(descriptor.objectPath, expiresIn),
+        SUPABASE_QUERY_TIMEOUT_MS,
+        "Signed URL generation timed out.",
+      );
+      if (!signedResult?.error && signedResult?.data?.signedUrl) {
+        resolvedUrl = String(signedResult.data.signedUrl || "").trim();
+        break;
+      }
+    }
+
+    const currentEntry = questionImageRuntime.entries.get(cacheKey) || entry;
+    currentEntry.url = resolvedUrl;
+    currentEntry.lastAttemptAt = Date.now();
+    currentEntry.promise = null;
+    questionImageRuntime.entries.set(cacheKey, currentEntry);
+    if (resolvedUrl) {
+      scheduleQuestionImageRuntimeRender();
+    }
+    return resolvedUrl;
+  })().catch(() => {
+    const currentEntry = questionImageRuntime.entries.get(cacheKey) || entry;
+    currentEntry.url = "";
+    currentEntry.lastAttemptAt = Date.now();
+    currentEntry.promise = null;
+    questionImageRuntime.entries.set(cacheKey, currentEntry);
+    return "";
+  });
+
+  entry.promise = promise;
+  questionImageRuntime.entries.set(cacheKey, entry);
+  return promise;
+}
+
+function getRenderableQuestionImageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const descriptor = parseSupabaseStorageObjectSource(raw);
+  if (!descriptor) {
+    return raw;
+  }
+  if (descriptor.isPublic) {
+    return raw;
+  }
+  const cacheKey = buildSupabaseStorageObjectCacheKey(descriptor.bucket, descriptor.objectPath);
+  const cachedEntry = questionImageRuntime.entries.get(cacheKey);
+  if (cachedEntry?.url) {
+    return cachedEntry.url;
+  }
+  ensureSupabaseStorageObjectSignedUrl(raw).catch(() => { });
+  return "";
+}
+
+function isPendingSupabaseQuestionImage(value) {
+  const descriptor = parseSupabaseStorageObjectSource(value);
+  return Boolean(descriptor && !descriptor.isPublic);
 }
 
 async function uploadQuestionImageDataUrlToStorage(dataUrl, options = {}) {
@@ -12660,7 +12995,7 @@ async function startGoogleOAuthSignIn(authClient) {
     };
   }
 
-  const { error } = await authClient.auth.signInWithOAuth({
+  const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signInWithOAuth({
     provider: "google",
     options: {
       redirectTo,
@@ -12668,7 +13003,7 @@ async function startGoogleOAuthSignIn(authClient) {
         prompt: "select_account",
       },
     },
-  });
+  }));
 
   if (error) {
     return { ok: false, message: error.message || "Could not start Google sign-in." };
@@ -12931,8 +13266,9 @@ function wireAuth(mode) {
       };
       try {
         if (authClient) {
-          const { data, error } = await runWithTimeoutResult(
-            authClient.auth.signInWithPassword({ email, password }),
+          const { data, error } = await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.signInWithPassword({ email, password }),
             AUTH_SIGNIN_TIMEOUT_MS,
             "Login request timed out. Check your internet and try again.",
           );
@@ -12954,7 +13290,7 @@ function wireAuth(mode) {
             }
             if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
-              await authClient.auth.signOut().catch(() => { });
+              await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
               toast("Your account is pending admin approval.");
               return;
             }
@@ -13243,7 +13579,7 @@ function wireAuth(mode) {
           } else {
             const authClient = getSupabaseAuthClient();
             if (authClient) {
-              await authClient.auth.signOut().catch(() => { });
+              await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
             }
             removeStorageKey(STORAGE_KEYS.currentUserId);
             toast("Account created. Await admin approval before first login.");
@@ -13302,7 +13638,7 @@ function wireAuth(mode) {
           academicSemester,
         });
         if (authClient) {
-          const { data: authData, error } = await authClient.auth.signUp({
+          const { data: authData, error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signUp({
             email,
             password,
             options: {
@@ -13318,7 +13654,7 @@ function wireAuth(mode) {
                 assignedCourses: selectedCourses,
               },
             },
-          });
+          }));
           if (error) {
             toast(error.message || "Could not create Supabase account.");
             return;
@@ -13358,7 +13694,7 @@ function wireAuth(mode) {
           await flushPendingSyncNow();
 
           if (authData.session && !autoApproved) {
-            await authClient.auth.signOut().catch(() => { });
+            await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
           }
           if (autoApproved && authData.session) {
             save(STORAGE_KEYS.currentUserId, user.id);
@@ -13423,7 +13759,7 @@ function wireAuth(mode) {
     try {
       if (authClient) {
         const redirectTo = getAuthRedirectToUrl();
-        const { error } = await authClient.auth.resetPasswordForEmail(email, { redirectTo });
+        const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.resetPasswordForEmail(email, { redirectTo }));
         if (error) {
           toast(error.message || "Could not send reset email.");
           return;
@@ -13521,21 +13857,26 @@ function wirePasswordReset() {
 
     lockForm(true);
     try {
-      const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+      const { data: sessionData } = await runSupabaseAuthRequestWithTimeout(
+        authClient,
+        () => authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+        SUPABASE_SESSION_TIMEOUT_MS,
+        "Supabase session check timed out.",
+      );
       if (!sessionData?.session?.user) {
         setPasswordRecoveryPendingState(false);
         toast("Reset session expired. Request a new reset link.");
         navigate("forgot");
         return;
       }
-      const { error } = await authClient.auth.updateUser({ password });
+      const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.updateUser({ password }));
       if (error) {
         toast(error.message || "Could not update password.");
         return;
       }
       setPasswordRecoveryPendingState(false);
       removeStorageKey(STORAGE_KEYS.currentUserId);
-      await authClient.auth.signOut().catch(() => { });
+      await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
       toast("Password updated. Log in with your new password.");
       navigate("login");
     } finally {
@@ -13703,7 +14044,7 @@ function wireCompleteProfile() {
       } else {
         const authClient = getSupabaseAuthClient();
         if (authClient) {
-          await authClient.auth.signOut().catch(() => { });
+          await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
         }
         removeStorageKey(STORAGE_KEYS.currentUserId);
         toast("Profile submitted. Your account is waiting admin approval.");
@@ -16844,7 +17185,7 @@ function wireProfile() {
       if (password) {
         updates.password = password;
       }
-      const { error } = await authClient.auth.updateUser(updates);
+      const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.updateUser(updates));
       if (error) {
         toast(error.message || "Could not update Supabase profile.");
         return;
@@ -18001,11 +18342,21 @@ function renderAdmin() {
                   </div>
                   <p class="subtle" style="margin: 0;">If you choose a file, upload is automatic and replaces the URL above.</p>
                   ${editing?.questionImage
-          ? `
+          ? (() => {
+            const previewUrl = getRenderableQuestionImageUrl(editing.questionImage);
+            if (!previewUrl && isPendingSupabaseQuestionImage(editing.questionImage)) {
+              return `
                         <figure class="admin-question-image-preview">
-                          <img src="${escapeHtml(editing.questionImage)}" alt="Question visual preview" loading="lazy" />
+                          <div class="subtle" style="padding: 0.85rem 1rem;">Loading image...</div>
                         </figure>
-                      `
+                      `;
+            }
+            return `
+                        <figure class="admin-question-image-preview">
+                          <img src="${escapeHtml(previewUrl || editing.questionImage)}" alt="Question visual preview" loading="lazy" />
+                        </figure>
+                      `;
+          })()
           : ""
         }
                   <div class="form-row">
@@ -18843,12 +19194,22 @@ function wireAdmin() {
       render();
       return;
     }
-    let { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    let { data: sessionData } = await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+      SUPABASE_SESSION_TIMEOUT_MS,
+      "Supabase session check timed out.",
+    );
     if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
       // Attempt session recovery before giving up.
       const recovered = await tryRecoverSupabaseSessionInBackground().catch(() => false);
       if (recovered) {
-        const freshSession = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+        const freshSession = await runSupabaseAuthRequestWithTimeout(
+          authClient,
+          () => authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+          SUPABASE_SESSION_TIMEOUT_MS,
+          "Supabase session check timed out.",
+        );
         sessionData = freshSession?.data || sessionData;
       }
       if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
@@ -18901,7 +19262,12 @@ function wireAdmin() {
       toast("Cloud app-state sync is unavailable right now. Try Refresh from cloud first.");
       return;
     }
-    const { data: sessionData } = await authClient.auth.getSession().catch(() => ({ data: { session: null } }));
+    const { data: sessionData } = await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => authClient.auth.getSession().catch(() => ({ data: { session: null } })),
+      SUPABASE_SESSION_TIMEOUT_MS,
+      "Supabase session check timed out.",
+    );
     if (!sessionData?.session?.user?.id || sessionData.session.user.id !== currentProfileId) {
       toast("Supabase session expired. Please log out and sign in again.");
       return;
@@ -22118,11 +22484,33 @@ function getPendingAdminActionQueue() {
   return normalizePendingAdminActionQueue(load(STORAGE_KEYS.pendingAdminActions, []));
 }
 
+function getPendingAdminActionQueueSignature(entries = null) {
+  const queue = normalizePendingAdminActionQueue(entries == null ? getPendingAdminActionQueue() : entries);
+  if (!queue.length) {
+    return "";
+  }
+  return queue.map((entry) => [
+    String(entry?.id || "").trim(),
+    String(entry?.type || "").trim(),
+    String(entry?.targetAuthId || "").trim(),
+    String(entry?.targetProfileId || "").trim(),
+    String(entry?.targetLocalUserId || "").trim(),
+    entry?.approved === true ? "1" : "0",
+  ].join(":")).join("|");
+}
+
 function savePendingAdminActionQueue(entries) {
+  const normalizedEntries = normalizePendingAdminActionQueue(entries);
   saveLocalOnly(
     STORAGE_KEYS.pendingAdminActions,
-    normalizePendingAdminActionQueue(entries),
+    normalizedEntries,
   );
+  if (!normalizedEntries.length) {
+    adminActionRuntime.lastFailureAt = 0;
+    adminActionRuntime.lastFailureMessage = "";
+    adminActionRuntime.retryAt = 0;
+    adminActionRuntime.blockedQueueSignature = "";
+  }
   scheduleSyncStatusUiRefresh();
 }
 
@@ -23450,8 +23838,9 @@ async function getValidSupabaseAccessToken(authClient) {
   }
 
   const readToken = async () => {
-    const { data: sessionData, error: sessionError } = await runWithTimeoutResult(
-      authClient.auth.getSession(),
+    const { data: sessionData, error: sessionError } = await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => authClient.auth.getSession(),
       SUPABASE_SESSION_TIMEOUT_MS,
       "Supabase session check timed out.",
     );
@@ -23492,8 +23881,9 @@ async function getValidSupabaseAccessToken(authClient) {
   }
 
   if (!isLikelyJwtToken(tokenResult.token) || isJwtTokenExpired(tokenResult.token, 60)) {
-    await runWithTimeoutResult(
-      authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+    await runSupabaseAuthRequestWithTimeout(
+      authClient,
+      () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
       SUPABASE_SESSION_TIMEOUT_MS,
       "Supabase session refresh timed out.",
     );
@@ -23505,8 +23895,9 @@ async function getValidSupabaseAccessToken(authClient) {
 
   const validateToken = async (token) => {
     try {
-      const { data, error } = await runWithTimeoutResult(
-        authClient.auth.getUser(token),
+      const { data, error } = await runSupabaseAuthRequestWithTimeout(
+        authClient,
+        () => authClient.auth.getUser(token),
         SUPABASE_SESSION_TIMEOUT_MS,
         "Supabase user validation timed out.",
       );
@@ -23541,8 +23932,9 @@ async function getValidSupabaseAccessToken(authClient) {
     return tokenResult;
   }
 
-  await runWithTimeoutResult(
-    authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+  await runSupabaseAuthRequestWithTimeout(
+    authClient,
+    () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
     SUPABASE_SESSION_TIMEOUT_MS,
     "Supabase session refresh timed out.",
   );
@@ -23577,7 +23969,7 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
   try {
     const serverDeleteUrl = buildServerApiUrl("/admin-delete-user");
-    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.legacyAnonKey);
     if (!serverDeleteUrl && !hasLegacySupabaseFunction) {
       return {
         ok: false,
@@ -23670,7 +24062,7 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
           method: "POST",
           headers: {
             Authorization: `Bearer ${tokenResult.token}`,
-            apikey: SUPABASE_CONFIG.anonKey,
+            apikey: SUPABASE_CONFIG.legacyAnonKey,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ targetAuthId }),
@@ -23685,16 +24077,18 @@ async function deleteSupabaseAuthUserAsAdmin(targetAuthId) {
 
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
           continue;
         }
         if (attempt === 0 && !details) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
@@ -23739,7 +24133,7 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
 
   try {
     const serverSetPasswordUrl = buildServerApiUrl("/admin-set-user-password");
-    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.legacyAnonKey);
     if (!serverSetPasswordUrl && !hasLegacySupabaseFunction) {
       return {
         ok: false,
@@ -23832,7 +24226,7 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
           method: "POST",
           headers: {
             Authorization: `Bearer ${tokenResult.token}`,
-            apikey: SUPABASE_CONFIG.anonKey,
+            apikey: SUPABASE_CONFIG.legacyAnonKey,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ targetAuthId: safeTargetAuthId, password }),
@@ -23847,16 +24241,18 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
 
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
           continue;
         }
         if (attempt === 0 && !details) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
@@ -23937,7 +24333,7 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
 
   try {
     const serverSetAccessUrl = buildServerApiUrl("/admin-set-user-access");
-    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey);
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.legacyAnonKey);
     if (!serverSetAccessUrl && !hasLegacySupabaseFunction) {
       return {
         ok: false,
@@ -24054,7 +24450,7 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
           method: "POST",
           headers: {
             Authorization: `Bearer ${tokenResult.token}`,
-            apikey: SUPABASE_CONFIG.anonKey,
+            apikey: SUPABASE_CONFIG.legacyAnonKey,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ targetAuthIds: ids, approved }),
@@ -24070,16 +24466,18 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
 
       if (response.status === 401 || response.status === 403) {
         if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
           continue;
         }
         if (attempt === 0 && !details) {
-          await runWithTimeoutResult(
-            authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
             SUPABASE_SESSION_TIMEOUT_MS,
             "Supabase session refresh timed out.",
           );
@@ -27506,9 +27904,17 @@ function renderQuestionStemVisual(question) {
   if (!questionImage) {
     return "";
   }
+  const displayUrl = getRenderableQuestionImageUrl(questionImage);
+  if (!displayUrl && isPendingSupabaseQuestionImage(questionImage)) {
+    return `
+      <figure class="exam-question-media">
+        <div class="subtle" style="padding: 0.85rem 1rem;">Loading image...</div>
+      </figure>
+    `;
+  }
   return `
     <figure class="exam-question-media">
-      <img src="${escapeHtml(questionImage)}" alt="Question visual" loading="lazy" />
+      <img src="${escapeHtml(displayUrl || questionImage)}" alt="Question visual" loading="lazy" />
     </figure>
   `;
 }
@@ -27533,8 +27939,15 @@ function renderInlineExplanationPane(question, isCorrect) {
 }
 
 function renderExplanationVisual(question) {
-  if (question.explanationImage) {
-    return `<img src="${escapeHtml(question.explanationImage)}" alt="Explanation visual" loading="lazy" />`;
+  const explanationImage = String(question?.explanationImage || "").trim();
+  if (explanationImage) {
+    const displayUrl = getRenderableQuestionImageUrl(explanationImage);
+    if (displayUrl) {
+      return `<img src="${escapeHtml(displayUrl)}" alt="Explanation visual" loading="lazy" />`;
+    }
+    if (isPendingSupabaseQuestionImage(explanationImage)) {
+      return `<div class="exam-visual-fallback"><p>Loading explanation image...</p></div>`;
+    }
   }
 
   return `
@@ -27946,7 +28359,7 @@ async function logout(options = {}) {
     suppressSupabaseSignedOutRecovery = true;
   }
   const signOutPromise = authClient
-    ? authClient.auth.signOut().catch((error) => {
+    ? queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch((error) => {
       console.warn("Supabase sign-out failed.", error?.message || error);
     })
     : Promise.resolve();
@@ -27958,6 +28371,7 @@ async function logout(options = {}) {
   clearSessionRealtimeSubscription();
   clearContentRealtimeSubscription();
   clearProfileAccessRealtimeSubscription();
+  resetQuestionImageRuntimeState();
   clearStudentAccessPolling();
   clearStudentForceRefreshPolling();
   clearStudentBackgroundRefreshPolling();
