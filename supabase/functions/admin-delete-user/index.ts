@@ -63,6 +63,14 @@ function parseBearerToken(authHeader: string): string {
   return value.slice("bearer ".length).trim();
 }
 
+function buildUserScopedAppStateKeys(targetAuthId: string): string[] {
+  return [
+    "mcq_sessions",
+    "mcq_incorrect_queue",
+    "mcq_flashcards",
+  ].map((storageKey) => `u:${targetAuthId}:${storageKey}`);
+}
+
 Deno.serve(async (req) => {
   const requestOrigin = String(req.headers.get("origin") || "").trim();
 
@@ -137,9 +145,26 @@ Deno.serve(async (req) => {
   if (deleteError) {
     const details = String(deleteError.message || "").trim();
     if (/not found|user not found/i.test(details)) {
+      const appStateKeys = buildUserScopedAppStateKeys(targetAuthId);
+      const { error: cleanupError } = await adminClient
+        .from("app_state")
+        .delete()
+        .in("storage_key", appStateKeys);
+      if (cleanupError && !/relation .*app_state.*does not exist/i.test(String(cleanupError.message || "").trim())) {
+        console.error("Could not clean deleted user's app_state rows.", cleanupError.message || cleanupError);
+      }
       return jsonResponse(200, { ok: true, deleted: false, message: "User already removed." }, requestOrigin);
     }
     return jsonResponse(500, { ok: false, error: details || "Supabase admin delete call failed." }, requestOrigin);
+  }
+
+  const appStateKeys = buildUserScopedAppStateKeys(targetAuthId);
+  const { error: cleanupError } = await adminClient
+    .from("app_state")
+    .delete()
+    .in("storage_key", appStateKeys);
+  if (cleanupError && !/relation .*app_state.*does not exist/i.test(String(cleanupError.message || "").trim())) {
+    console.error("Could not clean deleted user's app_state rows.", cleanupError.message || cleanupError);
   }
 
   return jsonResponse(200, { ok: true, deleted: true }, requestOrigin);

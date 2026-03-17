@@ -116,6 +116,7 @@ const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 500;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 8000;
+const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
 const SUPABASE_SESSION_TIMEOUT_MS = 6000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 5000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
@@ -2259,7 +2260,7 @@ async function initSupabaseAuth() {
           render();
           return;
         }
-        const shouldPreserveLocalSession = Boolean(preservedLocalUser?.id) && hasSupabaseManagedIdentity(preservedLocalUser);
+        const shouldPreserveLocalSession = shouldPreserveSupabaseLocalSessionAfterSignedOut(preservedLocalUser);
         if (shouldPreserveLocalSession) {
           clearNotificationRealtimeSubscription();
           clearSessionRealtimeSubscription();
@@ -3238,6 +3239,16 @@ function hasSupabaseManagedIdentity(user) {
   return Boolean(getUserProfileId(user));
 }
 
+function shouldPreserveSupabaseLocalSessionAfterSignedOut(user) {
+  if (!hasSupabaseManagedIdentity(user)) {
+    return false;
+  }
+  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+    return true;
+  }
+  return Boolean(relationalSync.flushing || supabaseSync.flushing || getPendingCloudWriteCount() > 0);
+}
+
 function canUseLocalPasswordFallback(user) {
   return Boolean(user) && !hasSupabaseManagedIdentity(user);
 }
@@ -3263,6 +3274,26 @@ function shouldAllowSupabaseManagedLocalFallback(error) {
     || message.includes("admin password api is unavailable")
     || message.includes("no active supabase session")
     || message.includes("session expired");
+}
+
+function shouldAllowSupabaseManagedDeleteFallback(error) {
+  if (!error) {
+    return false;
+  }
+  if (isLikelyNetworkFetchError(error) || isTimeoutResultError(error)) {
+    return true;
+  }
+  const message = getErrorMessage(error, "").toLowerCase();
+  return message.includes("timed out")
+    || message.includes("unavailable")
+    || message.includes("failed to fetch")
+    || message.includes("network")
+    || message.includes("load failed")
+    || message.includes("server api request failed")
+    || message.includes("supabase auth client is not available")
+    || message.includes("supabase relational client is not available")
+    || message.includes("relational database sync is unavailable")
+    || message.includes("admin delete api is unavailable");
 }
 
 function isForcedAdminEmail(email) {
@@ -3711,12 +3742,16 @@ function schedulePostAuthDataWarmup(user) {
   postAuthWarmupRuntime.promise = Promise.resolve().then(async () => {
     if (currentUser.role === "admin") {
       flushPendingAdminActionQueue({ user: currentUser }).catch(() => { });
-      await hydrateRelationalState(currentUser).catch((hydrateError) => {
+      try {
+        await hydrateRelationalState(currentUser);
+      } catch (hydrateError) {
         console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
-      });
-      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+      }
+      try {
+        await hydrateUserScopedSupabaseState(currentUser);
+      } catch (hydrateError) {
         console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-      });
+      }
       state.adminDataLastSyncAt = Date.now();
       state.adminDataSyncError = "";
     } else if (currentUser.role === "student") {
@@ -3724,16 +3759,22 @@ function schedulePostAuthDataWarmup(user) {
         rerender: false,
         reason: "post-auth warmup",
       }).catch(() => false);
-      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+      try {
+        await hydrateUserScopedSupabaseState(currentUser);
+      } catch (hydrateError) {
         console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-      });
+      }
     } else {
-      await hydrateRelationalState(currentUser).catch((hydrateError) => {
+      try {
+        await hydrateRelationalState(currentUser);
+      } catch (hydrateError) {
         console.warn("Could not hydrate relational state.", hydrateError?.message || hydrateError);
-      });
-      await hydrateUserScopedSupabaseState(currentUser).catch((hydrateError) => {
+      }
+      try {
+        await hydrateUserScopedSupabaseState(currentUser);
+      } catch (hydrateError) {
         console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-      });
+      }
     }
 
     const latestUser = getCurrentUser();
@@ -3801,7 +3842,7 @@ function isLikelyCloudSyncAuthMessage(value) {
   if (!normalized) {
     return false;
   }
-  return /no active supabase session|supabase session expired|session does not match|unauthorized|signed-in supabase admin account|log out and log in again|log in again/.test(normalized);
+  return /no active supabase session|supabase session expired|session does not match|unauthorized|signed-in supabase admin account|supabase admin session needs attention|log out and log in again|log out and sign in again|log in again|sign in again/.test(normalized);
 }
 
 function isLikelyRecoverableCloudSyncMessage(value) {
@@ -4627,14 +4668,74 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   return { ok: true, updatedIds, skippedIds, missingIds };
 }
 
-function syncUsersBackupState(usersPayload) {
+async function syncUsersBackupState(usersPayload) {
   if (!supabaseSync.enabled || !isLegacySupabaseStateSyncKey(STORAGE_KEYS.users)) {
-    return;
+    return false;
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : getUsers();
-  scheduleSupabaseWrite(STORAGE_KEYS.users, users);
-  // The scheduled timer will flush automatically — no need to block.
+  return scheduleSupabaseWrite(STORAGE_KEYS.users, users);
+}
+
+function purgeDeletedUserLocalState(target = {}) {
+  const targetLocalUserId = String(target?.targetLocalUserId || target?.localUserId || target?.userId || "").trim();
+  const targetProfileId = String(target?.targetProfileId || target?.profileId || "").trim();
+  const targetAuthId = String(target?.targetAuthId || target?.authId || "").trim();
+  if (!targetLocalUserId && !isUuidValue(targetProfileId) && !isUuidValue(targetAuthId)) {
+    return false;
+  }
+
+  let didChange = false;
+
+  const rawUsers = load(STORAGE_KEYS.users, []);
+  if (Array.isArray(rawUsers)) {
+    const nextUsers = rawUsers.filter((entry) => {
+      const localId = String(entry?.id || "").trim();
+      const profileId = String(getUserProfileId(entry) || "").trim();
+      const authId = String(entry?.supabaseAuthId || "").trim();
+      if (targetLocalUserId && localId === targetLocalUserId) {
+        return false;
+      }
+      if (isUuidValue(targetProfileId) && profileId === targetProfileId) {
+        return false;
+      }
+      if (isUuidValue(targetAuthId) && (authId === targetAuthId || profileId === targetAuthId)) {
+        return false;
+      }
+      return true;
+    });
+    if (nextUsers.length !== rawUsers.length) {
+      save(STORAGE_KEYS.users, nextUsers);
+      didChange = true;
+    }
+  }
+
+  if (targetLocalUserId) {
+    const rawSessions = load(STORAGE_KEYS.sessions, []);
+    if (Array.isArray(rawSessions)) {
+      const nextSessions = rawSessions.filter((entry) => String(entry?.userId || "").trim() !== targetLocalUserId);
+      if (nextSessions.length !== rawSessions.length) {
+        save(STORAGE_KEYS.sessions, nextSessions);
+        didChange = true;
+      }
+    }
+
+    const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
+    if (Object.prototype.hasOwnProperty.call(incorrectQueue, targetLocalUserId)) {
+      delete incorrectQueue[targetLocalUserId];
+      save(STORAGE_KEYS.incorrectQueue, incorrectQueue);
+      didChange = true;
+    }
+
+    const flashcards = load(STORAGE_KEYS.flashcards, {});
+    if (Object.prototype.hasOwnProperty.call(flashcards, targetLocalUserId)) {
+      delete flashcards[targetLocalUserId];
+      save(STORAGE_KEYS.flashcards, flashcards);
+      didChange = true;
+    }
+  }
+
+  return didChange;
 }
 
 async function flushPendingAdminActionQueue(options = {}) {
@@ -4754,7 +4855,15 @@ async function flushPendingAdminActionQueue(options = {}) {
           const authDeleteMessage = String(authDeleteResult?.message || "").trim();
           if (!authDeleteResult?.ok && !/not found|user not found/i.test(authDeleteMessage)) {
             failureMessage = failureMessage || authDeleteMessage || "Could not sync queued user deletion.";
-            if (shouldStopPendingAdminQueueOnFailure(authDeleteMessage)) {
+            const shouldStop = shouldStopPendingAdminQueueOnFailure(authDeleteMessage);
+            const shouldRetry = shouldAutoRetryPendingAdminQueueOnFailure(authDeleteMessage);
+            if (shouldStop && !shouldRetry) {
+              remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+              savePendingAdminActionQueue(remainingActions);
+              scheduleSyncStatusUiRefresh();
+              continue;
+            }
+            if (shouldStop) {
               queueBlockedByGlobalFailure = true;
               break;
             }
@@ -4766,13 +4875,22 @@ async function flushPendingAdminActionQueue(options = {}) {
           const profileDeleteMessage = String(profileDeleteResult?.message || "").trim();
           if (!profileDeleteResult?.ok && !/not found|missing/i.test(profileDeleteMessage)) {
             failureMessage = failureMessage || profileDeleteMessage || "Could not remove queued user profile from database.";
-            if (shouldStopPendingAdminQueueOnFailure(profileDeleteMessage)) {
+            const shouldStop = shouldStopPendingAdminQueueOnFailure(profileDeleteMessage);
+            const shouldRetry = shouldAutoRetryPendingAdminQueueOnFailure(profileDeleteMessage);
+            if (shouldStop && !shouldRetry) {
+              remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
+              savePendingAdminActionQueue(remainingActions);
+              scheduleSyncStatusUiRefresh();
+              continue;
+            }
+            if (shouldStop) {
               queueBlockedByGlobalFailure = true;
               break;
             }
             continue;
           }
         }
+        purgeDeletedUserLocalState(action);
         syncedCount += 1;
         remainingActions = remainingActions.filter((entry) => entry.id !== action.id);
         savePendingAdminActionQueue(remainingActions);
@@ -5375,18 +5493,22 @@ async function hydrateRelationalProfiles(currentUser) {
       })
       .filter(Boolean);
     if (backfillCandidates.length) {
-      await syncProfilesToRelational(backfillCandidates).catch((error) => {
+      try {
+        await syncProfilesToRelational(backfillCandidates);
+      } catch (error) {
         console.warn("Could not backfill missing student profile fields.", error?.message || error);
-      });
+      }
     }
     if (mapped.length) {
-      await syncUserCourseEnrollmentsToRelational(mapped, {
-        assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
-      }).catch((error) => {
+      try {
+        await syncUserCourseEnrollmentsToRelational(mapped, {
+          assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
+        });
+      } catch (error) {
         if (!isMissingRelationError(error)) {
           console.warn("Could not backfill missing student enrollment rows.", error?.message || error);
         }
-      });
+      }
     }
   }
 
@@ -6785,7 +6907,7 @@ async function flushSupabaseWrites() {
       supabaseSync.client
         .from(supabaseSync.tableName)
         .upsert(rows, { onConflict: supabaseSync.storageKeyColumn }),
-      SUPABASE_QUERY_TIMEOUT_MS,
+      SUPABASE_BACKUP_WRITE_TIMEOUT_MS,
       "Supabase backup sync timed out.",
     );
     if (error) {
@@ -20756,7 +20878,7 @@ function wireAdmin() {
       if (target.supabaseAuthId) {
         const deleteResult = await deleteSupabaseAuthUserAsAdmin(target.supabaseAuthId);
         if (!deleteResult.ok) {
-          if (shouldAllowSupabaseManagedLocalFallback(deleteResult.message)) {
+          if (shouldAllowSupabaseManagedDeleteFallback(deleteResult.message)) {
             queuedDelete = true;
           } else {
             toast(`Could not delete user from Supabase Auth. ${deleteResult.message || "Unauthorized."}`);
@@ -20767,7 +20889,7 @@ function wireAdmin() {
       if (targetProfileId && !queuedDelete) {
         const relationalDeleteResult = await deleteRelationalProfile(targetProfileId);
         if (!relationalDeleteResult.ok) {
-          if (shouldAllowSupabaseManagedLocalFallback(relationalDeleteResult.message)) {
+          if (shouldAllowSupabaseManagedDeleteFallback(relationalDeleteResult.message)) {
             queuedDelete = true;
           } else {
             toast(`Database delete failed. ${relationalDeleteResult.message}`);
@@ -20791,35 +20913,28 @@ function wireAdmin() {
           targetProfileId: String(targetProfileId || "").trim(),
           targetLocalUserId: userId,
         });
+        purgeDeletedUserLocalState({
+          targetAuthId: String(target.supabaseAuthId || "").trim(),
+          targetProfileId: String(targetProfileId || "").trim(),
+          targetLocalUserId: userId,
+        });
       }
-
-      save(
-        STORAGE_KEYS.users,
-        users.filter((entry) => entry.id !== userId),
-      );
-      save(
-        STORAGE_KEYS.sessions,
-        getSessions().filter((entry) => entry.userId !== userId),
-      );
-
-      const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
-      delete incorrectQueue[userId];
-      save(STORAGE_KEYS.incorrectQueue, incorrectQueue);
-
-      const flashcards = load(STORAGE_KEYS.flashcards, {});
-      delete flashcards[userId];
-      save(STORAGE_KEYS.flashcards, flashcards);
 
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: !queuedDelete });
-        toast(queuedDelete ? "User removed locally and queued for cloud deletion." : "User removed.");
+        toast(
+          queuedDelete
+            ? "User deletion is pending cloud cleanup. The account is hidden locally until Supabase confirms removal."
+            : "User removed.",
+        );
         render();
       } catch (syncError) {
         toast(
           queuedDelete
-            ? `User removed locally and queued for cloud deletion. ${getErrorMessage(syncError, "Sync failed.")}`
+            ? `User deletion is pending cloud cleanup. ${getErrorMessage(syncError, "Cloud sync is still catching up.")}`
             : `User removed locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`,
         );
+        render();
       }
     });
   });
