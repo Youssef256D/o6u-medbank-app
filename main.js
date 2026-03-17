@@ -133,6 +133,10 @@ const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
+const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
+const ENROLLMENT_SYNC_USER_BATCH_SIZE = 75;
+const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
+const ENROLLMENT_SYNC_DELETE_BATCH_SIZE = 150;
 const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
 const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
 const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
@@ -7470,10 +7474,14 @@ async function fetchRowsPaged(fetchPage, options = {}) {
   return { data: rows, error: null };
 }
 
-async function runRelationalQueryWithTimeout(queryPromise, timeoutMessage = "Supabase query timed out.") {
+async function runRelationalQueryWithTimeout(
+  queryPromise,
+  timeoutMessage = "Supabase query timed out.",
+  timeoutMs = SUPABASE_QUERY_TIMEOUT_MS,
+) {
   const { data, error } = await runWithTimeoutResult(
     queryPromise,
-    SUPABASE_QUERY_TIMEOUT_MS,
+    Math.max(1, Number(timeoutMs) || SUPABASE_QUERY_TIMEOUT_MS),
     timeoutMessage,
   );
   if (error) {
@@ -8426,8 +8434,18 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : [];
-  const students = users.filter((user) => user?.role === "student" && Boolean(getUserProfileId(user)));
-  if (!students.length) {
+  const studentsByUserId = new Map();
+  users.forEach((user) => {
+    if (user?.role !== "student") {
+      return;
+    }
+    const userId = String(getUserProfileId(user) || "").trim();
+    if (!isUuidValue(userId) || studentsByUserId.has(userId)) {
+      return;
+    }
+    studentsByUserId.set(userId, user);
+  });
+  if (!studentsByUserId.size) {
     return;
   }
   if (relationalSync.enrollmentWriteAccessDenied) {
@@ -8441,6 +8459,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
         .select("id,course_name")
         .eq("is_active", true),
       "Course lookup timed out during enrollment sync.",
+      ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
     );
 
     const courseIdByName = Object.fromEntries(
@@ -8449,10 +8468,8 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
         .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
     );
 
-    const enrollmentRows = [];
     const desiredCourseIdsByUserId = new Map();
-    students.forEach((student) => {
-      const userId = getUserProfileId(student);
+    studentsByUserId.forEach((student, userId) => {
       const enrollmentYear = normalizeAcademicYearOrNull(student.academicYear);
       const enrollmentSemester = normalizeAcademicSemesterOrNull(student.academicSemester);
       const curriculumCourses = enrollmentYear !== null && enrollmentSemester !== null
@@ -8469,33 +8486,18 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
           .filter((courseId) => isUuidValue(courseId)),
       );
       desiredCourseIdsByUserId.set(userId, desiredCourseIds);
-      desiredCourseIds.forEach((courseId) => {
-        enrollmentRows.push({
-          user_id: userId,
-          course_id: courseId,
-          assigned_by: isUuidValue(options.assignedByAuthId) ? options.assignedByAuthId : null,
-        });
-      });
     });
 
-    for (const batch of splitIntoBatches(enrollmentRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      await runRelationalQueryWithTimeout(
-        client
-          .from("user_course_enrollments")
-          .upsert(batch, { onConflict: "user_id,course_id" }),
-        "Enrollment sync timed out.",
-      );
-    }
-
-    const userIds = [...new Set(students.map((student) => getUserProfileId(student)).filter(isUuidValue))];
+    const userIds = [...studentsByUserId.keys()];
     const existingEnrollmentRows = [];
-    for (const userBatch of splitIntoBatches(userIds, RELATIONAL_IN_BATCH_SIZE)) {
+    for (const userBatch of splitIntoBatches(userIds, ENROLLMENT_SYNC_USER_BATCH_SIZE)) {
       const data = await runRelationalQueryWithTimeout(
         client
           .from("user_course_enrollments")
           .select("user_id,course_id")
           .in("user_id", userBatch),
         "Enrollment verification timed out.",
+        ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
       );
       if (Array.isArray(data) && data.length) {
         existingEnrollmentRows.push(...data);
@@ -8515,11 +8517,37 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       existingCourseIdsByUserId.get(userId).add(courseId);
     });
 
+    const enrollmentRows = [];
+    userIds.forEach((userId) => {
+      const desired = desiredCourseIdsByUserId.get(userId) || new Set();
+      const existing = existingCourseIdsByUserId.get(userId) || new Set();
+      desired.forEach((courseId) => {
+        if (existing.has(courseId)) {
+          return;
+        }
+        enrollmentRows.push({
+          user_id: userId,
+          course_id: courseId,
+          assigned_by: isUuidValue(options.assignedByAuthId) ? options.assignedByAuthId : null,
+        });
+      });
+    });
+
+    for (const batch of splitIntoBatches(enrollmentRows, ENROLLMENT_SYNC_WRITE_BATCH_SIZE)) {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("user_course_enrollments")
+          .upsert(batch, { onConflict: "user_id,course_id" }),
+        "Enrollment sync timed out.",
+        ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
+      );
+    }
+
     for (const userId of userIds) {
       const desired = desiredCourseIdsByUserId.get(userId) || new Set();
       const existing = existingCourseIdsByUserId.get(userId) || new Set();
       const removeCourseIds = [...existing].filter((courseId) => !desired.has(courseId));
-      for (const courseBatch of splitIntoBatches(removeCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+      for (const courseBatch of splitIntoBatches(removeCourseIds, ENROLLMENT_SYNC_DELETE_BATCH_SIZE)) {
         await runRelationalQueryWithTimeout(
           client
             .from("user_course_enrollments")
@@ -8527,6 +8555,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
             .eq("user_id", userId)
             .in("course_id", courseBatch),
           "Enrollment cleanup timed out.",
+          ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
         );
       }
     }
