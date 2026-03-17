@@ -12597,11 +12597,11 @@ function renderContact() {
           <p><b>Does timed mode auto-submit?</b><br />Yes, when the timer hits zero.</p>
           <p><b>Can I practice only assigned courses?</b><br />Yes, admin assignment controls course visibility per student.</p>
         </article>
-        <form id="support-form" class="card">
+        <form id="support-form" class="card" autocomplete="on">
           <h4>Support Form</h4>
-          <label>Name <input name="name" required /></label>
-          <label>Email <input type="email" name="email" required /></label>
-          <label>Message <textarea name="message" required></textarea></label>
+          <label>Name <input name="name" autocomplete="name" required /></label>
+          <label>Email <input type="email" name="email" autocomplete="email" required /></label>
+          <label>Message <textarea name="message" autocomplete="off" required></textarea></label>
           <button class="btn" type="submit">Send</button>
         </form>
       </div>
@@ -12720,8 +12720,8 @@ function renderAuth(mode) {
           <p class="subtle">Complete your Google sign-up details. Name and email are locked to your Google account. Phone format examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
           <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
             <div class="form-row">
-              <label>Full name <input name="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
-              <label>Email <input type="email" name="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
+              <label>Full name <input name="name" autocomplete="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
+              <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
             </div>
             <div class="form-row">
               <label>Phone number <input type="tel" name="phone" value="${escapeHtml(currentUser?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
@@ -12793,7 +12793,7 @@ function renderAuth(mode) {
             <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
           </div>
           <div class="form-row">
-            <label>Invite code (optional) <input name="inviteCode" /></label>
+            <label>Invite code (optional) <input name="inviteCode" autocomplete="one-time-code" /></label>
           </div>
           <div class="form-row">
             <label>Year
@@ -14367,7 +14367,7 @@ function renderCreateTest() {
           const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
           return `
                             <label class="admin-course-check create-test-topic-chip is-list-item">
-                              <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
+                              <input type="checkbox" name="createTestTopics" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
                               <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
                               ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
                             </label>
@@ -14388,7 +14388,7 @@ function renderCreateTest() {
               const isNewTopic = isTopicNewForUser(selectedCourse, topic, user);
               return `
                                     <label class="admin-course-check create-test-topic-chip">
-                                      <input type="checkbox" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
+                                      <input type="checkbox" name="createTestTopics" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
                                       <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
                                       ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
                                     </label>
@@ -14409,7 +14409,7 @@ function renderCreateTest() {
 
     <section class="panel">
       <h3 style="margin-top: 0;">Test Setup</h3>
-      <form id="create-test-block-form" class="create-test-setup-form">
+      <form id="create-test-block-form" class="create-test-setup-form" autocomplete="off">
         <div class="create-test-setup-grid">
           <label class="create-test-setup-field">Number of questions
             <input name="count" type="number" min="0" max="500" step="1" value="${defaultQuestionCount}" />
@@ -16660,7 +16660,7 @@ function renderAnalytics() {
       <h2 class="title">Performance Analytics</h2>
       <p class="subtle">Course trends and weak-area detection.</p>
       <div class="flex-between" style="gap: 0.8rem; align-items: flex-end; flex-wrap: wrap;">
-        <form id="analytics-course-form" style="margin-top: 0.8rem; max-width: 520px;">
+        <form id="analytics-course-form" style="margin-top: 0.8rem; max-width: 520px;" autocomplete="off">
           <label>Course
             <select id="analytics-course-select" name="analyticsCourse">
               ${availableCourses
@@ -16775,14 +16775,15 @@ function renderProfile() {
       <h2 class="title">Profile & Settings</h2>
       <p class="subtle">Manage account details and credentials.</p>
       <div class="grid-2" style="margin-top: 0.9rem;">
-        <form id="profile-form" class="card">
+        <form id="profile-form" class="card" autocomplete="on">
           <h4>Account</h4>
-          <label>Name <input name="name" value="${escapeHtml(user.name)}" required /></label>
+          <label>Name <input name="name" autocomplete="name" value="${escapeHtml(user.name)}" required /></label>
           <label>
             Email
             <input
               name="email"
               type="email"
+              autocomplete="email"
               value="${escapeHtml(user.email)}"
               ${isGoogleAuthUser ? "readonly aria-readonly=\"true\"" : ""}
               required
@@ -16792,7 +16793,7 @@ function renderProfile() {
       ? `<p class="subtle" style="margin: -0.35rem 0 0;">Email is locked for Google sign-in accounts.</p>`
       : ""
     }
-          <label>New password <input name="password" type="password" minlength="6" /></label>
+          <label>New password <input name="password" type="password" minlength="6" autocomplete="new-password" /></label>
           <button class="btn" type="submit">Save changes</button>
         </form>
         <article class="card">
@@ -17007,7 +17008,7 @@ function renderAdminBulkImportSection(allCourses, options = {}) {
     <section class="card admin-section" id="admin-bulk-import-section">
       <h3 style="margin: 0;">Bulk Import</h3>
       <p class="subtle">Upload or paste CSV/JSON and import questions by default course/topic.</p>
-      <form id="admin-import-form" style="margin-top: 0.7rem;">
+      <form id="admin-import-form" style="margin-top: 0.7rem;" autocomplete="off">
         <div class="form-row">
           <label>
             Default course
@@ -17286,6 +17287,7 @@ function renderAdmin() {
             <td class="admin-user-select-cell">
               <input
                 type="checkbox"
+                name="selectedAdminUser"
                 data-action="admin-select-user"
                 data-user-id="${escapeHtml(accountId)}"
                 aria-label="Select ${escapeHtml(String(account.name || account.email || "user"))}"
@@ -17306,7 +17308,7 @@ function renderAdmin() {
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
             <td>
               ${account.role === "student"
-            ? `<select class="admin-mini-select" data-field="academicYear">
+            ? `<select class="admin-mini-select" name="inlineAcademicYear" data-field="academicYear">
                        <option value="" ${year === null ? "selected" : ""}>Select year</option>
                        ${[1, 2, 3, 4, 5]
               .map((entry) => `<option value="${entry}" ${year === entry ? "selected" : ""}>Year ${entry}</option>`)
@@ -17317,7 +17319,7 @@ function renderAdmin() {
             </td>
             <td>
               ${account.role === "student"
-            ? `<select class="admin-mini-select" data-field="academicSemester">
+            ? `<select class="admin-mini-select" name="inlineAcademicSemester" data-field="academicSemester">
                        <option value="" ${semester === null ? "selected" : ""}>Select semester</option>
                        <option value="1" ${semester === 1 ? "selected" : ""}>Semester 1</option>
                        <option value="2" ${semester === 2 ? "selected" : ""}>Semester 2</option>
@@ -17378,13 +17380,13 @@ function renderAdmin() {
             </span>
           </summary>
           <div class="admin-user-create-panel-body">
-            <form id="admin-add-user-form">
+            <form id="admin-add-user-form" autocomplete="off">
               <div class="form-row">
-                <label>Full name <input name="name" required /></label>
-                <label>Email <input type="email" name="email" required /></label>
+                <label>Full name <input name="name" autocomplete="off" required /></label>
+                <label>Email <input type="email" name="email" autocomplete="off" required /></label>
               </div>
               <div class="form-row">
-                <label>Password <input type="password" name="password" minlength="6" required /></label>
+                <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
                 <label>Role
                   <select name="role">
                     <option value="student">Student</option>
@@ -17416,7 +17418,7 @@ function renderAdmin() {
           </div>
         </details>
 
-        <form id="admin-user-filter-form" class="admin-users-filter-form" style="margin-top: 0.95rem;">
+        <form id="admin-user-filter-form" class="admin-users-filter-form" style="margin-top: 0.95rem;" autocomplete="off">
           <div class="form-row">
             <label class="admin-user-search-field">Search user
               <input
@@ -17451,6 +17453,7 @@ function renderAdmin() {
           <label class="admin-question-select-all">
             <input
               type="checkbox"
+              name="selectAllUsersVisible"
               data-action="admin-select-all-users"
               aria-label="Select all users in this filtered list"
               data-indeterminate="${partiallyVisibleSelected ? "true" : "false"}"
@@ -17581,7 +17584,7 @@ function renderAdmin() {
                 <label class="admin-course-card-name-field admin-course-card-name-field-head">
                   <span>Course name</span>
                   <div class="admin-course-card-name-inline">
-                    <input data-field="curriculumCourseName" value="${escapeHtml(focusedCourse)}" />
+                    <input name="curriculumCourseName" data-field="curriculumCourseName" autocomplete="off" value="${escapeHtml(focusedCourse)}" />
                     <button class="btn admin-btn-sm" type="button" data-action="curriculum-rename">Save name</button>
                   </div>
                 </label>
@@ -17611,7 +17614,9 @@ function renderAdmin() {
                   <label class="admin-course-tool-field">Ask AI / Notebook link
                     <div class="admin-course-notebook-link admin-course-notebook-link-inline">
                       <input
+                        name="courseNotebookLink"
                         data-field="courseNotebookLink"
+                        autocomplete="off"
                         value="${escapeHtml(notebookLinksByCourse[focusedCourse] || "")}"
                         placeholder="https://notebooklm.google.com/..."
                       />
@@ -17656,7 +17661,7 @@ function renderAdmin() {
             <h3 style="margin: 0;">Courses</h3>
             <p class="subtle" style="margin: 0.22rem 0 0;">Year ${curriculumYear} • Semester ${curriculumSemester}</p>
           </div>
-          <form id="admin-curriculum-add-form" class="admin-courses-head-add-form">
+          <form id="admin-curriculum-add-form" class="admin-courses-head-add-form" autocomplete="off">
             <label class="admin-courses-head-add-label">Add new course
               <input name="newCourseName" placeholder="e.g., New Clinical Module (NCM 999)" required />
             </label>
@@ -17665,7 +17670,7 @@ function renderAdmin() {
         </div>
 
         <div class="admin-courses-minimal-controls" style="margin-top: 0.8rem;">
-              <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card">
+              <form id="admin-curriculum-filter-form" class="admin-course-toolbar-card" autocomplete="off">
                 <div class="form-row">
                   <label>Year
                     <select name="curriculumYear">
@@ -17795,6 +17800,7 @@ function renderAdmin() {
             <td class="admin-question-select-cell">
               <input
                 type="checkbox"
+                name="selectedAdminQuestion"
                 data-action="admin-select-question"
                 data-qid="${escapeHtml(questionId)}"
                 aria-label="Select question ${idx + 1}"
@@ -17859,7 +17865,7 @@ function renderAdmin() {
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-open-courses">Back to courses</button>
           </div>
         </div>
-        <form id="admin-question-filter-form" style="margin-top: 0.7rem;">
+        <form id="admin-question-filter-form" style="margin-top: 0.7rem;" autocomplete="off">
           <div class="form-row">
             <label>Course
               <select id="admin-filter-course" name="course">
@@ -17886,6 +17892,7 @@ function renderAdmin() {
           <label class="admin-question-select-all">
             <input
               type="checkbox"
+              name="selectAllQuestionsVisible"
               data-action="admin-select-all-questions"
               aria-label="Select all questions in this list"
               data-indeterminate="${partiallyVisibleSelected ? "true" : "false"}"
@@ -17945,7 +17952,7 @@ function renderAdmin() {
                     <button class="btn ghost admin-btn-sm" type="button" data-action="admin-cancel" ${questionSaveRunning ? "disabled" : ""}>Close</button>
                   </div>
                 </div>
-                <form id="admin-question-form" style="margin-top: 0.75rem;">
+                <form id="admin-question-form" style="margin-top: 0.75rem;" autocomplete="off">
                   <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}" />
                   <div class="form-row">
                     <label>Course
@@ -18103,7 +18110,7 @@ function renderAdmin() {
           </div>
         </div>
 
-        <form id="admin-notification-form">
+        <form id="admin-notification-form" autocomplete="off">
           <div class="form-row admin-notification-target-row">
             <label class="admin-notification-target-type-field ${targetType === "year" ? "" : "is-full-width"}" id="admin-notification-target-type-field-wrap">Audience
               <select name="targetType" id="admin-notification-target-type" ${notificationSending ? "disabled" : ""}>
@@ -18170,10 +18177,10 @@ function renderAdmin() {
             </label>
           </div>
           <label>Title
-            <input name="title" maxlength="120" required value="${escapeHtml(titleDraft)}" ${notificationSending ? "disabled" : ""} />
+            <input name="title" maxlength="120" autocomplete="off" required value="${escapeHtml(titleDraft)}" ${notificationSending ? "disabled" : ""} />
           </label>
           <label>Message
-            <textarea name="body" maxlength="2000" required ${notificationSending ? "disabled" : ""}>${escapeHtml(bodyDraft)}</textarea>
+            <textarea name="body" maxlength="2000" autocomplete="off" required ${notificationSending ? "disabled" : ""}>${escapeHtml(bodyDraft)}</textarea>
           </label>
           <div class="stack">
             <button class="btn ${notificationSending ? "is-loading" : ""}" type="submit" ${notificationSending ? "disabled" : ""}>
@@ -18235,7 +18242,7 @@ function renderAdmin() {
           <span class="badge ${config.enabled ? "bad" : "good"}">${config.enabled ? "Closed for users" : "Open to users"}</span>
         </div>
 
-        <form id="admin-site-maintenance-form" class="admin-site-maintenance-form">
+        <form id="admin-site-maintenance-form" class="admin-site-maintenance-form" autocomplete="off">
           <label class="toggle-switch-label admin-site-maintenance-toggle">
             <input name="enabled" type="checkbox" class="toggle-switch-input" ${config.enabled ? "checked" : ""} />
             <span class="toggle-switch-track" aria-hidden="true">
@@ -18249,12 +18256,12 @@ function renderAdmin() {
 
           <div class="form-row">
             <label>Public title
-              <input name="title" maxlength="120" value="${escapeHtml(config.title)}" required />
+              <input name="title" maxlength="120" autocomplete="off" value="${escapeHtml(config.title)}" required />
             </label>
           </div>
 
           <label>Public message
-            <textarea name="message" rows="6" maxlength="1200" required>${escapeHtml(config.message)}</textarea>
+            <textarea name="message" rows="6" maxlength="1200" autocomplete="off" required>${escapeHtml(config.message)}</textarea>
           </label>
 
           <div class="admin-site-maintenance-exceptions">
@@ -18612,11 +18619,13 @@ function renderAdminCourseTopicControls(course) {
       ? `
             <tr class="admin-topic-table-create-row is-open" data-role="course-topic-create-row">
               <td>
-                <input data-field="newCourseTopicInline" placeholder="Add topic (e.g., Diabetes Mellitus)" />
+                <input name="newCourseTopicInline" data-field="newCourseTopicInline" autocomplete="off" placeholder="Add topic (e.g., Diabetes Mellitus)" />
               </td>
               <td>
                 <input
+                  name="newCourseTopicGroupInline"
                   data-field="newCourseTopicGroupInline"
+                  autocomplete="off"
                   list="${groupOptionListId}"
                   placeholder="Type or create subgroup"
                 />
@@ -18659,11 +18668,13 @@ function renderAdminCourseTopicControls(course) {
         .map((topic, topicIdx) => `
                   <tr data-role="course-topic-row" data-topic-index="${topicIdx}">
                     <td>
-                      <input data-field="courseTopicName" value="${escapeHtml(topic)}" />
+                      <input name="courseTopicName" data-field="courseTopicName" autocomplete="off" value="${escapeHtml(topic)}" />
                     </td>
                     <td>
                       <input
+                        name="courseTopicGroupName"
                         data-field="courseTopicGroupName"
+                        autocomplete="off"
                         list="${groupOptionListId}"
                         value="${escapeHtml(getTopicGroupNameForCourseTopic(course, topic))}"
                         placeholder="Type or create subgroup"
@@ -27662,9 +27673,9 @@ function renderSessionPanel(session, question, response) {
 
   if (state.sessionPanel === "feedback") {
     content = `
-      <form id="feedback-form">
+      <form id="feedback-form" autocomplete="off">
         <label class="exam-panel-label">Send feedback on this question
-          <textarea id="feedback-input" placeholder="Tell us what can be improved..."></textarea>
+          <textarea id="feedback-input" name="feedback" autocomplete="off" placeholder="Tell us what can be improved..."></textarea>
         </label>
         <button class="btn" type="submit">Submit feedback</button>
       </form>
