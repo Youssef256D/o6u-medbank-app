@@ -388,6 +388,7 @@ const relationalSync = {
   pendingWrites: new Map(),
   inFlightPayloadSignatures: new Map(),
   lastSyncedPayloadSignatures: new Map(),
+  lastRejectedPayloadSignatures: new Map(),
   blockedStorageKeys: new Set(),
   flushTimer: null,
   flushing: false,
@@ -2067,6 +2068,7 @@ function queueSupabaseAuthStateChange(subscriptionVersion, event, session) {
 
 async function handleSupabaseAuthStateChange(event, session) {
   const sessionUserId = String(session?.user?.id || "").trim();
+  const isExplicitAdminReauthEvent = event === "INITIAL_SESSION" || event === "SIGNED_IN";
   // Only update activeUserId when we have a valid session or on explicit sign-out
   // that won't be recovered. This prevents the status indicator from flapping
   // orange/green during transient SIGNED_OUT events (e.g. token refresh).
@@ -2079,17 +2081,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       adminActionRuntime.blockedQueueSignature
       && isLikelyCloudSyncAuthMessage(adminActionRuntime.lastFailureMessage),
     );
-    if (hadBlockedAdminAuthQueue) {
-      adminActionRuntime.blockedQueueSignature = "";
-      adminActionRuntime.lastFailureAt = 0;
-      adminActionRuntime.lastFailureMessage = "";
-      adminActionRuntime.retryAt = 0;
-      scheduleSyncStatusUiRefresh();
-    }
     if (event === "TOKEN_REFRESHED") {
-      if (hadBlockedAdminAuthQueue && getCurrentUser()?.role === "admin" && getPendingAdminActionQueue().length) {
-        schedulePendingAdminActionFlush(300);
-      }
       return;
     }
     if (event === "PASSWORD_RECOVERY") {
@@ -2099,6 +2091,19 @@ async function handleSupabaseAuthStateChange(event, session) {
     let localUser = upsertLocalUserFromAuth(session.user);
     const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
     localUser = profileSync.user;
+    const shouldClearBlockedAdminAuthQueue = Boolean(
+      hadBlockedAdminAuthQueue
+      && isExplicitAdminReauthEvent
+      && localUser?.role === "admin"
+      && getPendingAdminActionQueue().length,
+    );
+    if (shouldClearBlockedAdminAuthQueue) {
+      adminActionRuntime.blockedQueueSignature = "";
+      adminActionRuntime.lastFailureAt = 0;
+      adminActionRuntime.lastFailureMessage = "";
+      adminActionRuntime.retryAt = 0;
+      scheduleSyncStatusUiRefresh();
+    }
     if (localUser?.id) {
       saveLocalOnly(STORAGE_KEYS.currentUserId, localUser.id);
     }
@@ -2143,7 +2148,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       render();
       return;
     }
-    if (hadBlockedAdminAuthQueue && localUser?.role === "admin" && getPendingAdminActionQueue().length) {
+    if (shouldClearBlockedAdminAuthQueue) {
       schedulePendingAdminActionFlush(300);
     }
     if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
@@ -4019,6 +4024,26 @@ function isNonRetryableCloudSyncPermissionError(errorOrMessage) {
     || normalized.includes("forbidden");
 }
 
+function isNonRetryableCloudSyncDataError(errorOrMessage) {
+  const rawCode = String(errorOrMessage?.code || errorOrMessage?.status || "").trim().toLowerCase();
+  if (["23502", "23503", "23505", "23514", "22p02"].includes(rawCode)) {
+    return true;
+  }
+  const normalized = typeof errorOrMessage === "string"
+    ? String(errorOrMessage || "").trim().toLowerCase()
+    : String(getErrorMessage(errorOrMessage, "") || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("null value in column")
+    || normalized.includes("violates not-null constraint")
+    || normalized.includes("violates foreign key constraint")
+    || normalized.includes("violates unique constraint")
+    || normalized.includes("duplicate key value violates unique constraint")
+    || normalized.includes("violates check constraint")
+    || normalized.includes("invalid input syntax");
+}
+
 function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync failed.") {
   const rawMessage = typeof errorOrMessage === "string"
     ? String(errorOrMessage || "").trim()
@@ -4035,6 +4060,9 @@ function normalizeCloudSyncFailureMessage(errorOrMessage, fallback = "Cloud sync
   }
   if (isNonRetryableCloudSyncPermissionError(normalized)) {
     return "Supabase write access is blocked by row-level security or permissions. Changes stay local until access is restored.";
+  }
+  if (isNonRetryableCloudSyncDataError(normalized)) {
+    return "A local change could not be synced because its data is invalid for Supabase. It stays local until that item changes.";
   }
   if (isLikelyRecoverableCloudSyncMessage(normalized)) {
     return "Temporary network issue contacting Supabase. Changes are saved locally and will retry automatically.";
@@ -4285,6 +4313,7 @@ function resetRelationalSyncState() {
   relationalSync.pendingWrites.clear();
   relationalSync.inFlightPayloadSignatures.clear();
   relationalSync.lastSyncedPayloadSignatures.clear();
+  relationalSync.lastRejectedPayloadSignatures.clear();
   relationalSync.blockedStorageKeys.clear();
   relationalSync.flushing = false;
   relationalSync.lastQueuedAt = 0;
@@ -4367,6 +4396,13 @@ function scheduleRelationalWrite(storageKey, value) {
       ? deepClone(value)
       : value;
   const nextSignature = getSyncPayloadSignature(snapshot);
+  const rejectedSignature = relationalSync.lastRejectedPayloadSignatures.get(storageKey);
+  if (rejectedSignature && rejectedSignature === nextSignature) {
+    return true;
+  }
+  if (rejectedSignature && rejectedSignature !== nextSignature) {
+    relationalSync.lastRejectedPayloadSignatures.delete(storageKey);
+  }
   const pendingPayload = getPendingRelationalPayloadForStorageKey(storageKey);
   if (pendingPayload !== undefined && getSyncPayloadSignature(pendingPayload) === nextSignature) {
     return true;
@@ -4437,6 +4473,28 @@ function markRelationalWriteAccessDenied(storageKeys, errorOrMessage) {
   });
   relationalSync.lastFailureAt = Date.now();
   relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(errorOrMessage, "Cloud sync access is blocked.");
+  relationalSync.retryAt = 0;
+  clearRelationalFlushTimer();
+  scheduleSyncStatusUiRefresh();
+}
+
+function discardRejectedRelationalWrite(storageKeys, errorOrMessage, payloadByStorageKey = new Map()) {
+  const keys = [...new Set((Array.isArray(storageKeys) ? storageKeys : [storageKeys])
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean))];
+  keys.forEach((storageKey) => {
+    const rejectedPayload = payloadByStorageKey instanceof Map ? payloadByStorageKey.get(storageKey) : undefined;
+    if (rejectedPayload !== undefined) {
+      relationalSync.lastRejectedPayloadSignatures.set(storageKey, getSyncPayloadSignature(rejectedPayload));
+    }
+    relationalSync.pendingWrites.delete(storageKey);
+    relationalSync.inFlightPayloadSignatures.delete(storageKey);
+  });
+  relationalSync.lastFailureAt = Date.now();
+  relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(
+    errorOrMessage,
+    "A local change could not be synced because its data is invalid for Supabase. It stays local until that item changes.",
+  );
   relationalSync.retryAt = 0;
   clearRelationalFlushTimer();
   scheduleSyncStatusUiRefresh();
@@ -6215,7 +6273,7 @@ async function createRelationalNotification(notificationPayload, actorUser, user
       created_by: isUuidValue(creatorProfileId) ? creatorProfileId : null,
       created_by_name: String(user.name || "Admin").trim() || "Admin",
       is_active: true,
-    }], { onConflict: "external_id" })
+    }], { onConflict: "external_id", defaultToNull: false })
     .select("id,external_id,recipient_user_id,title,message,created_by,created_by_name,created_at,is_active")
     .single();
   if (error) {
@@ -7237,20 +7295,22 @@ async function flushRelationalWrites(options = {}) {
             STORAGE_KEYS.courseTopics,
             getSyncPayloadSignature(payload.courseTopics),
           );
+          relationalSync.lastRejectedPayloadSignatures.delete(STORAGE_KEYS.curriculum);
+          relationalSync.lastRejectedPayloadSignatures.delete(STORAGE_KEYS.courseTopics);
           relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.curriculum);
           relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.courseTopics);
           syncedStorageKeys.add(STORAGE_KEYS.curriculum);
           syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
         } else {
           relationalSync.lastSyncedPayloadSignatures.set(storageKey, getSyncPayloadSignature(payload));
+          relationalSync.lastRejectedPayloadSignatures.delete(storageKey);
           relationalSync.inFlightPayloadSignatures.delete(storageKey);
           syncedStorageKeys.add(storageKey);
         }
         scheduleSyncStatusUiRefresh();
       } catch (error) {
         console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
-        const isNonRetryable = isNonRetryableCloudSyncPermissionError(error);
-        if (isNonRetryable) {
+        if (isNonRetryableCloudSyncPermissionError(error)) {
           if (
             storageKey === STORAGE_KEYS.curriculum
             && payload
@@ -7260,6 +7320,26 @@ async function flushRelationalWrites(options = {}) {
             markRelationalWriteAccessDenied([STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics], error);
           } else {
             markRelationalWriteAccessDenied(storageKey, error);
+          }
+          continue;
+        }
+        if (isNonRetryableCloudSyncDataError(error)) {
+          if (
+            storageKey === STORAGE_KEYS.curriculum
+            && payload
+            && typeof payload === "object"
+            && payload[RELATIONAL_COMBINED_COURSE_SYNC_MARKER] === true
+          ) {
+            discardRejectedRelationalWrite(
+              [STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics],
+              error,
+              new Map([
+                [STORAGE_KEYS.curriculum, payload.curriculum],
+                [STORAGE_KEYS.courseTopics, payload.courseTopics],
+              ]),
+            );
+          } else {
+            discardRejectedRelationalWrite(storageKey, error, new Map([[storageKey, payload]]));
           }
           continue;
         }
@@ -8606,7 +8686,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
       await runRelationalQueryWithTimeout(
         client
           .from("courses")
-          .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester" }),
+          .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester", defaultToNull: false }),
         "Course sync timed out.",
       );
     }
@@ -8674,7 +8754,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
       await runRelationalQueryWithTimeout(
         client
           .from("course_topics")
-          .upsert(topicBatch, { onConflict: "course_id,topic_name" }),
+          .upsert(topicBatch, { onConflict: "course_id,topic_name", defaultToNull: false }),
         "Course topic sync timed out.",
       );
     }
@@ -8917,7 +8997,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       await runRelationalQueryWithTimeout(
         client
           .from("course_topics")
-          .upsert(topicBatch, { onConflict: "course_id,topic_name" }),
+          .upsert(topicBatch, { onConflict: "course_id,topic_name", defaultToNull: false }),
         "Missing topic sync timed out.",
       );
     }
@@ -9306,7 +9386,7 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   for (const blockBatch of splitIntoBatches(upsertBlocks, RELATIONAL_UPSERT_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
-      client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id" }),
+      client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id", defaultToNull: false }),
       "Session block sync timed out.",
     );
   }
@@ -11253,7 +11333,7 @@ async function pushCurrentUserActivitySession(options = {}) {
     return true;
   }
 
-  const { error } = await client.from("user_activity_sessions").upsert([payload], { onConflict: "session_key" });
+  const { error } = await client.from("user_activity_sessions").upsert([payload], { onConflict: "session_key", defaultToNull: false });
   if (error) {
     return false;
   }
