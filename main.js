@@ -20772,16 +20772,17 @@ function wireAdmin() {
     }
 
     save(STORAGE_KEYS.users, users);
-    toast(
-      skippedCount
-        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped.`
-        : `${approvedCount} pending account(s) approved.`,
-    );
     render();
-    // Sync in background — don't block the UI.
-    syncUsersBackupState(users).catch(() => { });
-    syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users }).catch(() => { });
-    flushPendingSyncInBackground();
+    const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
+      users,
+      user: current,
+    });
+    toast(
+      (skippedCount
+        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped.`
+        : `${approvedCount} pending account(s) approved.`)
+        + describeAuthAccessSyncOutcome(authAccessSyncResult),
+    );
   });
 
   const adminUsersSection = document.getElementById("admin-users-section");
@@ -20997,16 +20998,17 @@ function wireAdmin() {
 
         save(STORAGE_KEYS.users, users);
         state.adminSelectedUserIds = [];
+        const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
+          users,
+          user: current,
+        });
         finishAdminUserBulkAction();
         toast(
-          skippedCount
+          (skippedCount
             ? `${approvedCount} account(s) approved. ${skippedCount} skipped.`
-            : `${approvedCount} account(s) approved.`,
+            : `${approvedCount} account(s) approved.`)
+            + describeAuthAccessSyncOutcome(authAccessSyncResult),
         );
-        // Sync in background — don't block the UI.
-        syncUsersBackupState(users).catch(() => { });
-        syncSupabaseAuthAccessForTargets([...approvedProfileIds], true, { users }).catch(() => { });
-        flushPendingSyncInBackground();
       } catch (bulkError) {
         finishAdminUserBulkAction();
         toast(`Could not approve selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
@@ -21041,7 +21043,6 @@ function wireAdmin() {
           || skippedProfileIds.has(profileId)
         )),
       );
-      const hasQueuedFallback = deactivationQueuedForSync || fallbackProfileIds.size > 0;
       if (profileIds.length && !dbResult.ok && !updatedProfileIds.size && !fallbackProfileIds.size) {
         finishAdminUserBulkAction();
         toast(`Database update failed. ${dbResult.message}`);
@@ -21049,7 +21050,6 @@ function wireAdmin() {
       }
       let deactivatedCount = 0;
       let skippedCount = 0;
-      let queuedCount = 0;
       users.forEach((entry) => {
         const entryId = String(entry.id || "").trim();
         if (!selectedIdSet.has(entryId) || !canBulkSelectAdminUser(entry, current) || !isUserAccessApproved(entry)) {
@@ -21065,9 +21065,6 @@ function wireAdmin() {
         entry.isApproved = false;
         entry.approvedAt = null;
         entry.approvedBy = null;
-        if (isUuidValue(profileId) && fallbackProfileIds.has(profileId)) {
-          queuedCount += 1;
-        }
         deactivatedCount += 1;
       });
 
@@ -21082,20 +21079,19 @@ function wireAdmin() {
         ...updatedProfileIds,
         ...fallbackProfileIds,
       ])];
-      syncSupabaseAuthAccessForTargets(authAccessTargetIds, false, {
+      const authAccessSyncResult = await syncAdminAccessChangeNow(authAccessTargetIds, false, {
         users,
         queueAll: deactivationQueuedForSync,
-      }).catch(() => { });
+        user: current,
+      });
       state.adminSelectedUserIds = [];
       finishAdminUserBulkAction();
       toast(
-        skippedCount
+        (skippedCount
           ? `${deactivatedCount} account(s) suspended. ${skippedCount} skipped.`
-          : `${deactivatedCount} account(s) suspended.`,
+          : `${deactivatedCount} account(s) suspended.`)
+          + describeAuthAccessSyncOutcome(authAccessSyncResult),
       );
-      // Sync in background — don't block the UI.
-      syncUsersBackupState(users).catch(() => { });
-      flushPendingSyncInBackground();
     } catch (bulkError) {
       finishAdminUserBulkAction();
       toast(`Could not suspend selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
@@ -21424,17 +21420,20 @@ function wireAdmin() {
           : `${nextApproved ? "Account approved." : "Account suspended."}`,
       );
       render();
-      // Fire all network work in the background — don't block the handler.
-      syncUsersBackupState(users).catch(() => {});
-      syncSupabaseAuthAccessForTargets(
+      const authAccessSyncResult = await syncAdminAccessChangeNow(
         isUuidValue(targetProfileId) ? [targetProfileId] : [],
         nextApproved,
         {
           users,
           queueAll: approvalQueuedForSync,
+          user: current,
         },
-      ).catch(() => {});
-      flushPendingSyncInBackground();
+      );
+      if (!authAccessSyncResult.ok || authAccessSyncResult.queuedIds.length) {
+        toast(
+          `${nextApproved ? "Account approval sync updated." : "Account suspension sync updated."}${describeAuthAccessSyncOutcome(authAccessSyncResult)}`,
+        );
+      }
     });
   });
 
@@ -22852,6 +22851,55 @@ function describeAuthAccessSyncOutcome(result) {
     return ` Auth access sync queued for ${queuedCount} account(s).`;
   }
   return "";
+}
+
+async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
+  const ids = [...new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  let authAccessResult = {
+    ok: true,
+    updatedIds: [],
+    notFoundIds: [],
+    failedIds: [],
+    queuedIds: [],
+    message: "",
+  };
+
+  if (ids.length) {
+    try {
+      authAccessResult = await syncSupabaseAuthAccessForTargets(ids, approved, options);
+    } catch (error) {
+      authAccessResult = {
+        ok: false,
+        updatedIds: [],
+        notFoundIds: [],
+        failedIds: ids,
+        queuedIds: [],
+        message: getErrorMessage(error, "Auth access sync failed."),
+      };
+    }
+
+    if (authAccessResult.queuedIds.length) {
+      const queueResult = await flushPendingAdminActionQueue({
+        user: options?.user || getCurrentUser(),
+        force: true,
+      }).catch((error) => ({
+        ok: false,
+        deferred: true,
+        syncedCount: 0,
+        message: getErrorMessage(error, "Queued auth access sync failed."),
+      }));
+      if (!authAccessResult.message && queueResult?.message) {
+        authAccessResult.message = String(queueResult.message || "").trim();
+      }
+    }
+  }
+
+  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  return authAccessResult;
 }
 
 function getPendingDeletedAdminTargets() {
