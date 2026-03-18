@@ -2964,12 +2964,12 @@ function matchesAdminUserFilters(account, filters = {}) {
   if (!account) {
     return false;
   }
-  const normalizedSearch = String(filters?.search || "").trim().toLowerCase();
   const targetYear = normalizeAcademicYearOrNull(filters?.year);
   const targetSemester = normalizeAcademicSemesterOrNull(filters?.semester);
   const role = String(account.role || "").trim().toLowerCase();
   const year = role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
   const semester = role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+  const searchTerms = splitBulkUserSearchTerms(filters?.search);
 
   if (targetYear !== null && year !== targetYear) {
     return false;
@@ -2977,10 +2977,34 @@ function matchesAdminUserFilters(account, filters = {}) {
   if (targetSemester !== null && semester !== targetSemester) {
     return false;
   }
-  if (!normalizedSearch) {
+  if (!searchTerms.length) {
     return true;
   }
 
+  return searchTerms.some((term) => matchesAdminUserSearchTerm(account, term));
+}
+
+function splitBulkUserSearchTerms(value) {
+  return [...new Set(
+    String(value || "")
+      .split(/[,\u060C]+/)
+      .map((term) => String(term || "").trim())
+      .filter(Boolean),
+  )];
+}
+
+function matchesAdminUserSearchTerm(account, term) {
+  if (!account) {
+    return false;
+  }
+  const normalizedSearch = String(term || "").trim().toLowerCase();
+  if (!normalizedSearch) {
+    return false;
+  }
+  const normalizedPhoneSearch = normalizeNotificationTargetPhoneSearchText(term);
+  const role = String(account.role || "").trim().toLowerCase();
+  const year = role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
+  const semester = role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
   const searchableParts = [
     account.name,
     account.email,
@@ -2991,7 +3015,14 @@ function matchesAdminUserFilters(account, filters = {}) {
     semester !== null ? String(semester) : "",
     semester !== null ? `semester ${semester}` : "",
   ];
-  return searchableParts.some((part) => String(part || "").trim().toLowerCase().includes(normalizedSearch));
+  if (searchableParts.some((part) => String(part || "").trim().toLowerCase().includes(normalizedSearch))) {
+    return true;
+  }
+  if (!normalizedPhoneSearch) {
+    return false;
+  }
+  const normalizedPhone = normalizeNotificationTargetPhoneSearchText(account.phone);
+  return Boolean(normalizedPhone) && normalizedPhone.includes(normalizedPhoneSearch);
 }
 
 function isAutoApproveStudentAccessEnabled() {
@@ -17854,7 +17885,7 @@ function renderAdmin() {
         <div class="flex-between" style="gap: 1rem;">
           <div>
             <h3 style="margin: 0;">Users</h3>
-            <p class="subtle">Add users, assign year/semester, change roles, and manage account access.</p>
+            <p class="subtle">Add users, assign year/semester, change roles, and manage account access. Use commas in search to match multiple phones, names, or emails at once.</p>
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.6rem;">
             <div style="display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end;">
@@ -17926,7 +17957,7 @@ function renderAdmin() {
                 id="admin-user-search"
                 type="search"
                 value="${escapeHtml(userSearchQuery)}"
-                placeholder="Name, email, phone, year, or semester"
+                placeholder="Name, email, phone, year, semester, or comma-separated values"
               />
             </label>
             <label>Year
@@ -18646,7 +18677,7 @@ function renderAdmin() {
                   id="admin-notification-target-user-search"
                   name="targetUserQuery"
                   value="${escapeHtml(targetUserQuery)}"
-                  placeholder="Type name or email..."
+                  placeholder="Type name, email, or phone..."
                   autocomplete="off"
                   spellcheck="false"
                   ${targetType === "user" ? "" : "disabled"}
@@ -18684,7 +18715,7 @@ function renderAdmin() {
         .join("")}
                 </div>
               </div>
-              <small class="subtle">Type a name or email, then choose a suggestion.</small>
+              <small class="subtle">Type a name, email, or phone, then choose a suggestion.</small>
             </label>
           </div>
           <label>Title
@@ -23373,6 +23404,10 @@ function normalizeNotificationTargetPhoneSearchText(value) {
   return String(value || "").replace(/\D+/g, "");
 }
 
+function getNotificationTargetSearchIdentityKey(user) {
+  return String(getUserProfileId(user) || user?.id || user?.email || user?.phone || "").trim();
+}
+
 function scoreUserNotificationTargetMatch(user, query) {
   const q = normalizeNotificationTargetSearchText(query);
   const phoneQuery = normalizeNotificationTargetPhoneSearchText(query);
@@ -23414,7 +23449,10 @@ function scoreUserNotificationTargetMatch(user, query) {
 
 function searchUsersForNotificationTarget(query, users = null, limit = 8) {
   const list = Array.isArray(users) ? users : getUsers();
-  const normalizedQuery = normalizeNotificationTargetSearchText(query);
+  const searchTerms = splitBulkUserSearchTerms(query)
+    .map((term) => normalizeNotificationTargetSearchText(term))
+    .filter(Boolean);
+  const safeLimit = Math.max(1, Number(limit) || 8);
   const sortedList = [...list].sort((a, b) => {
     const byName = String(a?.name || a?.full_name || "").localeCompare(String(b?.name || b?.full_name || ""));
     if (byName !== 0) {
@@ -23422,9 +23460,26 @@ function searchUsersForNotificationTarget(query, users = null, limit = 8) {
     }
     return String(a?.email || "").localeCompare(String(b?.email || ""));
   });
-  const scored = list
-    .map((entry) => ({ user: entry, score: scoreUserNotificationTargetMatch(entry, normalizedQuery) }))
-    .filter((entry) => entry.score > 0)
+  if (!searchTerms.length) {
+    return sortedList.slice(0, safeLimit);
+  }
+  const scoredByKey = new Map();
+  list.forEach((entry, index) => {
+    const bestScore = searchTerms.reduce(
+      (highest, term) => Math.max(highest, scoreUserNotificationTargetMatch(entry, term)),
+      0,
+    );
+    if (bestScore <= 0) {
+      return;
+    }
+    const userKey = getNotificationTargetSearchIdentityKey(entry);
+    const stableKey = userKey || `fallback:${index}`;
+    const existing = scoredByKey.get(stableKey);
+    if (!existing || bestScore > existing.score) {
+      scoredByKey.set(stableKey, { user: entry, score: bestScore });
+    }
+  });
+  return [...scoredByKey.values()]
     .sort((a, b) => {
       if (b.score !== a.score) {
         return b.score - a.score;
@@ -23435,16 +23490,17 @@ function searchUsersForNotificationTarget(query, users = null, limit = 8) {
       }
       return String(a.user?.email || "").localeCompare(String(b.user?.email || ""));
     })
-    .map((entry) => entry.user);
-  if (normalizedQuery) {
-    return scored.slice(0, Math.max(1, Number(limit) || 8));
-  }
-  return sortedList.slice(0, Math.max(1, Number(limit) || 8));
+    .map((entry) => entry.user)
+    .slice(0, safeLimit);
 }
 
 function findUserByNotificationTargetQuery(query, users = null) {
   const list = Array.isArray(users) ? users : getUsers();
-  const normalized = normalizeNotificationTargetSearchText(query);
+  const searchTerms = splitBulkUserSearchTerms(query);
+  if (searchTerms.length !== 1) {
+    return null;
+  }
+  const normalized = normalizeNotificationTargetSearchText(searchTerms[0]);
   if (!normalized) {
     return null;
   }
