@@ -3403,7 +3403,7 @@ function getApprovedUserAuthRepairIds(users = null) {
   const list = Array.isArray(users) ? users : getUsers();
   return [...new Set(
     list
-      .filter((entry) => isUserAccessApproved(entry) && entry?.authAccessKnownActive !== true)
+      .filter((entry) => isUserAccessApproved(entry))
       .map((entry) => String(getUserProfileId(entry) || "").trim())
       .filter((entry) => isUuidValue(entry)),
   )].sort();
