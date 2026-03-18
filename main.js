@@ -2677,11 +2677,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
   // When local user data was recently modified, prefer local values over DB
   // to prevent reverting the admin's change before it propagates to Supabase.
-  const preferLocalOverDbForCurrentUser = Boolean(
-    relationalSync.lastUserLocalWriteAt
-    && localUser
-    && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
-  );
+  const preferLocalOverDbForCurrentUser = shouldPreferRecentLocalUserData(localUser);
   const year = role === "student"
     ? (preferLocalOverDbForCurrentUser && fallbackYear !== null ? fallbackYear : (profileYear ?? fallbackYear))
     : null;
@@ -5624,11 +5620,7 @@ async function hydrateRelationalProfiles(currentUser) {
     // When local user data was recently modified but hasn't landed in the DB yet,
     // prefer the local (existing) values for year/semester/courses to prevent the
     // DB read from reverting the admin's change.
-    const preferLocalOverDb = Boolean(
-      relationalSync.lastUserLocalWriteAt
-      && existing
-      && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
-    );
+    const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
     let year = role === "student"
       ? (preferLocalOverDb && existingYear !== null
         ? existingYear
@@ -6636,30 +6628,61 @@ function getUserMergeMatchKeys(user) {
   return [...new Set(keys)];
 }
 
+function shouldPreferRecentLocalUserData(user = null) {
+  return Boolean(
+    relationalSync.lastUserLocalWriteAt
+    && user
+    && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
+  );
+}
+
 function mergeUserRecord(remoteUser, localUser) {
   const remoteCourses = Array.isArray(remoteUser?.assignedCourses) ? remoteUser.assignedCourses : [];
   const localCourses = Array.isArray(localUser?.assignedCourses) ? localUser.assignedCourses : [];
+  const remoteRole = String(remoteUser?.role || "").trim().toLowerCase();
+  const localRole = String(localUser?.role || "").trim().toLowerCase();
   const remoteEmail = String(remoteUser?.email || "").trim().toLowerCase();
   const localEmail = String(localUser?.email || "").trim().toLowerCase();
   const remotePhone = String(remoteUser?.phone || "").trim();
   const localPhone = String(localUser?.phone || "").trim();
   const remotePassword = String(remoteUser?.password || "").trim();
   const localPassword = String(localUser?.password || "").trim();
+  const remoteYear = normalizeAcademicYearOrNull(remoteUser?.academicYear);
+  const localYear = normalizeAcademicYearOrNull(localUser?.academicYear);
+  const remoteSemester = normalizeAcademicSemesterOrNull(remoteUser?.academicSemester);
+  const localSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
+  const preferLocal = shouldPreferRecentLocalUserData(localUser);
   return {
-    ...(isRecordObject(localUser) ? localUser : {}),
-    ...(isRecordObject(remoteUser) ? remoteUser : {}),
+    ...(preferLocal
+      ? (isRecordObject(remoteUser) ? remoteUser : {})
+      : (isRecordObject(localUser) ? localUser : {})),
+    ...(preferLocal
+      ? (isRecordObject(localUser) ? localUser : {})
+      : (isRecordObject(remoteUser) ? remoteUser : {})),
     id: String(remoteUser?.id || localUser?.id || "").trim(),
     supabaseAuthId: String(remoteUser?.supabaseAuthId || localUser?.supabaseAuthId || "").trim(),
-    email: remoteEmail || localEmail,
-    phone: remotePhone || localPhone,
-    password: remotePassword || localPassword,
-    assignedCourses: remoteCourses.length ? remoteCourses : localCourses,
+    role: preferLocal ? (localRole || remoteRole) : (remoteRole || localRole),
+    email: preferLocal ? (localEmail || remoteEmail) : (remoteEmail || localEmail),
+    phone: preferLocal ? (localPhone || remotePhone) : (remotePhone || localPhone),
+    password: preferLocal ? (localPassword || remotePassword) : (remotePassword || localPassword),
+    assignedCourses: preferLocal
+      ? (localCourses.length ? localCourses : remoteCourses)
+      : (remoteCourses.length ? remoteCourses : localCourses),
+    academicYear: preferLocal ? (localYear ?? remoteYear) : (remoteYear ?? localYear),
+    academicSemester: preferLocal ? (localSemester ?? remoteSemester) : (remoteSemester ?? localSemester),
+    isApproved: preferLocal && typeof localUser?.isApproved === "boolean"
+      ? localUser.isApproved
+      : (typeof remoteUser?.isApproved === "boolean" ? remoteUser.isApproved : localUser?.isApproved),
     createdAt: String(remoteUser?.createdAt || localUser?.createdAt || nowISO()).trim(),
-    approvedAt: remoteUser?.approvedAt || localUser?.approvedAt || null,
-    approvedBy: remoteUser?.approvedBy || localUser?.approvedBy || null,
-    profileCompleted: typeof remoteUser?.profileCompleted === "boolean"
-      ? remoteUser.profileCompleted
-      : Boolean(localUser?.profileCompleted),
+    approvedAt: preferLocal
+      ? (localUser?.approvedAt || remoteUser?.approvedAt || null)
+      : (remoteUser?.approvedAt || localUser?.approvedAt || null),
+    approvedBy: preferLocal
+      ? (localUser?.approvedBy || remoteUser?.approvedBy || null)
+      : (remoteUser?.approvedBy || localUser?.approvedBy || null),
+    profileCompleted: preferLocal
+      ? (typeof localUser?.profileCompleted === "boolean" ? localUser.profileCompleted : Boolean(remoteUser?.profileCompleted))
+      : (typeof remoteUser?.profileCompleted === "boolean" ? remoteUser.profileCompleted : Boolean(localUser?.profileCompleted)),
   };
 }
 
@@ -8543,8 +8566,6 @@ async function syncProfilesToRelational(usersPayload) {
       "Profile sync timed out.",
     );
   }
-  // Profile data has landed in the DB — safe to allow hydration to use DB values again.
-  relationalSync.lastUserLocalWriteAt = 0;
 
   const enrollmentSyncOptions = {
     assignedByAuthId: isAdminSync && isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
@@ -28457,7 +28478,9 @@ function save(key, value, options = {}) {
     scheduleSessionStateSync(options);
   } else {
     scheduleRelationalWrite(key, value);
-    if (!RELATIONAL_SYNC_KEY_SET.has(key)) {
+    if (key === STORAGE_KEYS.users) {
+      syncUsersBackupState(value);
+    } else if (!RELATIONAL_SYNC_KEY_SET.has(key)) {
       scheduleSupabaseWrite(key, value);
     }
   }
