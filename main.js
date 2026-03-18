@@ -99,6 +99,7 @@ const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 500;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
+const ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS = 60000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
@@ -283,6 +284,9 @@ let wasAdminCourseTopicGroupCreateModalOpen = false;
 let wasAdminCourseTopicInlineCreateOpen = false;
 let adminCourseSearchDebounce = null;
 let adminUserSearchDebounce = null;
+let adminApprovedAccessRepairInFlight = false;
+let adminApprovedAccessRepairSignature = "";
+let adminApprovedAccessRepairAttemptedAt = 0;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -2733,6 +2737,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     approvedAt: resolvedApproval ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: resolvedApproval ? localUser?.approvedBy || "admin" : null,
     authProvider,
+    authAccessKnownActive: true,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
   });
@@ -3365,6 +3370,45 @@ function getUserProfileId(user) {
   return "";
 }
 
+function setLocalUsersAuthAccessKnownActive(targetProfileIds, isActive) {
+  const ids = new Set(
+    (Array.isArray(targetProfileIds) ? targetProfileIds : [targetProfileIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  );
+  if (!ids.size || typeof isActive !== "boolean") {
+    return false;
+  }
+
+  const users = getUsers();
+  let changed = false;
+  users.forEach((entry, index) => {
+    const profileId = getUserProfileId(entry);
+    if (!ids.has(profileId) || entry?.authAccessKnownActive === isActive) {
+      return;
+    }
+    users[index] = {
+      ...entry,
+      authAccessKnownActive: isActive,
+    };
+    changed = true;
+  });
+  if (changed) {
+    saveLocalOnly(STORAGE_KEYS.users, users);
+  }
+  return changed;
+}
+
+function getApprovedUserAuthRepairIds(users = null) {
+  const list = Array.isArray(users) ? users : getUsers();
+  return [...new Set(
+    list
+      .filter((entry) => isUserAccessApproved(entry) && entry?.authAccessKnownActive !== true)
+      .map((entry) => String(getUserProfileId(entry) || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )].sort();
+}
+
 function getActiveSupabaseAuthUserId() {
   const authId = String(supabaseAuth.activeUserId || "").trim();
   return isUuidValue(authId) ? authId : "";
@@ -3589,6 +3633,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     createdAt: previous?.createdAt || nowISO(),
     supabaseAuthId: authUser.id,
     authProvider: nextAuthProvider,
+    authAccessKnownActive: typeof profileOverrides.authAccessKnownActive === "boolean"
+      ? profileOverrides.authAccessKnownActive
+      : true,
     profileCompleted: nextProfileCompleted,
   };
 
@@ -5693,6 +5740,9 @@ async function hydrateRelationalProfiles(currentUser) {
       academicYear: year,
       academicSemester: semester,
       authProvider: normalizeAuthProvider(profile.auth_provider || existing?.authProvider),
+      authAccessKnownActive: typeof existing?.authAccessKnownActive === "boolean"
+        ? existing.authAccessKnownActive
+        : undefined,
       profileCompleted: typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : role !== "student",
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
       supabaseAuthId: profile.id,
@@ -20826,6 +20876,9 @@ function wireAdmin() {
   );
   const getVisibleSelectableUserIdSet = () => new Set(getVisibleSelectableUserIds());
   const getSelectedVisibleUserIds = () => normalizeAdminUserIdList(state.adminSelectedUserIds, getVisibleSelectableUserIdSet());
+  if (adminUsersSection) {
+    scheduleApprovedAdminUserAccessRepair(getUsers(), getCurrentUser());
+  }
   const finishAdminUserBulkAction = () => {
     state.adminUserBulkActionRunning = false;
     state.adminBulkActionType = "";
@@ -22904,6 +22957,10 @@ async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
       };
     }
 
+    if (authAccessResult.updatedIds.length) {
+      setLocalUsersAuthAccessKnownActive(authAccessResult.updatedIds, approved);
+    }
+
     if (authAccessResult.queuedIds.length) {
       const queueResult = await flushPendingAdminActionQueue({
         user: options?.user || getCurrentUser(),
@@ -22922,6 +22979,60 @@ async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
 
   await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
   return authAccessResult;
+}
+
+function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
+  const currentUser = actorUser || getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return;
+  }
+
+  const usersList = Array.isArray(users) ? users : getUsers();
+  const targetIds = getApprovedUserAuthRepairIds(usersList);
+  const nextSignature = targetIds.join("|");
+  if (!nextSignature) {
+    adminApprovedAccessRepairSignature = "";
+    adminApprovedAccessRepairAttemptedAt = 0;
+    return;
+  }
+
+  const nowTs = Date.now();
+  if (adminApprovedAccessRepairInFlight) {
+    return;
+  }
+  if (
+    adminApprovedAccessRepairSignature === nextSignature
+    && (nowTs - adminApprovedAccessRepairAttemptedAt) < ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS
+  ) {
+    return;
+  }
+
+  adminApprovedAccessRepairSignature = nextSignature;
+  adminApprovedAccessRepairAttemptedAt = nowTs;
+  adminApprovedAccessRepairInFlight = true;
+
+  Promise.resolve().then(async () => {
+    try {
+      const repairResult = await syncSupabaseAuthAccessForTargets(targetIds, true, {
+        users: usersList,
+        user: currentUser,
+        queueFailures: false,
+      });
+      if (repairResult.updatedIds.length) {
+        setLocalUsersAuthAccessKnownActive(repairResult.updatedIds, true);
+      }
+      if (!repairResult.ok && repairResult.failedIds.length) {
+        console.warn(
+          `Approved user auth access repair failed for ${repairResult.failedIds.length} account(s).`,
+          repairResult.message || "Unknown error.",
+        );
+      }
+    } catch (error) {
+      console.warn("Approved user auth access repair failed.", error?.message || error);
+    } finally {
+      adminApprovedAccessRepairInFlight = false;
+    }
+  });
 }
 
 function getPendingDeletedAdminTargets() {
