@@ -115,18 +115,18 @@ const SITE_ACTIVITY_HEARTBEAT_MS = 30000;
 const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 500;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
-const SUPABASE_QUERY_TIMEOUT_MS = 8000;
-const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
-const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
+const SUPABASE_QUERY_TIMEOUT_MS = 12000;
+const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
+const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 25000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
-const SUPABASE_SESSION_TIMEOUT_MS = 6000;
-const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 5000;
+const SUPABASE_SESSION_TIMEOUT_MS = 15000;
+const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 12000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
 const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 600;
 const SUPABASE_SESSION_RECOVERY_RETRY_MS = 6000;
 const SUPABASE_SESSION_RECOVERY_RETRY_LIMIT = 20;
 const SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS = 30000;
-const ADMIN_REQUEST_TIMEOUT_MS = 8000;
+const ADMIN_REQUEST_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
@@ -1424,10 +1424,6 @@ async function init() {
   document.body.classList.add("is-routing");
   render();
 
-  const syncBootstrapPromise = initSupabaseSync().catch((error) => {
-    console.warn("Supabase sync bootstrap failed.", error?.message || error);
-    return { enabled: false, hadRemoteData: false };
-  });
   if (shouldForceStudentRefreshFromAdminTrigger()) {
     return;
   }
@@ -1438,7 +1434,10 @@ async function init() {
     console.warn("Supabase auth bootstrap failed.", error?.message || error);
   }
 
-  const syncBootstrap = await syncBootstrapPromise;
+  const syncBootstrap = await initSupabaseSync().catch((error) => {
+    console.warn("Supabase sync bootstrap failed.", error?.message || error);
+    return { enabled: false, hadRemoteData: false };
+  });
 
   if (syncBootstrap.enabled && !syncBootstrap.hadRemoteData) {
     scheduleFullSupabaseSync();
@@ -1505,18 +1504,16 @@ async function tryBootstrapSupabaseInBackground() {
 
   supabaseBootstrapInFlight = true;
   try {
-    const syncBootstrapPromise = initSupabaseSync().catch((error) => {
-      console.warn("Deferred Supabase sync bootstrap failed.", error?.message || error);
-      return { enabled: false, hadRemoteData: false };
-    });
-
     try {
       await initSupabaseAuth();
     } catch (error) {
       console.warn("Deferred Supabase auth bootstrap failed.", error?.message || error);
     }
 
-    const syncBootstrap = await syncBootstrapPromise;
+    const syncBootstrap = await initSupabaseSync().catch((error) => {
+      console.warn("Deferred Supabase sync bootstrap failed.", error?.message || error);
+      return { enabled: false, hadRemoteData: false };
+    });
 
     if (!syncBootstrap.enabled && !supabaseAuth.enabled) {
       return false;
@@ -2983,10 +2980,18 @@ function matchesAdminUserFilters(account, filters = {}) {
 function splitBulkUserSearchTerms(value) {
   return [...new Set(
     String(value || "")
-      .split(/[,\u060C]+/)
+      .split(/[\n\r,;\u060C]+/)
       .map((term) => String(term || "").trim())
       .filter(Boolean),
   )];
+}
+
+function shouldUseExactAdminUserPhoneMatch(term) {
+  const raw = String(term || "").trim();
+  if (!raw || /[a-z@]/i.test(raw)) {
+    return false;
+  }
+  return normalizeNotificationTargetPhoneSearchText(raw).length >= 6;
 }
 
 function matchesAdminUserSearchTerm(account, term) {
@@ -2998,6 +3003,10 @@ function matchesAdminUserSearchTerm(account, term) {
     return false;
   }
   const normalizedPhoneSearch = normalizeNotificationTargetPhoneSearchText(term);
+  const normalizedPhone = normalizeNotificationTargetPhoneSearchText(account.phone);
+  if (shouldUseExactAdminUserPhoneMatch(term)) {
+    return Boolean(normalizedPhoneSearch) && normalizedPhone === normalizedPhoneSearch;
+  }
   const role = String(account.role || "").trim().toLowerCase();
   const year = role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
   const semester = role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
@@ -3017,7 +3026,6 @@ function matchesAdminUserSearchTerm(account, term) {
   if (!normalizedPhoneSearch) {
     return false;
   }
-  const normalizedPhone = normalizeNotificationTargetPhoneSearchText(account.phone);
   return Boolean(normalizedPhone) && normalizedPhone.includes(normalizedPhoneSearch);
 }
 
@@ -17978,7 +17986,7 @@ function renderAdmin() {
                 id="admin-user-search"
                 type="search"
                 value="${escapeHtml(userSearchQuery)}"
-                placeholder="Name, email, phone, year, semester, or comma-separated values"
+                placeholder="Name, email, phone, year, semester, or comma/newline-separated values"
               />
             </label>
             <label>Year
