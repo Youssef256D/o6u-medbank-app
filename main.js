@@ -2994,6 +2994,18 @@ function shouldUseExactAdminUserPhoneMatch(term) {
   return normalizeNotificationTargetPhoneSearchText(raw).length >= 6;
 }
 
+function normalizeAdminUserPhoneExactMatchValue(value) {
+  const validated = validateAndNormalizePhoneNumber(value);
+  if (validated.ok) {
+    return normalizeNotificationTargetPhoneSearchText(validated.number);
+  }
+  const digitsOnly = normalizeNotificationTargetPhoneSearchText(value);
+  if (!digitsOnly) {
+    return "";
+  }
+  return digitsOnly.startsWith("00") ? digitsOnly.slice(2) : digitsOnly;
+}
+
 function matchesAdminUserSearchTerm(account, term) {
   if (!account) {
     return false;
@@ -3003,9 +3015,10 @@ function matchesAdminUserSearchTerm(account, term) {
     return false;
   }
   const normalizedPhoneSearch = normalizeNotificationTargetPhoneSearchText(term);
-  const normalizedPhone = normalizeNotificationTargetPhoneSearchText(account.phone);
   if (shouldUseExactAdminUserPhoneMatch(term)) {
-    return Boolean(normalizedPhoneSearch) && normalizedPhone === normalizedPhoneSearch;
+    const normalizedExactPhoneSearch = normalizeAdminUserPhoneExactMatchValue(term);
+    const normalizedExactPhone = normalizeAdminUserPhoneExactMatchValue(account.phone);
+    return Boolean(normalizedExactPhoneSearch) && normalizedExactPhone === normalizedExactPhoneSearch;
   }
   const role = String(account.role || "").trim().toLowerCase();
   const year = role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
@@ -3026,6 +3039,7 @@ function matchesAdminUserSearchTerm(account, term) {
   if (!normalizedPhoneSearch) {
     return false;
   }
+  const normalizedPhone = normalizeNotificationTargetPhoneSearchText(account.phone);
   return Boolean(normalizedPhone) && normalizedPhone.includes(normalizedPhoneSearch);
 }
 
