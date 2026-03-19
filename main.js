@@ -15356,6 +15356,33 @@ function getSessionDisplayId(session) {
   return normalizeSessionTestId(session?.testId, session?.id);
 }
 
+function getSessionTopicSummary(session) {
+  if (!session || typeof session !== "object") {
+    return "";
+  }
+
+  const questionsById = new Map(getQuestions().map((question) => [String(question?.id || "").trim(), question]));
+  const topics = [];
+  const seenTopics = new Set();
+  (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
+    const question = questionsById.get(String(qid || "").trim());
+    if (!question) {
+      return;
+    }
+    const topic = String(getQbankCourseTopicMeta(question).topic || question.qbankTopic || question.topic || "").trim();
+    if (!topic || seenTopics.has(topic)) {
+      return;
+    }
+    seenTopics.add(topic);
+    topics.push(topic);
+  });
+
+  if (!topics.length) {
+    return "";
+  }
+  return formatTopicFilterSummary(topics);
+}
+
 function renderCreateTest() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
@@ -15407,7 +15434,6 @@ function renderCreateTest() {
     strictEmptyTopics: true,
   });
   const inProgress = getNormalizedActiveSessionForDisplay(user.id, state.sessionId);
-  const inProgressCount = Array.isArray(inProgress?.questionIds) ? inProgress.questionIds.length : 0;
   const allTopicsSelected = topicOptions.length > 0 && selectedTopics.length === topicOptions.length;
   const singleFlatTopicSection = (
     topicSections.length === 1
@@ -15437,7 +15463,7 @@ function renderCreateTest() {
   const defaultQuestionCount = Math.max(0, Math.min(500, sourceFiltered.length || 0));
   const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
   const inProgressName = inProgress ? getSessionDisplayName(inProgress) : "";
-  const inProgressTestId = inProgress ? getSessionDisplayId(inProgress) : "";
+  const inProgressTopicSummary = inProgress ? getSessionTopicSummary(inProgress) : "";
 
   return `
     <section class="panel">
@@ -15448,7 +15474,7 @@ function renderCreateTest() {
         <div class="card" style="margin-top: 0.7rem; display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap;">
           <div>
             <span><b>Active block detected</b></span>
-            <small class="subtle" style="display: block; margin-top: 0.18rem;">${escapeHtml(inProgressName)} • ${escapeHtml(inProgressTestId)} • ${inProgressCount} questions</small>
+            <small class="subtle" style="display: block; margin-top: 0.18rem;">${escapeHtml([inProgressName, inProgressTopicSummary].filter(Boolean).join(" • "))}</small>
           </div>
           <div style="display: flex; gap: 0.55rem; flex-wrap: wrap;">
             <button class="btn" data-nav="session">Resume</button>
