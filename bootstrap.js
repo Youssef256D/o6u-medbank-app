@@ -9,7 +9,8 @@
     "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
     "https://unpkg.com/@supabase/supabase-js@2",
   ];
-  const SCRIPT_LOAD_TIMEOUT_MS = 12000;
+  const SCRIPT_LOAD_TIMEOUT_MS = 45000;
+  const APP_BACKGROUND_PREFETCH_DELAY_MS = 1200;
   const BOOTSTRAP_STATUS_ID = "bootstrap-status";
   const KNOWN_ROUTES = new Set([
     "landing",
@@ -140,8 +141,7 @@
         finalize(reject, new Error(`Failed to load ${src}`));
       };
       const timeoutId = window.setTimeout(() => {
-        script.dataset.failed = "1";
-        script.remove();
+        script.dataset.timedOut = "1";
         finalize(reject, new Error(`Timed out loading ${src}`));
       }, timeoutMs);
 
@@ -487,6 +487,10 @@
     ensureAppLoaded().catch(() => {});
   } else if (hasOAuthCallbackParams() || isGoogleOAuthPendingState()) {
     ensureAppLoaded().catch(() => {});
+  } else {
+    window.setTimeout(() => {
+      prefetchAppOnIntent();
+    }, APP_BACKGROUND_PREFETCH_DELAY_MS);
   }
 
   registerServiceWorker();
