@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.18").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.21").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -142,13 +142,14 @@ const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
 const ROUTE_TRANSITION_MS = 420;
 const RELATIONAL_IN_BATCH_SIZE = 200;
+const RELATIONAL_UUID_IN_BATCH_SIZE = 20;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
-const ENROLLMENT_SYNC_USER_BATCH_SIZE = 75;
 const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
-const ENROLLMENT_SYNC_DELETE_BATCH_SIZE = 150;
+const ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS = 60000;
+const ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
 const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
 const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
 const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
@@ -428,6 +429,7 @@ const relationalSync = {
   readyPromise: null,
   lastReadyError: "",
   enrollmentWriteAccessDenied: false,
+  enrollmentBackfillRetryAt: 0,
   // Timestamp of last local user/profile write. Used to prevent DB hydration
   // from overwriting locally-changed fields (year, semester, courses) before
   // the write has propagated to the database.
@@ -3700,6 +3702,11 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   if (previous?.id && previous.id !== nextUser.id) {
     migrateLocalUserReferences(previous.id, nextUser.id);
   }
+  if (previous) {
+    archiveSessionsForChangedUserEnrollments([previous], [nextUser], {
+      reason: "enrollment_change",
+    });
+  }
 
   save(STORAGE_KEYS.users, users);
   save(STORAGE_KEYS.currentUserId, nextUser.id);
@@ -4499,6 +4506,7 @@ function resetRelationalSyncState() {
   relationalSync.readyPromise = null;
   relationalSync.lastReadyError = "";
   relationalSync.enrollmentWriteAccessDenied = false;
+  relationalSync.enrollmentBackfillRetryAt = 0;
   relationalSync.lastUserLocalWriteAt = 0;
   relationalQuestionColumnSupport.checked = false;
   relationalQuestionColumnSupport.questionImageUrl = false;
@@ -5583,7 +5591,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       ]),
     );
     const enrollmentRows = [];
-    for (const idBatch of splitIntoBatches(ids, RELATIONAL_IN_BATCH_SIZE)) {
+    for (const idBatch of splitIntoBatches(ids, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const { data, error } = await client
         .from("user_course_enrollments")
         .select("user_id,course_id")
@@ -5602,7 +5610,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
     }
 
     const courseRows = [];
-    for (const courseBatch of splitIntoBatches(courseIds, RELATIONAL_IN_BATCH_SIZE)) {
+    for (const courseBatch of splitIntoBatches(courseIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const { data, error } = await client
         .from("courses")
         .select("id,course_name,is_active,academic_year,academic_semester")
@@ -5889,12 +5897,18 @@ async function hydrateRelationalProfiles(currentUser) {
         console.warn("Could not backfill missing student profile fields.", error?.message || error);
       }
     }
-    if (mapped.length) {
+    if (mapped.length && Date.now() >= Number(relationalSync.enrollmentBackfillRetryAt || 0)) {
       try {
         await syncUserCourseEnrollmentsToRelational(mapped, {
           assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
         });
+        relationalSync.enrollmentBackfillRetryAt = Date.now() + ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS;
       } catch (error) {
+        relationalSync.enrollmentBackfillRetryAt = Date.now() + (
+          isLikelyNetworkFetchError(error) || isTimeoutResultError(error)
+            ? ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS
+            : ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS
+        );
         if (!isMissingRelationError(error)) {
           console.warn("Could not backfill missing student enrollment rows.", error?.message || error);
         }
@@ -5927,6 +5941,9 @@ async function hydrateRelationalProfiles(currentUser) {
     migrateLocalUserReferences(existing.id, entry.id);
   });
   const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
+  archiveSessionsForChangedUserEnrollments(usersBefore, nextUsers, {
+    reason: "enrollment_change",
+  });
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
   syncUsersWithCurriculum();
@@ -9127,7 +9144,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       ...(isUuidValue(options.assignedByAuthId) ? [String(options.assignedByAuthId).trim()] : []),
     ])];
     const existingProfileIds = new Set();
-    for (const profileBatch of splitIntoBatches(profileIdsToVerify, ENROLLMENT_SYNC_USER_BATCH_SIZE)) {
+    for (const profileBatch of splitIntoBatches(profileIdsToVerify, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const data = await runRelationalQueryWithTimeout(
         client
           .from("profiles")
@@ -9188,7 +9205,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     });
 
     const existingEnrollmentRows = [];
-    for (const userBatch of splitIntoBatches(userIds, ENROLLMENT_SYNC_USER_BATCH_SIZE)) {
+    for (const userBatch of splitIntoBatches(userIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const data = await runRelationalQueryWithTimeout(
         client
           .from("user_course_enrollments")
@@ -9245,7 +9262,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       const desired = desiredCourseIdsByUserId.get(userId) || new Set();
       const existing = existingCourseIdsByUserId.get(userId) || new Set();
       const removeCourseIds = [...existing].filter((courseId) => !desired.has(courseId));
-      for (const courseBatch of splitIntoBatches(removeCourseIds, ENROLLMENT_SYNC_DELETE_BATCH_SIZE)) {
+      for (const courseBatch of splitIntoBatches(removeCourseIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
         await runRelationalQueryWithTimeout(
           client
             .from("user_course_enrollments")
@@ -10834,9 +10851,18 @@ function navigate(route, extras = {}) {
 
   if (shouldUseViewTransition) {
     state.skipNextRouteAnimation = true;
-    document.startViewTransition(() => {
+    try {
+      const transition = document.startViewTransition(() => {
+        applyNavigation();
+      });
+      attachViewTransitionErrorGuards(transition);
+    } catch (error) {
+      const errorName = String(error?.name || "").trim();
+      if (errorName !== "InvalidStateError" && errorName !== "AbortError") {
+        console.warn("Could not start view transition.", error?.message || error);
+      }
       applyNavigation();
-    });
+    }
     return;
   }
 
@@ -10849,6 +10875,26 @@ function navigate(route, extras = {}) {
   state.route = targetRoute;
   Object.assign(state, extras);
   render();
+}
+
+function attachViewTransitionErrorGuards(transition) {
+  if (!transition || typeof transition !== "object") {
+    return;
+  }
+
+  ["ready", "updateCallbackDone", "finished"].forEach((key) => {
+    const promise = transition[key];
+    if (!promise || typeof promise.catch !== "function") {
+      return;
+    }
+    promise.catch((error) => {
+      const errorName = String(error?.name || "").trim();
+      if (errorName === "InvalidStateError" || errorName === "AbortError") {
+        return;
+      }
+      console.warn("View transition failed.", error?.message || error);
+    });
+  });
 }
 
 function clearAdminPresencePolling() {
@@ -14382,6 +14428,10 @@ function wireAuth(mode) {
             academicYear,
             academicSemester,
           });
+          const previousUser = {
+            ...users[idx],
+            assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
+          };
           users[idx].name = onboardingUser?.name || name;
           users[idx].email = onboardingUser?.email || email;
           users[idx].phone = normalizedPhone;
@@ -14395,6 +14445,9 @@ function wireAuth(mode) {
           users[idx].profileCompleted = true;
           users[idx].authProvider = "google";
 
+          archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
+            reason: "enrollment_change",
+          });
           save(STORAGE_KEYS.users, users);
           save(STORAGE_KEYS.currentUserId, users[idx].id);
           await syncUsersBackupState(users).catch(() => { });
@@ -14849,6 +14902,10 @@ function wireCompleteProfile() {
         academicYear,
         academicSemester,
       });
+      const previousUser = {
+        ...users[idx],
+        assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
+      };
       users[idx].phone = normalizedPhone;
       users[idx].role = "student";
       users[idx].academicYear = academicYear;
@@ -14860,6 +14917,9 @@ function wireCompleteProfile() {
       users[idx].profileCompleted = true;
       users[idx].authProvider = normalizeAuthProvider(users[idx].authProvider || getAuthProviderFromUser(current));
 
+      archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
+        reason: "enrollment_change",
+      });
       save(STORAGE_KEYS.users, users);
       save(STORAGE_KEYS.currentUserId, users[idx].id);
       await syncUsersBackupState(users).catch(() => { });
@@ -21864,6 +21924,10 @@ function wireAdmin() {
         return false;
       }
 
+      const previousUser = {
+        ...users[idx],
+        assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
+      };
       const role = users[idx].role;
       const previousApproved = Boolean(users[idx].isApproved);
       const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
@@ -21906,11 +21970,14 @@ function wireAdmin() {
         users[idx].authAccessKnownActive = false;
       }
 
+      const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
+        reason: "enrollment_change",
+      });
       save(STORAGE_KEYS.users, users);
       if (mode === "manual") {
-        toast(didEnrollmentTermChange
-          ? "Enrollment saved."
-          : "Enrollment saved.");
+        toast(archivedSessionIds.length
+          ? "Enrollment saved. Previous exams were archived and analytics reset."
+          : (didEnrollmentTermChange ? "Enrollment saved." : "Enrollment saved."));
       }
       state.skipNextRouteAnimation = true;
       render();
@@ -22073,6 +22140,10 @@ function wireAdmin() {
         return;
       }
 
+      const previousUser = {
+        ...users[idx],
+        assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
+      };
       const previousApproved = Boolean(users[idx].isApproved);
       users[idx].role = users[idx].role === "admin" ? "student" : "admin";
       if (users[idx].role === "student") {
@@ -22099,10 +22170,15 @@ function wireAdmin() {
       if (previousApproved !== Boolean(users[idx].isApproved)) {
         users[idx].authAccessKnownActive = false;
       }
+      const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
+        reason: "enrollment_change",
+      });
       save(STORAGE_KEYS.users, users);
       try {
         await flushPendingSyncNow();
-        toast("User role updated.");
+        toast(archivedSessionIds.length
+          ? "User role updated. Previous exams were archived and analytics reset."
+          : "User role updated.");
         render();
       } catch (syncError) {
         toast(`Role updated locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
@@ -25975,14 +26051,148 @@ function getSessionsForUser(userId) {
   return getSessions().filter((session) => doesSessionBelongToUser(session, userId));
 }
 
+function getNormalizedEnrollmentCourseList(user) {
+  if (!user || String(user?.role || "student").trim().toLowerCase() !== "student") {
+    return [];
+  }
+  return [...sanitizeCourseAssignments(user?.assignedCourses || [])]
+    .map((course) => String(course || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function getUserEnrollmentScopeFingerprint(user) {
+  if (!user || typeof user !== "object") {
+    return "";
+  }
+  const role = String(user?.role || "student").trim().toLowerCase() === "admin" ? "admin" : "student";
+  if (role !== "student") {
+    return role;
+  }
+  const year = normalizeAcademicYearOrNull(user?.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(user?.academicSemester);
+  const courses = getNormalizedEnrollmentCourseList(user);
+  return `student|${year ?? "na"}|${semester ?? "na"}|${courses.join("||")}`;
+}
+
+function didUserEnrollmentScopeChange(previousUser, nextUser) {
+  if (!previousUser || !nextUser) {
+    return false;
+  }
+  return getUserEnrollmentScopeFingerprint(previousUser) !== getUserEnrollmentScopeFingerprint(nextUser);
+}
+
+function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  if (!list.length || !userOrId) {
+    return [];
+  }
+
+  const archiveAt = String(options?.archivedAt || nowISO()).trim() || nowISO();
+  const archiveReason = String(options?.reason || "enrollment_change").trim() || "enrollment_change";
+  const archivedSessionIds = [];
+
+  list.forEach((session) => {
+    if (!session || !doesSessionBelongToUser(session, userOrId)) {
+      return;
+    }
+    const status = String(session?.status || "").trim();
+    if (status !== "in_progress" && status !== "completed") {
+      return;
+    }
+
+    session.previousStatus = status;
+    session.status = "suspended";
+    session.archivedAt = archiveAt;
+    session.archivedReason = archiveReason;
+    session.updatedAt = archiveAt;
+    archivedSessionIds.push(String(session?.id || "").trim());
+  });
+
+  return [...new Set(archivedSessionIds.filter(Boolean))];
+}
+
+function archiveSessionsForChangedUserEnrollments(previousUsers, nextUsers, options = {}) {
+  const previousList = Array.isArray(previousUsers) ? previousUsers : [];
+  const nextList = Array.isArray(nextUsers) ? nextUsers : [];
+  if (!previousList.length || !nextList.length) {
+    return [];
+  }
+
+  const previousByKey = new Map();
+  previousList.forEach((user) => {
+    getUserMergeMatchKeys(user).forEach((key) => {
+      if (key && !previousByKey.has(key)) {
+        previousByKey.set(key, user);
+      }
+    });
+  });
+
+  const sessions = getSessions();
+  if (!sessions.length) {
+    return [];
+  }
+
+  const archivedSessionIds = new Set();
+  const processedUsers = new Set();
+  nextList.forEach((nextUser) => {
+    const previousUser = getUserMergeMatchKeys(nextUser)
+      .map((key) => previousByKey.get(key))
+      .find(Boolean);
+    if (!previousUser || !didUserEnrollmentScopeChange(previousUser, nextUser)) {
+      return;
+    }
+
+    const processedKey = String(
+      getUserProfileId(nextUser)
+      || nextUser?.id
+      || getUserProfileId(previousUser)
+      || previousUser?.id
+      || getUserMergeMatchKeys(nextUser)[0]
+      || "",
+    ).trim();
+    if (processedKey && processedUsers.has(processedKey)) {
+      return;
+    }
+    if (processedKey) {
+      processedUsers.add(processedKey);
+    }
+
+    archiveEnrollmentResetSessionsInList(sessions, nextUser, options).forEach((sessionId) => {
+      archivedSessionIds.add(sessionId);
+    });
+  });
+
+  if (!archivedSessionIds.size) {
+    return [];
+  }
+
+  save(STORAGE_KEYS.sessions, sessions, options?.saveOptions || {});
+
+  const persistedActiveSessionId = readPersistedActiveSessionId();
+  if (persistedActiveSessionId && archivedSessionIds.has(persistedActiveSessionId)) {
+    clearPersistedActiveSessionId(persistedActiveSessionId);
+  }
+  if (archivedSessionIds.has(String(state.sessionId || "").trim())) {
+    state.sessionId = null;
+  }
+  if (archivedSessionIds.has(String(state.reviewSessionId || "").trim())) {
+    state.reviewSessionId = null;
+    state.reviewIndex = 0;
+  }
+
+  return [...archivedSessionIds];
+}
+
 function getAcademicTermScopedSessionsForUser(userId, userOverride = null, questionMetaById = null) {
   const sessions = getSessionsForUser(userId);
   const targetUser = userOverride || findUserForAnalytics(userId);
+  const visibleSessions = sessions.filter((session) => String(session?.status || "").trim() !== "suspended");
   if (!targetUser || targetUser.role !== "student") {
-    return sessions;
+    return visibleSessions;
   }
   const map = questionMetaById instanceof Map ? questionMetaById : getAnalyticsQuestionMetaById();
-  return sessions.filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, map));
+  return visibleSessions.filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, map));
 }
 
 function getCompletedSessionsForUser(userId) {
@@ -28606,7 +28816,8 @@ function getAnalyticsEnrollmentCacheToken(user) {
   }
   const year = normalizeAcademicYearOrNull(user.academicYear);
   const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
-  return `${year ?? "na"}-${semester ?? "na"}`;
+  const courses = getNormalizedEnrollmentCourseList(user);
+  return `${year ?? "na"}-${semester ?? "na"}-${courses.join("|") || "__all_courses__"}`;
 }
 
 function summarizeSessionRollups(rollups = []) {
@@ -28731,9 +28942,8 @@ function buildStudentAnalyticsSnapshot(userId, courseFilter = "", userOverride =
   const normalizedFilter = String(courseFilter || "").trim();
   const targetUser = userOverride || findUserForAnalytics(userId);
   const questionMetaById = getAnalyticsQuestionMetaById();
-  const sessions = getSessionsForUser(userId)
+  const sessions = getAcademicTermScopedSessionsForUser(userId, targetUser, questionMetaById)
     .filter((session) => session.status === "completed")
-    .filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, questionMetaById))
     .slice()
     .sort((a, b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt));
   const byTopic = new Map();
