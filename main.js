@@ -5431,7 +5431,10 @@ async function hydrateRelationalState(user) {
   const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
   const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
   const hasPendingNotificationWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.notifications) || relationalSync.flushing;
-  const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions) || relationalSync.flushing;
+  const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions)
+    || relationalSync.flushing
+    || sessionSyncRuntime.dirty
+    || sessionSyncRuntime.flushing;
 
   // Avoid overwriting unsynced local edits per storage key while still allowing safe keys to hydrate.
   if (!hasPendingCourseWrites) {
@@ -7028,6 +7031,15 @@ function mergeSessionResponseSnapshots(localResponse, remoteResponse, preferLoca
 }
 
 function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession) {
+  const activeSessionId = String(state.sessionId || "").trim();
+  if (
+    sessionId
+    && state.route === "session"
+    && activeSessionId === sessionId
+    && String(localSession?.status || "").trim() === "in_progress"
+  ) {
+    return true;
+  }
   const localUpdatedAtMs = parseSyncTimestampMs(localSession?.updatedAt);
   const remoteUpdatedAtMs = parseSyncTimestampMs(remoteSession?.updatedAt);
   if (localUpdatedAtMs > remoteUpdatedAtMs) {
