@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.16").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.17").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -200,7 +200,7 @@ let activeTheme = THEME_LIGHT;
 
 const state = {
   route: INITIAL_ROUTE,
-  sessionId: null,
+  sessionId: readPersistedActiveSessionId(),
   reviewSessionId: null,
   reviewIndex: 0,
   adminEditQuestionId: null,
@@ -6616,6 +6616,11 @@ async function hydrateRelationalSessions(currentUser) {
       .map((entry) => [getUserProfileId(entry), entry.id])
       .filter(([profileId]) => Boolean(profileId)),
   );
+  const localUserByAuth = new Map(
+    allUsers
+      .map((entry) => [String(getUserProfileId(entry) || "").trim(), entry])
+      .filter(([profileId]) => isUuidValue(profileId)),
+  );
   const itemsByBlock = {};
   (items || []).forEach((item) => {
     if (!itemsByBlock[item.block_id]) {
@@ -6650,10 +6655,13 @@ async function hydrateRelationalSessions(currentUser) {
     });
 
     const sessionId = String(block.external_id || block.id);
+    const matchingUser = localUserByAuth.get(String(block.user_id || "").trim()) || null;
     return {
       id: sessionId,
       dbId: block.id,
       userId: localUserIdByAuth[block.user_id] || block.user_id,
+      ownerProfileId: isUuidValue(block.user_id) ? block.user_id : null,
+      ownerAuthId: isUuidValue(block.user_id) ? block.user_id : null,
       mode: String(block.mode || "tutor"),
       source: String(block.source || "all"),
       durationMin: Number(block.duration_minutes || 20),
@@ -6668,6 +6676,9 @@ async function hydrateRelationalSessions(currentUser) {
       createdAt: block.created_at || nowISO(),
       updatedAt: block.updated_at || nowISO(),
       completedAt: block.completed_at || null,
+      academicYear: normalizeAcademicYearOrNull(matchingUser?.academicYear),
+      academicSemester: normalizeAcademicSemesterOrNull(matchingUser?.academicSemester),
+      courses: sanitizeCourseAssignments(matchingUser?.assignedCourses || []),
       originSessionId: null,
     };
   });
@@ -6747,20 +6758,27 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
   }
   const current = user || getCurrentUser();
   const currentUserId = String(current?.id || "").trim();
+  const currentProfileId = String(getCurrentSessionProfileId(current) || getUserProfileId(current) || "").trim();
   if (!currentUserId) {
     return payload;
   }
 
   if (storageKey === STORAGE_KEYS.sessions) {
     const list = Array.isArray(payload) ? payload : [];
+    const normalizedOwnerProfileId = isUuidValue(currentProfileId) ? currentProfileId : "";
     return list
       .filter((session) => {
-        const owner = String(session?.userId || "").trim();
-        return !owner || owner === currentUserId;
+        const ownerIds = getStoredSessionOwnerIds(session);
+        if (!ownerIds.size) {
+          return true;
+        }
+        return ownerIds.has(currentUserId) || (normalizedOwnerProfileId && ownerIds.has(normalizedOwnerProfileId));
       })
       .map((session) => ({
         ...session,
-        userId: currentUserId,
+        userId: String(session?.userId || "").trim() || currentUserId,
+        ownerProfileId: resolveSessionOwnerProfileId(session) || normalizedOwnerProfileId || null,
+        ownerAuthId: resolveSessionOwnerProfileId(session) || normalizedOwnerProfileId || null,
       }));
   }
 
@@ -6952,6 +6970,9 @@ function cloneTextHighlightStore(value) {
 function hasPendingSessionSyncForId(sessionId = "") {
   const targetId = String(sessionId || "").trim();
   const activeSessionId = String(state.sessionId || "").trim();
+  if (!targetId && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || relationalSync.flushing)) {
+    return true;
+  }
   if (
     targetId
     && activeSessionId === targetId
@@ -7078,6 +7099,38 @@ function mergeHydratedSessionsWithLocal(remotePayload) {
   return [...mergedSessionById.values()];
 }
 
+function hasRenderableLocalSessionRouteState(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+
+  const currentRoute = String(state.route || "").trim();
+  if (currentRoute === "session") {
+    const activeSession = getActiveSession(currentUser.id, state.sessionId);
+    return Boolean(
+      activeSession
+      && String(activeSession.status || "").trim() === "in_progress"
+      && Array.isArray(activeSession.questionIds)
+      && activeSession.questionIds.length,
+    );
+  }
+
+  if (currentRoute === "review") {
+    return getCompletedSessionsForUser(currentUser.id).length > 0;
+  }
+
+  return false;
+}
+
+function shouldDeferSessionHydrationOnActiveRoute(user = null) {
+  const currentRoute = String(state.route || "").trim();
+  if (currentRoute !== "session" && currentRoute !== "review") {
+    return false;
+  }
+  return hasRenderableLocalSessionRouteState(user);
+}
+
 function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
   const remoteGroups = normalizeCourseTopicGroupMap(remotePayload);
   const localGroups = normalizeCourseTopicGroupMap(load(STORAGE_KEYS.courseTopicGroups, {}));
@@ -7140,7 +7193,9 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
       return;
     }
     hadRemoteData = true;
-    if (storageKey === STORAGE_KEYS.sessions && (state.route === "session" || state.route === "review")) {
+    // Keep the active session/review route stable when it already has local data,
+    // but allow cloud hydration to repopulate empty routes after reload/sign-in.
+    if (storageKey === STORAGE_KEYS.sessions && shouldDeferSessionHydrationOnActiveRoute()) {
       return;
     }
     try {
@@ -9935,13 +9990,15 @@ async function syncSessionsToRelational(sessionsPayload) {
   const users = getUsers();
   const questions = getQuestions();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
-  const authIdByLocalUserId = Object.fromEntries(
-    users
-      .map((entry) => [entry.id, getUserProfileId(entry)])
-      .filter(([, profileId]) => Boolean(profileId)),
-  );
-
-  const ownedSessions = sessions.filter((session) => isUuidValue(authIdByLocalUserId[session.userId]));
+  const sessionOwnerProfileIdBySessionId = new Map();
+  const ownedSessions = sessions.filter((session) => {
+    const profileId = resolveSessionOwnerProfileId(session, users);
+    if (!isUuidValue(profileId)) {
+      return false;
+    }
+    sessionOwnerProfileIdBySessionId.set(String(session?.id || "").trim(), profileId);
+    return true;
+  });
   if (!ownedSessions.length) {
     return;
   }
@@ -9967,7 +10024,7 @@ async function syncSessionsToRelational(sessionsPayload) {
   const upsertBlocks = ownedSessions.map((session) => ({
     ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
     external_id: String(session.id || "").trim(),
-    user_id: authIdByLocalUserId[session.userId],
+    user_id: sessionOwnerProfileIdBySessionId.get(String(session?.id || "").trim()),
     course_id: courseIdByName[String(getSessionCourseList(session)[0] || "").trim()] || null,
     mode: session.mode === "timed" ? "timed" : "tutor",
     source: ["all", "unused", "incorrect", "flagged"].includes(String(session.source || "")) ? session.source : "all",
@@ -10063,10 +10120,21 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   const syncedSessions = sessions.map((session) => {
     const dbId = blockIdByExternalId[session.id];
-    if (!dbId || session.dbId === dbId) {
+    const ownerProfileId = resolveSessionOwnerProfileId(session, users);
+    const nextOwnerProfileId = isUuidValue(ownerProfileId) ? ownerProfileId : null;
+    if (
+      !dbId
+      && String(session?.ownerProfileId || "").trim() === String(nextOwnerProfileId || "").trim()
+      && String(session?.ownerAuthId || "").trim() === String(nextOwnerProfileId || "").trim()
+    ) {
       return session;
     }
-    return { ...session, dbId };
+    return {
+      ...session,
+      ...(dbId ? { dbId } : {}),
+      ownerProfileId: nextOwnerProfileId,
+      ownerAuthId: nextOwnerProfileId,
+    };
   });
   saveLocalOnly(STORAGE_KEYS.sessions, syncedSessions);
 }
@@ -10601,6 +10669,16 @@ function bindGlobalEvents() {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
       const route = navTarget.getAttribute("data-nav");
+      if (String(route || "").trim().toLowerCase() === "session") {
+        const currentUser = getCurrentUser();
+        const activeSession = currentUser ? getActiveSession(currentUser.id, state.sessionId) : null;
+        if (activeSession?.id) {
+          state.sessionId = activeSession.id;
+          persistActiveSessionId(activeSession.id);
+          navigate(route, { sessionId: activeSession.id });
+          return;
+        }
+      }
       navigate(route);
       return;
     }
@@ -12651,7 +12729,7 @@ async function refreshStudentDataFromSupabaseState(user) {
     return true;
   }
 
-  const userScopedKeys = (state.route === "session" || state.route === "review")
+  const userScopedKeys = shouldDeferSessionHydrationOnActiveRoute(user)
     ? USER_SCOPED_SYNC_KEYS.filter((key) => key !== STORAGE_KEYS.sessions)
     : USER_SCOPED_SYNC_KEYS;
   const userRefreshResult = await hydrateSupabaseSyncKeys(userScopedKeys, scope).catch((error) => ({ error }));
@@ -12711,7 +12789,10 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
     const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
     const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
-    const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions) || relationalSync.flushing;
+    const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions)
+      || relationalSync.flushing
+      || sessionSyncRuntime.dirty
+      || sessionSyncRuntime.flushing;
     let completedFullSync = false;
     if (needsFullSync) {
       // Run courses/topics and profiles in parallel — they are independent DB reads.
@@ -15136,7 +15217,7 @@ function wireDashboard() {
       }
 
       state.sessionId = created.id;
-      navigate("session");
+      navigate("session", { sessionId: created.id });
       toast(
         autoFinalizedIds.length
           ? `Retry test created: ${retryMeta.wrongSubmitted} wrong + ${retryMeta.unsolved} unsolved. ${autoFinalizedIds.length} previous active block(s) were ended automatically.`
@@ -15765,7 +15846,7 @@ function wireCreateTest() {
 
     state.createTestNameDraft = "";
     state.sessionId = session.id;
-    navigate("session");
+    navigate("session", { sessionId: session.id });
     toast(
       autoFinalizedIds.length
         ? `Test created. ${autoFinalizedIds.length} previous active block(s) were ended automatically and moved to previous tests.`
@@ -16270,7 +16351,6 @@ function renderSession() {
   const session = getActiveSession(user.id, state.sessionId);
 
   if (!session) {
-    clearPersistedActiveSessionId();
     return `
       <section class="panel">
         <h2 class="title">No active session</h2>
@@ -25643,6 +25723,46 @@ function addKnownUserMatchKeys(targetSet, user) {
   return targetSet;
 }
 
+function getStoredSessionOwnerIds(session) {
+  const ownerIds = new Set();
+  [
+    session?.userId,
+    session?.ownerProfileId,
+    session?.ownerAuthId,
+  ].forEach((entry) => {
+    const normalized = String(entry || "").trim();
+    if (normalized) {
+      ownerIds.add(normalized);
+    }
+  });
+  const resolvedProfileId = resolveSessionOwnerProfileId(session);
+  if (resolvedProfileId) {
+    ownerIds.add(resolvedProfileId);
+  }
+  return ownerIds;
+}
+
+function resolveSessionOwnerProfileId(session, usersOverride = null) {
+  const explicitProfileId = String(session?.ownerProfileId || session?.ownerAuthId || "").trim();
+  if (isUuidValue(explicitProfileId)) {
+    return explicitProfileId;
+  }
+
+  const ownerId = String(session?.userId || "").trim();
+  if (isUuidValue(ownerId)) {
+    return ownerId;
+  }
+
+  const users = Array.isArray(usersOverride) ? usersOverride : getUsers();
+  const matchingUser = (Array.isArray(users) ? users : []).find((entry) => {
+    const localId = String(entry?.id || "").trim();
+    const authId = String(entry?.supabaseAuthId || "").trim();
+    return ownerId && (localId === ownerId || authId === ownerId);
+  });
+  const resolvedProfileId = String(getUserProfileId(matchingUser) || "").trim();
+  return isUuidValue(resolvedProfileId) ? resolvedProfileId : "";
+}
+
 function getSessionOwnerIdentitySet(userOrId) {
   const identities = new Set();
   const matchKeys = new Set();
@@ -25712,11 +25832,12 @@ function getSessionOwnerIdentitySet(userOrId) {
 }
 
 function doesSessionBelongToUser(session, userOrId) {
-  const ownerId = String(session?.userId || "").trim();
-  if (!ownerId) {
+  const ownerIds = getStoredSessionOwnerIds(session);
+  if (!ownerIds.size) {
     return false;
   }
-  return getSessionOwnerIdentitySet(userOrId).has(ownerId);
+  const userIdentitySet = getSessionOwnerIdentitySet(userOrId);
+  return [...ownerIds].some((ownerId) => userIdentitySet.has(ownerId));
 }
 
 function getSessionsForUser(userId) {
@@ -25724,7 +25845,7 @@ function getSessionsForUser(userId) {
   if (!ownerIds.size) {
     return [];
   }
-  return getSessions().filter((session) => ownerIds.has(String(session?.userId || "").trim()));
+  return getSessions().filter((session) => doesSessionBelongToUser(session, userId));
 }
 
 function getAcademicTermScopedSessionsForUser(userId, userOverride = null, questionMetaById = null) {
@@ -25834,6 +25955,7 @@ function createSessionFromQuestions(questions, config = {}) {
   const sessionAcademicYear = user.role === "student" ? normalizeAcademicYearOrNull(user.academicYear) : null;
   const sessionAcademicSemester = user.role === "student" ? normalizeAcademicSemesterOrNull(user.academicSemester) : null;
   const sessionId = makeId("s");
+  const sessionOwnerProfileId = String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
   const sessionCourses = [];
   const seenSessionCourses = new Set();
 
@@ -25869,6 +25991,8 @@ function createSessionFromQuestions(questions, config = {}) {
   const session = {
     id: sessionId,
     userId: user.id,
+    ownerProfileId: isUuidValue(sessionOwnerProfileId) ? sessionOwnerProfileId : null,
+    ownerAuthId: isUuidValue(sessionOwnerProfileId) ? sessionOwnerProfileId : null,
     name: sessionName,
     testId: sessionTestId,
     mode,
@@ -25907,7 +26031,6 @@ function getActiveSession(userId, preferredId = null) {
       persistActiveSessionId(persistedSession.id);
       return persistedSession;
     }
-    clearPersistedActiveSessionId();
     return null;
   }
 
@@ -25917,19 +26040,11 @@ function getActiveSession(userId, preferredId = null) {
     return preferredSession;
   }
 
-  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "in_progress");
-  if (!sessions.length) {
-    const persistedSession = persistedPreferredId ? getSessionById(persistedPreferredId) : null;
-    if (persistedSession && String(persistedSession.status || "").trim() === "in_progress" && doesSessionBelongToUser(persistedSession, userId)) {
-      persistActiveSessionId(persistedSession.id);
-      return persistedSession;
-    }
-    clearPersistedActiveSessionId();
-    return null;
-  }
-
-  const resolvedSession = sessions.find((session) => session.id === persistedPreferredId)
-    || sessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+  const termScopedSessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "in_progress");
+  const latestAllSession = [...allSessions].sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))[0] || null;
+  const resolvedSession = termScopedSessions.find((session) => session.id === persistedPreferredId)
+    || [...termScopedSessions].sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))[0]
+    || latestAllSession;
   if (resolvedSession) {
     persistActiveSessionId(resolvedSession.id);
   }
@@ -28688,6 +28803,17 @@ function persistSessionUiPreferences() {
 
 function normalizeSession(session) {
   let changed = false;
+
+  const normalizedOwnerProfileId = resolveSessionOwnerProfileId(session);
+  const normalizedOwnerAuthId = normalizedOwnerProfileId || String(session?.ownerAuthId || "").trim() || null;
+  if ((String(session?.ownerProfileId || "").trim() || null) !== (normalizedOwnerProfileId || null)) {
+    session.ownerProfileId = normalizedOwnerProfileId || null;
+    changed = true;
+  }
+  if ((String(session?.ownerAuthId || "").trim() || null) !== (normalizedOwnerAuthId || null)) {
+    session.ownerAuthId = normalizedOwnerAuthId || null;
+    changed = true;
+  }
 
   if (!Array.isArray(session.questionIds)) {
     session.questionIds = [];
