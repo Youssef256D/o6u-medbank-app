@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.17").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.18").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -10001,7 +10001,15 @@ async function syncSessionsToRelational(sessionsPayload) {
     return;
   }
 
-  const sessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
+  const queuedSessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
+  const latestLocalSessions = getSessions();
+  const latestLocalSessionById = new Map(
+    latestLocalSessions.map((session) => [String(session?.id || "").trim(), session]),
+  );
+  const sessions = queuedSessions.map((session) => {
+    const sessionId = String(session?.id || "").trim();
+    return (sessionId && latestLocalSessionById.get(sessionId)) || session;
+  });
   const users = getUsers();
   const questions = getQuestions();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
@@ -10133,8 +10141,8 @@ async function syncSessionsToRelational(sessionsPayload) {
     }
   }
 
-  const syncedSessions = sessions.map((session) => {
-    const dbId = blockIdByExternalId[session.id];
+  const applySyncedSessionMetadata = (session) => {
+    const dbId = blockIdByExternalId[String(session?.id || "").trim()];
     const ownerProfileId = resolveSessionOwnerProfileId(session, users);
     const nextOwnerProfileId = isUuidValue(ownerProfileId) ? ownerProfileId : null;
     if (
@@ -10150,6 +10158,19 @@ async function syncSessionsToRelational(sessionsPayload) {
       ownerProfileId: nextOwnerProfileId,
       ownerAuthId: nextOwnerProfileId,
     };
+  };
+
+  const refreshedLocalSessions = getSessions();
+  const refreshedLocalSessionIds = new Set(
+    refreshedLocalSessions.map((session) => String(session?.id || "").trim()).filter(Boolean),
+  );
+  const syncedSessions = refreshedLocalSessions.map((session) => applySyncedSessionMetadata(session));
+  sessions.forEach((session) => {
+    const sessionId = String(session?.id || "").trim();
+    if (!sessionId || refreshedLocalSessionIds.has(sessionId)) {
+      return;
+    }
+    syncedSessions.push(applySyncedSessionMetadata(session));
   });
   saveLocalOnly(STORAGE_KEYS.sessions, syncedSessions);
 }
