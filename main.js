@@ -16622,10 +16622,26 @@ function renderSession() {
   `;
 }
 
+function getCurrentSessionResponseContext(session) {
+  if (!session || !Array.isArray(session.questionIds)) {
+    return null;
+  }
+  const qid = String(session.questionIds[session.currentIndex] || "").trim();
+  if (!qid) {
+    return null;
+  }
+  const response = session.responses && typeof session.responses === "object"
+    ? session.responses[qid]
+    : null;
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return null;
+  }
+  return { qid, response };
+}
+
 function syncActiveResponseSelectionFromDom(activeSession) {
-  const currentQid = activeSession.questionIds[activeSession.currentIndex];
-  const response = activeSession.responses[currentQid];
-  if (!response) {
+  const currentContext = getCurrentSessionResponseContext(activeSession);
+  if (!currentContext) {
     return [];
   }
   const selected = [...new Set(
@@ -16633,7 +16649,7 @@ function syncActiveResponseSelectionFromDom(activeSession) {
       .map((entry) => String(entry.value || "").trim().toUpperCase())
       .filter(Boolean),
   )];
-  response.selected = selected;
+  currentContext.response.selected = selected;
   return selected;
 }
 
@@ -16669,10 +16685,15 @@ function wireSession() {
         return;
       }
 
-      const currentQid = latest.questionIds[latest.currentIndex];
-      const response = latest.responses[currentQid];
+      normalizeSession(latest);
+      const currentContext = getCurrentSessionResponseContext(latest);
+      if (!currentContext) {
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
       syncActiveResponseSelectionFromDom(latest);
-      response.submitted = false;
+      currentContext.response.submitted = false;
       latest.updatedAt = nowISO();
       upsertSession(latest);
       state.skipNextRouteAnimation = true;
@@ -16694,8 +16715,14 @@ function wireSession() {
       return;
     }
 
-    const currentQid = latest.questionIds[latest.currentIndex];
-    latest.responses[currentQid].notes = noteInput.value;
+    normalizeSession(latest);
+    const currentContext = getCurrentSessionResponseContext(latest);
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    currentContext.response.notes = noteInput.value;
     latest.updatedAt = nowISO();
     upsertSession(latest);
   });
@@ -16746,6 +16773,7 @@ async function handleSessionClick(event) {
 
   normalizeSession(session);
   syncActiveResponseSelectionFromDom(session);
+  const currentContext = getCurrentSessionResponseContext(session);
 
   const maxIndex = session.questionIds.length - 1;
   const trackedActions = new Set(["prev-question", "next-question", "jump-question", "jump-unanswered", "save-exit", "submit-session"]);
@@ -16839,7 +16867,12 @@ async function handleSessionClick(event) {
   }
 
   if (action === "open-course-ai") {
-    const qid = session.questionIds[session.currentIndex];
+    const qid = currentContext?.qid;
+    if (!qid) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
     const question = getQuestions().find((entry) => entry.id === qid);
     if (!question) {
       toast("Current question could not be loaded.");
@@ -16858,7 +16891,12 @@ async function handleSessionClick(event) {
   }
 
   if (action === "copy-course-ai-question") {
-    const qid = session.questionIds[session.currentIndex];
+    const qid = currentContext?.qid;
+    if (!qid) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
     const question = getQuestions().find((entry) => entry.id === qid);
     if (!question) {
       toast("Current question could not be loaded.");
@@ -16929,7 +16967,12 @@ async function handleSessionClick(event) {
   }
 
   if (action === "add-flashcard") {
-    addCurrentQuestionToFlashcards(session.userId, session.questionIds[session.currentIndex]);
+    if (!currentContext?.qid) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    addCurrentQuestionToFlashcards(session.userId, currentContext.qid);
     toast("Added to flashcards.");
     return;
   }
@@ -16952,7 +16995,10 @@ async function handleSessionClick(event) {
   }
 
   if (action === "jump-unanswered") {
-    const unansweredIndex = session.questionIds.findIndex((qid) => session.responses[qid].selected.length === 0);
+    const unansweredIndex = session.questionIds.findIndex((qid) => {
+      const response = session.responses[qid];
+      return !Array.isArray(response?.selected) || response.selected.length === 0;
+    });
     if (unansweredIndex === -1) {
       toast("All questions are answered.");
       return;
@@ -16961,9 +17007,12 @@ async function handleSessionClick(event) {
   }
 
   if (action === "toggle-flag") {
-    const qid = session.questionIds[session.currentIndex];
-    const response = session.responses[qid];
-    response.flagged = !response.flagged;
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    currentContext.response.flagged = !currentContext.response.flagged;
   }
 
   if (action === "toggle-strike") {
@@ -16971,8 +17020,13 @@ async function handleSessionClick(event) {
     if (!choiceId) {
       return;
     }
-    const qid = session.questionIds[session.currentIndex];
-    const response = session.responses[qid];
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const qid = currentContext.qid;
+    const response = currentContext.response;
     if (shouldSuppressStrikeClick(session.id, qid, choiceId)) {
       return;
     }
@@ -16989,8 +17043,13 @@ async function handleSessionClick(event) {
   }
 
   if (action === "submit-answer") {
-    const qid = session.questionIds[session.currentIndex];
-    const response = session.responses[qid];
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    const qid = currentContext.qid;
+    const response = currentContext.response;
     if (response.submitted) {
       captureElapsedForCurrentQuestion(session);
       session.currentIndex = Math.min(maxIndex, session.currentIndex + 1);
@@ -17013,9 +17072,12 @@ async function handleSessionClick(event) {
   }
 
   if (action === "reset-answer") {
-    const qid = session.questionIds[session.currentIndex];
-    const response = session.responses[qid];
-    response.submitted = false;
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    currentContext.response.submitted = false;
     state.sessionPanel = null;
   }
 
