@@ -13,6 +13,54 @@ const {
   updateAuthUserAccess,
 } = require("./_supabase");
 
+const ACCESS_UPDATE_CONCURRENCY = 12;
+
+async function applyAuthAccessUpdatesInParallel(env, targetAuthIds, approved) {
+  const updatedIds = [];
+  const notFoundIds = [];
+  const failedIds = [];
+  let firstFailureMessage = "";
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < targetAuthIds.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const targetAuthId = targetAuthIds[currentIndex];
+      try {
+        const updated = await updateAuthUserAccess(env, targetAuthId, approved);
+        if (updated.ok) {
+          updatedIds.push(targetAuthId);
+          continue;
+        }
+        if (updated.notFound) {
+          notFoundIds.push(targetAuthId);
+          continue;
+        }
+        failedIds.push(targetAuthId);
+        if (!firstFailureMessage) {
+          firstFailureMessage = updated.error || "Supabase admin access update failed.";
+        }
+      } catch (error) {
+        failedIds.push(targetAuthId);
+        if (!firstFailureMessage) {
+          firstFailureMessage = String(error?.message || "").trim() || "Unexpected error while updating user access.";
+        }
+      }
+    }
+  };
+
+  const workerCount = Math.min(ACCESS_UPDATE_CONCURRENCY, targetAuthIds.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return {
+    updatedIds,
+    notFoundIds,
+    failedIds,
+    firstFailureMessage,
+  };
+}
+
 module.exports = async (req, res) => {
   applyCorsHeaders(req, res);
 
@@ -97,33 +145,12 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const updatedIds = [];
-  const notFoundIds = [];
-  const failedIds = [];
-  let firstFailureMessage = "";
-
-  for (const targetAuthId of targetAuthIds) {
-    try {
-      const updated = await updateAuthUserAccess(env, targetAuthId, approved);
-      if (updated.ok) {
-        updatedIds.push(targetAuthId);
-        continue;
-      }
-      if (updated.notFound) {
-        notFoundIds.push(targetAuthId);
-        continue;
-      }
-      failedIds.push(targetAuthId);
-      if (!firstFailureMessage) {
-        firstFailureMessage = updated.error || "Supabase admin access update failed.";
-      }
-    } catch (error) {
-      failedIds.push(targetAuthId);
-      if (!firstFailureMessage) {
-        firstFailureMessage = String(error?.message || "").trim() || "Unexpected error while updating user access.";
-      }
-    }
-  }
+  const {
+    updatedIds,
+    notFoundIds,
+    failedIds,
+    firstFailureMessage,
+  } = await applyAuthAccessUpdatesInParallel(env, targetAuthIds, approved);
 
   if (!failedIds.length) {
     json(res, 200, { ok: true, updatedIds, notFoundIds, failedIds: [] });

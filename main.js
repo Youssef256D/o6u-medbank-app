@@ -27,6 +27,8 @@ const STORAGE_KEYS = {
   studentRefreshTriggerSeen: "mcq_student_refresh_trigger_seen",
   pendingAdminActions: "mcq_pending_admin_actions",
   pendingQuestionDeletions: "mcq_pending_question_deletions",
+  pendingCourseDeletions: "mcq_pending_course_deletions",
+  pendingCourseTopicDeletions: "mcq_pending_course_topic_deletions",
 };
 
 const appEl = document.getElementById("app");
@@ -93,6 +95,7 @@ const SUPABASE_RETRY_FLUSH_MS = 1200;
 const SESSION_SYNC_FLUSH_MS = 600;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
+const ADMIN_BACKUP_RESTORE_CHECK_COOLDOWN_MS = 5 * 60 * 1000;
 const STUDENT_DATA_REFRESH_MS = 8000;
 const STUDENT_FULL_DATA_REFRESH_MS = 60000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
@@ -128,6 +131,8 @@ const SUPABASE_SESSION_RECOVERY_RETRY_MS = 6000;
 const SUPABASE_SESSION_RECOVERY_RETRY_LIMIT = 20;
 const SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS = 30000;
 const ADMIN_REQUEST_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
+const ADMIN_ACCESS_SYNC_BATCH_SIZE = 50;
+const ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS = Math.max(ADMIN_REQUEST_TIMEOUT_MS, 20000);
 const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
@@ -286,7 +291,9 @@ let adminCourseSearchDebounce = null;
 let adminUserSearchDebounce = null;
 let adminApprovedAccessRepairInFlight = false;
 let adminApprovedAccessRepairSignature = "";
+let adminApprovedAccessRepairCompletedSignature = "";
 let adminApprovedAccessRepairAttemptedAt = 0;
+let adminBackupRestoreLastCheckedAt = 0;
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -354,6 +361,16 @@ const GLOBAL_SYNC_BOOTSTRAP_KEYS = GLOBAL_SYNC_KEYS.filter((key) => !RELATIONAL_
 const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS.curriculum, STORAGE_KEYS.courseTopics]);
 const LEGACY_SUPABASE_STATE_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_SYNC_KEY_SET = new Set(LEGACY_SUPABASE_STATE_SYNC_KEYS);
+const RELATIONAL_BACKUP_SYNC_KEYS = [
+  STORAGE_KEYS.questions,
+  STORAGE_KEYS.curriculum,
+  STORAGE_KEYS.courseTopics,
+];
+const RELATIONAL_BACKUP_SYNC_KEY_SET = new Set(RELATIONAL_BACKUP_SYNC_KEYS);
+const SUPABASE_BACKUP_SYNC_KEY_SET = new Set([
+  ...LEGACY_SUPABASE_STATE_SYNC_KEYS,
+  ...RELATIONAL_BACKUP_SYNC_KEYS,
+]);
 const LEGACY_SUPABASE_STATE_GLOBAL_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => USER_SCOPED_SYNC_KEY_SET.has(key));
 const RELATIONAL_COMBINED_COURSE_SYNC_MARKER = "__relational_combined_course_topic_sync__";
@@ -2680,10 +2697,10 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   // to prevent reverting the admin's change before it propagates to Supabase.
   const preferLocalOverDbForCurrentUser = shouldPreferRecentLocalUserData(localUser);
   const year = role === "student"
-    ? (preferLocalOverDbForCurrentUser && fallbackYear !== null ? fallbackYear : (profileYear ?? fallbackYear))
+    ? (preferLocalOverDbForCurrentUser && fallbackYear !== null ? fallbackYear : profileYear)
     : null;
   const semester = role === "student"
-    ? (preferLocalOverDbForCurrentUser && fallbackSemester !== null ? fallbackSemester : (profileSemester ?? fallbackSemester))
+    ? (preferLocalOverDbForCurrentUser && fallbackSemester !== null ? fallbackSemester : profileSemester)
     : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const metadataPhone = String(
@@ -2693,14 +2710,14 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   ).trim();
   const profilePhone = String(profile.phone || "").trim();
   const fallbackPhone = String(localUser?.phone || "").trim();
-  const resolvedPhone = profilePhone || metadataPhone || fallbackPhone;
+  const resolvedPhone = profilePhone || (preferLocalOverDbForCurrentUser ? (fallbackPhone || metadataPhone) : "");
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
     role,
-    phone: String(profile.phone || localUser?.phone || "").trim(),
-    academicYear: normalizeAcademicYearOrNull(profile.academic_year ?? localUser?.academicYear),
-    academicSemester: normalizeAcademicSemesterOrNull(profile.academic_semester ?? localUser?.academicSemester),
+    phone: resolvedPhone,
+    academicYear: year,
+    academicSemester: semester,
   });
   const resolvedApproval = role === "admin"
     ? true
@@ -2713,7 +2730,12 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
-    : validateAndNormalizePhoneNumber(resolvedPhone).ok && Number(year) >= 1 && Number(semester) >= 1;
+    : hasCompleteStudentProfile({
+      role: "student",
+      phone: resolvedPhone,
+      academicYear: year,
+      academicSemester: semester,
+    });
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let nextProfileCompleted = role !== "student";
   if (role === "student") {
@@ -3646,36 +3668,53 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
   }
 
   if (previous?.id && previous.id !== nextUser.id) {
-    const sessions = getSessions();
-    let sessionsChanged = false;
-    sessions.forEach((session) => {
-      if (session.userId === previous.id) {
-        session.userId = nextUser.id;
-        sessionsChanged = true;
-      }
-    });
-    if (sessionsChanged) {
-      saveLocalOnly(STORAGE_KEYS.sessions, sessions);
-    }
-
-    const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
-    if (incorrectQueue[previous.id] && !incorrectQueue[nextUser.id]) {
-      incorrectQueue[nextUser.id] = incorrectQueue[previous.id];
-      delete incorrectQueue[previous.id];
-      saveLocalOnly(STORAGE_KEYS.incorrectQueue, incorrectQueue);
-    }
-
-    const flashcards = load(STORAGE_KEYS.flashcards, {});
-    if (flashcards[previous.id] && !flashcards[nextUser.id]) {
-      flashcards[nextUser.id] = flashcards[previous.id];
-      delete flashcards[previous.id];
-      saveLocalOnly(STORAGE_KEYS.flashcards, flashcards);
-    }
+    migrateLocalUserReferences(previous.id, nextUser.id);
   }
 
   save(STORAGE_KEYS.users, users);
   save(STORAGE_KEYS.currentUserId, nextUser.id);
   return nextUser;
+}
+
+function migrateLocalUserReferences(previousUserId, nextUserId) {
+  const previousId = String(previousUserId || "").trim();
+  const nextId = String(nextUserId || "").trim();
+  if (!previousId || !nextId || previousId === nextId) {
+    return false;
+  }
+
+  let changed = false;
+
+  const sessions = getSessions();
+  let sessionsChanged = false;
+  sessions.forEach((session) => {
+    if (String(session?.userId || "").trim() === previousId) {
+      session.userId = nextId;
+      sessionsChanged = true;
+    }
+  });
+  if (sessionsChanged) {
+    saveLocalOnly(STORAGE_KEYS.sessions, sessions);
+    changed = true;
+  }
+
+  const incorrectQueue = load(STORAGE_KEYS.incorrectQueue, {});
+  if (incorrectQueue[previousId] && !incorrectQueue[nextId]) {
+    incorrectQueue[nextId] = incorrectQueue[previousId];
+    delete incorrectQueue[previousId];
+    saveLocalOnly(STORAGE_KEYS.incorrectQueue, incorrectQueue);
+    changed = true;
+  }
+
+  const flashcards = load(STORAGE_KEYS.flashcards, {});
+  if (flashcards[previousId] && !flashcards[nextId]) {
+    flashcards[nextId] = flashcards[previousId];
+    delete flashcards[previousId];
+    saveLocalOnly(STORAGE_KEYS.flashcards, flashcards);
+    changed = true;
+  }
+
+  return changed;
 }
 
 async function detectSupabaseStorageShape(client) {
@@ -5089,12 +5128,18 @@ async function flushPendingAdminActionQueue(options = {}) {
       if (result?.ok) {
         // All succeeded — remove all actions in this batch.
         const batchActionIds = new Set(batch.map((a) => a.id));
+        if (Array.isArray(result?.updatedIds) && result.updatedIds.length) {
+          setLocalUsersAuthAccessKnownActive(result.updatedIds, batchApproved);
+        }
         syncedCount += batch.length;
         remainingActions = remainingActions.filter((entry) => !batchActionIds.has(entry.id));
         savePendingAdminActionQueue(remainingActions);
         scheduleSyncStatusUiRefresh();
       } else if (handledIds.size > 0) {
         // Partial success — remove actions whose targets were handled.
+        if (Array.isArray(result?.updatedIds) && result.updatedIds.length) {
+          setLocalUsersAuthAccessKnownActive(result.updatedIds, batchApproved);
+        }
         for (const action of batch) {
           if (handledIds.has(action.targetAuthId)) {
             syncedCount += 1;
@@ -5479,6 +5524,11 @@ async function hydrateRelationalCoursesAndTopics() {
   saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
+  const currentUser = getCurrentUser();
+  if (currentUser?.role === "admin") {
+    scheduleSupabaseWrite(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    scheduleSupabaseWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  }
   return true;
 }
 
@@ -5648,11 +5698,9 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   let enrollmentCourseMap = {};
-  let enrollmentTermMap = {};
   try {
     const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
     enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
-    enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
   } catch (enrollmentError) {
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
@@ -5666,39 +5714,32 @@ async function hydrateRelationalProfiles(currentUser) {
   const mapped = profileRows.map((profile) => {
     const existing = localByAuthId.get(profile.id);
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
+    const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
     const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
     const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
     const profilePhone = String(profile.phone || "").trim();
     const existingPhone = String(existing?.phone || "").trim();
-    const resolvedPhone = profilePhone || existingPhone;
+    const resolvedPhone = profilePhone || (preferLocalOverDb ? existingPhone : "");
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
-    const inferredEnrollmentYear = normalizeAcademicYearOrNull(enrollmentTermMap[profile.id]?.year);
-    const inferredEnrollmentSemester = normalizeAcademicSemesterOrNull(enrollmentTermMap[profile.id]?.semester);
-    const inferredFromCourses = role === "student"
-      ? inferAcademicTermFromCourses(enrolledCourses.length ? enrolledCourses : existingAssignedCourses)
-      : { year: null, semester: null };
-    const inferredCourseYear = normalizeAcademicYearOrNull(inferredFromCourses.year);
-    const inferredCourseSemester = normalizeAcademicSemesterOrNull(inferredFromCourses.semester);
     // When local user data was recently modified but hasn't landed in the DB yet,
     // prefer the local (existing) values for year/semester/courses to prevent the
     // DB read from reverting the admin's change.
-    const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
     let year = role === "student"
       ? (preferLocalOverDb && existingYear !== null
         ? existingYear
-        : (profileYear ?? existingYear ?? inferredEnrollmentYear ?? inferredCourseYear))
+        : profileYear)
       : null;
     let semester = role === "student"
       ? (preferLocalOverDb && existingSemester !== null
         ? existingSemester
-        : (profileSemester ?? existingSemester ?? inferredEnrollmentSemester ?? inferredCourseSemester))
+        : profileSemester)
       : null;
     let assignedCourses = role !== "student"
       ? [...allCourses]
@@ -5820,6 +5861,13 @@ async function hydrateRelationalProfiles(currentUser) {
     ? Array.from(preservedRelationalMap.values())
     : [];
   const preservedLocalOnly = usersBefore.filter((entry) => !getUserProfileId(entry) && !isLegacyDemoUser(entry));
+  mapped.forEach((entry) => {
+    const existing = localByAuthId.get(String(entry?.supabaseAuthId || "").trim());
+    if (!existing) {
+      return;
+    }
+    migrateLocalUserReferences(existing.id, entry.id);
+  });
   const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
@@ -6155,10 +6203,15 @@ async function hydrateRelationalQuestions() {
     ? getQuestions()
     : normalizedMappedQuestions;
   if (currentUser?.role === "admin") {
+    scheduleSupabaseWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
     if (topicRepairResult.questionsChanged) {
       scheduleRelationalWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
     }
     if (topicRepairResult.topicsChanged) {
+      scheduleSupabaseWrite(
+        STORAGE_KEYS.courseTopics,
+        load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
+      );
       scheduleRelationalWrite(
         STORAGE_KEYS.courseTopics,
         load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
@@ -6604,6 +6657,10 @@ function isUserScopedSyncKey(storageKey) {
 
 function isLegacySupabaseStateSyncKey(storageKey) {
   return LEGACY_SUPABASE_STATE_SYNC_KEY_SET.has(storageKey);
+}
+
+function isSupabaseBackupSyncKey(storageKey) {
+  return SUPABASE_BACKUP_SYNC_KEY_SET.has(storageKey);
 }
 
 function buildRemoteSyncKey(storageKey, scope = "") {
@@ -7114,8 +7171,265 @@ async function hydrateQuestionsFromSupabaseBackup() {
   return Array.isArray(questions) && questions.some((question) => String(question?.stem || "").trim());
 }
 
+async function fetchSupabaseBackupPayloads(storageKeys, scope = "") {
+  if (!Array.isArray(storageKeys) || !storageKeys.length) {
+    return {};
+  }
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
+    if (!bootstrap?.enabled) {
+      return {};
+    }
+  }
+
+  const requestedKeys = [...new Set(storageKeys.filter((key) => SYNCABLE_STORAGE_KEYS.includes(key)))];
+  if (!requestedKeys.length) {
+    return {};
+  }
+  const candidateKeys = [...new Set(
+    requestedKeys.flatMap((storageKey) => getSyncQueryCandidates(storageKey, scope)),
+  )];
+  if (!candidateKeys.length) {
+    return {};
+  }
+
+  const { data, error } = await runWithTimeoutResult(
+    supabaseSync.client
+      .from(supabaseSync.tableName)
+      .select(`${supabaseSync.storageKeyColumn},payload,updated_at`)
+      .in(supabaseSync.storageKeyColumn, candidateKeys)
+      .order("updated_at", { ascending: false }),
+    SUPABASE_BACKUP_WRITE_TIMEOUT_MS,
+    "Supabase backup fetch timed out.",
+  );
+  if (error || !Array.isArray(data)) {
+    return {};
+  }
+
+  const payloads = {};
+  requestedKeys.forEach((storageKey) => {
+    const matchingRow = data.find((row) => {
+      const remoteKey = String(row?.[supabaseSync.storageKeyColumn] || "").trim();
+      return getSyncQueryCandidates(storageKey, scope).includes(remoteKey);
+    });
+    if (!matchingRow) {
+      return;
+    }
+    payloads[storageKey] = sanitizeUserScopedPayload(storageKey, matchingRow.payload);
+  });
+  return payloads;
+}
+
+function countCurriculumCourses(curriculum) {
+  const normalized = normalizeCurriculum(curriculum || DEFAULT_O6U_CURRICULUM);
+  let count = 0;
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      count += sanitizeCurriculumCourseList(normalized?.[year]?.[semester] || []).length;
+    }
+  }
+  return count;
+}
+
+function mergeCurriculumWithBackup(localCurriculum, backupCurriculum) {
+  const local = normalizeCurriculum(localCurriculum || DEFAULT_O6U_CURRICULUM);
+  const backup = normalizeCurriculum(backupCurriculum || DEFAULT_O6U_CURRICULUM);
+  const merged = deepClone(local);
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      merged[year][semester] = sanitizeCurriculumCourseList([
+        ...(backup?.[year]?.[semester] || []),
+        ...(local?.[year]?.[semester] || []),
+      ]);
+    }
+  }
+  return merged;
+}
+
+function hasCurriculumAdditions(baseCurriculum, nextCurriculum) {
+  const base = normalizeCurriculum(baseCurriculum || DEFAULT_O6U_CURRICULUM);
+  const next = normalizeCurriculum(nextCurriculum || DEFAULT_O6U_CURRICULUM);
+  for (let year = 1; year <= 5; year += 1) {
+    for (let semester = 1; semester <= 2; semester += 1) {
+      const baseKeys = new Set(
+        sanitizeCurriculumCourseList(base?.[year]?.[semester] || []).map((course) => String(course || "").trim().toLowerCase()),
+      );
+      const hasAddition = sanitizeCurriculumCourseList(next?.[year]?.[semester] || []).some(
+        (course) => !baseKeys.has(String(course || "").trim().toLowerCase()),
+      );
+      if (hasAddition) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function countCourseTopicEntries(courseTopicMap) {
+  return Object.values(normalizeCourseTopicMap(courseTopicMap || {}))
+    .reduce((sum, topics) => sum + normalizeCourseTopicList(topics || [], "").length, 0);
+}
+
+function mergeCourseTopicMapWithBackup(localTopicMap, backupTopicMap) {
+  const local = normalizeCourseTopicMap(localTopicMap || {});
+  const backup = normalizeCourseTopicMap(backupTopicMap || {});
+  const merged = {};
+  CURRICULUM_COURSE_LIST.forEach((course) => {
+    merged[course] = mergeUniqueCourseTopics(
+      course,
+      backup[course] || [],
+      local[course] || [],
+    );
+  });
+  return normalizeCourseTopicMap(merged);
+}
+
+function hasCourseTopicAdditions(baseTopicMap, nextTopicMap) {
+  const base = normalizeCourseTopicMap(baseTopicMap || {});
+  const next = normalizeCourseTopicMap(nextTopicMap || {});
+  return CURRICULUM_COURSE_LIST.some((course) => {
+    const baseKeys = new Set((base[course] || []).map((topic) => normalizeTopicKey(topic)));
+    return (next[course] || []).some((topic) => !baseKeys.has(normalizeTopicKey(topic)));
+  });
+}
+
+async function fetchRelationalContentCountsForRestore() {
+  const client = getRelationalClient();
+  if (!client) {
+    return null;
+  }
+  try {
+    const [coursesResult, topicsResult, questionsResult] = await Promise.all([
+      fetchRowsPaged((from, to) => (
+        client
+          .from("courses")
+          .select("id")
+          .eq("is_active", true)
+          .range(from, to)
+      )),
+      fetchRowsPaged((from, to) => (
+        client
+          .from("course_topics")
+          .select("id")
+          .eq("is_active", true)
+          .range(from, to)
+      )),
+      fetchRowsPaged((from, to) => (
+        client
+          .from("questions")
+          .select("id")
+          .range(from, to)
+      )),
+    ]);
+    return {
+      courseCount: Array.isArray(coursesResult?.data) ? coursesResult.data.length : 0,
+      topicCount: Array.isArray(topicsResult?.data) ? topicsResult.data.length : 0,
+      questionCount: Array.isArray(questionsResult?.data) ? questionsResult.data.length : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
+  const currentUser = options?.user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return { restored: false, restoredKeys: [] };
+  }
+
+  const force = Boolean(options?.force);
+  if (!force && (Date.now() - adminBackupRestoreLastCheckedAt) < ADMIN_BACKUP_RESTORE_CHECK_COOLDOWN_MS) {
+    return { restored: false, restoredKeys: [] };
+  }
+  adminBackupRestoreLastCheckedAt = Date.now();
+
+  const backupPayloads = await fetchSupabaseBackupPayloads([
+    STORAGE_KEYS.curriculum,
+    STORAGE_KEYS.courseTopics,
+    STORAGE_KEYS.questions,
+  ]);
+  if (!Object.keys(backupPayloads).length) {
+    return { restored: false, restoredKeys: [] };
+  }
+
+  const restoredKeys = [];
+  const relationalContentCounts = await fetchRelationalContentCountsForRestore();
+
+  const currentCurriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  const backupCurriculum = backupPayloads[STORAGE_KEYS.curriculum];
+  if (backupCurriculum && typeof backupCurriculum === "object") {
+    const mergedCurriculum = mergeCurriculumWithBackup(currentCurriculum, backupCurriculum);
+    if (
+      hasCurriculumAdditions(currentCurriculum, mergedCurriculum)
+      || (
+        relationalContentCounts
+        && relationalContentCounts.courseCount < countCurriculumCourses(mergedCurriculum)
+      )
+    ) {
+      saveLocalOnly(STORAGE_KEYS.curriculum, mergedCurriculum);
+      restoredKeys.push(STORAGE_KEYS.curriculum);
+      rehydrateCourseCatalogConfigFromStorage();
+    }
+  }
+
+  const currentTopicMap = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  const backupTopicMap = backupPayloads[STORAGE_KEYS.courseTopics];
+  if (backupTopicMap && typeof backupTopicMap === "object") {
+    const mergedTopicMap = mergeCourseTopicMapWithBackup(currentTopicMap, backupTopicMap);
+    if (
+      hasCourseTopicAdditions(currentTopicMap, mergedTopicMap)
+      || (
+        relationalContentCounts
+        && relationalContentCounts.topicCount < countCourseTopicEntries(mergedTopicMap)
+      )
+    ) {
+      saveLocalOnly(STORAGE_KEYS.courseTopics, mergedTopicMap);
+      restoredKeys.push(STORAGE_KEYS.courseTopics);
+      rehydrateCourseCatalogConfigFromStorage();
+    }
+  }
+
+  const currentQuestions = getQuestions();
+  const backupQuestions = Array.isArray(backupPayloads[STORAGE_KEYS.questions])
+    ? dedupeQuestions(backupPayloads[STORAGE_KEYS.questions])
+    : [];
+  if (backupQuestions.length) {
+    const mergedQuestions = dedupeQuestions([...backupQuestions, ...currentQuestions]);
+    if (
+      mergedQuestions.length > currentQuestions.length
+      || (
+        relationalContentCounts
+        && relationalContentCounts.questionCount < mergedQuestions.length
+      )
+    ) {
+      saveLocalOnly(STORAGE_KEYS.questions, mergedQuestions);
+      restoredKeys.push(STORAGE_KEYS.questions);
+    }
+  }
+
+  if (!restoredKeys.length) {
+    return { restored: false, restoredKeys: [] };
+  }
+
+  rehydrateCourseCatalogConfigFromStorage();
+  const repairResult = repairCourseTopicCatalogFromQuestions({ persist: false });
+  if (restoredKeys.includes(STORAGE_KEYS.curriculum)) {
+    save(STORAGE_KEYS.curriculum, load(STORAGE_KEYS.curriculum, O6U_CURRICULUM));
+  }
+  if (restoredKeys.includes(STORAGE_KEYS.courseTopics) || repairResult.topicsChanged) {
+    save(STORAGE_KEYS.courseTopics, load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES));
+  }
+  if (restoredKeys.includes(STORAGE_KEYS.questions) || repairResult.questionsChanged) {
+    save(STORAGE_KEYS.questions, getQuestions());
+  }
+  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
+    console.warn("Backup content restore sync failed.", error?.message || error);
+  });
+  return { restored: true, restoredKeys };
+}
+
 function scheduleSupabaseWrite(storageKey, value) {
-  if (!supabaseSync.enabled || supabaseSync.writeAccessDenied || !isLegacySupabaseStateSyncKey(storageKey)) {
+  if (!supabaseSync.enabled || supabaseSync.writeAccessDenied || !isSupabaseBackupSyncKey(storageKey)) {
     return false;
   }
 
@@ -7166,9 +7480,13 @@ function scheduleFullSupabaseSync(options = {}) {
   const includeUserScoped = Boolean(options?.includeUserScoped);
   const currentUser = options?.user || getCurrentUser();
   const scope = options?.scope || getSyncScopeForUser(currentUser);
+  const globalKeys = [...new Set([
+    ...LEGACY_SUPABASE_STATE_GLOBAL_KEYS,
+    ...RELATIONAL_BACKUP_SYNC_KEYS,
+  ])];
   const keys = includeUserScoped
-    ? [...LEGACY_SUPABASE_STATE_GLOBAL_KEYS, ...LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS]
-    : LEGACY_SUPABASE_STATE_GLOBAL_KEYS;
+    ? [...globalKeys, ...LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS]
+    : globalKeys;
 
   keys.forEach((storageKey) => {
     if (isUserScopedSyncKey(storageKey) && !scope) {
@@ -8882,26 +9200,13 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   }
   const allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
 
-  const desiredCourseKeys = new Set(
-    desiredCourses.map((course) => `${course.course_name}::${course.academic_year}::${course.academic_semester}`),
-  );
-
-  const deactivateCourseIds = (allCourses || [])
-    .filter((course) => course.is_active)
-    .filter((course) => !desiredCourseKeys.has(`${course.course_name}::${course.academic_year}::${course.academic_semester}`))
-    .map((course) => course.id);
-  for (const deactivateBatch of splitIntoBatches(deactivateCourseIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client
-        .from("courses")
-        .update({ is_active: false })
-        .in("id", deactivateBatch),
-      "Course deactivation sync timed out.",
-    );
-  }
-
   const courseRowsByName = {};
+  const courseRowsByCompositeKey = {};
   (allCourses || []).forEach((course) => {
+    const compositeKey = `${course.course_name}::${course.academic_year}::${course.academic_semester}`;
+    if (!courseRowsByCompositeKey[compositeKey] || course.is_active) {
+      courseRowsByCompositeKey[compositeKey] = course;
+    }
     if (!courseRowsByName[course.course_name] || course.is_active) {
       courseRowsByName[course.course_name] = course;
     }
@@ -8948,19 +9253,79 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     throw allTopicsResult.error;
   }
   const allTopics = Array.isArray(allTopicsResult.data) ? allTopicsResult.data : [];
-  const desiredTopicKeys = new Set(desiredTopicRows.map((topic) => `${topic.course_id}::${topic.topic_name}`));
-  const deactivateTopicIds = (allTopics || [])
-    .filter((topic) => topic.is_active)
-    .filter((topic) => !desiredTopicKeys.has(`${topic.course_id}::${topic.topic_name}`))
-    .map((topic) => topic.id);
-  for (const deactivateBatch of splitIntoBatches(deactivateTopicIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client
-        .from("course_topics")
-        .update({ is_active: false })
-        .in("id", deactivateBatch),
-      "Course topic cleanup timed out.",
-    );
+  const pendingCourseDeletions = getPendingCourseDeletions();
+  if (pendingCourseDeletions.length) {
+    const deactivatedCourseIds = [];
+    const processedCourseDeletions = [];
+    pendingCourseDeletions.forEach((entry) => {
+      const matchingCourse = courseRowsByCompositeKey[
+        `${entry.courseName}::${entry.academicYear}::${entry.academicSemester}`
+      ];
+      if (!matchingCourse || !isUuidValue(matchingCourse.id)) {
+        processedCourseDeletions.push(entry);
+        return;
+      }
+      deactivatedCourseIds.push(matchingCourse.id);
+      processedCourseDeletions.push(entry);
+    });
+    for (const deactivateBatch of splitIntoBatches([...new Set(deactivatedCourseIds)], RELATIONAL_DELETE_BATCH_SIZE)) {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("course_topics")
+          .update({ is_active: false })
+          .in("course_id", deactivateBatch),
+        "Course topic deactivation sync timed out.",
+      );
+      await runRelationalQueryWithTimeout(
+        client
+          .from("courses")
+          .update({ is_active: false })
+          .in("id", deactivateBatch),
+        "Course deactivation sync timed out.",
+      );
+    }
+    clearPendingCourseDeletions(processedCourseDeletions);
+  }
+
+  const pendingCourseTopicDeletions = getPendingCourseTopicDeletions();
+  if (pendingCourseTopicDeletions.length) {
+    const activeCourseIdByName = {};
+    (allCourses || []).forEach((course) => {
+      if (!course?.is_active || !isUuidValue(course.id)) {
+        return;
+      }
+      activeCourseIdByName[String(course.course_name || "").trim()] = course.id;
+    });
+    const deactivateTopicIds = [];
+    const processedTopicDeletions = [];
+    pendingCourseTopicDeletions.forEach((entry) => {
+      const courseId = activeCourseIdByName[entry.courseName];
+      if (!isUuidValue(courseId)) {
+        processedTopicDeletions.push(entry);
+        return;
+      }
+      const matchingTopicIds = (allTopics || [])
+        .filter((topic) => topic?.is_active && topic.course_id === courseId)
+        .filter((topic) => normalizeTopicKey(topic.topic_name) === normalizeTopicKey(entry.topicName))
+        .map((topic) => topic.id)
+        .filter((id) => isUuidValue(id));
+      if (!matchingTopicIds.length) {
+        processedTopicDeletions.push(entry);
+        return;
+      }
+      deactivateTopicIds.push(...matchingTopicIds);
+      processedTopicDeletions.push(entry);
+    });
+    for (const deactivateBatch of splitIntoBatches([...new Set(deactivateTopicIds)], RELATIONAL_DELETE_BATCH_SIZE)) {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("course_topics")
+          .update({ is_active: false })
+          .in("id", deactivateBatch),
+        "Course topic deletion sync timed out.",
+      );
+    }
+    clearPendingCourseTopicDeletions(processedTopicDeletions);
   }
 }
 
@@ -9214,6 +9579,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     if (addedTopicsToOverrides) {
       rebuildCurriculumCatalog();
       saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+      scheduleSupabaseWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
       scheduleRelationalWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     }
   }
@@ -12481,12 +12847,22 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       await hydrateRelationalQuestions();
       adminQuestionsLastHydratedAt = Date.now();
     }
+    const backupRestoreResult = await restoreAdminContentFromSupabaseBackupIfNeeded({
+      user,
+      force,
+    }).catch((error) => {
+      console.warn("Admin backup restore check failed.", error?.message || error);
+      return { restored: false, restoredKeys: [] };
+    });
+    const backupRestoreMessage = backupRestoreResult?.restored
+      ? `Recovered missing ${backupRestoreResult.restoredKeys.length > 1 ? "content items" : "content item"} from cloud backup.`
+      : "";
     await hydrateRelationalNotifications(user);
     await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
       await refreshAdminPresenceSnapshot({ force: true, silent: true });
     }
-    state.adminDataSyncError = "";
+    state.adminDataSyncError = backupRestoreMessage;
     state.adminDataLastSyncAt = Date.now();
     return true;
   } catch (error) {
@@ -20326,6 +20702,7 @@ function wireAdmin() {
 
       const nextCurriculum = deepClone(O6U_CURRICULUM);
       nextCurriculum[year][semester][index] = newName;
+      queuePendingCourseDeletion(oldName, year, semester);
       applyCurriculumUpdate(nextCurriculum, { renamedFrom: oldName, renamedTo: newName });
       if (state.adminCourseFocus === oldName) {
         state.adminCourseFocus = newName;
@@ -20362,6 +20739,7 @@ function wireAdmin() {
 
       const nextCurriculum = deepClone(O6U_CURRICULUM);
       nextCurriculum[year][semester].splice(index, 1);
+      queuePendingCourseDeletion(removedCourse, year, semester);
       const replacementCourse = nextCurriculum[year][semester][0] || CURRICULUM_COURSE_LIST[0] || removedCourse;
       applyCurriculumUpdate(nextCurriculum, { removedCourse, replacementCourse });
       if (state.adminCourseFocus === removedCourse) {
@@ -20516,6 +20894,13 @@ function wireAdmin() {
       if (!window.confirm(`Delete all topics from "${course}"? Questions will be reassigned to the default topic.`)) {
         return;
       }
+      const resetTopics = normalizeCourseTopicList([], course);
+      const resetTopicKeys = new Set(resetTopics.map((topic) => normalizeTopicKey(topic)));
+      existingTopics.forEach((topicName) => {
+        if (!resetTopicKeys.has(normalizeTopicKey(topicName))) {
+          queuePendingCourseTopicDeletion(course, topicName);
+        }
+      });
       applyCourseTopicsUpdate(course, [], { allowQuestionTopicCollapse: true });
       toast(`Deleted ${existingTopics.length} topic(s) from ${course}.`);
       rerenderCoursesPage();
@@ -20583,6 +20968,7 @@ function wireAdmin() {
 
       let changed = false;
       if (nextTopic !== currentTopic) {
+        queuePendingCourseTopicDeletion(course, currentTopic);
         const nextTopics = [...topics];
         nextTopics[topicIndex] = nextTopic;
         applyCourseTopicsUpdate(course, nextTopics, { renamedFrom: currentTopic, renamedTo: nextTopic });
@@ -20612,6 +20998,7 @@ function wireAdmin() {
       toast("Each course must keep at least one topic.");
       return;
     }
+    queuePendingCourseTopicDeletion(course, currentTopic);
     applyCourseTopicsUpdate(
       course,
       topics.filter((_, idx) => idx !== topicIndex),
@@ -20811,11 +21198,11 @@ function wireAdmin() {
       return;
     }
 
-    const approvedProfileIds = new Set(dbResult.updatedIds || []);
-    const skippedProfileIds = new Set(dbResult.skippedIds || []);
-    let approvedCount = 0;
-    let skippedCount = 0;
-    users.forEach((entry) => {
+      const approvedProfileIds = new Set(dbResult.updatedIds || []);
+      const skippedProfileIds = new Set(dbResult.skippedIds || []);
+      let approvedCount = 0;
+      let skippedCount = 0;
+      users.forEach((entry) => {
       const entryId = String(entry.id || "").trim();
       if (
         entry.role !== "student"
@@ -20836,6 +21223,7 @@ function wireAdmin() {
       entry.isApproved = true;
       entry.approvedAt = nowISO();
       entry.approvedBy = current?.email || "admin";
+      entry.authAccessKnownActive = false;
       approvedCount += 1;
     });
     if (!approvedCount) {
@@ -21063,6 +21451,7 @@ function wireAdmin() {
           entry.isApproved = true;
           entry.approvedAt = nowISO();
           entry.approvedBy = current?.email || "admin";
+          entry.authAccessKnownActive = false;
           approvedCount += 1;
         });
         if (!approvedCount) {
@@ -21140,6 +21529,7 @@ function wireAdmin() {
         entry.isApproved = false;
         entry.approvedAt = null;
         entry.approvedBy = null;
+        entry.authAccessKnownActive = false;
         deactivatedCount += 1;
       });
 
@@ -21210,6 +21600,7 @@ function wireAdmin() {
       }
 
       const role = users[idx].role;
+      const previousApproved = Boolean(users[idx].isApproved);
       const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
       const previousSemester = role === "student" ? normalizeAcademicSemesterOrNull(users[idx].academicSemester) : null;
       let didEnrollmentTermChange = false;
@@ -21245,6 +21636,9 @@ function wireAdmin() {
         users[idx].isApproved = true;
         users[idx].approvedAt = users[idx].approvedAt || nowISO();
         users[idx].approvedBy = users[idx].approvedBy || "admin";
+      }
+      if (previousApproved !== Boolean(users[idx].isApproved)) {
+        users[idx].authAccessKnownActive = false;
       }
 
       save(STORAGE_KEYS.users, users);
@@ -21414,6 +21808,7 @@ function wireAdmin() {
         return;
       }
 
+      const previousApproved = Boolean(users[idx].isApproved);
       users[idx].role = users[idx].role === "admin" ? "student" : "admin";
       if (users[idx].role === "student") {
         users[idx].academicYear = sanitizeAcademicYear(users[idx].academicYear || 1);
@@ -21435,6 +21830,9 @@ function wireAdmin() {
         users[idx].isApproved = true;
         users[idx].approvedAt = nowISO();
         users[idx].approvedBy = current?.email || "admin";
+      }
+      if (previousApproved !== Boolean(users[idx].isApproved)) {
+        users[idx].authAccessKnownActive = false;
       }
       save(STORAGE_KEYS.users, users);
       try {
@@ -21486,6 +21884,7 @@ function wireAdmin() {
       users[idx].isApproved = nextApproved;
       users[idx].approvedAt = nextApproved ? nowISO() : null;
       users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
+      users[idx].authAccessKnownActive = false;
       save(STORAGE_KEYS.users, users);
       // Optimistic feedback: update the UI instantly so the admin can
       // approve the next user without waiting for the network round-trips.
@@ -22766,6 +23165,155 @@ function clearQuestionDeletions(externalIds) {
   savePendingQuestionDeletions(current.filter((id) => !removeSet.has(id)));
 }
 
+function normalizePendingCourseDeletionEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const courseName = String(entry.courseName || entry.course || "").trim();
+  const academicYear = normalizeAcademicYearOrNull(entry.academicYear ?? entry.year);
+  const academicSemester = normalizeAcademicSemesterOrNull(entry.academicSemester ?? entry.semester);
+  if (!courseName || academicYear === null || academicSemester === null) {
+    return null;
+  }
+  return {
+    courseName,
+    academicYear,
+    academicSemester,
+  };
+}
+
+function getPendingCourseDeletions() {
+  const raw = load(STORAGE_KEYS.pendingCourseDeletions, []);
+  const unique = new Map();
+  (Array.isArray(raw) ? raw : []).forEach((entry) => {
+    const normalized = normalizePendingCourseDeletionEntry(entry);
+    if (!normalized) {
+      return;
+    }
+    unique.set(
+      `${normalized.courseName}::${normalized.academicYear}::${normalized.academicSemester}`,
+      normalized,
+    );
+  });
+  return [...unique.values()];
+}
+
+function savePendingCourseDeletions(entries) {
+  const normalized = [];
+  const unique = new Set();
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const nextEntry = normalizePendingCourseDeletionEntry(entry);
+    if (!nextEntry) {
+      return;
+    }
+    const key = `${nextEntry.courseName}::${nextEntry.academicYear}::${nextEntry.academicSemester}`;
+    if (unique.has(key)) {
+      return;
+    }
+    unique.add(key);
+    normalized.push(nextEntry);
+  });
+  saveLocalOnly(STORAGE_KEYS.pendingCourseDeletions, normalized);
+}
+
+function queuePendingCourseDeletion(courseName, academicYear, academicSemester) {
+  const nextEntry = normalizePendingCourseDeletionEntry({ courseName, academicYear, academicSemester });
+  if (!nextEntry) {
+    return false;
+  }
+  savePendingCourseDeletions([...getPendingCourseDeletions(), nextEntry]);
+  return true;
+}
+
+function clearPendingCourseDeletions(entries) {
+  const removeKeys = new Set(
+    (Array.isArray(entries) ? entries : [])
+      .map((entry) => normalizePendingCourseDeletionEntry(entry))
+      .filter(Boolean)
+      .map((entry) => `${entry.courseName}::${entry.academicYear}::${entry.academicSemester}`),
+  );
+  if (!removeKeys.size) {
+    return;
+  }
+  savePendingCourseDeletions(
+    getPendingCourseDeletions().filter(
+      (entry) => !removeKeys.has(`${entry.courseName}::${entry.academicYear}::${entry.academicSemester}`),
+    ),
+  );
+}
+
+function normalizePendingCourseTopicDeletionEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const courseName = String(entry.courseName || entry.course || "").trim();
+  const topicName = String(entry.topicName || entry.topic || "").trim();
+  if (!courseName || !topicName) {
+    return null;
+  }
+  return {
+    courseName,
+    topicName,
+  };
+}
+
+function getPendingCourseTopicDeletions() {
+  const raw = load(STORAGE_KEYS.pendingCourseTopicDeletions, []);
+  const unique = new Map();
+  (Array.isArray(raw) ? raw : []).forEach((entry) => {
+    const normalized = normalizePendingCourseTopicDeletionEntry(entry);
+    if (!normalized) {
+      return;
+    }
+    unique.set(`${normalized.courseName}::${normalizeTopicKey(normalized.topicName)}`, normalized);
+  });
+  return [...unique.values()];
+}
+
+function savePendingCourseTopicDeletions(entries) {
+  const normalized = [];
+  const unique = new Set();
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const nextEntry = normalizePendingCourseTopicDeletionEntry(entry);
+    if (!nextEntry) {
+      return;
+    }
+    const key = `${nextEntry.courseName}::${normalizeTopicKey(nextEntry.topicName)}`;
+    if (unique.has(key)) {
+      return;
+    }
+    unique.add(key);
+    normalized.push(nextEntry);
+  });
+  saveLocalOnly(STORAGE_KEYS.pendingCourseTopicDeletions, normalized);
+}
+
+function queuePendingCourseTopicDeletion(courseName, topicName) {
+  const nextEntry = normalizePendingCourseTopicDeletionEntry({ courseName, topicName });
+  if (!nextEntry) {
+    return false;
+  }
+  savePendingCourseTopicDeletions([...getPendingCourseTopicDeletions(), nextEntry]);
+  return true;
+}
+
+function clearPendingCourseTopicDeletions(entries) {
+  const removeKeys = new Set(
+    (Array.isArray(entries) ? entries : [])
+      .map((entry) => normalizePendingCourseTopicDeletionEntry(entry))
+      .filter(Boolean)
+      .map((entry) => `${entry.courseName}::${normalizeTopicKey(entry.topicName)}`),
+  );
+  if (!removeKeys.size) {
+    return;
+  }
+  savePendingCourseTopicDeletions(
+    getPendingCourseTopicDeletions().filter(
+      (entry) => !removeKeys.has(`${entry.courseName}::${normalizeTopicKey(entry.topicName)}`),
+    ),
+  );
+}
+
 function getPendingAdminActionQueue() {
   return normalizePendingAdminActionQueue(load(STORAGE_KEYS.pendingAdminActions, []));
 }
@@ -22992,12 +23540,16 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
   const nextSignature = targetIds.join("|");
   if (!nextSignature) {
     adminApprovedAccessRepairSignature = "";
+    adminApprovedAccessRepairCompletedSignature = "";
     adminApprovedAccessRepairAttemptedAt = 0;
     return;
   }
 
   const nowTs = Date.now();
   if (adminApprovedAccessRepairInFlight) {
+    return;
+  }
+  if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
     return;
   }
   if (
@@ -23021,6 +23573,11 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
       if (repairResult.updatedIds.length) {
         setLocalUsersAuthAccessKnownActive(repairResult.updatedIds, true);
       }
+      if (!repairResult.failedIds.length) {
+        adminApprovedAccessRepairCompletedSignature = nextSignature;
+      } else if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
+        adminApprovedAccessRepairCompletedSignature = "";
+      }
       if (!repairResult.ok && repairResult.failedIds.length) {
         console.warn(
           `Approved user auth access repair failed for ${repairResult.failedIds.length} account(s).`,
@@ -23028,6 +23585,9 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
         );
       }
     } catch (error) {
+      if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
+        adminApprovedAccessRepairCompletedSignature = "";
+      }
       console.warn("Approved user auth access repair failed.", error?.message || error);
     } finally {
       adminApprovedAccessRepairInFlight = false;
@@ -24702,7 +25262,7 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
   }
 }
 
-async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
+async function setSupabaseAuthUserAccessBatchAsAdmin(targetAuthIds, approved) {
   const ids = [...new Set(
     (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
       .map((entry) => String(entry || "").trim())
@@ -24828,7 +25388,7 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ targetAuthIds: ids, approved }),
-          });
+          }, ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS);
           payload = await readJsonResponseSafe(response);
           details = await getResponseDetails(response, payload);
         } catch (serverError) {
@@ -24872,7 +25432,7 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ targetAuthIds: ids, approved }),
-        });
+        }, ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS);
         payload = await readJsonResponseSafe(response);
         details = await getResponseDetails(response, payload);
       }
@@ -24926,6 +25486,76 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
   } catch (error) {
     return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: error?.message || "Unexpected error during Supabase auth access update." };
   }
+}
+
+async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
+  const ids = [...new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  if (!ids.length) {
+    return { ok: true, updatedIds: [], notFoundIds: [], failedIds: [], message: "" };
+  }
+  if (typeof approved !== "boolean") {
+    return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, message: "approved must be a boolean value." };
+  }
+
+  const batches = splitIntoBatches(ids, ADMIN_ACCESS_SYNC_BATCH_SIZE);
+  if (batches.length === 1) {
+    return setSupabaseAuthUserAccessBatchAsAdmin(ids, approved);
+  }
+
+  const updatedIds = [];
+  const notFoundIds = [];
+  const failedIds = [];
+  let failureMessage = "";
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batchIds = batches[batchIndex];
+    const batchResult = await setSupabaseAuthUserAccessBatchAsAdmin(batchIds, approved);
+    const batchUpdatedIds = Array.isArray(batchResult?.updatedIds) ? batchResult.updatedIds : [];
+    const batchNotFoundIds = Array.isArray(batchResult?.notFoundIds) ? batchResult.notFoundIds : [];
+    const batchFailedIds = Array.isArray(batchResult?.failedIds) ? batchResult.failedIds : [];
+
+    updatedIds.push(...batchUpdatedIds);
+    notFoundIds.push(...batchNotFoundIds);
+    failedIds.push(...batchFailedIds);
+    if (!failureMessage && batchResult?.message) {
+      failureMessage = String(batchResult.message || "").trim();
+    }
+
+    const handledIds = new Set([
+      ...batchUpdatedIds,
+      ...batchNotFoundIds,
+      ...batchFailedIds,
+    ]);
+    batchIds.forEach((entry) => {
+      if (!handledIds.has(entry)) {
+        failedIds.push(entry);
+      }
+    });
+
+    if (!batchResult?.ok && shouldStopPendingAdminQueueOnFailure(batchResult?.message)) {
+      const remainingIds = batches.slice(batchIndex + 1).flat();
+      failedIds.push(...remainingIds);
+      break;
+    }
+  }
+
+  const uniqueUpdatedIds = [...new Set(updatedIds)].filter((entry) => ids.includes(entry));
+  const uniqueNotFoundIds = [...new Set(notFoundIds)].filter((entry) => ids.includes(entry) && !uniqueUpdatedIds.includes(entry));
+  const uniqueFailedIds = [...new Set(failedIds)].filter(
+    (entry) => ids.includes(entry) && !uniqueUpdatedIds.includes(entry) && !uniqueNotFoundIds.includes(entry),
+  );
+
+  return {
+    ok: !uniqueFailedIds.length,
+    updatedIds: uniqueUpdatedIds,
+    notFoundIds: uniqueNotFoundIds,
+    failedIds: uniqueFailedIds,
+    message: failureMessage || (!uniqueFailedIds.length ? "" : `${uniqueFailedIds.length} account(s) could not be updated.`),
+  };
 }
 
 function getSessionsForUser(userId) {
@@ -25103,6 +25733,16 @@ function createSessionFromQuestions(questions, config = {}) {
 }
 
 function getActiveSession(userId, preferredId = null) {
+  const allSessions = getSessionsForUser(userId).filter((session) => session.status === "in_progress");
+  if (!allSessions.length) {
+    return null;
+  }
+
+  const preferredSession = allSessions.find((session) => session.id === preferredId);
+  if (preferredSession) {
+    return preferredSession;
+  }
+
   const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "in_progress");
   if (!sessions.length) {
     return null;
@@ -26762,19 +27402,6 @@ function normalizeStudentEnrollmentProfile(user) {
   const normalizedAssigned = sanitizeCourseAssignments(source.assignedCourses || []);
   let year = normalizeAcademicYearOrNull(source.academicYear);
   let semester = normalizeAcademicSemesterOrNull(source.academicSemester);
-
-  // Only infer missing enrollment pieces. Once a year/semester is explicitly set, keep it authoritative.
-  if (year === null || semester === null) {
-    const inferred = inferAcademicTermFromCourses(normalizedAssigned);
-    if (year === null && semester === null) {
-      year = inferred.year;
-      semester = inferred.semester;
-    } else if (year === null && semester !== null && inferred.semester === semester) {
-      year = inferred.year;
-    } else if (semester === null && year !== null && inferred.year === year) {
-      semester = inferred.semester;
-    }
-  }
 
   if (year === null || semester === null) {
     return {
@@ -28661,7 +29288,7 @@ function save(key, value, options = {}) {
     scheduleRelationalWrite(key, value);
     if (key === STORAGE_KEYS.users) {
       syncUsersBackupState(value);
-    } else if (!RELATIONAL_SYNC_KEY_SET.has(key)) {
+    } else if (!RELATIONAL_SYNC_KEY_SET.has(key) || RELATIONAL_BACKUP_SYNC_KEY_SET.has(key)) {
       scheduleSupabaseWrite(key, value);
     }
   }

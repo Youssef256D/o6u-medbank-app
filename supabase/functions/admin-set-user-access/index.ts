@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
+const ACCESS_UPDATE_CONCURRENCY = 12;
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(String(value || "").trim());
@@ -62,6 +63,65 @@ function parseBearerToken(authHeader: string): string {
     return "";
   }
   return value.slice("bearer ".length).trim();
+}
+
+async function applyAuthAccessUpdatesInParallel(
+  adminClient: ReturnType<typeof createClient>,
+  targetAuthIds: string[],
+  approved: boolean,
+): Promise<{
+  updatedIds: string[];
+  notFoundIds: string[];
+  failedIds: string[];
+  firstFailureMessage: string;
+}> {
+  const updatedIds: string[] = [];
+  const notFoundIds: string[] = [];
+  const failedIds: string[] = [];
+  let firstFailureMessage = "";
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < targetAuthIds.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const targetAuthId = targetAuthIds[currentIndex];
+      try {
+        const { error: updateError } = await adminClient.auth.admin.updateUserById(targetAuthId, {
+          ban_duration: approved ? "none" : ACCOUNT_DEACTIVATION_BAN_DURATION,
+        });
+        if (!updateError) {
+          updatedIds.push(targetAuthId);
+          continue;
+        }
+        const details = String(updateError.message || "").trim();
+        if (/not found|user not found/i.test(details)) {
+          notFoundIds.push(targetAuthId);
+          continue;
+        }
+        failedIds.push(targetAuthId);
+        if (!firstFailureMessage) {
+          firstFailureMessage = details || "Supabase admin access update failed.";
+        }
+      } catch (error) {
+        failedIds.push(targetAuthId);
+        if (!firstFailureMessage) {
+          firstFailureMessage = String(error instanceof Error ? error.message : error || "").trim()
+            || "Unexpected error while updating user access.";
+        }
+      }
+    }
+  };
+
+  const workerCount = Math.min(ACCESS_UPDATE_CONCURRENCY, targetAuthIds.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return {
+    updatedIds,
+    notFoundIds,
+    failedIds,
+    firstFailureMessage,
+  };
 }
 
 Deno.serve(async (req) => {
@@ -138,29 +198,12 @@ Deno.serve(async (req) => {
     return jsonResponse(403, { ok: false, error: "Only admin users can update account access." }, requestOrigin);
   }
 
-  const updatedIds: string[] = [];
-  const notFoundIds: string[] = [];
-  const failedIds: string[] = [];
-  let firstFailureMessage = "";
-
-  for (const targetAuthId of targetAuthIds) {
-    const { error: updateError } = await adminClient.auth.admin.updateUserById(targetAuthId, {
-      ban_duration: approved ? "none" : ACCOUNT_DEACTIVATION_BAN_DURATION,
-    });
-    if (!updateError) {
-      updatedIds.push(targetAuthId);
-      continue;
-    }
-    const details = String(updateError.message || "").trim();
-    if (/not found|user not found/i.test(details)) {
-      notFoundIds.push(targetAuthId);
-      continue;
-    }
-    failedIds.push(targetAuthId);
-    if (!firstFailureMessage) {
-      firstFailureMessage = details || "Supabase admin access update failed.";
-    }
-  }
+  const {
+    updatedIds,
+    notFoundIds,
+    failedIds,
+    firstFailureMessage,
+  } = await applyAuthAccessUpdatesInParallel(adminClient, targetAuthIds, approved);
 
   if (!failedIds.length) {
     return jsonResponse(200, { ok: true, updatedIds, notFoundIds, failedIds: [] }, requestOrigin);
