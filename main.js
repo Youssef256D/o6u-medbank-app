@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.12").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.13").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -5706,13 +5706,38 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   const allCourses = [...CURRICULUM_COURSE_LIST];
+  const localIndexByKey = new Map();
+  usersBefore.forEach((entry, index) => {
+    getUserMergeMatchKeys(entry).forEach((key) => {
+      if (!key || localIndexByKey.has(key)) {
+        return;
+      }
+      localIndexByKey.set(key, index);
+    });
+  });
   const localByAuthId = new Map(
     usersBefore
       .map((entry) => [getUserProfileId(entry), entry])
       .filter(([profileId]) => Boolean(profileId)),
   );
+  const consumedLocalIndexes = new Set();
+  const matchedLocalUserByProfileId = new Map();
   const mapped = profileRows.map((profile) => {
-    const existing = localByAuthId.get(profile.id);
+    const remoteMatchCandidate = {
+      id: profile.id,
+      supabaseAuthId: profile.id,
+      email: String(profile.email || "").trim().toLowerCase(),
+    };
+    const matchingIndex = getUserMergeMatchKeys(remoteMatchCandidate)
+      .map((key) => localIndexByKey.get(key))
+      .find((index) => Number.isInteger(index));
+    const existing = Number.isInteger(matchingIndex) ? usersBefore[matchingIndex] : localByAuthId.get(profile.id);
+    if (Number.isInteger(matchingIndex)) {
+      consumedLocalIndexes.add(matchingIndex);
+    }
+    if (existing) {
+      matchedLocalUserByProfileId.set(String(profile.id || "").trim(), existing);
+    }
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
     const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
@@ -5860,9 +5885,12 @@ async function hydrateRelationalProfiles(currentUser) {
   const preservedRelational = preserveUnmappedRelationalUsers
     ? Array.from(preservedRelationalMap.values())
     : [];
-  const preservedLocalOnly = usersBefore.filter((entry) => !getUserProfileId(entry) && !isLegacyDemoUser(entry));
+  const preservedLocalOnly = usersBefore.filter(
+    (entry, index) => !consumedLocalIndexes.has(index) && !getUserProfileId(entry) && !isLegacyDemoUser(entry),
+  );
   mapped.forEach((entry) => {
-    const existing = localByAuthId.get(String(entry?.supabaseAuthId || "").trim());
+    const existing = matchedLocalUserByProfileId.get(String(entry?.supabaseAuthId || "").trim())
+      || localByAuthId.get(String(entry?.supabaseAuthId || "").trim());
     if (!existing) {
       return;
     }
@@ -25577,8 +25605,17 @@ function addKnownUserIds(targetSet, user) {
   return targetSet;
 }
 
+function addKnownUserMatchKeys(targetSet, user) {
+  if (!(targetSet instanceof Set) || !user || typeof user !== "object") {
+    return targetSet;
+  }
+  getUserMergeMatchKeys(user).forEach((key) => targetSet.add(key));
+  return targetSet;
+}
+
 function getSessionOwnerIdentitySet(userOrId) {
   const identities = new Set();
+  const matchKeys = new Set();
   const providedUser = userOrId && typeof userOrId === "object" ? userOrId : null;
   const normalizedUserId = providedUser
     ? String(providedUser?.id || "").trim()
@@ -25589,9 +25626,12 @@ function getSessionOwnerIdentitySet(userOrId) {
 
   if (normalizedUserId) {
     identities.add(normalizedUserId);
+    matchKeys.add(`id:${normalizedUserId.toLowerCase()}`);
+    matchKeys.add(`auth:${normalizedUserId.toLowerCase()}`);
   }
   if (providedUser) {
     addKnownUserIds(identities, providedUser);
+    addKnownUserMatchKeys(matchKeys, providedUser);
   }
 
   let expanded = true;
@@ -25600,16 +25640,20 @@ function getSessionOwnerIdentitySet(userOrId) {
     expanded = false;
     users.forEach((entry) => {
       const knownIds = addKnownUserIds(new Set(), entry);
-      if (!knownIds.size) {
+      const knownKeys = addKnownUserMatchKeys(new Set(), entry);
+      if (!knownIds.size && !knownKeys.size) {
         return;
       }
       const matchesKnownIdentity = [...knownIds].some((id) => identities.has(id));
-      if (!matchesKnownIdentity) {
+      const matchesKnownKey = [...knownKeys].some((key) => matchKeys.has(key));
+      if (!matchesKnownIdentity && !matchesKnownKey) {
         return;
       }
-      const sizeBefore = identities.size;
+      const identitySizeBefore = identities.size;
+      const keySizeBefore = matchKeys.size;
       knownIds.forEach((id) => identities.add(id));
-      if (identities.size !== sizeBefore) {
+      knownKeys.forEach((key) => matchKeys.add(key));
+      if (identities.size !== identitySizeBefore || matchKeys.size !== keySizeBefore) {
         expanded = true;
       }
     });
@@ -25618,12 +25662,19 @@ function getSessionOwnerIdentitySet(userOrId) {
   const currentUser = getCurrentUser();
   if (currentUser) {
     const currentIds = addKnownUserIds(new Set(), currentUser);
+    const currentKeys = addKnownUserMatchKeys(new Set(), currentUser);
     const activeAuthId = getActiveSupabaseAuthUserId();
     if (activeAuthId) {
       currentIds.add(activeAuthId);
+      currentKeys.add(`auth:${activeAuthId.toLowerCase()}`);
+      currentKeys.add(`id:${activeAuthId.toLowerCase()}`);
     }
-    if ([...currentIds].some((id) => identities.has(id))) {
+    if (
+      [...currentIds].some((id) => identities.has(id))
+      || [...currentKeys].some((key) => matchKeys.has(key))
+    ) {
       currentIds.forEach((id) => identities.add(id));
+      currentKeys.forEach((key) => matchKeys.add(key));
     }
   }
 
