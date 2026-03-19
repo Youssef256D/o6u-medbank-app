@@ -6560,6 +6560,9 @@ async function hydrateRelationalSessions(currentUser) {
   if (!client || !relationalSync.enabled || !isUuidValue(userProfileId)) {
     return;
   }
+  if (shouldDeferSessionHydrationOnActiveRoute(currentUser)) {
+    return;
+  }
 
   const allUsers = getUsers();
   const localQuestionByDbId = Object.fromEntries(
@@ -11448,6 +11451,9 @@ function shouldRenderAfterSessionHydration(user) {
 async function hydrateStudentSessionsFromCloud(user = null) {
   const currentUser = user || getCurrentUser();
   if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  if (shouldDeferSessionHydrationOnActiveRoute(currentUser)) {
     return false;
   }
   const profileId = getCurrentSessionProfileId(currentUser);
