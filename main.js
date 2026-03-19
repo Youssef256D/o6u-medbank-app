@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-05.12").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.12").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -15628,7 +15628,7 @@ function wireCreateTest() {
     }
 
     const session = getSessionById(sessionId);
-    if (!session || session.userId !== user.id || session.status !== "in_progress") {
+    if (!session || !doesSessionBelongToUser(session, user) || session.status !== "in_progress") {
       toast("Active block not found.");
       state.skipNextRouteAnimation = true;
       render();
@@ -25558,8 +25558,92 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
   };
 }
 
+function addKnownUserIds(targetSet, user) {
+  if (!(targetSet instanceof Set) || !user || typeof user !== "object") {
+    return targetSet;
+  }
+  const localId = String(user?.id || "").trim();
+  const profileId = String(getUserProfileId(user) || "").trim();
+  const authId = String(user?.supabaseAuthId || "").trim();
+  if (localId) {
+    targetSet.add(localId);
+  }
+  if (profileId) {
+    targetSet.add(profileId);
+  }
+  if (authId) {
+    targetSet.add(authId);
+  }
+  return targetSet;
+}
+
+function getSessionOwnerIdentitySet(userOrId) {
+  const identities = new Set();
+  const providedUser = userOrId && typeof userOrId === "object" ? userOrId : null;
+  const normalizedUserId = providedUser
+    ? String(providedUser?.id || "").trim()
+    : String(userOrId || "").trim();
+  if (!normalizedUserId && !providedUser) {
+    return identities;
+  }
+
+  if (normalizedUserId) {
+    identities.add(normalizedUserId);
+  }
+  if (providedUser) {
+    addKnownUserIds(identities, providedUser);
+  }
+
+  let expanded = true;
+  const users = getUsers();
+  while (expanded) {
+    expanded = false;
+    users.forEach((entry) => {
+      const knownIds = addKnownUserIds(new Set(), entry);
+      if (!knownIds.size) {
+        return;
+      }
+      const matchesKnownIdentity = [...knownIds].some((id) => identities.has(id));
+      if (!matchesKnownIdentity) {
+        return;
+      }
+      const sizeBefore = identities.size;
+      knownIds.forEach((id) => identities.add(id));
+      if (identities.size !== sizeBefore) {
+        expanded = true;
+      }
+    });
+  }
+
+  const currentUser = getCurrentUser();
+  if (currentUser) {
+    const currentIds = addKnownUserIds(new Set(), currentUser);
+    const activeAuthId = getActiveSupabaseAuthUserId();
+    if (activeAuthId) {
+      currentIds.add(activeAuthId);
+    }
+    if ([...currentIds].some((id) => identities.has(id))) {
+      currentIds.forEach((id) => identities.add(id));
+    }
+  }
+
+  return identities;
+}
+
+function doesSessionBelongToUser(session, userOrId) {
+  const ownerId = String(session?.userId || "").trim();
+  if (!ownerId) {
+    return false;
+  }
+  return getSessionOwnerIdentitySet(userOrId).has(ownerId);
+}
+
 function getSessionsForUser(userId) {
-  return getSessions().filter((session) => session.userId === userId);
+  const ownerIds = getSessionOwnerIdentitySet(userId);
+  if (!ownerIds.size) {
+    return [];
+  }
+  return getSessions().filter((session) => ownerIds.has(String(session?.userId || "").trim()));
 }
 
 function getAcademicTermScopedSessionsForUser(userId, userOverride = null, questionMetaById = null) {
