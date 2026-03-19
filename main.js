@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.14").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.15").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -86,6 +86,8 @@ const PRIVATE_ROUTE_SET = new Set([
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
+const inMemoryStorage = new Map();
+let storageFallbackWarned = false;
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -194,8 +196,6 @@ const PHONE_COUNTRY_RULES = [
 const PHONE_COUNTRY_CODES_DESC = PHONE_COUNTRY_RULES
   .map((rule) => rule.code)
   .sort((a, b) => b.length - a.length);
-const inMemoryStorage = new Map();
-let storageFallbackWarned = false;
 let activeTheme = THEME_LIGHT;
 
 const state = {
