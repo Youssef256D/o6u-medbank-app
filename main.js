@@ -39,11 +39,13 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.13").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-19.14").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
 const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
+const ACTIVE_SESSION_ID_KEY = "mcq_active_session_id";
+const ACTIVE_SESSION_ID_LOCAL_KEY = "mcq_active_session_id_local";
 const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
 const PASSWORD_RECOVERY_PENDING_KEY = "mcq_password_recovery_pending";
 const KNOWN_ROUTES = new Set([
@@ -1427,6 +1429,34 @@ function persistRouteState() {
   }
 
   syncRouteHash(route);
+}
+
+function readPersistedActiveSessionId() {
+  const sessionValue = String(readSessionStorageKey(ACTIVE_SESSION_ID_KEY) || "").trim();
+  if (sessionValue) {
+    return sessionValue;
+  }
+  return String(load(ACTIVE_SESSION_ID_LOCAL_KEY, "") || "").trim();
+}
+
+function persistActiveSessionId(sessionId) {
+  const normalizedId = String(sessionId || "").trim();
+  if (!normalizedId) {
+    clearPersistedActiveSessionId();
+    return;
+  }
+  writeSessionStorageKey(ACTIVE_SESSION_ID_KEY, normalizedId);
+  saveLocalOnly(ACTIVE_SESSION_ID_LOCAL_KEY, normalizedId);
+}
+
+function clearPersistedActiveSessionId(targetSessionId = "") {
+  const normalizedTargetId = String(targetSessionId || "").trim();
+  const persistedId = readPersistedActiveSessionId();
+  if (normalizedTargetId && persistedId && normalizedTargetId !== persistedId) {
+    return;
+  }
+  removeSessionStorageKey(ACTIVE_SESSION_ID_KEY);
+  removeStorageKey(ACTIVE_SESSION_ID_LOCAL_KEY);
 }
 
 async function init() {
@@ -16243,6 +16273,7 @@ function renderSession() {
   const session = getActiveSession(user.id, state.sessionId);
 
   if (!session) {
+    clearPersistedActiveSessionId();
     return `
       <section class="panel">
         <h2 class="title">No active session</h2>
@@ -16256,6 +16287,7 @@ function renderSession() {
   }
 
   state.sessionId = session.id;
+  persistActiveSessionId(session.id);
   normalizeSession(session);
 
   const questionsById = new Map(getQuestions().map((entry) => [entry.id, entry]));
@@ -17256,6 +17288,7 @@ function finalizeSession(sessionId) {
 
   incorrectMap[session.userId] = [...userQueue];
   save(STORAGE_KEYS.incorrectQueue, incorrectMap);
+  clearPersistedActiveSessionId(session.id);
 }
 
 function finalizeActiveSessionsForUser(userId) {
@@ -25864,26 +25897,46 @@ function createSessionFromQuestions(questions, config = {}) {
   const sessions = getSessions();
   sessions.push(session);
   save(STORAGE_KEYS.sessions, sessions);
+  persistActiveSessionId(session.id);
   return session;
 }
 
 function getActiveSession(userId, preferredId = null) {
+  const persistedPreferredId = String(preferredId || "").trim() || readPersistedActiveSessionId();
   const allSessions = getSessionsForUser(userId).filter((session) => session.status === "in_progress");
   if (!allSessions.length) {
+    const persistedSession = persistedPreferredId ? getSessionById(persistedPreferredId) : null;
+    if (persistedSession && String(persistedSession.status || "").trim() === "in_progress" && doesSessionBelongToUser(persistedSession, userId)) {
+      persistActiveSessionId(persistedSession.id);
+      return persistedSession;
+    }
+    clearPersistedActiveSessionId();
     return null;
   }
 
-  const preferredSession = allSessions.find((session) => session.id === preferredId);
+  const preferredSession = allSessions.find((session) => session.id === persistedPreferredId);
   if (preferredSession) {
+    persistActiveSessionId(preferredSession.id);
     return preferredSession;
   }
 
   const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "in_progress");
   if (!sessions.length) {
+    const persistedSession = persistedPreferredId ? getSessionById(persistedPreferredId) : null;
+    if (persistedSession && String(persistedSession.status || "").trim() === "in_progress" && doesSessionBelongToUser(persistedSession, userId)) {
+      persistActiveSessionId(persistedSession.id);
+      return persistedSession;
+    }
+    clearPersistedActiveSessionId();
     return null;
   }
 
-  return sessions.find((session) => session.id === preferredId) || sessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+  const resolvedSession = sessions.find((session) => session.id === persistedPreferredId)
+    || sessions.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+  if (resolvedSession) {
+    persistActiveSessionId(resolvedSession.id);
+  }
+  return resolvedSession || null;
 }
 
 function getNormalizedActiveSessionForDisplay(userId, preferredId = null) {
@@ -29432,11 +29485,18 @@ function save(key, value, options = {}) {
 
 function readStorageKey(key) {
   try {
-    return localStorage.getItem(key);
+    const localValue = localStorage.getItem(key);
+    if (localValue != null) {
+      return localValue;
+    }
   } catch (error) {
     warnStorageFallback(error);
-    return inMemoryStorage.get(key) ?? null;
   }
+  const sessionValue = readSessionStorageKey(key);
+  if (sessionValue != null) {
+    return sessionValue;
+  }
+  return inMemoryStorage.get(key) ?? null;
 }
 
 function writeStorageKey(key, value) {
@@ -29450,9 +29510,11 @@ function writeStorageKey(key, value) {
 
   try {
     localStorage.setItem(key, serialized);
+    writeSessionStorageKey(key, serialized);
     inMemoryStorage.delete(key);
   } catch (error) {
     warnStorageFallback(error);
+    writeSessionStorageKey(key, serialized);
     inMemoryStorage.set(key, serialized);
   }
   if (key === STORAGE_KEYS.questions) {
@@ -29462,6 +29524,7 @@ function writeStorageKey(key, value) {
 
 function removeStorageKey(key) {
   inMemoryStorage.delete(key);
+  removeSessionStorageKey(key);
   try {
     localStorage.removeItem(key);
   } catch (error) {
@@ -29563,6 +29626,7 @@ async function logout(options = {}) {
   resetSupabaseSyncRuntimeState();
   resetPendingAdminActionRuntimeState();
   resetPostAuthWarmupRuntimeState();
+  clearPersistedActiveSessionId();
   supabaseAuth.activeUserId = "";
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
