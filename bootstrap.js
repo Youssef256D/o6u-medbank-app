@@ -10,8 +10,13 @@
     "https://unpkg.com/@supabase/supabase-js@2",
   ];
   const SCRIPT_LOAD_TIMEOUT_MS = 45000;
+  const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
   const APP_BACKGROUND_PREFETCH_DELAY_MS = 1200;
   const BOOTSTRAP_STATUS_ID = "bootstrap-status";
+  const STATIC_CACHE_PREFIX = "o6u-medbank-static-v";
+  const APP_VERSION_SEEN_KEY = "mcq_app_version_seen";
+  const APP_VERSION_FORCED_KEY = "mcq_app_version_forced";
+  const BOOTSTRAP_RELOAD_TARGET_KEY = "mcq_bootstrap_reload_target";
   const KNOWN_ROUTES = new Set([
     "landing",
     "features",
@@ -357,6 +362,120 @@
       });
   }
 
+  function persistVersionMarker(storageKey, value) {
+    const normalized = String(value || "").trim();
+    if (!storageKey || !normalized) {
+      return;
+    }
+    const serialized = JSON.stringify(normalized);
+    try {
+      localStorage.setItem(storageKey, serialized);
+    } catch {
+      // Ignore storage failures and continue with the reload path.
+    }
+    try {
+      sessionStorage.setItem(storageKey, serialized);
+    } catch {
+      // Ignore storage failures and continue with the reload path.
+    }
+  }
+
+  function readSessionValue(storageKey) {
+    try {
+      return String(sessionStorage.getItem(storageKey) || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function clearSessionValue(storageKey) {
+    try {
+      sessionStorage.removeItem(storageKey);
+    } catch {
+      // Ignore storage cleanup failures.
+    }
+  }
+
+  async function fetchPublishedAppVersion() {
+    try {
+      const checkUrl = new URL(window.location.href);
+      checkUrl.searchParams.set("__app_version_check", String(Date.now()));
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timeoutHandle = controller
+        ? window.setTimeout(() => {
+          controller.abort();
+        }, APP_VERSION_FETCH_TIMEOUT_MS)
+        : null;
+      const response = await fetch(checkUrl.toString(), {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+        ...(controller ? { signal: controller.signal } : {}),
+      }).finally(() => {
+        if (timeoutHandle) {
+          window.clearTimeout(timeoutHandle);
+        }
+      });
+      if (!response.ok) {
+        return "";
+      }
+      const html = await response.text();
+      const match = html.match(/<meta\s+name=["']app-version["']\s+content=["']([^"']+)["']/i);
+      return String(match?.[1] || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  async function clearOutdatedStaticState() {
+    if ("serviceWorker" in navigator) {
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
+      } catch (error) {
+        console.warn("Could not clean existing service worker registrations.", error?.message || error);
+      }
+    }
+    if ("caches" in window) {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys
+            .filter((key) => key.startsWith(STATIC_CACHE_PREFIX))
+            .map((key) => caches.delete(key)),
+        );
+      } catch (error) {
+        console.warn("Could not clean existing static caches.", error?.message || error);
+      }
+    }
+  }
+
+  async function ensureLatestPublishedVersionOnStartup() {
+    const publishedVersion = await fetchPublishedAppVersion();
+    if (!publishedVersion || publishedVersion === appVersion) {
+      clearSessionValue(BOOTSTRAP_RELOAD_TARGET_KEY);
+      return false;
+    }
+
+    const attemptedVersion = readSessionValue(BOOTSTRAP_RELOAD_TARGET_KEY);
+    const currentUrl = new URL(window.location.href);
+    const currentTargetVersion = String(currentUrl.searchParams.get("appv") || "").trim();
+    if (attemptedVersion === publishedVersion && currentTargetVersion === publishedVersion) {
+      return false;
+    }
+
+    persistVersionMarker(APP_VERSION_SEEN_KEY, publishedVersion);
+    persistVersionMarker(APP_VERSION_FORCED_KEY, publishedVersion);
+    try {
+      sessionStorage.setItem(BOOTSTRAP_RELOAD_TARGET_KEY, publishedVersion);
+    } catch {
+      // Ignore storage failures and continue with the reload path.
+    }
+    await clearOutdatedStaticState();
+    currentUrl.searchParams.set("appv", publishedVersion);
+    window.location.replace(currentUrl.toString());
+    return true;
+  }
+
   function prefetchAppOnIntent() {
     if (appPrefetchTriggered) {
       return;
@@ -491,16 +610,26 @@
     { capture: true, passive: true },
   );
 
-  const persistedRoute = readPersistedRoute();
-  if (persistedRoute && persistedRoute !== "landing") {
-    ensureAppLoaded().catch(() => {});
-  } else if (hasOAuthCallbackParams() || isGoogleOAuthPendingState()) {
-    ensureAppLoaded().catch(() => {});
-  } else {
-    window.setTimeout(() => {
-      prefetchAppOnIntent();
-    }, APP_BACKGROUND_PREFETCH_DELAY_MS);
-  }
+  (async () => {
+    const redirectedToLatestVersion = await ensureLatestPublishedVersionOnStartup().catch((error) => {
+      console.warn("Startup version check failed.", error?.message || error);
+      return false;
+    });
+    if (redirectedToLatestVersion) {
+      return;
+    }
 
-  registerServiceWorker();
+    const persistedRoute = readPersistedRoute();
+    if (persistedRoute && persistedRoute !== "landing") {
+      ensureAppLoaded().catch(() => {});
+    } else if (hasOAuthCallbackParams() || isGoogleOAuthPendingState()) {
+      ensureAppLoaded().catch(() => {});
+    } else {
+      window.setTimeout(() => {
+        prefetchAppOnIntent();
+      }, APP_BACKGROUND_PREFETCH_DELAY_MS);
+    }
+
+    registerServiceWorker();
+  })();
 })();

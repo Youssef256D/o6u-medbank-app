@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.21").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.25").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -6020,18 +6020,28 @@ async function hydrateRelationalProfiles(currentUser) {
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
+    const hasProfileTerm = profileYear !== null && profileSemester !== null;
+    const hasEnrolledTerm = enrolledYear !== null && enrolledSemester !== null;
+    // Course enrollments are the authoritative term source when they disagree with
+    // the profile row. This prevents a stale profile semester/year from snapping
+    // the admin UI back to the previous term after a successful enrollment save.
+    const shouldPreferEnrolledTerm = hasEnrolledTerm && (
+      !hasProfileTerm
+      || profileYear !== enrolledYear
+      || profileSemester !== enrolledSemester
+    );
     // When local user data was recently modified but hasn't landed in the DB yet,
     // prefer the local (existing) values for year/semester/courses to prevent the
     // DB read from reverting the admin's change.
     let year = role === "student"
       ? (preferLocalOverDb && existingYear !== null
         ? existingYear
-        : (profileYear !== null ? profileYear : enrolledYear))
+        : (shouldPreferEnrolledTerm ? enrolledYear : (profileYear !== null ? profileYear : enrolledYear)))
       : null;
     let semester = role === "student"
       ? (preferLocalOverDb && existingSemester !== null
         ? existingSemester
-        : (profileSemester !== null ? profileSemester : enrolledSemester))
+        : (shouldPreferEnrolledTerm ? enrolledSemester : (profileSemester !== null ? profileSemester : enrolledSemester)))
       : null;
     let assignedCourses = role !== "student"
       ? [...allCourses]
@@ -6112,13 +6122,16 @@ async function hydrateRelationalProfiles(currentUser) {
         const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
         const missingYear = profileYear === null && mappedYear !== null;
         const missingSemester = profileSemester === null && mappedSemester !== null;
-        if (!canBackfillPhone && !missingYear && !missingSemester) {
+        const mismatchedTerm = mappedYear !== null
+          && mappedSemester !== null
+          && (profileYear !== mappedYear || profileSemester !== mappedSemester);
+        if (!canBackfillPhone && !missingYear && !missingSemester && !mismatchedTerm) {
           return null;
         }
         return {
           ...mappedEntry,
-          academicYear: missingYear ? mappedYear : profileYear,
-          academicSemester: missingSemester ? mappedSemester : profileSemester,
+          academicYear: (missingYear || mismatchedTerm) ? mappedYear : profileYear,
+          academicSemester: (missingSemester || mismatchedTerm) ? mappedSemester : profileSemester,
           phone: canBackfillPhone ? mappedPhone : profilePhone,
         };
       })
@@ -9405,7 +9418,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     const courses = await runRelationalQueryWithTimeout(
       client
         .from("courses")
-        .select("id,course_name")
+        .select("id,course_name,academic_year,academic_semester")
         .eq("is_active", true),
       "Course lookup timed out during enrollment sync.",
       ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
@@ -9415,6 +9428,24 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       (courses || [])
         .map((course) => [String(course?.course_name || "").trim(), String(course?.id || "").trim()])
         .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
+    );
+    const courseIdByScopedTerm = Object.fromEntries(
+      (courses || [])
+        .map((course) => {
+          const courseName = String(course?.course_name || "").trim();
+          const courseId = String(course?.id || "").trim();
+          const year = normalizeAcademicYearOrNull(course?.academic_year);
+          const semester = normalizeAcademicSemesterOrNull(course?.academic_semester);
+          return {
+            courseKey: `${courseName}::${year ?? ""}::${semester ?? ""}`,
+            courseId,
+            courseName,
+            year,
+            semester,
+          };
+        })
+        .filter((entry) => entry.courseName && entry.year !== null && entry.semester !== null && isUuidValue(entry.courseId))
+        .map((entry) => [entry.courseKey, entry.courseId]),
     );
 
     const desiredCourseIdsByUserId = new Map();
@@ -9432,7 +9463,14 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
         : sanitizeCourseAssignments(curriculumCourses.length ? curriculumCourses : (student.assignedCourses || []));
       const desiredCourseIds = new Set(
         selectedCourses
-          .map((courseName) => courseIdByName[String(courseName || "").trim()])
+          .map((courseName) => {
+            const normalizedCourseName = String(courseName || "").trim();
+            const scopedCourseKey = normalizedCourseName && enrollmentYear !== null && enrollmentSemester !== null
+              ? `${normalizedCourseName}::${enrollmentYear}::${enrollmentSemester}`
+              : "";
+            return (scopedCourseKey ? courseIdByScopedTerm[scopedCourseKey] : "")
+              || courseIdByName[normalizedCourseName];
+          })
           .filter((courseId) => isUuidValue(courseId)),
       );
       desiredCourseIdsByUserId.set(userId, desiredCourseIds);
@@ -14266,7 +14304,7 @@ function renderAuth(mode) {
               <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
             </div>
             <div class="form-row">
-              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
+              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
             </div>
             <div class="form-row">
               <label>Year
@@ -14332,7 +14370,7 @@ function renderAuth(mode) {
             <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
           </div>
           <div class="form-row">
-            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
+            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
           </div>
           <div class="form-row">
             <label>Invite code (optional) <input name="inviteCode" autocomplete="one-time-code" /></label>
@@ -15160,7 +15198,7 @@ function renderCompleteProfile() {
       <h2 class="title">Complete Your Account</h2>
       <p class="subtle">Add your phone number, choose your year and semester, and pick one or more courses first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
+        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" /></label>
         <div class="form-row">
           <label>Year
             <select name="academicYear" id="complete-profile-year" required aria-required="true">
@@ -19201,7 +19239,6 @@ function renderAdmin() {
                   inputmode="tel"
                   autocomplete="off"
                   maxlength="20"
-                  pattern="[0-9+() -]{0,20}"
                   placeholder="+20 10 0000 0000"
                   aria-label="Phone number for ${escapeHtml(String(account.name || account.email || "user"))}"
                 />
@@ -19298,7 +19335,7 @@ function renderAdmin() {
                 </label>
               </div>
               <div class="form-row">
-                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" pattern="[0-9+() -]{0,20}" placeholder="+20 10 0000 0000" /></label>
+                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" placeholder="+20 10 0000 0000" /></label>
                 <label>Year
                   <select name="academicYear">
                     <option value="1">Year 1</option>
