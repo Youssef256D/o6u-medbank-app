@@ -2771,14 +2771,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     )
     : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
-  const metadataPhone = String(
-    authUser?.user_metadata?.phone
-    || authUser?.user_metadata?.phone_number
-    || "",
-  ).trim();
-  const profilePhone = String(profile.phone || "").trim();
-  const fallbackPhone = String(localUser?.phone || "").trim();
-  const resolvedPhone = profilePhone || (preferLocalOverDbForCurrentUser ? (fallbackPhone || metadataPhone) : "");
   const metadataAssignedCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
     ? authUser.user_metadata.assigned_courses
     : (Array.isArray(authUser?.user_metadata?.assignedCourses) ? authUser.user_metadata.assignedCourses : []);
@@ -2796,13 +2788,24 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
+  const profilePhoneValidation = validateAndNormalizePhoneNumber(String(profile.phone || "").trim());
+  const normalizedProfilePhone = profilePhoneValidation.ok ? profilePhoneValidation.number : "";
+  const fallbackPhoneValidation = validateAndNormalizePhoneNumber(String(localUser?.phone || "").trim());
+  const normalizedFallbackPhone = fallbackPhoneValidation.ok ? fallbackPhoneValidation.number : "";
+  const metadataPhoneValidation = validateAndNormalizePhoneNumber(String(
+    authUser?.user_metadata?.phone
+    || authUser?.user_metadata?.phone_number
+    || "",
+  ).trim());
+  const normalizedMetadataPhone = metadataPhoneValidation.ok ? metadataPhoneValidation.number : "";
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
     role,
-    phone: resolvedPhone,
+    phone: normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone,
     academicYear: year,
     academicSemester: semester,
     assignedCourses: resolvedAssignedCourses,
   });
+  const resolvedPhone = normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone;
   const resolvedApproval = role === "admin"
     ? true
     : (
@@ -2851,7 +2854,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   });
 
   const shouldBackfillProfilePhone = role === "student"
-    && profilePhone !== resolvedPhone
+    && normalizedProfilePhone !== resolvedPhone
     && Boolean(resolvedPhone);
   if (shouldBackfillProfilePhone) {
     client
@@ -5953,9 +5956,11 @@ async function hydrateRelationalProfiles(currentUser) {
   }
 
   let enrollmentCourseMap = {};
+  let enrollmentTermMap = {};
   try {
     const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
     enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
+    enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
   } catch (enrollmentError) {
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
@@ -6001,7 +6006,14 @@ async function hydrateRelationalProfiles(currentUser) {
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
     const profilePhone = String(profile.phone || "").trim();
     const existingPhone = String(existing?.phone || "").trim();
-    const resolvedPhone = profilePhone || (preferLocalOverDb ? existingPhone : "");
+    const enrolledTerm = role === "student" ? enrollmentTermMap[profile.id] || null : null;
+    const enrolledYear = normalizeAcademicYearOrNull(enrolledTerm?.year);
+    const enrolledSemester = normalizeAcademicSemesterOrNull(enrolledTerm?.semester);
+    const profilePhoneValidation = validateAndNormalizePhoneNumber(profilePhone);
+    const normalizedProfilePhone = profilePhoneValidation.ok ? profilePhoneValidation.number : "";
+    const existingPhoneValidation = validateAndNormalizePhoneNumber(existingPhone);
+    const normalizedExistingPhone = existingPhoneValidation.ok ? existingPhoneValidation.number : "";
+    const resolvedPhone = normalizedProfilePhone || normalizedExistingPhone;
     const existingAssignedCourses = role === "student"
       ? sanitizeCourseAssignments(existing?.assignedCourses || [])
       : [];
@@ -6014,12 +6026,12 @@ async function hydrateRelationalProfiles(currentUser) {
     let year = role === "student"
       ? (preferLocalOverDb && existingYear !== null
         ? existingYear
-        : profileYear)
+        : (profileYear !== null ? profileYear : enrolledYear))
       : null;
     let semester = role === "student"
       ? (preferLocalOverDb && existingSemester !== null
         ? existingSemester
-        : profileSemester)
+        : (profileSemester !== null ? profileSemester : enrolledSemester))
       : null;
     let assignedCourses = role !== "student"
       ? [...allCourses]
@@ -6096,13 +6108,17 @@ async function hydrateRelationalProfiles(currentUser) {
         const mappedPhone = String(mappedEntry.phone || "").trim();
         const mappedPhoneValid = validateAndNormalizePhoneNumber(mappedPhone).ok;
         const canBackfillPhone = mappedPhoneValid;
-        if (!canBackfillPhone) {
+        const mappedYear = normalizeAcademicYearOrNull(mappedEntry.academicYear);
+        const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
+        const missingYear = profileYear === null && mappedYear !== null;
+        const missingSemester = profileSemester === null && mappedSemester !== null;
+        if (!canBackfillPhone && !missingYear && !missingSemester) {
           return null;
         }
         return {
           ...mappedEntry,
-          academicYear: profileYear,
-          academicSemester: profileSemester,
+          academicYear: missingYear ? mappedYear : profileYear,
+          academicSemester: missingSemester ? mappedSemester : profileSemester,
           phone: canBackfillPhone ? mappedPhone : profilePhone,
         };
       })
@@ -10762,6 +10778,10 @@ async function resumeDeferredAppWork(options = {}) {
     return false;
   }
 
+  if (await shouldForceRefreshAfterSignIn()) {
+    return true;
+  }
+
   let activeUser = getCurrentUser();
   if (activeUser && !hasActiveSupabaseSessionForUser(activeUser)) {
     ensureSupabaseCloudReconnect(activeUser, {
@@ -12165,6 +12185,18 @@ function ensureContentRealtimeSubscription(user = null) {
       scheduleContentRealtimeHydration();
     },
   );
+  channel.on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "profiles",
+      filter: `id=eq.${profileId}`,
+    },
+    () => {
+      scheduleContentRealtimeHydration();
+    },
+  );
 
   channel.subscribe((status) => {
     contentRealtimeSubscribed = status === "SUBSCRIBED";
@@ -13167,6 +13199,9 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     }
     if (completedFullSync) {
       state.studentDataLastFullSyncAt = now;
+    }
+    if (!hasPendingUserWrites && !needsFullSync) {
+      await hydrateRelationalProfiles(user);
     }
     // Run notifications and Supabase state keys in parallel — they are independent.
     await Promise.all([
@@ -14231,7 +14266,7 @@ function renderAuth(mode) {
               <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
             </div>
             <div class="form-row">
-              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
             </div>
             <div class="form-row">
               <label>Year
@@ -14297,7 +14332,7 @@ function renderAuth(mode) {
             <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
           </div>
           <div class="form-row">
-            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
           </div>
           <div class="form-row">
             <label>Invite code (optional) <input name="inviteCode" autocomplete="one-time-code" /></label>
@@ -15125,7 +15160,7 @@ function renderCompleteProfile() {
       <h2 class="title">Complete Your Account</h2>
       <p class="subtle">Add your phone number, choose your year and semester, and pick one or more courses first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+() -]{8,20}" /></label>
         <div class="form-row">
           <label>Year
             <select name="academicYear" id="complete-profile-year" required aria-required="true">
@@ -19166,7 +19201,7 @@ function renderAdmin() {
                   inputmode="tel"
                   autocomplete="off"
                   maxlength="20"
-                  pattern="[0-9+()\\-\\s]{0,20}"
+                  pattern="[0-9+() -]{0,20}"
                   placeholder="+20 10 0000 0000"
                   aria-label="Phone number for ${escapeHtml(String(account.name || account.email || "user"))}"
                 />
@@ -19263,7 +19298,7 @@ function renderAdmin() {
                 </label>
               </div>
               <div class="form-row">
-                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" pattern="[0-9+()\\-\\s]{0,20}" placeholder="+20 10 0000 0000" /></label>
+                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" pattern="[0-9+() -]{0,20}" placeholder="+20 10 0000 0000" /></label>
                 <label>Year
                   <select name="academicYear">
                     <option value="1">Year 1</option>
@@ -22589,7 +22624,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
-      await saveUserEnrollmentFromRow(row, { mode: "manual" });
+      await saveUserEnrollmentFromRow(row, { mode: "manual", syncNow: true });
     });
   });
 

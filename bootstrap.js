@@ -371,9 +371,18 @@
     if (!("serviceWorker" in navigator)) {
       return;
     }
+    let reloadedForControllerChange = false;
     window.addEventListener("load", () => {
       const currentSwUrl = new URL(`./sw.js${versionSuffix}`, window.location.href).href;
       const currentCacheName = `o6u-medbank-static-v${appVersion.replaceAll(".", "-") || "runtime"}`;
+
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloadedForControllerChange) {
+          return;
+        }
+        reloadedForControllerChange = true;
+        window.location.reload();
+      });
 
       navigator.serviceWorker.getRegistrations()
         .then((registrations) => Promise.all(registrations.map(async (registration) => {
