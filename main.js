@@ -3457,8 +3457,8 @@ function isStudentProfileCompletionRequired(user) {
     return false;
   }
   const missingCoreProfile = !hasCompleteStudentProfile(user);
-  const missingGoogleCourseSelection = getAuthProviderFromUser(user) === "google" && !hasSelectedStudentCourses(user);
-  return missingCoreProfile || missingGoogleCourseSelection;
+  const missingCourseSelection = !hasSelectedStudentCourses(user);
+  return missingCoreProfile || missingCourseSelection;
 }
 
 function getStudentProfileCompletionRoute(user) {
@@ -3466,6 +3466,21 @@ function getStudentProfileCompletionRoute(user) {
     return "";
   }
   return getAuthProviderFromUser(user) === "google" ? "signup" : "complete-profile";
+}
+
+function isStudentOnboardingRoute(route = null, user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  const normalizedRoute = String(route == null ? state.route : route || "").trim().toLowerCase();
+  if (normalizedRoute === "complete-profile") {
+    return isStudentProfileCompletionRequired(currentUser);
+  }
+  if (normalizedRoute === "signup") {
+    return isGoogleSignupCompletionFlow(currentUser);
+  }
+  return false;
 }
 
 function shouldDeferStudentApprovalEnforcement(user) {
@@ -4153,6 +4168,9 @@ function schedulePostAuthDataWarmup(user) {
     if (currentUser.role === "admin" && String(state.adminPage || "").trim() !== adminPageBefore) {
       return true;
     }
+    if (currentUser.role === "student" && isStudentOnboardingRoute(routeBefore, latestUser)) {
+      return true;
+    }
     state.skipNextRouteAnimation = true;
     render();
     return true;
@@ -4163,6 +4181,103 @@ function schedulePostAuthDataWarmup(user) {
   });
 
   return postAuthWarmupRuntime.promise;
+}
+
+const STUDENT_ONBOARDING_DRAFT_STORAGE_KEY = "o6u_student_onboarding_draft";
+
+function getStudentOnboardingDraftScope(user = null, route = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return "";
+  }
+  const normalizedRoute = String(route == null ? state.route : route || "").trim().toLowerCase();
+  if (!["signup", "complete-profile"].includes(normalizedRoute)) {
+    return "";
+  }
+  if (normalizedRoute === "signup" && getAuthProviderFromUser(currentUser) !== "google") {
+    return "";
+  }
+  const scopeId = String(getUserProfileId(currentUser) || currentUser.id || "").trim();
+  if (!scopeId) {
+    return "";
+  }
+  return `${normalizedRoute}:${scopeId}`;
+}
+
+function readStudentOnboardingDraftMap() {
+  const raw = readSessionStorageKey(STUDENT_ONBOARDING_DRAFT_STORAGE_KEY);
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStudentOnboardingDraftMap(drafts) {
+  const nextDrafts = drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
+  if (!Object.keys(nextDrafts).length) {
+    removeSessionStorageKey(STUDENT_ONBOARDING_DRAFT_STORAGE_KEY);
+    return;
+  }
+  try {
+    writeSessionStorageKey(STUDENT_ONBOARDING_DRAFT_STORAGE_KEY, JSON.stringify(nextDrafts));
+  } catch {
+    removeSessionStorageKey(STUDENT_ONBOARDING_DRAFT_STORAGE_KEY);
+  }
+}
+
+function loadStudentOnboardingDraft(user = null, route = null) {
+  const scope = getStudentOnboardingDraftScope(user, route);
+  if (!scope) {
+    return null;
+  }
+  const draft = readStudentOnboardingDraftMap()[scope];
+  return draft && typeof draft === "object" && !Array.isArray(draft) ? draft : null;
+}
+
+function saveStudentOnboardingDraft(nextDraft, user = null, route = null) {
+  const scope = getStudentOnboardingDraftScope(user, route);
+  if (!scope || !nextDraft || typeof nextDraft !== "object") {
+    return;
+  }
+  const drafts = readStudentOnboardingDraftMap();
+  const previous = drafts[scope] && typeof drafts[scope] === "object" && !Array.isArray(drafts[scope])
+    ? drafts[scope]
+    : {};
+  const merged = { ...previous };
+  if (Object.prototype.hasOwnProperty.call(nextDraft, "phone")) {
+    merged.phone = String(nextDraft.phone || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(nextDraft, "academicYear")) {
+    merged.academicYear = normalizeAcademicYearOrNull(nextDraft.academicYear);
+  }
+  if (Object.prototype.hasOwnProperty.call(nextDraft, "academicSemester")) {
+    merged.academicSemester = normalizeAcademicSemesterOrNull(nextDraft.academicSemester);
+  }
+  if (Object.prototype.hasOwnProperty.call(nextDraft, "selectedCourses")) {
+    merged.selectedCourses = sanitizeCourseAssignments(
+      Array.isArray(nextDraft.selectedCourses) ? nextDraft.selectedCourses : [],
+    );
+  }
+  drafts[scope] = merged;
+  writeStudentOnboardingDraftMap(drafts);
+}
+
+function clearStudentOnboardingDraft(user = null, route = null) {
+  const scope = getStudentOnboardingDraftScope(user, route);
+  if (!scope) {
+    return;
+  }
+  const drafts = readStudentOnboardingDraftMap();
+  if (!Object.prototype.hasOwnProperty.call(drafts, scope)) {
+    return;
+  }
+  delete drafts[scope];
+  writeStudentOnboardingDraftMap(drafts);
 }
 
 function getPendingCloudWriteCount() {
@@ -11194,7 +11309,12 @@ function clearStudentBackgroundRefreshPolling() {
 function ensureStudentBackgroundRefreshPolling(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(profileId)
+    || isStudentOnboardingRoute(state.route, currentUser)
+  ) {
     clearStudentBackgroundRefreshPolling();
     return;
   }
@@ -11466,6 +11586,7 @@ function ensureStudentForceRefreshPolling(user = null) {
     !currentUser
     || currentUser.role !== "student"
     || !isUuidValue(profileId)
+    || isStudentOnboardingRoute(state.route, currentUser)
     || !supabaseSync.enabled
     || !supabaseSync.client
     || !supabaseSync.tableName
@@ -12011,7 +12132,12 @@ function ensureContentRealtimeSubscription(user = null) {
   const currentUser = user || getCurrentUser();
   const client = getSupabaseAuthClient();
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+  if (
+    !client
+    || currentUser?.role !== "student"
+    || !isUuidValue(profileId)
+    || isStudentOnboardingRoute(state.route, currentUser)
+  ) {
     clearContentRealtimeSubscription();
     return;
   }
@@ -12902,6 +13028,9 @@ function shouldRefreshStudentData(user) {
   if (!user || user.role !== "student") {
     return false;
   }
+  if (isStudentOnboardingRoute(state.route, user)) {
+    return false;
+  }
   if (isPostAuthDataWarmupActive(user)) {
     return false;
   }
@@ -12982,6 +13111,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
 
   let shouldRerenderRoute = "";
   const routeBefore = state.route;
+  const shouldPreserveOnboardingDraft = isStudentOnboardingRoute(routeBefore, user);
   state.studentDataRefreshing = true;
   try {
     const ready = await ensureRelationalSyncReady({ force });
@@ -12996,6 +13126,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       }
       if (
         rerender
+        && !shouldPreserveOnboardingDraft
         && routeBefore !== "session"
         && routeBefore !== "review"
         && state.route === routeBefore
@@ -13058,6 +13189,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     state.studentDataLastSyncAt = Date.now();
     if (
       rerender
+      && !shouldPreserveOnboardingDraft
       && routeBefore !== "session"
       && routeBefore !== "review"
       && state.route === routeBefore
@@ -13074,6 +13206,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     if (fallbackRefreshed) {
       if (
         rerender
+        && !shouldPreserveOnboardingDraft
         && (
           routeBefore === "dashboard"
           || routeBefore === "analytics"
@@ -14062,14 +14195,30 @@ function renderAuth(mode) {
   if (mode === "signup") {
     const currentUser = getCurrentUser();
     const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(currentUser);
-    const defaultYear = isGoogleOnboardingFlow ? null : normalizeAcademicYearOrNull(currentUser?.academicYear);
-    const defaultSemester = isGoogleOnboardingFlow ? null : normalizeAcademicSemesterOrNull(currentUser?.academicSemester);
+    const onboardingDraft = isGoogleOnboardingFlow ? loadStudentOnboardingDraft(currentUser, "signup") : null;
+    const draftYear = normalizeAcademicYearOrNull(onboardingDraft?.academicYear);
+    const draftSemester = normalizeAcademicSemesterOrNull(onboardingDraft?.academicSemester);
+    const defaultYear = draftYear !== null
+      ? draftYear
+      : (isGoogleOnboardingFlow ? null : normalizeAcademicYearOrNull(currentUser?.academicYear));
+    const defaultSemester = draftSemester !== null
+      ? draftSemester
+      : (isGoogleOnboardingFlow ? null : normalizeAcademicSemesterOrNull(currentUser?.academicSemester));
     const hasEnrollmentDefaults = defaultYear !== null && defaultSemester !== null;
     const defaultCourses = hasEnrollmentDefaults ? getCurriculumCourses(defaultYear, defaultSemester) : [];
+    const hasDraftSelectedCourses = Array.isArray(onboardingDraft?.selectedCourses);
+    const draftSelectedCourses = hasDraftSelectedCourses
+      ? sanitizeCourseAssignments(onboardingDraft.selectedCourses).filter((course) => defaultCourses.includes(course))
+      : [];
     const preferredCourses = Array.isArray(currentUser?.assignedCourses)
       ? currentUser.assignedCourses.filter((course) => defaultCourses.includes(course))
       : [];
-    const initiallyCheckedCourses = preferredCourses.length ? preferredCourses : defaultCourses;
+    const initiallyCheckedCourses = hasDraftSelectedCourses
+      ? draftSelectedCourses
+      : (preferredCourses.length ? preferredCourses : defaultCourses);
+    const defaultPhone = typeof onboardingDraft?.phone === "string"
+      ? onboardingDraft.phone
+      : String(currentUser?.phone || "");
 
     if (isGoogleOnboardingFlow) {
       return `
@@ -14082,7 +14231,7 @@ function renderAuth(mode) {
               <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
             </div>
             <div class="form-row">
-              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(currentUser?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
             </div>
             <div class="form-row">
               <label>Year
@@ -14408,6 +14557,7 @@ function wireAuth(mode) {
     const onboardingUser = getCurrentUser();
     const isGoogleOnboardingFlow = isGoogleSignupCompletionFlow(onboardingUser);
     const googleButton = document.getElementById("signup-google-btn");
+    const phoneInput = form.querySelector("input[name='phone']");
     const yearSelect = document.getElementById("signup-academic-year");
     const semesterSelect = document.getElementById("signup-academic-semester");
     const courseOptionsEl = document.getElementById("signup-course-options");
@@ -14447,7 +14597,19 @@ function wireAuth(mode) {
     const getSelectedSignupCourses = () =>
       Array.from(form?.querySelectorAll("input[name='signupCourses']:checked") || []).map((input) => input.value);
 
-    const renderSignupCourseOptions = (preferred = []) => {
+    const persistSignupDraft = () => {
+      if (!isGoogleOnboardingFlow) {
+        return;
+      }
+      saveStudentOnboardingDraft({
+        phone: phoneInput?.value || "",
+        academicYear: yearSelect?.value,
+        academicSemester: semesterSelect?.value,
+        selectedCourses: getSelectedSignupCourses(),
+      }, onboardingUser, "signup");
+    };
+
+    const renderSignupCourseOptions = (preferred = [], options = {}) => {
       if (!courseOptionsEl) return;
       const year = normalizeAcademicYearOrNull(yearSelect?.value);
       const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
@@ -14456,11 +14618,12 @@ function wireAuth(mode) {
         if (courseHelpEl) {
           courseHelpEl.textContent = "Choose year and semester first.";
         }
+        persistSignupDraft();
         return;
       }
       const courses = getCurriculumCourses(year, semester);
       const selectedSet = new Set(preferred.filter((course) => courses.includes(course)));
-      const selectAllByDefault = selectedSet.size === 0;
+      const selectAllByDefault = !options.explicitSelection && selectedSet.size === 0;
 
       courseOptionsEl.innerHTML = courses
         .map(
@@ -14478,31 +14641,45 @@ function wireAuth(mode) {
           ? `${courses.length} course(s) available for this year/semester. Choose one or more.`
           : "No courses available for this year/semester.";
       }
+      persistSignupDraft();
     };
 
+    phoneInput?.addEventListener("input", persistSignupDraft);
     yearSelect?.addEventListener("change", () => {
-      renderSignupCourseOptions(getSelectedSignupCourses());
+      const preferredCourses = getSelectedSignupCourses();
+      const hasExplicitSelection = Boolean(courseOptionsEl?.querySelector("input[name='signupCourses']"));
+      renderSignupCourseOptions(preferredCourses, { explicitSelection: hasExplicitSelection });
     });
     semesterSelect?.addEventListener("change", () => {
-      renderSignupCourseOptions(getSelectedSignupCourses());
+      const preferredCourses = getSelectedSignupCourses();
+      const hasExplicitSelection = Boolean(courseOptionsEl?.querySelector("input[name='signupCourses']"));
+      renderSignupCourseOptions(preferredCourses, { explicitSelection: hasExplicitSelection });
     });
+    courseOptionsEl?.addEventListener("change", persistSignupDraft);
 
     selectAllCoursesBtn?.addEventListener("click", () => {
       courseOptionsEl?.querySelectorAll("input[name='signupCourses']").forEach((input) => {
         input.checked = true;
       });
+      persistSignupDraft();
     });
 
     clearCoursesBtn?.addEventListener("click", () => {
       courseOptionsEl?.querySelectorAll("input[name='signupCourses']").forEach((input) => {
         input.checked = false;
       });
+      persistSignupDraft();
     });
 
-    const preferredCourses = isGoogleOnboardingFlow && Array.isArray(onboardingUser?.assignedCourses)
-      ? onboardingUser.assignedCourses
-      : [];
-    renderSignupCourseOptions(preferredCourses);
+    const savedDraft = isGoogleOnboardingFlow ? loadStudentOnboardingDraft(onboardingUser, "signup") : null;
+    const preferredCourses = Array.isArray(savedDraft?.selectedCourses)
+      ? sanitizeCourseAssignments(savedDraft.selectedCourses)
+      : (isGoogleOnboardingFlow && Array.isArray(onboardingUser?.assignedCourses)
+        ? onboardingUser.assignedCourses
+        : []);
+    renderSignupCourseOptions(preferredCourses, {
+      explicitSelection: Array.isArray(savedDraft?.selectedCourses),
+    });
 
     form?.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -14602,6 +14779,7 @@ function wireAuth(mode) {
             }
           }
           await flushPendingSyncNow();
+          clearStudentOnboardingDraft(users[idx], "signup");
 
           if (autoApproved) {
             save(STORAGE_KEYS.currentUserId, users[idx].id);
@@ -14919,17 +15097,35 @@ function wirePasswordReset() {
 
 function renderCompleteProfile() {
   const user = getCurrentUser();
+  const onboardingDraft = loadStudentOnboardingDraft(user, "complete-profile");
   const shouldForceEmptyEnrollment = isGoogleOnboardingRequired(user);
-  const year = shouldForceEmptyEnrollment ? null : normalizeAcademicYearOrNull(user?.academicYear);
-  const semester = shouldForceEmptyEnrollment ? null : normalizeAcademicSemesterOrNull(user?.academicSemester);
+  const draftYear = normalizeAcademicYearOrNull(onboardingDraft?.academicYear);
+  const draftSemester = normalizeAcademicSemesterOrNull(onboardingDraft?.academicSemester);
+  const year = draftYear !== null
+    ? draftYear
+    : (shouldForceEmptyEnrollment ? null : normalizeAcademicYearOrNull(user?.academicYear));
+  const semester = draftSemester !== null
+    ? draftSemester
+    : (shouldForceEmptyEnrollment ? null : normalizeAcademicSemesterOrNull(user?.academicSemester));
   const courses = year !== null && semester !== null ? getCurriculumCourses(year, semester) : [];
+  const hasDraftSelectedCourses = Array.isArray(onboardingDraft?.selectedCourses);
+  const draftSelectedCourses = hasDraftSelectedCourses
+    ? sanitizeCourseAssignments(onboardingDraft.selectedCourses).filter((course) => courses.includes(course))
+    : [];
+  const existingSelectedCourses = sanitizeCourseAssignments(user?.assignedCourses || []).filter((course) => courses.includes(course));
+  const initiallyCheckedCourses = hasDraftSelectedCourses
+    ? draftSelectedCourses
+    : (existingSelectedCourses.length ? existingSelectedCourses : courses);
+  const defaultPhone = typeof onboardingDraft?.phone === "string"
+    ? onboardingDraft.phone
+    : String(user?.phone || "");
 
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Add your phone number and enrollment details first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+      <p class="subtle">Add your phone number, choose your year and semester, and pick one or more courses first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
+        <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
         <div class="form-row">
           <label>Year
             <select name="academicYear" id="complete-profile-year" required aria-required="true">
@@ -14949,7 +15145,23 @@ function renderCompleteProfile() {
         </div>
         <div class="signup-course-field">
           <p class="signup-course-label">Courses for selected year/semester</p>
-          <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.length ? courses.join(", ") : "Choose year and semester first.")}</small>
+          <div id="complete-profile-course-options" class="signup-course-grid">
+            ${courses
+              .map(
+                (course) => `
+                  <label class="admin-course-check">
+                    <input type="checkbox" name="completeProfileCourses" value="${escapeHtml(course)}" ${initiallyCheckedCourses.includes(course) ? "checked" : ""} />
+                    <span>${escapeHtml(course)}</span>
+                  </label>
+                `,
+              )
+              .join("")}
+          </div>
+          <small id="complete-profile-course-help" class="subtle">${escapeHtml(courses.length ? `${courses.length} course(s) available for this year/semester. Choose one or more.` : "Choose year and semester first.")}</small>
+        </div>
+        <div class="stack">
+          <button class="btn ghost" type="button" id="complete-profile-select-all-courses">Select all</button>
+          <button class="btn ghost" type="button" id="complete-profile-clear-courses">Clear</button>
         </div>
         <div class="stack">
           <button class="btn" type="submit">Submit Profile</button>
@@ -14966,9 +15178,14 @@ function wireCompleteProfile() {
     return;
   }
 
+  const currentUser = getCurrentUser();
+  const phoneInput = form.querySelector("input[name='phone']");
   const yearSelect = document.getElementById("complete-profile-year");
   const semesterSelect = document.getElementById("complete-profile-semester");
-  const coursesEl = document.getElementById("complete-profile-courses");
+  const courseOptionsEl = document.getElementById("complete-profile-course-options");
+  const courseHelpEl = document.getElementById("complete-profile-course-help");
+  const selectAllCoursesBtn = document.getElementById("complete-profile-select-all-courses");
+  const clearCoursesBtn = document.getElementById("complete-profile-clear-courses");
   const submitButton = form.querySelector('button[type="submit"]');
   const setSubmitting = (submitting) => {
     form.dataset.submitting = submitting ? "1" : "0";
@@ -14982,20 +15199,82 @@ function wireCompleteProfile() {
     submitButton.textContent = submitting ? "Submitting..." : submitButton.dataset.baseLabel;
   };
 
-  const updateCoursesPreview = () => {
+  const getSelectedCompleteProfileCourses = () =>
+    Array.from(form.querySelectorAll("input[name='completeProfileCourses']:checked")).map((input) => input.value);
+
+  const persistCompleteProfileDraft = () => {
+    saveStudentOnboardingDraft({
+      phone: phoneInput?.value || "",
+      academicYear: yearSelect?.value,
+      academicSemester: semesterSelect?.value,
+      selectedCourses: getSelectedCompleteProfileCourses(),
+    }, currentUser, "complete-profile");
+  };
+
+  const renderCompleteProfileCourseOptions = (preferred = [], options = {}) => {
     const year = normalizeAcademicYearOrNull(yearSelect?.value);
     const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
     const courses = year !== null && semester !== null ? getCurriculumCourses(year, semester) : [];
-    if (coursesEl) {
-      coursesEl.textContent = year !== null && semester !== null
-        ? (courses.length ? courses.join(", ") : "No courses available for this selection.")
+    if (courseOptionsEl) {
+      if (year === null || semester === null) {
+        courseOptionsEl.innerHTML = "";
+      } else {
+        const selectedSet = new Set(preferred.filter((course) => courses.includes(course)));
+        const selectAllByDefault = !options.explicitSelection && selectedSet.size === 0;
+        courseOptionsEl.innerHTML = courses
+          .map(
+            (course) => `
+              <label class="admin-course-check">
+                <input type="checkbox" name="completeProfileCourses" value="${escapeHtml(course)}" ${selectAllByDefault || selectedSet.has(course) ? "checked" : ""} />
+                <span>${escapeHtml(course)}</span>
+              </label>
+            `,
+          )
+          .join("");
+      }
+    }
+    if (courseHelpEl) {
+      courseHelpEl.textContent = year !== null && semester !== null
+        ? (courses.length ? `${courses.length} course(s) available for this year/semester. Choose one or more.` : "No courses available for this selection.")
         : "Choose year and semester first.";
     }
+    persistCompleteProfileDraft();
   };
 
-  yearSelect?.addEventListener("change", updateCoursesPreview);
-  semesterSelect?.addEventListener("change", updateCoursesPreview);
-  updateCoursesPreview();
+  phoneInput?.addEventListener("input", persistCompleteProfileDraft);
+  yearSelect?.addEventListener("change", () => {
+    const preferredCourses = getSelectedCompleteProfileCourses();
+    const hasExplicitSelection = Boolean(courseOptionsEl?.querySelector("input[name='completeProfileCourses']"));
+    renderCompleteProfileCourseOptions(preferredCourses, { explicitSelection: hasExplicitSelection });
+  });
+  semesterSelect?.addEventListener("change", () => {
+    const preferredCourses = getSelectedCompleteProfileCourses();
+    const hasExplicitSelection = Boolean(courseOptionsEl?.querySelector("input[name='completeProfileCourses']"));
+    renderCompleteProfileCourseOptions(preferredCourses, { explicitSelection: hasExplicitSelection });
+  });
+  courseOptionsEl?.addEventListener("change", persistCompleteProfileDraft);
+
+  selectAllCoursesBtn?.addEventListener("click", () => {
+    courseOptionsEl?.querySelectorAll("input[name='completeProfileCourses']").forEach((input) => {
+      input.checked = true;
+    });
+    persistCompleteProfileDraft();
+  });
+
+  clearCoursesBtn?.addEventListener("click", () => {
+    courseOptionsEl?.querySelectorAll("input[name='completeProfileCourses']").forEach((input) => {
+      input.checked = false;
+    });
+    persistCompleteProfileDraft();
+  });
+
+  const savedDraft = loadStudentOnboardingDraft(currentUser, "complete-profile");
+  const preferredCourses = Array.isArray(savedDraft?.selectedCourses)
+    ? sanitizeCourseAssignments(savedDraft.selectedCourses)
+    : sanitizeCourseAssignments(currentUser?.assignedCourses || []);
+  renderCompleteProfileCourseOptions(preferredCourses, {
+    explicitSelection: Array.isArray(savedDraft?.selectedCourses),
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -15019,14 +15298,19 @@ function wireCompleteProfile() {
       toast("You need to choose the year and semester.");
       return;
     }
-    const assignedCourses = getCurriculumCourses(academicYear, academicSemester);
+    const availableCourses = getCurriculumCourses(academicYear, academicSemester);
+    const assignedCourses = getSelectedCompleteProfileCourses().filter((course) => availableCourses.includes(course));
 
     if (!phoneValidation.ok) {
       toast(phoneValidation.message || "Please enter a valid phone number.");
       return;
     }
-    if (!assignedCourses.length) {
+    if (!availableCourses.length) {
       toast("No courses are available for this year and semester.");
+      return;
+    }
+    if (!assignedCourses.length) {
+      toast("Choose at least one course for your enrollment.");
       return;
     }
 
@@ -15076,6 +15360,7 @@ function wireCompleteProfile() {
         }
       }
       await flushPendingSyncNow();
+      clearStudentOnboardingDraft(users[idx], "complete-profile");
 
       if (autoApproved) {
         save(STORAGE_KEYS.currentUserId, users[idx].id);
