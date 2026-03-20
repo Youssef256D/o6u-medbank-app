@@ -2620,6 +2620,13 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
     ?? fallbackUser?.phone
     ?? "",
   ).trim();
+  const metadataCourses = sanitizeCourseAssignments(
+    Array.isArray(authUser?.user_metadata?.assigned_courses)
+      ? authUser.user_metadata.assigned_courses
+      : (Array.isArray(authUser?.user_metadata?.assignedCourses)
+        ? authUser.user_metadata.assignedCourses
+        : (fallbackUser?.assignedCourses || [])),
+  );
   const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
   const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
   const role = isForcedAdminEmail(email) ? "admin" : "student";
@@ -2630,6 +2637,7 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
       phone: normalizedPhone,
       academicYear: metadataYear,
       academicSemester: metadataSemester,
+      assignedCourses: metadataCourses,
     });
 
   return {
@@ -2728,11 +2736,39 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   // When local user data was recently modified, prefer local values over DB
   // to prevent reverting the admin's change before it propagates to Supabase.
   const preferLocalOverDbForCurrentUser = shouldPreferRecentLocalUserData(localUser);
+  const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
+  let relationalAssignedCourses = [];
+  let relationalEnrollmentTerm = null;
+  if (role === "student" && isUuidValue(authUser.id)) {
+    try {
+      const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers([authUser.id]);
+      relationalAssignedCourses = sanitizeCourseAssignments(enrollmentSnapshot?.coursesByUser?.[authUser.id] || []);
+      const resolvedEnrollmentTerm = enrollmentSnapshot?.termByUser?.[authUser.id] || null;
+      if (resolvedEnrollmentTerm) {
+        relationalEnrollmentTerm = {
+          year: normalizeAcademicYearOrNull(resolvedEnrollmentTerm.year),
+          semester: normalizeAcademicSemesterOrNull(resolvedEnrollmentTerm.semester),
+        };
+      }
+    } catch (error) {
+      if (!isMissingRelationError(error)) {
+        console.warn("Could not hydrate enrollment rows for current profile.", error?.message || error);
+      }
+    }
+  }
   const year = role === "student"
-    ? (preferLocalOverDbForCurrentUser && fallbackYear !== null ? fallbackYear : profileYear)
+    ? (
+      preferLocalOverDbForCurrentUser && fallbackYear !== null
+        ? fallbackYear
+        : (profileYear !== null ? profileYear : normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year))
+    )
     : null;
   const semester = role === "student"
-    ? (preferLocalOverDbForCurrentUser && fallbackSemester !== null ? fallbackSemester : profileSemester)
+    ? (
+      preferLocalOverDbForCurrentUser && fallbackSemester !== null
+        ? fallbackSemester
+        : (profileSemester !== null ? profileSemester : normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester))
+    )
     : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const metadataPhone = String(
@@ -2743,6 +2779,21 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profilePhone = String(profile.phone || "").trim();
   const fallbackPhone = String(localUser?.phone || "").trim();
   const resolvedPhone = profilePhone || (preferLocalOverDbForCurrentUser ? (fallbackPhone || metadataPhone) : "");
+  const metadataAssignedCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
+    ? authUser.user_metadata.assigned_courses
+    : (Array.isArray(authUser?.user_metadata?.assignedCourses) ? authUser.user_metadata.assignedCourses : []);
+  const fallbackAssignedCourses = sanitizeCourseAssignments(
+    Array.isArray(localUser?.assignedCourses) && localUser.assignedCourses.length
+      ? localUser.assignedCourses
+      : metadataAssignedCourses,
+  );
+  const resolvedAssignedCourses = role === "student"
+    ? (
+      relationalAssignedCourses.length
+        ? relationalAssignedCourses
+        : (authProvider === "google" && !preferLocalOverDbForCurrentUser ? [] : fallbackAssignedCourses)
+    )
+    : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
@@ -2750,6 +2801,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     phone: resolvedPhone,
     academicYear: year,
     academicSemester: semester,
+    assignedCourses: resolvedAssignedCourses,
   });
   const resolvedApproval = role === "admin"
     ? true
@@ -2762,13 +2814,14 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
-    : hasCompleteStudentProfile({
+    : !isStudentProfileCompletionRequired({
       role: "student",
       phone: resolvedPhone,
       academicYear: year,
       academicSemester: semester,
+      assignedCourses: resolvedAssignedCourses,
+      authProvider,
     });
-  const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let nextProfileCompleted = role !== "student";
   if (role === "student") {
     if (profileHasStudentCompletion) {
@@ -2787,6 +2840,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     role,
     academicYear: year,
     academicSemester: semester,
+    assignedCourses: resolvedAssignedCourses,
     isApproved: resolvedApproval,
     approvedAt: resolvedApproval ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: resolvedApproval ? localUser?.approvedBy || "admin" : null,
@@ -2983,6 +3037,26 @@ function hasCompleteStudentProfile(user) {
   const year = Number(user.academicYear);
   const semester = Number(user.academicSemester);
   return phoneValidation.ok && year >= 1 && year <= 5 && (semester === 1 || semester === 2);
+}
+
+function hasSelectedStudentCourses(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.role !== "student") {
+    return true;
+  }
+  return sanitizeCourseAssignments(user.assignedCourses || []).length > 0;
+}
+
+function hasCompleteStudentApprovalProfile(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.role !== "student") {
+    return true;
+  }
+  return hasCompleteStudentProfile(user) && hasSelectedStudentCourses(user);
 }
 
 function normalizeAdminUserIdList(ids, allowedSet = null) {
@@ -3209,7 +3283,7 @@ function shouldAutoApproveStudentAccess(user) {
   if (!isAutoApproveStudentAccessEnabled() || !user || user.role !== "student") {
     return false;
   }
-  return hasCompleteStudentProfile(user);
+  return hasCompleteStudentApprovalProfile(user);
 }
 
 function parseTimestampMs(value) {
@@ -3382,10 +3456,9 @@ function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (isUserAccessApproved(user)) {
-    return false;
-  }
-  return !hasCompleteStudentProfile(user);
+  const missingCoreProfile = !hasCompleteStudentProfile(user);
+  const missingGoogleCourseSelection = getAuthProviderFromUser(user) === "google" && !hasSelectedStudentCourses(user);
+  return missingCoreProfile || missingGoogleCourseSelection;
 }
 
 function getStudentProfileCompletionRoute(user) {
@@ -3632,6 +3705,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     phone: nextPhone,
     academicYear: nextYear,
     academicSemester: nextSemester,
+    assignedCourses: nextCourses,
   });
   const hasExplicitIsApprovedOverride = typeof profileOverrides.isApproved === "boolean";
   const nextIsApproved =
@@ -3646,11 +3720,13 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
             : shouldAutoApproveNextStudent;
   const inferredStudentProfileCompletion = nextRole !== "student"
     ? true
-    : hasCompleteStudentProfile({
+    : !isStudentProfileCompletionRequired({
       role: "student",
       phone: nextPhone,
       academicYear: nextYear,
       academicSemester: nextSemester,
+      assignedCourses: nextCourses,
+      authProvider: nextAuthProvider,
     });
 
   const hasExplicitProfileCompletionFlag = typeof profileOverrides.profileCompleted === "boolean";
@@ -4916,6 +4992,28 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   const missingIds = ids.filter((id) => !existingIds.has(id));
   let targetIds = ids.filter((id) => existingIds.has(id));
   const ineligibleIds = [];
+  const enrolledProfileIdSet = new Set();
+  if (targetApproved && targetIds.length) {
+    for (const idBatch of splitIntoBatches(targetIds, RELATIONAL_IN_BATCH_SIZE)) {
+      const { data, error: enrollmentError } = await runWithTimeoutResult(
+        client
+          .from("user_course_enrollments")
+          .select("user_id")
+          .in("user_id", idBatch),
+        SUPABASE_QUERY_TIMEOUT_MS,
+        "Profile enrollment check timed out.",
+      );
+      if (enrollmentError) {
+        return { ok: false, message: enrollmentError.message || "Could not read course enrollments before approval." };
+      }
+      (Array.isArray(data) ? data : []).forEach((row) => {
+        const userId = String(row?.user_id || "").trim();
+        if (isUuidValue(userId)) {
+          enrolledProfileIdSet.add(userId);
+        }
+      });
+    }
+  }
   if (targetApproved) {
     targetIds = targetIds.filter((id) => {
       const row = existingRowsById.get(id);
@@ -4928,7 +5026,7 @@ async function updateRelationalProfileApproval(profileIds, approved) {
         phone: String(row?.phone || "").trim(),
         academicYear: normalizeAcademicYearOrNull(row?.academic_year),
         academicSemester: normalizeAcademicSemesterOrNull(row?.academic_semester),
-      });
+      }) && enrolledProfileIdSet.has(id);
       if (!canApproveStudent) {
         ineligibleIds.push(id);
       }
@@ -4939,7 +5037,7 @@ async function updateRelationalProfileApproval(profileIds, approved) {
     return {
       ok: false,
       message: targetApproved
-        ? "No selected users have complete phone, year, and semester details for approval."
+        ? "No selected users have complete phone, year, semester, and course enrollment details for approval."
         : "No matching database profiles found for selected users.",
       updatedIds: [],
       skippedIds: [...new Set([...missingIds, ...ineligibleIds])],
@@ -9191,11 +9289,12 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       const curriculumCourses = enrollmentYear !== null && enrollmentSemester !== null
         ? getCurriculumCourses(enrollmentYear, enrollmentSemester)
         : [];
-      const selectedCourses = sanitizeCourseAssignments(
-        curriculumCourses.length
-          ? curriculumCourses
-          : (student.assignedCourses || []),
-      );
+      const scopedAssignedCourses = curriculumCourses.length
+        ? sanitizeCourseAssignments((student.assignedCourses || []).filter((course) => curriculumCourses.includes(course)))
+        : sanitizeCourseAssignments(student.assignedCourses || []);
+      const selectedCourses = scopedAssignedCourses.length
+        ? scopedAssignedCourses
+        : sanitizeCourseAssignments(curriculumCourses.length ? curriculumCourses : (student.assignedCourses || []));
       const desiredCourseIds = new Set(
         selectedCourses
           .map((courseName) => courseIdByName[String(courseName || "").trim()])
@@ -10912,6 +11011,26 @@ function clearAdminDashboardPolling() {
 }
 
 const ADMIN_BACKGROUND_SYNC_INTERVAL_MS = 15000;
+const ADMIN_USER_MUTATION_COOLDOWN_MS = 12000;
+let adminUserMutationActiveCount = 0;
+let adminUserMutationLastAt = 0;
+
+function beginAdminUserMutation() {
+  adminUserMutationActiveCount += 1;
+  adminUserMutationLastAt = Date.now();
+}
+
+function endAdminUserMutation() {
+  adminUserMutationActiveCount = Math.max(0, adminUserMutationActiveCount - 1);
+  adminUserMutationLastAt = Date.now();
+}
+
+function isAdminUserMutationCoolingDown() {
+  return Boolean(
+    adminUserMutationActiveCount > 0
+    || (adminUserMutationLastAt && (Date.now() - adminUserMutationLastAt) < ADMIN_USER_MUTATION_COOLDOWN_MS)
+  );
+}
 
 function clearAdminBackgroundSync() {
   if (adminBackgroundSyncHandle) {
@@ -10946,6 +11065,9 @@ function ensureAdminDashboardPolling() {
       || !ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())
     ) {
       clearAdminDashboardPolling();
+      return;
+    }
+    if (isAdminUserMutationCoolingDown()) {
       return;
     }
     if (state.adminDataRefreshing) {
@@ -12985,6 +13107,9 @@ function shouldRefreshAdminData(user) {
   if (!user || user.role !== "admin") {
     return false;
   }
+  if (isAdminUserMutationCoolingDown()) {
+    return false;
+  }
   if (isPostAuthDataWarmupActive(user)) {
     return false;
   }
@@ -14427,6 +14552,7 @@ function wireAuth(mode) {
             phone: normalizedPhone,
             academicYear,
             academicSemester,
+            assignedCourses: selectedCourses,
           });
           const previousUser = {
             ...users[idx],
@@ -14524,6 +14650,7 @@ function wireAuth(mode) {
           phone: normalizedPhone,
           academicYear,
           academicSemester,
+          assignedCourses: selectedCourses,
         });
         if (authClient) {
           const { data: authData, error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signUp({
@@ -14901,6 +15028,7 @@ function wireCompleteProfile() {
         phone: normalizedPhone,
         academicYear,
         academicSemester,
+        assignedCourses,
       });
       const previousUser = {
         ...users[idx],
@@ -18403,6 +18531,98 @@ function renderAdminBulkImportSection(allCourses, options = {}) {
   `;
 }
 
+function getAdminVisibleCoursesForUser(account, allCourses = Object.keys(QBANK_COURSE_TOPICS)) {
+  if (!account) {
+    return [];
+  }
+  const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
+  const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+  if (account.role === "student") {
+    return year && semester
+      ? getCurriculumCourses(year, semester)
+      : sanitizeCourseAssignments(account.assignedCourses || []);
+  }
+  return sanitizeCourseAssignments(account.assignedCourses || allCourses);
+}
+
+function getAdminVisibleCoursePreviewText(visibleCourses) {
+  const list = Array.isArray(visibleCourses) ? visibleCourses : [];
+  const compactCourses = list.slice(0, 2).map((course) => (course.length > 42 ? `${course.slice(0, 39)}...` : course));
+  return list.length > 2 ? `${compactCourses.join(", ")} +${list.length - 2} more` : compactCourses.join(", ");
+}
+
+function patchAdminUsersPendingSummaryUi() {
+  const usersSection = appEl?.querySelector("#admin-users-section");
+  if (!usersSection) {
+    return false;
+  }
+  const pendingCount = getUsers().filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
+  const pendingBadge = usersSection.querySelector("[data-admin-pending-count]");
+  if (pendingBadge) {
+    pendingBadge.className = `badge ${pendingCount ? "bad" : "good"}`;
+    pendingBadge.innerHTML = `Pending: <b>${pendingCount}</b>`;
+  }
+  const approveAllButton = usersSection.querySelector("[data-action='approve-all-pending']");
+  if (approveAllButton && !state.adminUserBulkActionRunning) {
+    approveAllButton.disabled = !pendingCount;
+  }
+  return true;
+}
+
+function patchAdminUserRowUi(row, account, actorUser = null) {
+  if (!row || !account) {
+    return false;
+  }
+  const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
+  const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+  const isApproved = isUserAccessApproved(account);
+  const visibleCourses = getAdminVisibleCoursesForUser(account);
+  const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
+
+  const yearSelect = row.querySelector("select[data-field='academicYear']");
+  if (yearSelect) {
+    yearSelect.value = year === null ? "" : String(year);
+  }
+
+  const semesterSelect = row.querySelector("select[data-field='academicSemester']");
+  if (semesterSelect) {
+    semesterSelect.value = semester === null ? "" : String(semester);
+  }
+
+  const coursePreviewEl = row.querySelector(".admin-course-preview");
+  if (coursePreviewEl) {
+    coursePreviewEl.textContent = coursePreview || "No courses assigned";
+    coursePreviewEl.title = visibleCourses.join(", ");
+  }
+
+  const statusBadge = row.querySelector("[data-user-status-badge]");
+  if (statusBadge) {
+    statusBadge.className = `badge ${isApproved ? "good" : "bad"}`;
+    statusBadge.textContent = isApproved ? "approved" : "pending";
+  }
+
+  const approvalButton = row.querySelector("[data-action='toggle-user-approval']");
+  if (approvalButton) {
+    const isBusy = approvalButton.dataset.busy === "1";
+    approvalButton.disabled = isBusy || account.role === "admin";
+    if (!isBusy) {
+      approvalButton.textContent = isApproved ? "Suspend" : "Approve";
+    }
+  }
+
+  const roleButton = row.querySelector("[data-action='toggle-user-role']");
+  if (roleButton) {
+    const currentAdmin = actorUser || getCurrentUser();
+    const isSelf = account.id === currentAdmin?.id;
+    const isLockedAdmin = isForcedAdminEmail(account.email);
+    roleButton.disabled = Boolean(isSelf || isLockedAdmin);
+    roleButton.textContent = account.role === "admin" ? "Make student" : "Make admin";
+  }
+
+  patchAdminUsersPendingSummaryUi();
+  return true;
+}
+
 function renderAdmin() {
   const user = getCurrentUser();
   if (!user || user.role !== "admin") {
@@ -18629,7 +18849,7 @@ function renderAdmin() {
                 ${authProviderIcon}
               </small><br />
               <small>${escapeHtml(account.phone || "No phone")}</small><br />
-              <small><span class="badge ${isApproved ? "good" : "bad"}">${isApproved ? "approved" : "pending"}</span></small>
+              <small><span class="badge ${isApproved ? "good" : "bad"}" data-user-status-badge>${isApproved ? "approved" : "pending"}</span></small>
             </td>
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
             <td>
@@ -18683,7 +18903,7 @@ function renderAdmin() {
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.6rem;">
             <div style="display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end;">
-              <span class="badge ${pendingCount ? 'bad' : 'good'}" style="font-size: 0.8rem; padding: 0.3rem 0.7rem;">Pending: <b>${pendingCount}</b></span>
+              <span class="badge ${pendingCount ? 'bad' : 'good'}" data-admin-pending-count style="font-size: 0.8rem; padding: 0.3rem 0.7rem;">Pending: <b>${pendingCount}</b></span>
               <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
             </div>
             <label class="toggle-switch-label" style="margin: 0;">
@@ -21453,6 +21673,7 @@ function wireAdmin() {
         phone: "",
         academicYear,
         academicSemester,
+        assignedCourses,
       })
       : false;
     const newUserApproved = normalizedRole === "admin" ? true : newStudentAutoApproval;
@@ -21504,7 +21725,7 @@ function wireAdmin() {
     const current = getCurrentUser();
     const users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
-    const eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentProfile(entry));
+    const eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentApprovalProfile(entry));
     const eligiblePendingUserIdSet = new Set(eligiblePendingUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
     const pendingProfileIds = eligiblePendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
 
@@ -21513,7 +21734,7 @@ function wireAdmin() {
       return;
     }
     if (!eligiblePendingUsers.length) {
-      toast("Pending users must complete phone number, year, and semester before approval.");
+      toast("Pending users must complete phone number, year, semester, and course selection before approval.");
       return;
     }
 
@@ -21733,9 +21954,9 @@ function wireAdmin() {
         toast("Selected accounts are already approved.");
         return;
       }
-      const eligibleUsers = unapprovedUsers.filter((entry) => entry.role === "admin" || hasCompleteStudentProfile(entry));
+      const eligibleUsers = unapprovedUsers.filter((entry) => entry.role === "admin" || hasCompleteStudentApprovalProfile(entry));
       if (!eligibleUsers.length) {
-        toast("Selected users must complete phone number, year, and semester before approval.");
+        toast("Selected users must complete phone number, year, semester, and course selection before approval.");
         return;
       }
       if (!window.confirm(`Approve ${eligibleUsers.length} selected account(s)?`)) {
@@ -21915,6 +22136,7 @@ function wireAdmin() {
     const saveButton = row.querySelector("[data-action='save-user-enrollment']");
     row.dataset.enrollmentSaving = "1";
     setEnrollmentSaveButtonBusy(saveButton, true, mode === "auto" ? "Auto-saving..." : "Saving...");
+    beginAdminUserMutation();
 
     try {
       const users = getUsers();
@@ -21949,7 +22171,7 @@ function wireAdmin() {
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
         didEnrollmentTermChange = previousYear !== year || previousSemester !== semester;
-        if (!hasCompleteStudentProfile(users[idx])) {
+        if (!hasCompleteStudentApprovalProfile(users[idx])) {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
           users[idx].approvedBy = null;
@@ -21974,13 +22196,13 @@ function wireAdmin() {
         reason: "enrollment_change",
       });
       save(STORAGE_KEYS.users, users);
+      state.adminDataLastSyncAt = Date.now();
+      patchAdminUserRowUi(row, users[idx], getCurrentUser());
       if (mode === "manual") {
         toast(archivedSessionIds.length
           ? "Enrollment saved. Previous exams were archived and analytics reset."
           : (didEnrollmentTermChange ? "Enrollment saved." : "Enrollment saved."));
       }
-      state.skipNextRouteAnimation = true;
-      render();
       // Sync in background — don't block the UI.
       flushPendingSyncInBackground();
       return true;
@@ -21988,8 +22210,14 @@ function wireAdmin() {
       toast(`Could not save enrollment: ${getErrorMessage(error, "Save failed.")}`);
       return false;
     } finally {
+      endAdminUserMutation();
       row.dataset.enrollmentSaving = "0";
       setEnrollmentSaveButtonBusy(saveButton, false);
+      const refreshedUsers = getUsers();
+      const refreshedUser = refreshedUsers.find((entry) => entry.id === userId);
+      if (refreshedUser) {
+        patchAdminUserRowUi(row, refreshedUser, getCurrentUser());
+      }
     }
   };
 
@@ -22155,6 +22383,7 @@ function wireAdmin() {
           phone: String(users[idx].phone || "").trim(),
           academicYear: users[idx].academicYear,
           academicSemester: users[idx].academicSemester,
+          assignedCourses: users[idx].assignedCourses,
         });
         users[idx].isApproved = studentAutoApproved;
         users[idx].approvedAt = studentAutoApproved ? users[idx].approvedAt || nowISO() : null;
@@ -22188,6 +22417,9 @@ function wireAdmin() {
 
   appEl.querySelectorAll("[data-action='toggle-user-approval']").forEach((button) => {
     button.addEventListener("click", async () => {
+      if (button.dataset.busy === "1") {
+        return;
+      }
       const row = button.closest("tr[data-user-id]");
       const userId = row?.getAttribute("data-user-id");
       if (!userId) {
@@ -22207,47 +22439,70 @@ function wireAdmin() {
       }
 
       const nextApproved = !isUserAccessApproved(users[idx]);
-      if (nextApproved && !hasCompleteStudentProfile(users[idx])) {
-        toast("Student must have phone number, year, and semester before approval.");
+      if (nextApproved && !hasCompleteStudentApprovalProfile(users[idx])) {
+        toast("Student must have phone number, year, semester, and at least one course before approval.");
         return;
       }
+      beginAdminUserMutation();
+      button.dataset.busy = "1";
+      if (!button.dataset.baseLabel) {
+        button.dataset.baseLabel = String(button.textContent || "").trim() || "Approve";
+      }
+      button.disabled = true;
+      button.classList.add("is-loading");
+      button.innerHTML = `<span class="inline-loader" aria-hidden="true"></span><span>${nextApproved ? "Approving..." : "Suspending..."}</span>`;
       const targetProfileId = getUserProfileId(users[idx]);
-      const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
-      const approvalQueuedForSync = isUuidValue(targetProfileId) && !dbResult.ok && shouldAllowSupabaseManagedLocalFallback(dbResult.message);
-      if (isUuidValue(targetProfileId) && !dbResult.ok && !approvalQueuedForSync) {
-        toast(`Database update failed. ${dbResult.message}`);
-        return;
-      }
-      if (isUuidValue(targetProfileId) && !approvalQueuedForSync && !(dbResult.updatedIds || []).includes(targetProfileId)) {
-        toast("Database update failed. This user profile is missing or inaccessible.");
-        return;
-      }
-      users[idx].isApproved = nextApproved;
-      users[idx].approvedAt = nextApproved ? nowISO() : null;
-      users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
-      users[idx].authAccessKnownActive = false;
-      save(STORAGE_KEYS.users, users);
-      // Optimistic feedback: update the UI instantly so the admin can
-      // approve the next user without waiting for the network round-trips.
-      toast(
-        approvalQueuedForSync
-          ? `${nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync."}`
-          : `${nextApproved ? "Account approved." : "Account suspended."}`,
-      );
-      render();
-      const authAccessSyncResult = await syncAdminAccessChangeNow(
-        isUuidValue(targetProfileId) ? [targetProfileId] : [],
-        nextApproved,
-        {
-          users,
-          queueAll: approvalQueuedForSync,
-          user: current,
-        },
-      );
-      if (!authAccessSyncResult.ok || authAccessSyncResult.queuedIds.length) {
+      try {
+        const dbResult = await updateRelationalProfileApproval([targetProfileId], nextApproved);
+        const approvalQueuedForSync = isUuidValue(targetProfileId) && !dbResult.ok && shouldAllowSupabaseManagedLocalFallback(dbResult.message);
+        if (isUuidValue(targetProfileId) && !dbResult.ok && !approvalQueuedForSync) {
+          toast(`Database update failed. ${dbResult.message}`);
+          return;
+        }
+        if (isUuidValue(targetProfileId) && !approvalQueuedForSync && !(dbResult.updatedIds || []).includes(targetProfileId)) {
+          toast("Database update failed. This user profile is missing or inaccessible.");
+          return;
+        }
+        users[idx].isApproved = nextApproved;
+        users[idx].approvedAt = nextApproved ? nowISO() : null;
+        users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
+        users[idx].authAccessKnownActive = false;
+        save(STORAGE_KEYS.users, users);
+        state.adminDataLastSyncAt = Date.now();
+        patchAdminUserRowUi(row, users[idx], current);
         toast(
-          `${nextApproved ? "Account approval sync updated." : "Account suspension sync updated."}${describeAuthAccessSyncOutcome(authAccessSyncResult)}`,
+          approvalQueuedForSync
+            ? `${nextApproved ? "Account approved locally and queued for cloud sync." : "Account suspended locally and queued for cloud sync."}`
+            : `${nextApproved ? "Account approved." : "Account suspended."}`,
         );
+        const authAccessSyncResult = await syncAdminAccessChangeNow(
+          isUuidValue(targetProfileId) ? [targetProfileId] : [],
+          nextApproved,
+          {
+            users,
+            queueAll: approvalQueuedForSync,
+            user: current,
+          },
+        );
+        if (!authAccessSyncResult.ok || authAccessSyncResult.queuedIds.length) {
+          toast(
+            `${nextApproved ? "Account approval sync updated." : "Account suspension sync updated."}${describeAuthAccessSyncOutcome(authAccessSyncResult)}`,
+          );
+        }
+      } catch (approvalError) {
+        toast(`Could not update account access: ${getErrorMessage(approvalError, "Action failed.")}`);
+      } finally {
+        endAdminUserMutation();
+        button.dataset.busy = "0";
+        button.classList.remove("is-loading");
+        const refreshedUsers = getUsers();
+        const refreshedUser = refreshedUsers.find((entry) => entry.id === userId);
+        if (refreshedUser) {
+          patchAdminUserRowUi(row, refreshedUser, current);
+        } else {
+          button.disabled = false;
+          button.textContent = button.dataset.baseLabel || "Approve";
+        }
       }
     });
   });
@@ -27790,7 +28045,7 @@ function syncUsersWithCurriculum() {
     }
 
     const shouldMarkProfileCompleted = user.role === "student"
-      ? hasCompleteStudentProfile(user)
+      ? !isStudentProfileCompletionRequired(user)
       : true;
     if (user.profileCompleted !== shouldMarkProfileCompleted) {
       user.profileCompleted = shouldMarkProfileCompleted;
@@ -28050,11 +28305,13 @@ function normalizeStudentEnrollmentProfile(user) {
 
   const semesterCourses = getCurriculumCourses(year, semester);
   if (semesterCourses.length) {
+    const scopedAssignedCourses = sanitizeCourseAssignments(
+      normalizedAssigned.filter((course) => semesterCourses.includes(course)),
+    );
     return {
       academicYear: year,
       academicSemester: semester,
-      // Keep the full registered term as canonical so partial assigned-course arrays cannot hide courses.
-      assignedCourses: [...semesterCourses],
+      assignedCourses: scopedAssignedCourses.length ? scopedAssignedCourses : [...semesterCourses],
     };
   }
 
