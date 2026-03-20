@@ -3468,6 +3468,10 @@ function getStudentProfileCompletionRoute(user) {
   return getAuthProviderFromUser(user) === "google" ? "signup" : "complete-profile";
 }
 
+function shouldDeferStudentApprovalEnforcement(user) {
+  return Boolean(user && user.role === "student" && isStudentProfileCompletionRequired(user));
+}
+
 function isGoogleOnboardingRequired(user) {
   return getStudentProfileCompletionRoute(user) === "signup";
 }
@@ -11247,6 +11251,9 @@ async function enforceCurrentStudentAccessStatus(user = null) {
   ) {
     return { checked: false, active: true };
   }
+  if (shouldDeferStudentApprovalEnforcement(currentUser)) {
+    return { checked: false, active: true, pendingCompletion: true };
+  }
 
   const { data, error } = await runWithTimeoutResult(
     client
@@ -11358,7 +11365,12 @@ function ensureProfileAccessRealtimeSubscription(user = null) {
   const currentUser = user || getCurrentUser();
   const client = getSupabaseAuthClient();
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+  if (
+    !client
+    || currentUser?.role !== "student"
+    || !isUuidValue(profileId)
+    || shouldDeferStudentApprovalEnforcement(currentUser)
+  ) {
     clearProfileAccessRealtimeSubscription();
     return;
   }
@@ -11396,7 +11408,12 @@ function ensureProfileAccessRealtimeSubscription(user = null) {
 function ensureStudentAccessPolling(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+  if (
+    !currentUser
+    || currentUser.role !== "student"
+    || !isUuidValue(profileId)
+    || shouldDeferStudentApprovalEnforcement(currentUser)
+  ) {
     clearStudentAccessPolling();
     return;
   }
@@ -14910,7 +14927,7 @@ function renderCompleteProfile() {
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Add your phone number and enrollment details to activate access immediately. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+      <p class="subtle">Add your phone number and enrollment details first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
         <label>Phone number <input type="tel" name="phone" value="${escapeHtml(user?.phone || "")}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" pattern="[0-9+()\\-\\s]{8,20}" /></label>
         <div class="form-row">
@@ -14935,7 +14952,7 @@ function renderCompleteProfile() {
           <small id="complete-profile-courses" class="subtle">${escapeHtml(courses.length ? courses.join(", ") : "Choose year and semester first.")}</small>
         </div>
         <div class="stack">
-          <button class="btn" type="submit">Save And Activate</button>
+          <button class="btn" type="submit">Submit Profile</button>
           <button class="btn ghost" type="button" data-action="logout">Cancel</button>
         </div>
       </form>
@@ -30282,6 +30299,13 @@ async function loginAsDemo(email, password) {
   const user = getUsers().find((entry) => entry.email === email && entry.password === password);
   if (!user) {
     toast("Demo account unavailable.");
+    return;
+  }
+  const completionRoute = getStudentProfileCompletionRoute(user);
+  if (completionRoute) {
+    save(STORAGE_KEYS.currentUserId, user.id);
+    toast("Complete your profile to continue.");
+    navigate(completionRoute);
     return;
   }
   if (!isUserAccessApproved(user)) {
