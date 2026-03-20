@@ -1994,6 +1994,24 @@ body.theme-comfort .maintenance-badge {
   padding: 0.42rem 0.48rem;
 }
 
+.admin-mini-input {
+  min-width: 148px;
+  max-width: 220px;
+  width: 100%;
+  padding: 0.42rem 0.48rem;
+}
+
+.admin-inline-phone-field {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  margin: 0.32rem 0 0.28rem;
+}
+
+.admin-inline-phone-input {
+  width: 100%;
+}
+
 #admin-users-section tbody tr.is-selected td {
   background: rgba(23, 126, 137, 0.08);
 }

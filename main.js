@@ -18880,6 +18880,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const isApproved = isUserAccessApproved(account);
   const visibleCourses = getAdminVisibleCoursesForUser(account);
   const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
+  const phoneInput = row.querySelector("input[data-field='phone']");
 
   const yearSelect = row.querySelector("select[data-field='academicYear']");
   if (yearSelect) {
@@ -18889,6 +18890,10 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const semesterSelect = row.querySelector("select[data-field='academicSemester']");
   if (semesterSelect) {
     semesterSelect.value = semester === null ? "" : String(semester);
+  }
+
+  if (phoneInput) {
+    phoneInput.value = String(account.phone || "").trim();
   }
 
   const coursePreviewEl = row.querySelector(".admin-course-preview");
@@ -19120,6 +19125,7 @@ function renderAdmin() {
         const isLockedAdmin = isForcedAdminEmail(account.email);
         const canBulkSelect = canBulkSelectAdminUser(account, user);
         const isSelected = accountId ? selectedUserSet.has(accountId) : false;
+        const accountPhone = String(account.phone || "").trim();
         const rowClassNames = [];
         if (isSelected) {
           rowClassNames.push("is-selected");
@@ -19150,7 +19156,21 @@ function renderAdmin() {
                 <span>${escapeHtml(account.email)}</span>
                 ${authProviderIcon}
               </small><br />
-              <small>${escapeHtml(account.phone || "No phone")}</small><br />
+              <label class="admin-inline-phone-field">
+                <input
+                  class="admin-mini-input admin-inline-phone-input"
+                  type="tel"
+                  name="inlinePhone"
+                  data-field="phone"
+                  value="${escapeHtml(accountPhone)}"
+                  inputmode="tel"
+                  autocomplete="off"
+                  maxlength="20"
+                  pattern="[0-9+()\\-\\s]{0,20}"
+                  placeholder="+20 10 0000 0000"
+                  aria-label="Phone number for ${escapeHtml(String(account.name || account.email || "user"))}"
+                />
+              </label>
               <small><span class="badge ${isApproved ? "good" : "bad"}" data-user-status-badge>${isApproved ? "approved" : "pending"}</span></small>
             </td>
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
@@ -19180,7 +19200,7 @@ function renderAdmin() {
             </td>
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
-                <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save enrollment</button>
+                <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save details</button>
                 ${resetPasswordAction}
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
                   ${isApproved ? "Suspend" : "Approve"}
@@ -19243,6 +19263,7 @@ function renderAdmin() {
                 </label>
               </div>
               <div class="form-row">
+                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" pattern="[0-9+()\\-\\s]{0,20}" placeholder="+20 10 0000 0000" /></label>
                 <label>Year
                   <select name="academicYear">
                     <option value="1">Year 1</option>
@@ -19252,6 +19273,8 @@ function renderAdmin() {
                     <option value="5">Year 5</option>
                   </select>
                 </label>
+              </div>
+              <div class="form-row">
                 <label>Semester
                   <select name="academicSemester">
                     <option value="1">Semester 1</option>
@@ -21949,12 +21972,19 @@ function wireAdmin() {
       .trim()
       .toLowerCase();
     const password = String(data.get("password") || "").trim();
+    const phone = String(data.get("phone") || "").trim();
     const role = String(data.get("role") || "student");
     const academicYear = sanitizeAcademicYear(data.get("academicYear") || 1);
     const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
+    const phoneValidation = phone ? validateAndNormalizePhoneNumber(phone) : { ok: true, message: "", number: "" };
+    const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
 
     if (!name || !email || !password) {
       toast("Name, email, and password are required.");
+      return;
+    }
+    if (!phoneValidation.ok) {
+      toast(phoneValidation.message || "Phone number is invalid.");
       return;
     }
 
@@ -21972,7 +22002,7 @@ function wireAdmin() {
     const newStudentAutoApproval = normalizedRole === "student"
       ? shouldAutoApproveStudentAccess({
         role: "student",
-        phone: "",
+        phone: normalizedPhone,
         academicYear,
         academicSemester,
         assignedCourses,
@@ -21985,7 +22015,7 @@ function wireAdmin() {
       name,
       email,
       password,
-      phone: "",
+      phone: normalizedPhone,
       role: normalizedRole,
       verified: true,
       isApproved: newUserApproved,
@@ -22416,7 +22446,7 @@ function wireAdmin() {
       return;
     }
     if (!button.dataset.baseLabel) {
-      button.dataset.baseLabel = button.textContent || "Save enrollment";
+      button.dataset.baseLabel = button.textContent || "Save details";
     }
     button.disabled = busy;
     button.classList.toggle("is-loading", busy);
@@ -22427,6 +22457,8 @@ function wireAdmin() {
 
   const saveUserEnrollmentFromRow = async (row, options = {}) => {
     const mode = options?.mode === "auto" ? "auto" : "manual";
+    const syncNow = Boolean(options?.syncNow);
+    const suppressSuccessToast = Boolean(options?.suppressSuccessToast);
     const userId = row?.getAttribute("data-user-id");
     if (!row || !userId) {
       return false;
@@ -22454,6 +22486,18 @@ function wireAdmin() {
       };
       const role = users[idx].role;
       const previousApproved = Boolean(users[idx].isApproved);
+      const phoneInput = row.querySelector("input[data-field='phone']");
+      const rawPhone = String(phoneInput?.value || "").trim();
+      let normalizedPhone = "";
+      if (rawPhone) {
+        const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
+        if (!phoneValidation.ok) {
+          toast(phoneValidation.message || "Phone number is invalid.");
+          return false;
+        }
+        normalizedPhone = phoneValidation.number;
+      }
+      users[idx].phone = normalizedPhone;
       const previousYear = role === "student" ? normalizeAcademicYearOrNull(users[idx].academicYear) : null;
       const previousSemester = role === "student" ? normalizeAcademicSemesterOrNull(users[idx].academicSemester) : null;
       let didEnrollmentTermChange = false;
@@ -22463,7 +22507,7 @@ function wireAdmin() {
         const year = normalizeAcademicYearOrNull(yearSelect?.value);
         const semester = normalizeAcademicSemesterOrNull(semesterSelect?.value);
         if (year === null || semester === null) {
-          if (mode === "manual") {
+          if (mode === "manual" || syncNow) {
             toast("Select both year and semester before saving.");
           }
           return false;
@@ -22500,16 +22544,20 @@ function wireAdmin() {
       save(STORAGE_KEYS.users, users);
       state.adminDataLastSyncAt = Date.now();
       patchAdminUserRowUi(row, users[idx], getCurrentUser());
-      if (mode === "manual") {
-        toast(archivedSessionIds.length
-          ? "Enrollment saved. Previous exams were archived and analytics reset."
-          : (didEnrollmentTermChange ? "Enrollment saved." : "Enrollment saved."));
+      if (syncNow) {
+        await flushPendingSyncNow();
+      } else {
+        // Keep ordinary row edits non-blocking unless a follow-up action needs cloud state immediately.
+        flushPendingSyncInBackground();
       }
-      // Sync in background — don't block the UI.
-      flushPendingSyncInBackground();
+      if (!suppressSuccessToast && mode === "manual") {
+        toast(archivedSessionIds.length
+          ? "Profile saved. Previous exams were archived and analytics reset."
+          : (didEnrollmentTermChange ? "Profile saved." : "Profile saved."));
+      }
       return true;
     } catch (error) {
-      toast(`Could not save enrollment: ${getErrorMessage(error, "Save failed.")}`);
+      toast(`Could not save user details: ${getErrorMessage(error, "Save failed.")}`);
       return false;
     } finally {
       endAdminUserMutation();
@@ -22729,8 +22777,8 @@ function wireAdmin() {
       }
 
       const current = getCurrentUser();
-      const users = getUsers();
-      const idx = users.findIndex((entry) => entry.id === userId);
+      let users = getUsers();
+      let idx = users.findIndex((entry) => entry.id === userId);
       if (idx === -1) {
         toast("Account not found.");
         return;
@@ -22741,6 +22789,22 @@ function wireAdmin() {
       }
 
       const nextApproved = !isUserAccessApproved(users[idx]);
+      if (nextApproved) {
+        const savedForApproval = await saveUserEnrollmentFromRow(row, {
+          mode: "auto",
+          syncNow: true,
+          suppressSuccessToast: true,
+        });
+        if (!savedForApproval) {
+          return;
+        }
+        users = getUsers();
+        idx = users.findIndex((entry) => entry.id === userId);
+        if (idx === -1) {
+          toast("Account not found.");
+          return;
+        }
+      }
       if (nextApproved && !hasCompleteStudentApprovalProfile(users[idx])) {
         toast("Student must have phone number, year, semester, and at least one course before approval.");
         return;
