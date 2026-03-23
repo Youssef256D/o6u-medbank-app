@@ -1551,7 +1551,7 @@ function shouldAttemptSupabaseReconnect(user = null) {
 }
 
 async function tryBootstrapSupabaseInBackground() {
-  if (supabaseBootstrapInFlight || !window.supabase?.createClient) {
+  if (supabaseBootstrapInFlight || !window.supabase?.createClient || isBrowserOffline()) {
     return false;
   }
 
@@ -1585,7 +1585,7 @@ async function tryBootstrapSupabaseInBackground() {
 }
 
 function scheduleSupabaseBootstrapRetry() {
-  if (supabaseBootstrapRetryHandle || !SUPABASE_CONFIG.enabled || supabaseAuth.enabled) {
+  if (supabaseBootstrapRetryHandle || !SUPABASE_CONFIG.enabled || supabaseAuth.enabled || isBrowserOffline()) {
     return;
   }
 
@@ -1666,7 +1666,7 @@ async function tryRecoverSupabaseSessionInBackground() {
   if (supabaseAuth.initializing) {
     return false;
   }
-  if (!SUPABASE_CONFIG.enabled || !getSupabaseAuthClient()) {
+  if (!SUPABASE_CONFIG.enabled || !getSupabaseAuthClient() || isBrowserOffline()) {
     return false;
   }
   if (!getCurrentUser() || hasActiveSupabaseSessionForUser()) {
@@ -1721,12 +1721,16 @@ function scheduleSupabaseSessionRecoveryRetry() {
     || !getSupabaseAuthClient()
     || !getCurrentUser()
     || hasActiveSupabaseSessionForUser()
+    || isBrowserOffline()
   ) {
     return;
   }
   supabaseSessionRecoveryRetries = 0;
   tryRecoverSupabaseSessionInBackground().catch(() => { });
   supabaseSessionRecoveryHandle = window.setInterval(() => {
+    if (isBrowserOffline()) {
+      return;
+    }
     if (
       !getCurrentUser()
       || hasActiveSupabaseSessionForUser()
@@ -1739,6 +1743,9 @@ function scheduleSupabaseSessionRecoveryRetry() {
     if (supabaseSessionRecoveryRetries >= SUPABASE_SESSION_RECOVERY_RETRY_LIMIT) {
       window.clearInterval(supabaseSessionRecoveryHandle);
       supabaseSessionRecoveryHandle = window.setInterval(() => {
+        if (isBrowserOffline()) {
+          return;
+        }
         if (!getCurrentUser() || hasActiveSupabaseSessionForUser()) {
           clearSupabaseSessionRecoveryRetry();
           return;
@@ -2630,15 +2637,27 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
   const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
   const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
   const role = isForcedAdminEmail(email) ? "admin" : "student";
-  const approved = role === "admin"
-    ? true
-    : shouldAutoApproveStudentAccess({
+  const canPreserveFallbackApproval = role !== "admin"
+    && fallbackUser?.isApproved === true
+    && hasCompleteStudentProfile({
       role: "student",
       phone: normalizedPhone,
       academicYear: metadataYear,
       academicSemester: metadataSemester,
-      assignedCourses: metadataCourses,
     });
+  const approved = role === "admin"
+    ? true
+    : (
+      canPreserveFallbackApproval
+        ? true
+        : shouldAutoApproveStudentAccess({
+          role: "student",
+          phone: normalizedPhone,
+          academicYear: metadataYear,
+          academicSemester: metadataSemester,
+          assignedCourses: metadataCourses,
+        })
+    );
 
   return {
     id: profileId,
@@ -3586,11 +3605,15 @@ function hasSupabaseManagedIdentity(user) {
   return Boolean(getUserProfileId(user));
 }
 
+function isBrowserOffline() {
+  return typeof navigator !== "undefined" && navigator?.onLine === false;
+}
+
 function shouldPreserveSupabaseLocalSessionAfterSignedOut(user) {
   if (!hasSupabaseManagedIdentity(user)) {
     return false;
   }
-  if (typeof navigator !== "undefined" && navigator?.onLine === false) {
+  if (isBrowserOffline()) {
     return true;
   }
   return Boolean(relationalSync.flushing || supabaseSync.flushing || getPendingCloudWriteCount() > 0);
@@ -4880,6 +4903,18 @@ function discardRejectedRelationalWrite(storageKeys, errorOrMessage, payloadBySt
 
 async function ensureRelationalSyncReady(options = {}) {
   const force = Boolean(options?.force);
+  if (isBrowserOffline()) {
+    relationalSync.enabled = false;
+    relationalSync.readyCheckedAt = Date.now();
+    relationalSync.readyPromise = null;
+    clearRelationalFlushTimer();
+    relationalSync.lastReadyError = "You are offline. Cloud sync will resume when the connection returns.";
+    relationalSync.lastFailureAt = Date.now();
+    relationalSync.lastFailureMessage = relationalSync.lastReadyError;
+    relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+    scheduleSyncStatusUiRefresh();
+    return false;
+  }
   const client = getRelationalClient();
   if (!client) {
     relationalSync.enabled = false;
@@ -9326,8 +9361,8 @@ async function syncProfilesToRelational(usersPayload) {
         academic_semester: user.role === "student" ? normalizedSemester : null,
         auth_provider: normalizedAuthProvider || null,
       };
-      const hasExplicitApproval = typeof user.isApproved === "boolean";
-      const shouldPersistApproval = isAdminSync || hasExplicitApproval || shouldAutoApproveStudentAccess(user);
+      const shouldPersistApproval = isAdminSync
+        || (Boolean(user.isApproved) && shouldAutoApproveStudentAccess(user));
       if (shouldPersistApproval) {
         baseRow.approved = Boolean(user.isApproved);
       }
@@ -10821,6 +10856,22 @@ async function resumeDeferredAppWork(options = {}) {
   }
 
   let activeUser = getCurrentUser();
+  if (isBrowserOffline()) {
+    clearSupabaseSessionRecoveryRetry();
+    clearSupabaseBootstrapRetry();
+    clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
+    clearProfileAccessRealtimeSubscription();
+    clearAdminPresencePolling();
+    clearAdminDashboardPolling();
+    clearAdminBackgroundSync();
+    syncPresenceRuntime(null);
+    resetSiteActivityRuntime();
+    syncTopbar();
+    scheduleSyncStatusUiRefresh();
+    return true;
+  }
   if (activeUser && !hasActiveSupabaseSessionForUser(activeUser)) {
     ensureSupabaseCloudReconnect(activeUser, {
       preferBootstrap: !supabaseAuth.enabled || !getSupabaseAuthClient(),
@@ -11087,6 +11138,22 @@ function bindGlobalEvents() {
 
   window.addEventListener("online", () => {
     scheduleDeferredAppResume(0);
+  });
+
+  window.addEventListener("offline", () => {
+    clearLifecycleResumeHandle();
+    clearSupabaseSessionRecoveryRetry();
+    clearSupabaseBootstrapRetry();
+    clearNotificationRealtimeSubscription();
+    clearSessionRealtimeSubscription();
+    clearContentRealtimeSubscription();
+    clearProfileAccessRealtimeSubscription();
+    clearAdminPresencePolling();
+    clearAdminDashboardPolling();
+    clearAdminBackgroundSync();
+    syncPresenceRuntime(null);
+    resetSiteActivityRuntime();
+    scheduleSyncStatusUiRefresh();
   });
 
   window.addEventListener("hashchange", () => {
@@ -11545,6 +11612,7 @@ function ensureProfileAccessRealtimeSubscription(user = null) {
   const profileId = getCurrentSessionProfileId(currentUser);
   if (
     !client
+    || isBrowserOffline()
     || currentUser?.role !== "student"
     || !isUuidValue(profileId)
     || shouldDeferStudentApprovalEnforcement(currentUser)
@@ -11971,7 +12039,7 @@ function ensureNotificationsRealtimeSubscription(user = null) {
   const client = getSupabaseAuthClient();
   const profileId = getCurrentSessionProfileId(currentUser);
   const role = currentUser?.role === "admin" ? "admin" : (currentUser?.role === "student" ? "student" : "");
-  if (!client || !isUuidValue(profileId) || !role) {
+  if (!client || isBrowserOffline() || !isUuidValue(profileId) || !role) {
     clearNotificationRealtimeSubscription();
     return;
   }
@@ -12080,7 +12148,7 @@ function ensureSessionRealtimeSubscription(user = null) {
   const currentUser = user || getCurrentUser();
   const client = getSupabaseAuthClient();
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!client || currentUser?.role !== "student" || !isUuidValue(profileId)) {
+  if (!client || isBrowserOffline() || currentUser?.role !== "student" || !isUuidValue(profileId)) {
     clearSessionRealtimeSubscription();
     clearStudentSessionPolling();
     return;
@@ -12192,6 +12260,7 @@ function ensureContentRealtimeSubscription(user = null) {
   const profileId = getCurrentSessionProfileId(currentUser);
   if (
     !client
+    || isBrowserOffline()
     || currentUser?.role !== "student"
     || !isUuidValue(profileId)
     || isStudentOnboardingRoute(state.route, currentUser)
@@ -24476,6 +24545,19 @@ async function syncSupabaseAuthAccessForTargets(targetAuthIds, approved, options
     const queuedIds = queuePendingAccessSyncActions(ids, approved, usersByProfileId);
     return { ok: false, updatedIds: [], notFoundIds: [], failedIds: ids, queuedIds, message: "Account access changes were queued for Supabase sync." };
   }
+  if (isBrowserOffline()) {
+    const queuedIds = queueFailures ? queuePendingAccessSyncActions(ids, approved, usersByProfileId) : [];
+    return {
+      ok: false,
+      updatedIds: [],
+      notFoundIds: [],
+      failedIds: ids,
+      queuedIds,
+      message: queuedIds.length
+        ? "You are offline. Account access changes were queued for Supabase sync."
+        : "You are offline. Reconnect to repair account access in Supabase.",
+    };
+  }
 
   const result = await setSupabaseAuthUserAccessAsAdmin(ids, approved);
   const updatedIds = [...new Set((Array.isArray(result?.updatedIds) ? result.updatedIds : []).filter((entry) => ids.includes(entry)))];
@@ -24565,7 +24647,7 @@ async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
 
 function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
   const currentUser = actorUser || getCurrentUser();
-  if (!currentUser || currentUser.role !== "admin") {
+  if (!currentUser || currentUser.role !== "admin" || isBrowserOffline()) {
     return;
   }
 
@@ -25847,6 +25929,15 @@ async function getResponseDetails(response, payload) {
 async function getValidSupabaseAccessToken(authClient) {
   if (!authClient?.auth) {
     return { ok: false, token: "", message: "Supabase auth client is not available." };
+  }
+  if (isBrowserOffline()) {
+    return {
+      ok: false,
+      token: "",
+      refreshToken: "",
+      sessionUserId: "",
+      message: "You are offline. Reconnect to verify the Supabase admin session.",
+    };
   }
 
   const readToken = async () => {
