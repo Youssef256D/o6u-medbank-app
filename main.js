@@ -127,6 +127,7 @@ const SUPABASE_QUERY_TIMEOUT_MS = 12000;
 const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
 const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 25000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
+const SUPABASE_BACKUP_WARNING_THROTTLE_MS = 60000;
 const SUPABASE_SESSION_TIMEOUT_MS = 15000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 12000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
@@ -398,6 +399,8 @@ const supabaseSync = {
   lastSuccessAt: 0,
   lastFailureAt: 0,
   lastFailureMessage: "",
+  lastWarningAt: 0,
+  lastWarningMessage: "",
   retryAt: 0,
 };
 
@@ -3945,10 +3948,12 @@ function invalidateAnalyticsCacheForStorageKey(storageKey) {
   });
 }
 
-function saveLocalOnly(key, value) {
+function saveLocalOnly(key, value, options = {}) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
-  appendStorageMutationLog("save_local", key, value);
+  if (options?.audit !== false) {
+    appendStorageMutationLog("save_local", key, value);
+  }
 }
 
 function clearSessionSyncTimer() {
@@ -5814,9 +5819,9 @@ async function hydrateRelationalCoursesAndTopics() {
     });
   }
   rebuildCurriculumCatalog();
-  saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
-  saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
-  saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
+  saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM, { audit: false });
+  saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES, { audit: false });
+  saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS, { audit: false });
   const currentUser = getCurrentUser();
   if (currentUser?.role === "admin") {
     scheduleSupabaseWrite(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
@@ -6553,7 +6558,7 @@ async function hydrateRelationalQuestions() {
     sortOrder: index + 1,
   }));
 
-  saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions);
+  saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions, { audit: false });
   const topicRepairResult = repairCourseTopicCatalogFromQuestions({ persist: false });
   const repairedQuestionsSnapshot = topicRepairResult.questionsChanged
     ? getQuestions()
@@ -7789,7 +7794,7 @@ async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
         && relationalContentCounts.courseCount < countCurriculumCourses(mergedCurriculum)
       )
     ) {
-      saveLocalOnly(STORAGE_KEYS.curriculum, mergedCurriculum);
+      saveLocalOnly(STORAGE_KEYS.curriculum, mergedCurriculum, { audit: false });
       restoredKeys.push(STORAGE_KEYS.curriculum);
       rehydrateCourseCatalogConfigFromStorage();
     }
@@ -7806,7 +7811,7 @@ async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
         && relationalContentCounts.topicCount < countCourseTopicEntries(mergedTopicMap)
       )
     ) {
-      saveLocalOnly(STORAGE_KEYS.courseTopics, mergedTopicMap);
+      saveLocalOnly(STORAGE_KEYS.courseTopics, mergedTopicMap, { audit: false });
       restoredKeys.push(STORAGE_KEYS.courseTopics);
       rehydrateCourseCatalogConfigFromStorage();
     }
@@ -7825,7 +7830,7 @@ async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
         && relationalContentCounts.questionCount < mergedQuestions.length
       )
     ) {
-      saveLocalOnly(STORAGE_KEYS.questions, mergedQuestions);
+      saveLocalOnly(STORAGE_KEYS.questions, mergedQuestions, { audit: false });
       restoredKeys.push(STORAGE_KEYS.questions);
     }
   }
@@ -7922,6 +7927,30 @@ function scheduleFullSupabaseSync(options = {}) {
   });
 }
 
+function warnSupabaseBackupSyncIssue(errorOrMessage, fallbackMessage = "Cloud backup sync failed.") {
+  const rawMessage = getErrorMessage(errorOrMessage, fallbackMessage);
+  const normalizedMessage = normalizeCloudSyncFailureMessage(errorOrMessage, fallbackMessage);
+  const recoverable = isLikelyRecoverableCloudSyncMessage(rawMessage) || isLikelyNetworkFetchError(errorOrMessage);
+  if (!recoverable) {
+    console.warn("Supabase sync error:", rawMessage);
+    supabaseSync.lastWarningAt = Date.now();
+    supabaseSync.lastWarningMessage = normalizedMessage;
+    return;
+  }
+
+  const now = Date.now();
+  const shouldWarn = (
+    supabaseSync.lastWarningMessage !== normalizedMessage
+    || (now - Number(supabaseSync.lastWarningAt || 0)) >= SUPABASE_BACKUP_WARNING_THROTTLE_MS
+  );
+  if (!shouldWarn) {
+    return;
+  }
+  console.warn("Supabase backup sync deferred:", normalizedMessage);
+  supabaseSync.lastWarningAt = now;
+  supabaseSync.lastWarningMessage = normalizedMessage;
+}
+
 async function flushSupabaseWrites() {
   if (
     !supabaseSync.enabled ||
@@ -7987,7 +8016,7 @@ async function flushSupabaseWrites() {
     );
     if (error) {
       const isNonRetryable = isNonRetryableSupabaseBackupWriteError(error);
-      console.warn("Supabase sync error:", error.message);
+      warnSupabaseBackupSyncIssue(error, "Cloud backup sync failed.");
       supabaseSync.lastFailureAt = Date.now();
       supabaseSync.lastFailureMessage = isNonRetryable
         ? ""
@@ -8010,6 +8039,8 @@ async function flushSupabaseWrites() {
     supabaseSync.lastSuccessAt = Date.now();
     supabaseSync.lastFailureAt = 0;
     supabaseSync.lastFailureMessage = "";
+    supabaseSync.lastWarningAt = 0;
+    supabaseSync.lastWarningMessage = "";
     supabaseSync.retryAt = 0;
     supabaseSync.writeAccessDenied = false;
     rows.forEach((row) => {
@@ -8025,7 +8056,7 @@ async function flushSupabaseWrites() {
     });
   } catch (error) {
     const isNonRetryable = isNonRetryableSupabaseBackupWriteError(error);
-    console.warn("Supabase sync error:", getErrorMessage(error, "Supabase sync failed."));
+    warnSupabaseBackupSyncIssue(error, "Supabase sync failed.");
     supabaseSync.lastFailureAt = Date.now();
     supabaseSync.lastFailureMessage = isNonRetryable
       ? ""
@@ -8066,6 +8097,8 @@ function resetSupabaseSyncRuntimeState() {
   supabaseSync.lastSuccessAt = 0;
   supabaseSync.lastFailureAt = 0;
   supabaseSync.lastFailureMessage = "";
+  supabaseSync.lastWarningAt = 0;
+  supabaseSync.lastWarningMessage = "";
   supabaseSync.retryAt = 0;
   clearSupabaseFlushTimer();
   scheduleSyncStatusUiRefresh();
@@ -9869,7 +9902,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   });
   if (promotedInlineImages.changed) {
     questions = promotedInlineImages.questions;
-    saveLocalOnly(STORAGE_KEYS.questions, questions);
+    saveLocalOnly(STORAGE_KEYS.questions, questions, { audit: false });
   }
   const payloadExternalIds = [...new Set(
     questions
@@ -10027,7 +10060,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     });
     if (addedTopicsToOverrides) {
       rebuildCurriculumCatalog();
-      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES, { audit: false });
       scheduleSupabaseWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
       scheduleRelationalWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     }
@@ -10184,7 +10217,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     }
     return { ...question, dbId: nextDbId };
   });
-  saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions);
+  saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions, { audit: false });
 
   const insertChoiceRows = async (rows) => {
     for (const choiceBatch of splitIntoBatches(rows, RELATIONAL_INSERT_BATCH_SIZE)) {
@@ -10250,7 +10283,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       }
       return { ...question, dbId: nextDbId };
     });
-    saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions);
+    saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions, { audit: false });
 
     choiceSyncPlan = buildQuestionChoiceSyncPlan(refreshedLocalQuestions, refreshedDbIdByExternalId);
     if (choiceSyncPlan.skippedQuestionIds.length) {
@@ -27812,7 +27845,7 @@ function repairCourseTopicCatalogFromQuestions(options = {}) {
     if (persist) {
       save(STORAGE_KEYS.questions, questions);
     } else {
-      saveLocalOnly(STORAGE_KEYS.questions, questions);
+      saveLocalOnly(STORAGE_KEYS.questions, questions, { audit: false });
     }
   }
 
@@ -27854,7 +27887,7 @@ function repairCourseTopicCatalogFromQuestions(options = {}) {
     if (persist) {
       save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     } else {
-      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+      saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES, { audit: false });
     }
   }
 
