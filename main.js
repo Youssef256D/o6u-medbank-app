@@ -7523,6 +7523,12 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
         payload = mergeHydratedSessionsWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.users) {
         payload = mergeHydratedUsersWithLocal(payload);
+      } else if (
+        storageKey === STORAGE_KEYS.questions
+        || storageKey === STORAGE_KEYS.curriculum
+        || storageKey === STORAGE_KEYS.courseTopics
+      ) {
+        payload = mergeHydratedBackupPayloadWithLocal(storageKey, payload);
       } else if (storageKey === STORAGE_KEYS.courseTopicGroups) {
         payload = mergeHydratedCourseTopicGroupsWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewCatalog) {
@@ -7674,6 +7680,21 @@ function mergeCurriculumWithBackup(localCurriculum, backupCurriculum) {
   return merged;
 }
 
+function mergeQuestionsWithBackup(localQuestions, backupQuestions) {
+  const local = dedupeQuestions(Array.isArray(localQuestions) ? localQuestions : []);
+  const backup = dedupeQuestions(Array.isArray(backupQuestions) ? backupQuestions : []);
+  if (!backup.length) {
+    return local;
+  }
+  if (!local.length) {
+    return backup;
+  }
+  // Treat backup hydration as additive only. The relational DB remains the
+  // source of truth for deletions; backup payloads should never remove
+  // questions from local state when they are stale or partial.
+  return dedupeQuestions([...backup, ...local]);
+}
+
 function hasCurriculumAdditions(baseCurriculum, nextCurriculum) {
   const base = normalizeCurriculum(baseCurriculum || DEFAULT_O6U_CURRICULUM);
   const next = normalizeCurriculum(nextCurriculum || DEFAULT_O6U_CURRICULUM);
@@ -7710,6 +7731,25 @@ function mergeCourseTopicMapWithBackup(localTopicMap, backupTopicMap) {
     );
   });
   return normalizeCourseTopicMap(merged);
+}
+
+function mergeHydratedBackupPayloadWithLocal(storageKey, remotePayload) {
+  if (storageKey === STORAGE_KEYS.questions) {
+    return mergeQuestionsWithBackup(getQuestions(), remotePayload);
+  }
+  if (storageKey === STORAGE_KEYS.curriculum) {
+    return mergeCurriculumWithBackup(
+      load(STORAGE_KEYS.curriculum, O6U_CURRICULUM),
+      remotePayload,
+    );
+  }
+  if (storageKey === STORAGE_KEYS.courseTopics) {
+    return mergeCourseTopicMapWithBackup(
+      load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
+      remotePayload,
+    );
+  }
+  return remotePayload;
 }
 
 function hasCourseTopicAdditions(baseTopicMap, nextTopicMap) {
