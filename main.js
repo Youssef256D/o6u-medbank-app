@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-20.25").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-25.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -88,6 +88,7 @@ const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions",
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
 let storageFallbackWarned = false;
+let largeQuestionStorageWarned = false;
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -147,6 +148,10 @@ const RELATIONAL_UUID_IN_BATCH_SIZE = 20;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
+const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
+const QUESTION_RELATIONAL_PAGE_SIZE = 250;
+const QUESTION_RELATIONAL_BATCH_SIZE = 100;
+const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
 const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
 const ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS = 60000;
@@ -418,6 +423,8 @@ const relationalSync = {
   inFlightPayloadSignatures: new Map(),
   lastSyncedPayloadSignatures: new Map(),
   lastRejectedPayloadSignatures: new Map(),
+  questionRowSignaturesByExternalId: new Map(),
+  questionChoiceSignaturesByExternalId: new Map(),
   blockedStorageKeys: new Set(),
   flushTimer: null,
   flushing: false,
@@ -859,6 +866,16 @@ function warnStorageFallback(error) {
   }
   storageFallbackWarned = true;
   console.warn("Persistent browser storage is unavailable. Using temporary in-memory storage for this tab.", error);
+}
+
+function warnLargeQuestionStorageFallback(serializedLength = 0) {
+  if (largeQuestionStorageWarned) {
+    return;
+  }
+  largeQuestionStorageWarned = true;
+  console.warn(
+    `Question cache is too large for browser storage (${serializedLength} chars). Keeping questions in temporary in-memory storage for this tab and relying on cloud sync for persistence.`,
+  );
 }
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
@@ -4719,6 +4736,8 @@ function resetRelationalSyncState() {
   relationalSync.inFlightPayloadSignatures.clear();
   relationalSync.lastSyncedPayloadSignatures.clear();
   relationalSync.lastRejectedPayloadSignatures.clear();
+  relationalSync.questionRowSignaturesByExternalId.clear();
+  relationalSync.questionChoiceSignaturesByExternalId.clear();
   relationalSync.blockedStorageKeys.clear();
   relationalSync.flushing = false;
   relationalSync.lastQueuedAt = 0;
@@ -6300,7 +6319,14 @@ async function hydrateRelationalQuestions() {
       .range(from, to);
   };
 
-  let questionsResult = await fetchRowsPaged((from, to) => buildQuestionsQuery(from, to));
+  let questionsResult = await fetchRowsPaged(
+    (from, to) => buildQuestionsQuery(from, to),
+    {
+      pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
+      timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+      timeoutMessage: "Question hydration timed out.",
+    },
+  );
   if (questionsResult.error) {
     console.warn("Could not hydrate relational questions.", questionsResult.error?.message || questionsResult.error);
     return false;
@@ -6316,7 +6342,14 @@ async function hydrateRelationalQuestions() {
       relationalSync.questionsBackfillAttempted = true;
       try {
         await syncQuestionsToRelational(localQuestionsBefore);
-        const retryResult = await fetchRowsPaged((from, to) => buildQuestionsQuery(from, to));
+        const retryResult = await fetchRowsPaged(
+          (from, to) => buildQuestionsQuery(from, to),
+          {
+            pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
+            timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+            timeoutMessage: "Question hydration timed out.",
+          },
+        );
         if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
           questionsResult = retryResult;
         } else {
@@ -6343,15 +6376,15 @@ async function hydrateRelationalQuestions() {
   const questionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
   const questionIds = questionRows.map((question) => question.id).filter(isUuidValue);
   const choiceRows = [];
-  for (const questionIdBatch of splitIntoBatches(questionIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error } = await client
-      .from("question_choices")
-      .select("question_id,choice_label,choice_text,is_correct")
-      .in("question_id", questionIdBatch);
-    if (error) {
-      console.warn("Could not hydrate question choices.", error?.message || error);
-      return false;
-    }
+  for (const questionIdBatch of splitIntoBatches(questionIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("question_choices")
+        .select("question_id,choice_label,choice_text,is_correct")
+        .in("question_id", questionIdBatch),
+      "Question choice hydration timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
+    );
     if (Array.isArray(data) && data.length) {
       choiceRows.push(...data);
     }
@@ -6558,7 +6591,33 @@ async function hydrateRelationalQuestions() {
     sortOrder: index + 1,
   }));
 
-  saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions, { audit: false });
+  const hydratedRemoteQuestionIds = new Set(
+    mappedQuestions
+      .map((question) => String(question?.id || "").trim())
+      .filter(Boolean),
+  );
+  relationalSync.questionRowSignaturesByExternalId.clear();
+  relationalSync.questionChoiceSignaturesByExternalId.clear();
+  normalizedMappedQuestions.forEach((question) => {
+    const externalId = String(question?.id || "").trim();
+    if (!externalId || !hydratedRemoteQuestionIds.has(externalId) || !isUuidValue(question?.dbId)) {
+      return;
+    }
+    relationalSync.questionRowSignaturesByExternalId.set(
+      externalId,
+      buildQuestionRowSyncSignature(question, {
+        columnSupport: questionColumnSupport,
+      }),
+    );
+    const choiceSignature = buildQuestionChoiceSyncSignatureFromQuestion(question, question.dbId);
+    if (choiceSignature) {
+      relationalSync.questionChoiceSignaturesByExternalId.set(externalId, choiceSignature);
+    }
+  });
+
+  if (getSyncPayloadSignature(localQuestionsBefore) !== getSyncPayloadSignature(normalizedMappedQuestions)) {
+    saveLocalOnly(STORAGE_KEYS.questions, normalizedMappedQuestions, { audit: false });
+  }
   const topicRepairResult = repairCourseTopicCatalogFromQuestions({ persist: false });
   const repairedQuestionsSnapshot = topicRepairResult.questionsChanged
     ? getQuestions()
@@ -9104,6 +9163,61 @@ function buildChoiceSyncSignature(rows) {
     .join("|");
 }
 
+function normalizeQuestionImageForRelationalSync(value, enabled) {
+  if (!enabled) {
+    return "";
+  }
+  const normalized = String(value || "").trim();
+  if (!normalized || isInlineImageDataUrl(normalized)) {
+    return "";
+  }
+  return normalized;
+}
+
+function buildQuestionRowSyncSignature(question, options = {}) {
+  const columnSupport = options?.columnSupport || relationalQuestionColumnSupport;
+  const meta = getQbankCourseTopicMeta(question);
+  return getSyncPayloadSignature({
+    course: String(meta?.course || "").trim(),
+    topic: String(meta?.topic || "").trim(),
+    stem: String(question?.stem || "").trim(),
+    explanation: String(question?.explanation || "").trim() || "No explanation provided.",
+    objective: String(question?.objective || "").trim(),
+    difficulty: toRelationalDifficulty(question?.difficulty),
+    status: toRelationalQuestionStatus(question?.status),
+    sortOrder: columnSupport?.sortOrder
+      ? (normalizeQuestionSortOrder(question?.sortOrder) ?? null)
+      : null,
+    questionImageUrl: normalizeQuestionImageForRelationalSync(
+      question?.questionImage,
+      Boolean(columnSupport?.questionImageUrl),
+    ),
+    explanationImageUrl: normalizeQuestionImageForRelationalSync(
+      question?.explanationImage,
+      Boolean(columnSupport?.explanationImageUrl),
+    ),
+  });
+}
+
+function buildQuestionChoiceSyncSignatureFromQuestion(question, mappedDbId = "") {
+  if (!isUuidValue(mappedDbId)) {
+    return "";
+  }
+  const normalizedChoices = normalizeQuestionChoiceEntries(question?.choices);
+  if (normalizedChoices.length < 2) {
+    return "";
+  }
+  const normalizedCorrect = resolveQuestionCorrectAnswers(question?.correct, [], normalizedChoices);
+  const correctSet = new Set(normalizedCorrect);
+  const rows = normalizedChoices.map((choice) => ({
+    question_id: mappedDbId,
+    choice_label: choice.id,
+    choice_text: choice.text,
+    is_correct: correctSet.has(choice.id),
+  }));
+  return buildChoiceSyncSignature(rows);
+}
+
 function buildQuestionChoiceSyncPlan(sourceQuestions, idMap = {}) {
   const questions = Array.isArray(sourceQuestions) ? sourceQuestions : [];
   const mapping = idMap && typeof idMap === "object" ? idMap : {};
@@ -9155,13 +9269,14 @@ async function verifyQuestionChoiceSync(client, questionIds, expectedSignatureBy
   }
 
   const remoteRows = [];
-  for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_IN_BATCH_SIZE)) {
+  for (const questionIdBatch of splitIntoBatches(targetIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
     const data = await runRelationalQueryWithTimeout(
       client
         .from("question_choices")
         .select("question_id,choice_label,choice_text,is_correct")
         .in("question_id", questionIdBatch),
       "Question choice verification timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
     if (Array.isArray(data) && data.length) {
       remoteRows.push(...data);
@@ -9857,45 +9972,84 @@ async function deleteRelationalQuestionsAndDependents(client, questionIds) {
     return;
   }
 
-  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client
         .from("question_choices")
         .delete()
         .in("question_id", idBatch),
       "Question choice cleanup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
 
-  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client
         .from("test_responses")
         .delete()
         .in("question_id", idBatch),
       "Question response cleanup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
 
-  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client
         .from("test_block_items")
         .delete()
         .in("question_id", idBatch),
       "Question block-item cleanup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
 
-  for (const idBatch of splitIntoBatches(ids, RELATIONAL_DELETE_BATCH_SIZE)) {
+  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client
         .from("questions")
         .delete()
         .in("id", idBatch),
       "Question cleanup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
+}
+
+async function flushPendingRelationalQuestionDeletions(client, pendingExternalIds = null) {
+  const pendingDeletions = [...new Set(
+    (Array.isArray(pendingExternalIds) ? pendingExternalIds : getPendingQuestionDeletions())
+      .filter((externalId) => typeof externalId === "string" && externalId.trim())
+      .map((externalId) => String(externalId).trim()),
+  )];
+  if (!pendingDeletions.length) {
+    return [];
+  }
+
+  const deleteDbIds = [];
+  for (const extIdBatch of splitIntoBatches(pendingDeletions, QUESTION_RELATIONAL_BATCH_SIZE)) {
+    const matchRows = await runRelationalQueryWithTimeout(
+      client
+        .from("questions")
+        .select("id")
+        .in("external_id", extIdBatch),
+      "Question deletion lookup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
+    );
+    (matchRows || []).forEach((row) => {
+      if (isUuidValue(row?.id)) {
+        deleteDbIds.push(row.id);
+      }
+    });
+  }
+
+  if (deleteDbIds.length) {
+    await deleteRelationalQuestionsAndDependents(client, deleteDbIds);
+  }
+
+  clearQuestionDeletions(pendingDeletions);
+  return pendingDeletions;
 }
 
 async function syncQuestionsToRelational(questionsPayload) {
@@ -9949,14 +10103,36 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       .map((question) => String(question?.id || "").trim())
       .filter(Boolean),
   )];
-  const existingByExternalId = {};
-  for (const externalIdBatch of splitIntoBatches(payloadExternalIds, RELATIONAL_IN_BATCH_SIZE)) {
+  if (!payloadExternalIds.length) {
+    const processedPendingDeletions = currentUser.role === "admin"
+      ? await flushPendingRelationalQuestionDeletions(client)
+      : [];
+    processedPendingDeletions.forEach((externalId) => {
+      relationalSync.questionRowSignaturesByExternalId.delete(externalId);
+      relationalSync.questionChoiceSignaturesByExternalId.delete(externalId);
+    });
+    if (!processedPendingDeletions.length) {
+      console.warn("syncQuestionsToRelational: payload is empty — skipping sync to prevent accidental DB wipe.");
+    }
+    return;
+  }
+
+  const existingByExternalId = Object.fromEntries(
+    questions
+      .map((question) => [String(question?.id || "").trim(), String(question?.dbId || "").trim()])
+      .filter(([externalId, dbId]) => externalId && isUuidValue(dbId)),
+  );
+  const externalIdsNeedingLookup = payloadExternalIds.filter(
+    (externalId) => !isUuidValue(existingByExternalId[externalId]),
+  );
+  for (const externalIdBatch of splitIntoBatches(externalIdsNeedingLookup, QUESTION_RELATIONAL_BATCH_SIZE)) {
     const existingRows = await runRelationalQueryWithTimeout(
       client
         .from("questions")
         .select("id,external_id")
         .in("external_id", externalIdBatch),
       "Question lookup timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
     (existingRows || []).forEach((row) => {
       const externalId = String(row?.external_id || "").trim();
@@ -10140,6 +10316,18 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     const stableDbId =
       existingByExternalId[externalId]
       || crypto.randomUUID();
+    const rowSignature = buildQuestionRowSyncSignature(question, {
+      columnSupport: questionColumnSupport,
+    });
+    const lastSyncedRowSignature = relationalSync.questionRowSignaturesByExternalId.get(externalId);
+    const rowNeedsUpsert = (
+      !isUuidValue(existingByExternalId[externalId])
+      || !lastSyncedRowSignature
+      || lastSyncedRowSignature !== rowSignature
+    );
+    if (!rowNeedsUpsert) {
+      return;
+    }
     const questionImageValue = String(question.questionImage || "").trim();
     const explanationImageValue = String(question.explanationImage || "").trim();
     upsertRows.push({
@@ -10165,15 +10353,6 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     });
   });
 
-  if (!payloadExternalIds.length) {
-    // Safety: NEVER delete all questions from DB when local payload is empty.
-    // An empty local array is almost always a data-loss scenario (localStorage
-    // cleared, race condition, partial load) — not an intentional "delete all".
-    // Explicit per-course or bulk deletes are tracked via the deletion queue.
-    console.warn("syncQuestionsToRelational: payload is empty — skipping sync to prevent accidental DB wipe.");
-    return;
-  }
-
   if (unresolvedQuestionMappings.length) {
     const samples = unresolvedQuestionMappings
       .slice(0, 3)
@@ -10185,85 +10364,65 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     );
   }
 
-  if (!upsertRows.length) {
+  if (!upsertRows.length && questions.some((question) => !isUuidValue(existingByExternalId[String(question?.id || "").trim()]))) {
     throw new Error(
       "Could not map imported questions to database courses/topics. Questions were kept locally; database sync was skipped to prevent data loss.",
     );
   }
 
-  for (const upsertBatch of splitIntoBatches(upsertRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+  for (const upsertBatch of splitIntoBatches(upsertRows, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client.from("questions").upsert(upsertBatch, { onConflict: "external_id" }),
       "Question sync timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
 
   const externalIds = upsertRows.map((row) => row.external_id).filter(Boolean);
   const persistedQuestions = [];
-  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+  for (const externalIdBatch of splitIntoBatches(externalIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
     const persistedBatch = await runRelationalQueryWithTimeout(
       client
         .from("questions")
         .select("id,external_id")
         .in("external_id", externalIdBatch),
       "Question verification timed out.",
+      QUESTION_RELATIONAL_TIMEOUT_MS,
     );
     if (Array.isArray(persistedBatch) && persistedBatch.length) {
       persistedQuestions.push(...persistedBatch);
     }
   }
-  // Only delete questions that were *explicitly* deleted by the admin via the
-  // UI (single delete, bulk delete, "Delete all questions" per course).
-  // Previously this code diffed local vs DB and deleted anything missing
-  // locally, which caused catastrophic data loss when local storage was
-  // incomplete (e.g., race condition, localStorage cleared, partial load).
+  let processedPendingDeletions = [];
   if (currentUser.role === "admin") {
-    const pendingDeletions = getPendingQuestionDeletions();
-    if (pendingDeletions.length) {
-      // Look up the DB UUIDs for the external IDs queued for deletion.
-      const deleteDbIds = [];
-      const processedExternalIds = [];
-      for (const extIdBatch of splitIntoBatches(pendingDeletions, RELATIONAL_IN_BATCH_SIZE)) {
-        const matchRows = await runRelationalQueryWithTimeout(
-          client
-            .from("questions")
-            .select("id,external_id")
-            .in("external_id", extIdBatch),
-          "Question deletion lookup timed out.",
-        );
-        (matchRows || []).forEach((row) => {
-          if (isUuidValue(row?.id)) {
-            deleteDbIds.push(row.id);
-          }
-          const extId = String(row?.external_id || "").trim();
-          if (extId) {
-            processedExternalIds.push(extId);
-          }
-        });
-      }
-      if (deleteDbIds.length) {
-        await deleteRelationalQuestionsAndDependents(client, deleteDbIds);
-      }
-      // Clear the processed deletions (and any external IDs not found in DB).
-      clearQuestionDeletions(pendingDeletions);
-    }
+    processedPendingDeletions = await flushPendingRelationalQuestionDeletions(client);
   }
-  const dbIdByExternalId = Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id]));
+  const dbIdByExternalId = {
+    ...existingByExternalId,
+    ...Object.fromEntries((persistedQuestions || []).map((entry) => [entry.external_id, entry.id])),
+  };
 
+  const questionDbIdChangedExternalIds = new Set();
+  let questionsDbIdChanged = false;
   const updatedLocalQuestions = questions.map((question) => {
     const nextDbId = dbIdByExternalId[question.id];
     if (!nextDbId || question.dbId === nextDbId) {
       return question;
     }
+    questionsDbIdChanged = true;
+    questionDbIdChangedExternalIds.add(String(question.id || "").trim());
     return { ...question, dbId: nextDbId };
   });
-  saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions, { audit: false });
+  if (questionsDbIdChanged) {
+    saveLocalOnly(STORAGE_KEYS.questions, updatedLocalQuestions, { audit: false });
+  }
 
   const insertChoiceRows = async (rows) => {
-    for (const choiceBatch of splitIntoBatches(rows, RELATIONAL_INSERT_BATCH_SIZE)) {
+    for (const choiceBatch of splitIntoBatches(rows, QUESTION_RELATIONAL_BATCH_SIZE)) {
       await runRelationalQueryWithTimeout(
         client.from("question_choices").insert(choiceBatch),
         "Question choice sync timed out.",
+        QUESTION_RELATIONAL_TIMEOUT_MS,
       );
     }
   };
@@ -10273,13 +10432,14 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     if (!targetIds.length) {
       return;
     }
-    for (const questionIdBatch of splitIntoBatches(targetIds, RELATIONAL_DELETE_BATCH_SIZE)) {
+    for (const questionIdBatch of splitIntoBatches(targetIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
       await runRelationalQueryWithTimeout(
         client
           .from("question_choices")
           .delete()
           .in("question_id", questionIdBatch),
         "Question choice replacement timed out.",
+        QUESTION_RELATIONAL_TIMEOUT_MS,
       );
     }
 
@@ -10287,52 +10447,148 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     await verifyQuestionChoiceSync(client, targetIds, plan.signatureByQuestionId);
   };
 
-  let choiceSyncPlan = buildQuestionChoiceSyncPlan(updatedLocalQuestions, dbIdByExternalId);
-  if (choiceSyncPlan.skippedQuestionIds.length) {
+  const buildTargetedChoiceSyncPlan = (questionList, idMap, forcedExternalIds = new Set()) => {
+    const forceSet = forcedExternalIds instanceof Set
+      ? forcedExternalIds
+      : new Set(Array.isArray(forcedExternalIds) ? forcedExternalIds : []);
+    const targetQuestions = [];
+    const targetExternalIds = new Set();
+    const syncableExternalIds = new Set();
+
+    (Array.isArray(questionList) ? questionList : []).forEach((question) => {
+      const externalId = String(question?.id || "").trim();
+      if (!externalId || targetExternalIds.has(externalId)) {
+        return;
+      }
+      const mappedDbId = String(idMap?.[externalId] || question?.dbId || "").trim();
+      const localChoiceSignature = buildQuestionChoiceSyncSignatureFromQuestion(question, mappedDbId);
+      const lastSyncedChoiceSignature = relationalSync.questionChoiceSignaturesByExternalId.get(externalId);
+      const shouldSyncChoices = (
+        forceSet.has(externalId)
+        || !lastSyncedChoiceSignature
+        || !localChoiceSignature
+        || lastSyncedChoiceSignature !== localChoiceSignature
+      );
+      if (!shouldSyncChoices) {
+        return;
+      }
+      targetQuestions.push(question);
+      targetExternalIds.add(externalId);
+      if (localChoiceSignature) {
+        syncableExternalIds.add(externalId);
+      }
+    });
+
+    return {
+      targetExternalIds,
+      syncableExternalIds,
+      ...buildQuestionChoiceSyncPlan(targetQuestions, idMap),
+    };
+  };
+
+  let finalQuestionsSnapshot = updatedLocalQuestions;
+  let finalDbIdByExternalId = dbIdByExternalId;
+  let finalChoiceSyncPlan = buildTargetedChoiceSyncPlan(
+    updatedLocalQuestions,
+    dbIdByExternalId,
+    questionDbIdChangedExternalIds,
+  );
+  if (finalChoiceSyncPlan.skippedQuestionIds.length) {
     console.warn(
-      `Skipped choice sync for ${choiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
+      `Skipped choice sync for ${finalChoiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
     );
   }
   try {
-    await applyQuestionChoiceSyncPlan(choiceSyncPlan);
+    await applyQuestionChoiceSyncPlan(finalChoiceSyncPlan);
   } catch (error) {
     if (!isQuestionChoiceForeignKeyError(error)) {
       throw error;
     }
 
+    const refreshLookupExternalIds = finalChoiceSyncPlan.targetExternalIds.size
+      ? [...finalChoiceSyncPlan.targetExternalIds]
+      : externalIds;
     const refreshedPersistedQuestions = [];
-    for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+    for (const externalIdBatch of splitIntoBatches(refreshLookupExternalIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
       const persistedBatch = await runRelationalQueryWithTimeout(
         client
           .from("questions")
           .select("id,external_id")
           .in("external_id", externalIdBatch),
         "Question refresh lookup timed out.",
+        QUESTION_RELATIONAL_TIMEOUT_MS,
       );
       if (Array.isArray(persistedBatch) && persistedBatch.length) {
         refreshedPersistedQuestions.push(...persistedBatch);
       }
     }
-    const refreshedDbIdByExternalId = Object.fromEntries(
-      (refreshedPersistedQuestions || []).map((entry) => [entry.external_id, entry.id]),
-    );
+    const refreshedDbIdByExternalId = {
+      ...dbIdByExternalId,
+      ...Object.fromEntries((refreshedPersistedQuestions || []).map((entry) => [entry.external_id, entry.id])),
+    };
+    const refreshedDbIdChangedExternalIds = new Set(questionDbIdChangedExternalIds);
+    let refreshedQuestionsDbIdChanged = false;
     const refreshedLocalQuestions = questions.map((question) => {
       const nextDbId = refreshedDbIdByExternalId[question.id];
       if (!nextDbId || question.dbId === nextDbId) {
         return question;
       }
+      refreshedQuestionsDbIdChanged = true;
+      refreshedDbIdChangedExternalIds.add(String(question.id || "").trim());
       return { ...question, dbId: nextDbId };
     });
-    saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions, { audit: false });
+    if (refreshedQuestionsDbIdChanged) {
+      saveLocalOnly(STORAGE_KEYS.questions, refreshedLocalQuestions, { audit: false });
+    }
 
-    choiceSyncPlan = buildQuestionChoiceSyncPlan(refreshedLocalQuestions, refreshedDbIdByExternalId);
-    if (choiceSyncPlan.skippedQuestionIds.length) {
+    finalQuestionsSnapshot = refreshedLocalQuestions;
+    finalDbIdByExternalId = refreshedDbIdByExternalId;
+    finalChoiceSyncPlan = buildTargetedChoiceSyncPlan(
+      refreshedLocalQuestions,
+      refreshedDbIdByExternalId,
+      refreshedDbIdChangedExternalIds,
+    );
+    if (finalChoiceSyncPlan.skippedQuestionIds.length) {
       console.warn(
-        `Skipped choice sync for ${choiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
+        `Skipped choice sync for ${finalChoiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
       );
     }
-    await applyQuestionChoiceSyncPlan(choiceSyncPlan);
+    await applyQuestionChoiceSyncPlan(finalChoiceSyncPlan);
   }
+
+  const finalQuestionByExternalId = new Map(
+    finalQuestionsSnapshot
+      .map((question) => [String(question?.id || "").trim(), question])
+      .filter(([externalId]) => Boolean(externalId)),
+  );
+  externalIds.forEach((externalId) => {
+    const syncedQuestion = finalQuestionByExternalId.get(externalId);
+    if (!syncedQuestion) {
+      return;
+    }
+    relationalSync.questionRowSignaturesByExternalId.set(
+      externalId,
+      buildQuestionRowSyncSignature(syncedQuestion, {
+        columnSupport: questionColumnSupport,
+      }),
+    );
+  });
+  finalChoiceSyncPlan.syncableExternalIds.forEach((externalId) => {
+    const syncedQuestion = finalQuestionByExternalId.get(externalId);
+    if (!syncedQuestion) {
+      return;
+    }
+    const mappedDbId = String(finalDbIdByExternalId[externalId] || syncedQuestion?.dbId || "").trim();
+    const choiceSignature = buildQuestionChoiceSyncSignatureFromQuestion(syncedQuestion, mappedDbId);
+    if (!choiceSignature) {
+      return;
+    }
+    relationalSync.questionChoiceSignaturesByExternalId.set(externalId, choiceSignature);
+  });
+  processedPendingDeletions.forEach((externalId) => {
+    relationalSync.questionRowSignaturesByExternalId.delete(externalId);
+    relationalSync.questionChoiceSignaturesByExternalId.delete(externalId);
+  });
 }
 
 async function persistImportedQuestionsNow(questionsPayload) {
@@ -10726,7 +10982,7 @@ function seedData() {
     }
   }
 
-  if (!load(STORAGE_KEYS.questions, null)) {
+  if (!SUPABASE_CONFIG.enabled && !load(STORAGE_KEYS.questions, null)) {
     save(STORAGE_KEYS.questions, SAMPLE_QUESTIONS);
   }
 
@@ -16350,7 +16606,7 @@ function renderCreateTest() {
         </div>
 
         <label class="create-test-randomize">
-          <input type="checkbox" name="randomize" checked />
+          <input type="checkbox" name="randomize" />
           <span class="create-test-randomize-switch" aria-hidden="true"></span>
           <span class="create-test-randomize-copy">
             <b>Randomize questions</b>
@@ -29222,10 +29478,10 @@ function importQuestionsFromRaw(raw, config) {
   });
 
   if (added) {
-    save(STORAGE_KEYS.questions, questions);
+    saveLocalOnly(STORAGE_KEYS.questions, questions);
   }
   if (topicCatalogChanged) {
-    save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+    saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     topicCatalogPreviousByCourse.forEach((previousTopics, course) => {
       syncTopicNewCatalogForCourse(course, previousTopics, COURSE_TOPIC_OVERRIDES[course] || []);
     });
@@ -30824,6 +31080,26 @@ function writeStorageKey(key, value) {
     serialized = JSON.stringify(value);
   } catch (error) {
     console.warn(`Could not serialize storage key "${key}".`, error);
+    return;
+  }
+
+  const shouldKeepQuestionsInMemoryOnly = (
+    key === STORAGE_KEYS.questions
+    && typeof serialized === "string"
+    && serialized.length >= LARGE_QUESTION_STORAGE_CHAR_LIMIT
+  );
+  if (shouldKeepQuestionsInMemoryOnly) {
+    warnLargeQuestionStorageFallback(serialized.length);
+    inMemoryStorage.set(key, serialized);
+    removeSessionStorageKey(key);
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // Ignore when persistent storage is blocked.
+    }
+    if (key === STORAGE_KEYS.questions) {
+      state.questionsRevision = (state.questionsRevision || 0) + 1;
+    }
     return;
   }
 
