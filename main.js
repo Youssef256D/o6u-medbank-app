@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-25.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-29.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -868,14 +868,22 @@ function warnStorageFallback(error) {
   console.warn("Persistent browser storage is unavailable. Using temporary in-memory storage for this tab.", error);
 }
 
-function warnLargeQuestionStorageFallback(serializedLength = 0) {
+function warnLargeQuestionStorageFallback() {
   if (largeQuestionStorageWarned) {
     return;
   }
   largeQuestionStorageWarned = true;
-  console.warn(
-    `Question cache is too large for browser storage (${serializedLength} chars). Keeping questions in temporary in-memory storage for this tab and relying on cloud sync for persistence.`,
-  );
+}
+
+function isStorageQuotaExceededError(error) {
+  const rawCode = Number(error?.code);
+  const name = String(error?.name || "").trim().toLowerCase();
+  const message = String(error?.message || "").trim().toLowerCase();
+  return rawCode === 22
+    || rawCode === 1014
+    || name === "quotaexceedederror"
+    || name === "nserror_dom_quota_reached"
+    || (message.includes("quota") && (message.includes("exceeded") || message.includes("full")));
 }
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
@@ -10679,6 +10687,52 @@ async function syncSessionsToRelational(sessionsPayload) {
     return;
   }
 
+  const ownedSessionProfileIds = [...new Set(
+    [...sessionOwnerProfileIdBySessionId.values()]
+      .map((profileId) => String(profileId || "").trim())
+      .filter((profileId) => isUuidValue(profileId)),
+  )];
+  const loadExistingOwnerProfileIds = async (profileIds) => {
+    const existingProfileIds = new Set();
+    for (const profileBatch of splitIntoBatches(profileIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+      const data = await runRelationalQueryWithTimeout(
+        client
+          .from("profiles")
+          .select("id")
+          .in("id", profileBatch),
+        "Session owner verification timed out.",
+      );
+      (Array.isArray(data) ? data : []).forEach((row) => {
+        const profileId = String(row?.id || "").trim();
+        if (isUuidValue(profileId)) {
+          existingProfileIds.add(profileId);
+        }
+      });
+    }
+    return existingProfileIds;
+  };
+
+  let existingOwnerProfileIds = await loadExistingOwnerProfileIds(ownedSessionProfileIds);
+  const missingOwnerProfileIds = ownedSessionProfileIds.filter((profileId) => !existingOwnerProfileIds.has(profileId));
+  if (missingOwnerProfileIds.length) {
+    const activeProfileId = String(getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "").trim();
+    const shouldBackfillCurrentOwner = activeProfileId && missingOwnerProfileIds.includes(activeProfileId);
+    if (shouldBackfillCurrentOwner) {
+      const currentOwnerUser = users.find((entry) => String(getUserProfileId(entry) || "").trim() === activeProfileId) || currentUser;
+      await syncProfilesToRelational([currentOwnerUser]);
+      existingOwnerProfileIds = await loadExistingOwnerProfileIds(ownedSessionProfileIds);
+    }
+  }
+
+  const syncableOwnedSessions = ownedSessions.filter((session) => {
+    const sessionId = String(session?.id || "").trim();
+    const ownerProfileId = String(sessionOwnerProfileIdBySessionId.get(sessionId) || "").trim();
+    return ownerProfileId && existingOwnerProfileIds.has(ownerProfileId);
+  });
+  if (!syncableOwnedSessions.length) {
+    return;
+  }
+
   const courseRowsResult = await fetchRowsPaged((from, to) => (
     client
       .from("courses")
@@ -10697,7 +10751,7 @@ async function syncSessionsToRelational(sessionsPayload) {
       .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
   );
 
-  const upsertBlocks = ownedSessions.map((session) => ({
+  const upsertBlocks = syncableOwnedSessions.map((session) => ({
     ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
     external_id: String(session.id || "").trim(),
     user_id: sessionOwnerProfileIdBySessionId.get(String(session?.id || "").trim()),
@@ -10751,7 +10805,7 @@ async function syncSessionsToRelational(sessionsPayload) {
   const itemRows = [];
   const responseRows = [];
 
-  ownedSessions.forEach((session) => {
+  syncableOwnedSessions.forEach((session) => {
     const blockDbId = blockIdByExternalId[session.id];
     if (!blockDbId) return;
     const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
@@ -31083,13 +31137,7 @@ function writeStorageKey(key, value) {
     return;
   }
 
-  const shouldKeepQuestionsInMemoryOnly = (
-    key === STORAGE_KEYS.questions
-    && typeof serialized === "string"
-    && serialized.length >= LARGE_QUESTION_STORAGE_CHAR_LIMIT
-  );
-  if (shouldKeepQuestionsInMemoryOnly) {
-    warnLargeQuestionStorageFallback(serialized.length);
+  const persistInMemoryOnly = () => {
     inMemoryStorage.set(key, serialized);
     removeSessionStorageKey(key);
     try {
@@ -31100,6 +31148,16 @@ function writeStorageKey(key, value) {
     if (key === STORAGE_KEYS.questions) {
       state.questionsRevision = (state.questionsRevision || 0) + 1;
     }
+  };
+
+  const shouldKeepQuestionsInMemoryOnly = (
+    key === STORAGE_KEYS.questions
+    && typeof serialized === "string"
+    && serialized.length >= LARGE_QUESTION_STORAGE_CHAR_LIMIT
+  );
+  if (shouldKeepQuestionsInMemoryOnly) {
+    warnLargeQuestionStorageFallback();
+    persistInMemoryOnly();
     return;
   }
 
@@ -31108,6 +31166,11 @@ function writeStorageKey(key, value) {
     writeSessionStorageKey(key, serialized);
     inMemoryStorage.delete(key);
   } catch (error) {
+    if (key === STORAGE_KEYS.questions && isStorageQuotaExceededError(error)) {
+      warnLargeQuestionStorageFallback();
+      persistInMemoryOnly();
+      return;
+    }
     warnStorageFallback(error);
     writeSessionStorageKey(key, serialized);
     inMemoryStorage.set(key, serialized);
