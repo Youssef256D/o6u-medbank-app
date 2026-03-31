@@ -2803,20 +2803,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       }
     }
   }
-  const year = role === "student"
-    ? (
-      preferLocalOverDbForCurrentUser && fallbackYear !== null
-        ? fallbackYear
-        : (profileYear !== null ? profileYear : normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year))
-    )
-    : null;
-  const semester = role === "student"
-    ? (
-      preferLocalOverDbForCurrentUser && fallbackSemester !== null
-        ? fallbackSemester
-        : (profileSemester !== null ? profileSemester : normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester))
-    )
-    : null;
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
   const metadataAssignedCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
     ? authUser.user_metadata.assigned_courses
@@ -2826,13 +2812,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       ? localUser.assignedCourses
       : metadataAssignedCourses,
   );
-  const resolvedAssignedCourses = role === "student"
-    ? (
-      relationalAssignedCourses.length
-        ? relationalAssignedCourses
-        : (authProvider === "google" && !preferLocalOverDbForCurrentUser ? [] : fallbackAssignedCourses)
-    )
-    : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
   const profilePhoneValidation = validateAndNormalizePhoneNumber(String(profile.phone || "").trim());
@@ -2845,14 +2824,64 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     || "",
   ).trim());
   const normalizedMetadataPhone = metadataPhoneValidation.ok ? metadataPhoneValidation.number : "";
+  const resolvedPhone = normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone;
+  // Keep a fully-approved student profile stable if the DB read is temporarily missing
+  // term/course fields; we backfill those values once the admin snapshot hydrates.
+  const canPreserveApprovedFallbackTerm = role === "student" && canPreserveApprovedStudentCoreProfile({
+    role: "student",
+    phone: resolvedPhone,
+    academicYear: fallbackYear,
+    academicSemester: fallbackSemester,
+    isApproved: true,
+  }, profileApproved === true);
+  const canPreserveApprovedFallbackCourses = role === "student" && canPreserveApprovedStudentProfile({
+    role: "student",
+    phone: resolvedPhone,
+    academicYear: fallbackYear,
+    academicSemester: fallbackSemester,
+    assignedCourses: fallbackAssignedCourses,
+    isApproved: true,
+  }, profileApproved === true);
+  const relationalEnrollmentYear = normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year);
+  const relationalEnrollmentSemester = normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester);
+  let year = role === "student"
+    ? (
+      preferLocalOverDbForCurrentUser && fallbackYear !== null
+        ? fallbackYear
+        : (profileYear !== null ? profileYear : relationalEnrollmentYear)
+    )
+    : null;
+  let semester = role === "student"
+    ? (
+      preferLocalOverDbForCurrentUser && fallbackSemester !== null
+        ? fallbackSemester
+        : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester)
+    )
+    : null;
+  if (role === "student" && canPreserveApprovedFallbackTerm) {
+    if (year === null && fallbackYear !== null) {
+      year = fallbackYear;
+    }
+    if (semester === null && fallbackSemester !== null) {
+      semester = fallbackSemester;
+    }
+  }
+  const resolvedAssignedCourses = role === "student"
+    ? (
+      relationalAssignedCourses.length
+        ? relationalAssignedCourses
+        : (canPreserveApprovedFallbackCourses
+          ? fallbackAssignedCourses
+          : (authProvider === "google" && !preferLocalOverDbForCurrentUser ? [] : fallbackAssignedCourses))
+    )
+    : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
     role,
-    phone: normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone,
+    phone: resolvedPhone,
     academicYear: year,
     academicSemester: semester,
     assignedCourses: resolvedAssignedCourses,
   });
-  const resolvedPhone = normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone;
   const resolvedApproval = role === "admin"
     ? true
     : (
@@ -3107,6 +3136,22 @@ function hasCompleteStudentApprovalProfile(user) {
     return true;
   }
   return hasCompleteStudentProfile(user) && hasSelectedStudentCourses(user);
+}
+
+function canPreserveApprovedStudentProfile(user, approved = null) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  const isApproved = typeof approved === "boolean" ? approved : user.isApproved !== false;
+  return isApproved && hasCompleteStudentApprovalProfile(user);
+}
+
+function canPreserveApprovedStudentCoreProfile(user, approved = null) {
+  if (!user || user.role !== "student") {
+    return false;
+  }
+  const isApproved = typeof approved === "boolean" ? approved : user.isApproved !== false;
+  return isApproved && hasCompleteStudentProfile(user);
 }
 
 function normalizeAdminUserIdList(ids, allowedSet = null) {
@@ -6092,6 +6137,15 @@ async function hydrateRelationalProfiles(currentUser) {
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
+    // Approved students should not flip back to "pending" just because a later
+    // hydration read is missing the saved term snapshot.
+    const canUseApprovedExistingTerm = role === "student" && canPreserveApprovedStudentCoreProfile({
+      role: "student",
+      phone: resolvedPhone || normalizedExistingPhone,
+      academicYear: existingYear,
+      academicSemester: existingSemester,
+      isApproved: true,
+    }, Boolean(profile.approved));
     const hasProfileTerm = profileYear !== null && profileSemester !== null;
     const hasEnrolledTerm = enrolledYear !== null && enrolledSemester !== null;
     // Course enrollments are the authoritative term source when they disagree with
@@ -6115,6 +6169,14 @@ async function hydrateRelationalProfiles(currentUser) {
         ? existingSemester
         : (shouldPreferEnrolledTerm ? enrolledSemester : (profileSemester !== null ? profileSemester : enrolledSemester)))
       : null;
+    if (role === "student" && canUseApprovedExistingTerm) {
+      if (year === null && existingYear !== null) {
+        year = existingYear;
+      }
+      if (semester === null && existingSemester !== null) {
+        semester = existingSemester;
+      }
+    }
     let assignedCourses = role !== "student"
       ? [...allCourses]
       : preferLocalOverDb && existingAssignedCourses.length
@@ -6180,16 +6242,13 @@ async function hydrateRelationalProfiles(currentUser) {
         const profileSemester = normalizeAcademicSemesterOrNull(profile?.academic_semester);
         const profilePhone = String(profile?.phone || "").trim();
         const missingPhone = !validateAndNormalizePhoneNumber(profilePhone).ok;
-        if (!missingPhone) {
-          return null;
-        }
         const mappedEntry = mappedByAuthId.get(String(profile.id || "").trim());
         if (!mappedEntry) {
           return null;
         }
         const mappedPhone = String(mappedEntry.phone || "").trim();
         const mappedPhoneValid = validateAndNormalizePhoneNumber(mappedPhone).ok;
-        const canBackfillPhone = mappedPhoneValid;
+        const canBackfillPhone = missingPhone && mappedPhoneValid;
         const mappedYear = normalizeAcademicYearOrNull(mappedEntry.academicYear);
         const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
         const missingYear = profileYear === null && mappedYear !== null;
