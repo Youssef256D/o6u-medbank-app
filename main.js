@@ -3566,6 +3566,11 @@ function getUserProfileId(user) {
   return "";
 }
 
+function getExplicitSupabaseAuthId(user) {
+  const authId = String(user?.supabaseAuthId || "").trim();
+  return isUuidValue(authId) ? authId : "";
+}
+
 function setLocalUsersAuthAccessKnownActive(targetProfileIds, isActive) {
   const ids = new Set(
     (Array.isArray(targetProfileIds) ? targetProfileIds : [targetProfileIds])
@@ -9476,6 +9481,15 @@ function isQuestionChoiceForeignKeyError(error) {
   return /question_choices_question_id_fkey/i.test(message);
 }
 
+function isProfilesIdForeignKeyError(error) {
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || "");
+  if (code === "23503" && /profiles_id_fkey/i.test(message)) {
+    return true;
+  }
+  return /profiles_id_fkey/i.test(message);
+}
+
 function cloneQuestionsPayloadForSync(payload) {
   const questions = Array.isArray(payload) ? payload : [];
   try {
@@ -9544,6 +9558,7 @@ async function syncProfilesToRelational(usersPayload) {
       if (!profileId) {
         return null;
       }
+      const explicitProfileId = getExplicitSupabaseAuthId(user);
       const normalizedYear = normalizeAcademicYearOrNull(user.academicYear);
       const normalizedSemester = normalizeAcademicSemesterOrNull(user.academicSemester);
       const normalizedAuthProvider = normalizeAuthProvider(user.authProvider);
@@ -9562,25 +9577,89 @@ async function syncProfilesToRelational(usersPayload) {
       if (shouldPersistApproval) {
         baseRow.approved = Boolean(user.isApproved);
       }
-      return baseRow;
+      return {
+        user,
+        row: baseRow,
+        hasExplicitAuthId: Boolean(explicitProfileId),
+      };
     })
     .filter(Boolean);
   if (!rows.length) {
     return;
   }
 
-  for (const rowBatch of splitIntoBatches(rows, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client.from("profiles").upsert(rowBatch, { onConflict: "id" }),
-      "Profile sync timed out.",
+  // Legacy local records may have a UUID `id` without a real Supabase auth user.
+  // Only trust those IDs if they already exist in `profiles` or match the active auth session.
+  const verifiedLegacyProfileIds = new Set();
+  const activeAuthId = getActiveSupabaseAuthUserId();
+  if (isUuidValue(activeAuthId)) {
+    verifiedLegacyProfileIds.add(activeAuthId);
+  }
+  const legacyProfileIdsToVerify = [...new Set(
+    rows
+      .filter((entry) => !entry.hasExplicitAuthId)
+      .map((entry) => String(entry?.row?.id || "").trim())
+      .filter((profileId) => isUuidValue(profileId) && !verifiedLegacyProfileIds.has(profileId)),
+  )];
+  for (const profileBatch of splitIntoBatches(legacyProfileIdsToVerify, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("profiles")
+        .select("id")
+        .in("id", profileBatch),
+      "Profile verification timed out during profile sync.",
+      ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
     );
+    (Array.isArray(data) ? data : []).forEach((row) => {
+      const profileId = String(row?.id || "").trim();
+      if (isUuidValue(profileId)) {
+        verifiedLegacyProfileIds.add(profileId);
+      }
+    });
+  }
+
+  const syncableEntries = rows.filter(
+    (entry) => entry.hasExplicitAuthId || verifiedLegacyProfileIds.has(String(entry?.row?.id || "").trim()),
+  );
+  if (!syncableEntries.length) {
+    return;
+  }
+  const syncableRows = syncableEntries.map((entry) => entry.row);
+
+  for (const rowBatch of splitIntoBatches(syncableRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    try {
+      await runRelationalQueryWithTimeout(
+        client.from("profiles").upsert(rowBatch, { onConflict: "id" }),
+        "Profile sync timed out.",
+      );
+    } catch (error) {
+      if (!isProfilesIdForeignKeyError(error)) {
+        throw error;
+      }
+      // One stale profile ID should not block valid profile writes in the same batch.
+      for (const row of rowBatch) {
+        try {
+          await runRelationalQueryWithTimeout(
+            client.from("profiles").upsert([row], { onConflict: "id" }),
+            "Profile sync timed out.",
+          );
+        } catch (rowError) {
+          if (!isProfilesIdForeignKeyError(rowError)) {
+            throw rowError;
+          }
+        }
+      }
+    }
   }
 
   const enrollmentSyncOptions = {
     assignedByAuthId: isAdminSync && isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
   };
   try {
-    await syncUserCourseEnrollmentsToRelational(users, enrollmentSyncOptions);
+    await syncUserCourseEnrollmentsToRelational(
+      syncableEntries.map((entry) => entry.user).filter(Boolean),
+      enrollmentSyncOptions,
+    );
   } catch (enrollmentError) {
     if (isAdminSync) {
       throw enrollmentError;
