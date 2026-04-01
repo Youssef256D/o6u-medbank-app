@@ -3645,11 +3645,12 @@ function setLocalUsersAuthAccessKnownActive(targetProfileIds, isActive) {
   return changed;
 }
 
-function getApprovedUserAuthRepairIds(users = null) {
+function getApprovedUserAuthRepairIds(users = null, options = {}) {
   const list = Array.isArray(users) ? users : getUsers();
+  const includeKnownActive = Boolean(options?.includeKnownActive);
   return [...new Set(
     list
-      .filter((entry) => isUserAccessApproved(entry))
+      .filter((entry) => isUserAccessApproved(entry) && (includeKnownActive || entry?.authAccessKnownActive !== true))
       .map((entry) => String(getUserProfileId(entry) || "").trim())
       .filter((entry) => isUuidValue(entry)),
   )].sort();
@@ -25168,7 +25169,7 @@ async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
 
 function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
   const currentUser = actorUser || getCurrentUser();
-  if (!currentUser || currentUser.role !== "admin" || isBrowserOffline()) {
+  if (!currentUser || currentUser.role !== "admin") {
     return;
   }
 
@@ -25178,6 +25179,11 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
   if (!nextSignature) {
     adminApprovedAccessRepairSignature = "";
     adminApprovedAccessRepairCompletedSignature = "";
+    adminApprovedAccessRepairAttemptedAt = 0;
+    return;
+  }
+  if (isBrowserOffline() || !getSupabaseAuthClient() || !hasActiveSupabaseSessionForUser(currentUser)) {
+    adminApprovedAccessRepairSignature = "";
     adminApprovedAccessRepairAttemptedAt = 0;
     return;
   }
