@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-03-29.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-01.1").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -25174,7 +25174,7 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
   }
 
   const usersList = Array.isArray(users) ? users : getUsers();
-  const targetIds = getApprovedUserAuthRepairIds(usersList);
+  const targetIds = getApprovedUserAuthRepairIds(usersList).slice(0, ADMIN_ACCESS_SYNC_BATCH_SIZE);
   const nextSignature = targetIds.join("|");
   if (!nextSignature) {
     adminApprovedAccessRepairSignature = "";
@@ -26446,6 +26446,9 @@ async function getResponseDetails(response, payload) {
   if (structured) {
     return structured;
   }
+  if (response?.ok) {
+    return "";
+  }
   try {
     return String(await response.text()).trim();
   } catch {
@@ -27173,7 +27176,7 @@ async function setSupabaseAuthUserAccessAsAdmin(targetAuthIds, approved) {
     updatedIds.push(...batchUpdatedIds);
     notFoundIds.push(...batchNotFoundIds);
     failedIds.push(...batchFailedIds);
-    if (!failureMessage && batchResult?.message) {
+    if (!failureMessage && !batchResult?.ok && batchResult?.message) {
       failureMessage = String(batchResult.message || "").trim();
     }
 
