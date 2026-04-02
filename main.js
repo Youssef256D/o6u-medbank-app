@@ -1534,7 +1534,7 @@ async function init() {
   }
 
   const bootUser = getCurrentUser();
-  if (bootUser?.role === "student") {
+  if (bootUser?.role === "student" && !Number(state.studentDataLastSyncAt || 0)) {
     const hasFreshAdminContent = shouldForceStudentRefreshFromAdminTrigger(bootUser, { reload: false });
     scheduleStudentBootRefresh(bootUser, {
       rerender: true,
@@ -2250,9 +2250,18 @@ async function handleSupabaseAuthStateChange(event, session) {
     if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
       return;
     }
-    schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
-      console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
-    });
+    if (localUser?.role === "student") {
+      await ensureFreshStudentDataAfterAuth(localUser, {
+        reason: event === "SIGNED_IN" ? "sign-in" : "auth state change",
+      }).catch((warmupError) => {
+        console.warn("Student auth refresh failed.", warmupError?.message || warmupError);
+      });
+      localUser = getCurrentUser() || localUser;
+    } else {
+      schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+        console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+      });
+    }
     if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
       const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
       navigate(postAuthRoute);
@@ -2281,6 +2290,14 @@ async function handleSupabaseAuthStateChange(event, session) {
       let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
       const recoveredProfileSync = await refreshLocalUserFromRelationalProfile(recoveredSessionUser, recoveredLocalUser);
       recoveredLocalUser = recoveredProfileSync.user;
+      if (recoveredLocalUser?.role === "student") {
+        await ensureFreshStudentDataAfterAuth(recoveredLocalUser, {
+          reason: "session recovery",
+        }).catch((warmupError) => {
+          console.warn("Student recovery refresh failed.", warmupError?.message || warmupError);
+        });
+        recoveredLocalUser = getCurrentUser() || recoveredLocalUser;
+      }
       if (recoveredLocalUser?.id) {
         saveLocalOnly(STORAGE_KEYS.currentUserId, recoveredLocalUser.id);
       }
@@ -2478,9 +2495,18 @@ async function initSupabaseAuth() {
         if (await shouldForceRefreshForUpdates(localUser)) {
           return;
         }
-        schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
-          console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
-        });
+        if (localUser.role === "student") {
+          await ensureFreshStudentDataAfterAuth(localUser, {
+            reason: "session bootstrap",
+          }).catch((warmupError) => {
+            console.warn("Student bootstrap refresh failed.", warmupError?.message || warmupError);
+          });
+          localUser = getCurrentUser() || localUser;
+        } else {
+          schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+            console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+          });
+        }
       }
     } else if (isGoogleOAuthPendingState()) {
       setGoogleOAuthPendingState(false);
@@ -4215,6 +4241,28 @@ function scheduleStudentBootRefresh(user = null, options = {}) {
   return studentBootRefreshPromise;
 }
 
+async function ensureFreshStudentDataAfterAuth(user, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    return false;
+  }
+
+  resetStudentLoginRefreshState(currentUser);
+  const refreshed = await scheduleStudentBootRefresh(currentUser, {
+    rerender: false,
+    reason: String(options?.reason || "auth refresh").trim() || "auth refresh",
+  }).catch(() => false);
+
+  try {
+    await hydrateUserScopedSupabaseState(currentUser);
+  } catch (hydrateError) {
+    console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+  }
+
+  return refreshed;
+}
+
 function schedulePostAuthDataWarmup(user) {
   const currentUser = user || getCurrentUser();
   const profileId = String(getUserProfileId(currentUser) || "").trim();
@@ -4252,16 +4300,9 @@ function schedulePostAuthDataWarmup(user) {
       state.adminDataLastSyncAt = Date.now();
       state.adminDataSyncError = "";
     } else if (currentUser.role === "student") {
-      resetStudentLoginRefreshState(currentUser);
-      await scheduleStudentBootRefresh(currentUser, {
-        rerender: false,
+      await ensureFreshStudentDataAfterAuth(currentUser, {
         reason: "post-auth warmup",
       }).catch(() => false);
-      try {
-        await hydrateUserScopedSupabaseState(currentUser);
-      } catch (hydrateError) {
-        console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-      }
     } else {
       try {
         await hydrateRelationalState(currentUser);
@@ -9574,6 +9615,44 @@ function isProfilesIdForeignKeyError(error) {
   return /profiles_id_fkey/i.test(message);
 }
 
+function isUserCourseEnrollmentUserForeignKeyError(error) {
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || "");
+  if (code === "23503" && /user_course_enrollments_user_id_fkey|user_id/i.test(message)) {
+    return true;
+  }
+  return /user_course_enrollments_user_id_fkey/i.test(message);
+}
+
+async function fetchExistingRelationalProfileIds(client, profileIds, timeoutMessage = "Profile verification timed out.") {
+  const ids = [...new Set(
+    (Array.isArray(profileIds) ? profileIds : [profileIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+  const existingProfileIds = new Set();
+  if (!client || !ids.length) {
+    return existingProfileIds;
+  }
+  for (const profileBatch of splitIntoBatches(ids, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("profiles")
+        .select("id")
+        .in("id", profileBatch),
+      timeoutMessage,
+      ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
+    );
+    (Array.isArray(data) ? data : []).forEach((row) => {
+      const profileId = String(row?.id || "").trim();
+      if (isUuidValue(profileId)) {
+        existingProfileIds.add(profileId);
+      }
+    });
+  }
+  return existingProfileIds;
+}
+
 function isProfileUpsertConflictError(error) {
   const status = Number(error?.status || 0);
   const code = String(error?.code || "").trim();
@@ -9883,23 +9962,11 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       ...requestedUserIds,
       ...(isUuidValue(options.assignedByAuthId) ? [String(options.assignedByAuthId).trim()] : []),
     ])];
-    const existingProfileIds = new Set();
-    for (const profileBatch of splitIntoBatches(profileIdsToVerify, RELATIONAL_UUID_IN_BATCH_SIZE)) {
-      const data = await runRelationalQueryWithTimeout(
-        client
-          .from("profiles")
-          .select("id")
-          .in("id", profileBatch),
-        "Profile verification timed out during enrollment sync.",
-        ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
-      );
-      (Array.isArray(data) ? data : []).forEach((row) => {
-        const profileId = String(row?.id || "").trim();
-        if (isUuidValue(profileId)) {
-          existingProfileIds.add(profileId);
-        }
-      });
-    }
+    const existingProfileIds = await fetchExistingRelationalProfileIds(
+      client,
+      profileIdsToVerify,
+      "Profile verification timed out during enrollment sync.",
+    );
 
     const userIds = requestedUserIds.filter((userId) => existingProfileIds.has(userId));
     if (!userIds.length) {
@@ -10015,13 +10082,45 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     });
 
     for (const batch of splitIntoBatches(enrollmentRows, ENROLLMENT_SYNC_WRITE_BATCH_SIZE)) {
-      await runRelationalQueryWithTimeout(
-        client
-          .from("user_course_enrollments")
-          .upsert(batch, { onConflict: "user_id,course_id" }),
-        "Enrollment sync timed out.",
-        ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
-      );
+      try {
+        await runRelationalQueryWithTimeout(
+          client
+            .from("user_course_enrollments")
+            .upsert(batch, { onConflict: "user_id,course_id" }),
+          "Enrollment sync timed out.",
+          ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
+        );
+      } catch (error) {
+        if (!isUserCourseEnrollmentUserForeignKeyError(error)) {
+          throw error;
+        }
+        const validBatchProfileIds = await fetchExistingRelationalProfileIds(
+          client,
+          batch.map((row) => row?.user_id),
+          "Enrollment profile recheck timed out.",
+        );
+        const retryableRows = batch.filter((row) => validBatchProfileIds.has(String(row?.user_id || "").trim()));
+        if (!retryableRows.length) {
+          console.warn("Skipped enrollment sync rows for profile IDs that no longer exist.");
+          continue;
+        }
+        for (const row of retryableRows) {
+          try {
+            await runRelationalQueryWithTimeout(
+              client
+                .from("user_course_enrollments")
+                .upsert([row], { onConflict: "user_id,course_id" }),
+              "Enrollment sync timed out.",
+              ENROLLMENT_SYNC_QUERY_TIMEOUT_MS,
+            );
+          } catch (rowError) {
+            if (isUserCourseEnrollmentUserForeignKeyError(rowError)) {
+              continue;
+            }
+            throw rowError;
+          }
+        }
+      }
     }
 
     for (const userId of userIds) {
@@ -16333,7 +16432,7 @@ function renderDashboard() {
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
           <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
-            ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
+            ${state.studentDataRefreshing ? "Refreshing..." : "Get Updates"}
           </button>
         </div>
       </div>
@@ -19229,7 +19328,7 @@ function renderAnalytics() {
           </label>
         </form>
         <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
-          ${state.studentDataRefreshing ? "Refreshing..." : "Refresh analytics"}
+          ${state.studentDataRefreshing ? "Refreshing..." : "Get Updates"}
         </button>
       </div>
       <small class="subtle">Showing analytics for <b>${escapeHtml(selectedCourse)}</b>. ${escapeHtml(syncStatusText)}</small>
