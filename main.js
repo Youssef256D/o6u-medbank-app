@@ -4252,6 +4252,7 @@ function schedulePostAuthDataWarmup(user) {
       state.adminDataLastSyncAt = Date.now();
       state.adminDataSyncError = "";
     } else if (currentUser.role === "student") {
+      resetStudentLoginRefreshState(currentUser);
       await scheduleStudentBootRefresh(currentUser, {
         rerender: false,
         reason: "post-auth warmup",
@@ -4297,6 +4298,20 @@ function schedulePostAuthDataWarmup(user) {
   });
 
   return postAuthWarmupRuntime.promise;
+}
+
+function resetStudentLoginRefreshState(user = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  state.analyticsCourse = "";
+  state.studentDataLastSyncAt = 0;
+  state.studentDataLastFullSyncAt = 0;
+  invalidateAnalyticsCache({
+    resetQuestionMeta: true,
+  });
+  return true;
 }
 
 const STUDENT_ONBOARDING_DRAFT_STORAGE_KEY = "o6u_student_onboarding_draft";
@@ -9559,6 +9574,98 @@ function isProfilesIdForeignKeyError(error) {
   return /profiles_id_fkey/i.test(message);
 }
 
+function isProfileUpsertConflictError(error) {
+  const status = Number(error?.status || 0);
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || "");
+  const details = String(error?.details || "");
+  if (status === 409) {
+    return true;
+  }
+  if (code === "23505" || code === "21000") {
+    return true;
+  }
+  const haystack = `${message} ${details}`.toLowerCase();
+  return haystack.includes("duplicate key")
+    || haystack.includes("cannot affect row a second time")
+    || haystack.includes("profiles_email_key")
+    || haystack.includes("profiles_pkey")
+    || haystack.includes("conflict");
+}
+
+function getProfileSyncEntryPriority(entry, activeProfileId = "") {
+  const user = entry?.user || null;
+  const row = entry?.row || null;
+  const profileId = String(row?.id || "").trim();
+  let score = 0;
+  if (entry?.hasExplicitAuthId) {
+    score += 100;
+  }
+  if (activeProfileId && profileId === activeProfileId) {
+    score += 80;
+  }
+  if (String(user?.role || "").trim().toLowerCase() === "admin") {
+    score += 20;
+  }
+  if (Boolean(user?.profileCompleted)) {
+    score += 10;
+  }
+  if (Boolean(user?.isApproved)) {
+    score += 5;
+  }
+  score += Math.min(4, sanitizeCourseAssignments(user?.assignedCourses || []).length);
+  const updatedAtMs = Math.max(
+    parseSyncTimestampMs(user?.updatedAt),
+    parseSyncTimestampMs(user?.createdAt),
+    parseSyncTimestampMs(row?.updated_at),
+    parseSyncTimestampMs(row?.created_at),
+  );
+  return { score, updatedAtMs };
+}
+
+function dedupeProfileSyncEntries(entries, currentUser = null) {
+  const list = Array.isArray(entries) ? entries.filter(Boolean) : [];
+  if (list.length <= 1) {
+    return list;
+  }
+
+  const activeProfileId = String(
+    getCurrentSessionProfileId(currentUser)
+    || getUserProfileId(currentUser)
+    || "",
+  ).trim();
+  const sorted = [...list].sort((a, b) => {
+    const priorityA = getProfileSyncEntryPriority(a, activeProfileId);
+    const priorityB = getProfileSyncEntryPriority(b, activeProfileId);
+    if (priorityA.score !== priorityB.score) {
+      return priorityB.score - priorityA.score;
+    }
+    if (priorityA.updatedAtMs !== priorityB.updatedAtMs) {
+      return priorityB.updatedAtMs - priorityA.updatedAtMs;
+    }
+    return String(b?.row?.id || "").localeCompare(String(a?.row?.id || ""));
+  });
+
+  const seenProfileIds = new Set();
+  const seenEmails = new Set();
+  const deduped = [];
+  sorted.forEach((entry) => {
+    const profileId = String(entry?.row?.id || "").trim();
+    const email = String(entry?.row?.email || "").trim().toLowerCase();
+    if ((profileId && seenProfileIds.has(profileId)) || (email && seenEmails.has(email))) {
+      return;
+    }
+    if (profileId) {
+      seenProfileIds.add(profileId);
+    }
+    if (email) {
+      seenEmails.add(email);
+    }
+    deduped.push(entry);
+  });
+  return deduped;
+}
+
 function cloneQuestionsPayloadForSync(payload) {
   const questions = Array.isArray(payload) ? payload : [];
   try {
@@ -9693,7 +9800,8 @@ async function syncProfilesToRelational(usersPayload) {
   if (!syncableEntries.length) {
     return;
   }
-  const syncableRows = syncableEntries.map((entry) => entry.row);
+  const dedupedSyncableEntries = dedupeProfileSyncEntries(syncableEntries, currentUser);
+  const syncableRows = dedupedSyncableEntries.map((entry) => entry.row);
 
   for (const rowBatch of splitIntoBatches(syncableRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
     try {
@@ -9702,10 +9810,10 @@ async function syncProfilesToRelational(usersPayload) {
         "Profile sync timed out.",
       );
     } catch (error) {
-      if (!isProfilesIdForeignKeyError(error)) {
+      if (!isProfilesIdForeignKeyError(error) && !isProfileUpsertConflictError(error)) {
         throw error;
       }
-      // One stale profile ID should not block valid profile writes in the same batch.
+      // One stale/conflicting row should not block valid profile writes in the same batch.
       for (const row of rowBatch) {
         try {
           await runRelationalQueryWithTimeout(
@@ -9713,6 +9821,13 @@ async function syncProfilesToRelational(usersPayload) {
             "Profile sync timed out.",
           );
         } catch (rowError) {
+          if (isProfilesIdForeignKeyError(rowError) || isProfileUpsertConflictError(rowError)) {
+            console.warn(
+              `Skipped conflicting profile row during sync for ${String(row?.email || row?.id || "unknown")}.`,
+              rowError?.message || rowError,
+            );
+            continue;
+          }
           if (!isProfilesIdForeignKeyError(rowError)) {
             throw rowError;
           }
@@ -9726,7 +9841,7 @@ async function syncProfilesToRelational(usersPayload) {
   };
   try {
     await syncUserCourseEnrollmentsToRelational(
-      syncableEntries.map((entry) => entry.user).filter(Boolean),
+      dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
       enrollmentSyncOptions,
     );
   } catch (enrollmentError) {
@@ -15142,6 +15257,7 @@ function wireAuth(mode) {
             if (await shouldForceRefreshForUpdates(user)) {
               return;
             }
+            resetStudentLoginRefreshState(user);
             navigate(user.role === "admin" ? "admin" : "dashboard");
             toast(`Welcome back, ${user.name}.`);
             return;
@@ -15169,6 +15285,7 @@ function wireAuth(mode) {
               return;
             }
             save(STORAGE_KEYS.currentUserId, localDemoUser.id);
+            resetStudentLoginRefreshState(localDemoUser);
             if (await shouldForceRefreshForUpdates(localDemoUser)) {
               return;
             }
@@ -15208,6 +15325,7 @@ function wireAuth(mode) {
           return;
         }
         save(STORAGE_KEYS.currentUserId, user.id);
+        resetStudentLoginRefreshState(user);
         if (await shouldForceRefreshForUpdates(user)) {
           return;
         }
@@ -18359,7 +18477,9 @@ async function handleSessionClick(event) {
   }
 
   session.updatedAt = nowISO();
-  upsertSession(session);
+  upsertSession(session, {
+    immediate: action === "submit-answer",
+  });
   render();
 }
 
@@ -23127,6 +23247,17 @@ function wireAdmin() {
       : button.dataset.baseLabel;
   };
 
+  const clearEnrollmentAutoSaveTimer = (row) => {
+    if (!row) {
+      return;
+    }
+    const timerId = Number(row.dataset.enrollmentAutosaveTimer || 0);
+    if (timerId) {
+      window.clearTimeout(timerId);
+    }
+    row.dataset.enrollmentAutosaveTimer = "0";
+  };
+
   const saveUserEnrollmentFromRow = async (row, options = {}) => {
     const mode = options?.mode === "auto" ? "auto" : "manual";
     const syncNow = Boolean(options?.syncNow);
@@ -23136,6 +23267,19 @@ function wireAdmin() {
       return false;
     }
     if (row.dataset.enrollmentSaving === "1") {
+      row.dataset.enrollmentResave = "1";
+      row.dataset.enrollmentResaveMode = row.dataset.enrollmentResaveMode === "manual" || mode === "manual"
+        ? "manual"
+        : "auto";
+      if (syncNow) {
+        row.dataset.enrollmentResaveSyncNow = "1";
+      }
+      row.dataset.enrollmentResaveSuppressSuccessToast = (
+        row.dataset.enrollmentResaveSuppressSuccessToast === "1"
+        || suppressSuccessToast
+      )
+        ? "1"
+        : "0";
       return false;
     }
 
@@ -23215,7 +23359,9 @@ function wireAdmin() {
       });
       save(STORAGE_KEYS.users, users);
       state.adminDataLastSyncAt = Date.now();
-      patchAdminUserRowUi(row, users[idx], getCurrentUser());
+      if (row.dataset.enrollmentResave !== "1") {
+        patchAdminUserRowUi(row, users[idx], getCurrentUser());
+      }
       if (syncNow) {
         await flushPendingSyncNow();
       } else {
@@ -23235,6 +23381,26 @@ function wireAdmin() {
       endAdminUserMutation();
       row.dataset.enrollmentSaving = "0";
       setEnrollmentSaveButtonBusy(saveButton, false);
+      const shouldRetryQueuedSave = row.dataset.enrollmentResave === "1";
+      const queuedMode = row.dataset.enrollmentResaveMode === "manual" ? "manual" : "auto";
+      const queuedSyncNow = row.dataset.enrollmentResaveSyncNow === "1";
+      const queuedSuppressSuccessToast = row.dataset.enrollmentResaveSuppressSuccessToast === "1";
+      row.dataset.enrollmentResave = "0";
+      row.dataset.enrollmentResaveMode = "";
+      row.dataset.enrollmentResaveSyncNow = "0";
+      row.dataset.enrollmentResaveSuppressSuccessToast = "0";
+      if (shouldRetryQueuedSave) {
+        window.setTimeout(() => {
+          saveUserEnrollmentFromRow(row, {
+            mode: queuedMode,
+            syncNow: queuedSyncNow,
+            suppressSuccessToast: queuedSuppressSuccessToast || queuedMode === "auto",
+          }).catch((error) => {
+            console.warn("Queued enrollment save failed.", error?.message || error);
+          });
+        }, 0);
+        return;
+      }
       const refreshedUsers = getUsers();
       const refreshedUser = refreshedUsers.find((entry) => entry.id === userId);
       if (refreshedUser) {
@@ -23250,9 +23416,13 @@ function wireAdmin() {
       return;
     }
     const autoSaveEnrollment = () => {
-      saveUserEnrollmentFromRow(row, { mode: "auto" }).catch((error) => {
-        console.warn("Auto enrollment save failed.", error?.message || error);
-      });
+      clearEnrollmentAutoSaveTimer(row);
+      row.dataset.enrollmentAutosaveTimer = String(window.setTimeout(() => {
+        row.dataset.enrollmentAutosaveTimer = "0";
+        saveUserEnrollmentFromRow(row, { mode: "auto" }).catch((error) => {
+          console.warn("Auto enrollment save failed.", error?.message || error);
+        });
+      }, 180));
     };
     yearSelect?.addEventListener("change", autoSaveEnrollment);
     semesterSelect?.addEventListener("change", autoSaveEnrollment);
@@ -23261,6 +23431,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest("tr[data-user-id]");
+      clearEnrollmentAutoSaveTimer(row);
       await saveUserEnrollmentFromRow(row, { mode: "manual", syncNow: true });
     });
   });
@@ -31433,6 +31604,7 @@ async function loginAsDemo(email, password) {
     return;
   }
   save(STORAGE_KEYS.currentUserId, user.id);
+  resetStudentLoginRefreshState(user);
   if (await shouldForceRefreshForUpdates(user)) {
     return;
   }
@@ -31458,6 +31630,20 @@ async function logout(options = {}) {
     },
     { force: true },
   );
+  const shouldFlushBeforeLogout = Boolean(
+    sessionSyncRuntime.dirty
+    || sessionSyncRuntime.flushing
+    || relationalSync.pendingWrites.size
+    || relationalSync.flushing
+    || supabaseSync.pendingWrites.size
+    || supabaseSync.flushing
+    || getPendingAdminActionQueue().length
+  );
+  if (shouldFlushBeforeLogout) {
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((error) => {
+      console.warn("Could not flush pending sync work before logout.", error?.message || error);
+    });
+  }
   const offlinePromise = markCurrentUserOffline().catch(() => { });
   const activityEndPromise = endCurrentUserActivitySession().catch(() => { });
   const authClient = getSupabaseAuthClient();
