@@ -12193,7 +12193,17 @@ async function runProfileAccessRealtimeCheck() {
 
   profileAccessRealtimeHydrateInFlight = true;
   try {
-    await enforceCurrentStudentAccessStatus(user);
+    const accessStatus = await enforceCurrentStudentAccessStatus(user);
+    if (accessStatus?.active === false) {
+      return;
+    }
+    // A profile row change can also mean year/semester/course scope changed, not
+    // just approval status. Refresh the student snapshot so their account updates
+    // immediately after an admin edits enrollment details.
+    await refreshStudentDataSnapshot(user, {
+      force: true,
+      rerender: state.route !== "session" && state.route !== "review",
+    });
   } catch (error) {
     console.warn("Profile access realtime check failed.", error?.message || error);
   } finally {
