@@ -87,8 +87,10 @@ const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about",
 const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
+const storageQuotaRetryThresholds = new Map();
 let storageFallbackWarned = false;
 let largeQuestionStorageWarned = false;
+let largeSessionStorageWarned = false;
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -873,6 +875,13 @@ function warnLargeQuestionStorageFallback() {
     return;
   }
   largeQuestionStorageWarned = true;
+}
+
+function warnLargeSessionStorageFallback() {
+  if (largeSessionStorageWarned) {
+    return;
+  }
+  largeSessionStorageWarned = true;
 }
 
 function isStorageQuotaExceededError(error) {
@@ -31275,6 +31284,24 @@ function readStorageKey(key) {
   return inMemoryStorage.get(key) ?? null;
 }
 
+function isSilentStorageQuotaFallbackKey(key) {
+  return key === STORAGE_KEYS.questions || key === STORAGE_KEYS.sessions;
+}
+
+function warnStorageQuotaFallbackForKey(key) {
+  if (key === STORAGE_KEYS.questions) {
+    warnLargeQuestionStorageFallback();
+  } else if (key === STORAGE_KEYS.sessions) {
+    warnLargeSessionStorageFallback();
+  }
+}
+
+function bumpQuestionsRevisionForStorageKey(key) {
+  if (key === STORAGE_KEYS.questions) {
+    state.questionsRevision = (state.questionsRevision || 0) + 1;
+  }
+}
+
 function writeStorageKey(key, value) {
   let serialized = null;
   try {
@@ -31284,17 +31311,22 @@ function writeStorageKey(key, value) {
     return;
   }
 
-  const persistInMemoryOnly = () => {
+  const persistTransientStorageOnly = ({ includeSessionStorage = true, rememberQuotaOverflow = false } = {}) => {
     inMemoryStorage.set(key, serialized);
-    removeSessionStorageKey(key);
+    if (includeSessionStorage) {
+      writeSessionStorageKey(key, serialized);
+    } else {
+      removeSessionStorageKey(key);
+    }
     try {
       localStorage.removeItem(key);
     } catch {
       // Ignore when persistent storage is blocked.
     }
-    if (key === STORAGE_KEYS.questions) {
-      state.questionsRevision = (state.questionsRevision || 0) + 1;
+    if (rememberQuotaOverflow) {
+      storageQuotaRetryThresholds.set(key, serialized.length);
     }
+    bumpQuestionsRevisionForStorageKey(key);
   };
 
   const shouldKeepQuestionsInMemoryOnly = (
@@ -31304,7 +31336,21 @@ function writeStorageKey(key, value) {
   );
   if (shouldKeepQuestionsInMemoryOnly) {
     warnLargeQuestionStorageFallback();
-    persistInMemoryOnly();
+    persistTransientStorageOnly({ includeSessionStorage: false });
+    return;
+  }
+
+  const knownQuotaOverflowThreshold = Number(storageQuotaRetryThresholds.get(key));
+  if (
+    isSilentStorageQuotaFallbackKey(key)
+    && Number.isFinite(knownQuotaOverflowThreshold)
+    && serialized.length >= knownQuotaOverflowThreshold
+  ) {
+    warnStorageQuotaFallbackForKey(key);
+    persistTransientStorageOnly({
+      includeSessionStorage: key !== STORAGE_KEYS.questions,
+      rememberQuotaOverflow: true,
+    });
     return;
   }
 
@@ -31312,23 +31358,26 @@ function writeStorageKey(key, value) {
     localStorage.setItem(key, serialized);
     writeSessionStorageKey(key, serialized);
     inMemoryStorage.delete(key);
+    storageQuotaRetryThresholds.delete(key);
   } catch (error) {
-    if (key === STORAGE_KEYS.questions && isStorageQuotaExceededError(error)) {
-      warnLargeQuestionStorageFallback();
-      persistInMemoryOnly();
+    if (isSilentStorageQuotaFallbackKey(key) && isStorageQuotaExceededError(error)) {
+      warnStorageQuotaFallbackForKey(key);
+      persistTransientStorageOnly({
+        includeSessionStorage: key !== STORAGE_KEYS.questions,
+        rememberQuotaOverflow: true,
+      });
       return;
     }
     warnStorageFallback(error);
     writeSessionStorageKey(key, serialized);
     inMemoryStorage.set(key, serialized);
   }
-  if (key === STORAGE_KEYS.questions) {
-    state.questionsRevision = (state.questionsRevision || 0) + 1;
-  }
+  bumpQuestionsRevisionForStorageKey(key);
 }
 
 function removeStorageKey(key) {
   inMemoryStorage.delete(key);
+  storageQuotaRetryThresholds.delete(key);
   removeSessionStorageKey(key);
   try {
     localStorage.removeItem(key);
