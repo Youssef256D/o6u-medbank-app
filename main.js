@@ -2760,7 +2760,7 @@ async function bootstrapRelationalProfileFromAuth(authUser, fallbackUser = null)
   const profileResult = await runWithTimeoutResult(
     client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", profileRow.id)
       .maybeSingle(),
     PROFILE_LOOKUP_TIMEOUT_MS,
@@ -2786,7 +2786,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileResult = await runWithTimeoutResult(
     client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", authUser.id)
       .maybeSingle(),
     PROFILE_LOOKUP_TIMEOUT_MS,
@@ -2823,11 +2823,13 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let relationalAssignedCourses = [];
   let relationalEnrollmentTerm = null;
+  let relationalEnrollmentUpdatedAt = "";
   if (role === "student" && isUuidValue(authUser.id)) {
     try {
       const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers([authUser.id]);
       relationalAssignedCourses = sanitizeCourseAssignments(enrollmentSnapshot?.coursesByUser?.[authUser.id] || []);
       const resolvedEnrollmentTerm = enrollmentSnapshot?.termByUser?.[authUser.id] || null;
+      relationalEnrollmentUpdatedAt = String(enrollmentSnapshot?.latestAssignedAtByUser?.[authUser.id] || "").trim();
       if (resolvedEnrollmentTerm) {
         relationalEnrollmentTerm = {
           year: normalizeAcademicYearOrNull(resolvedEnrollmentTerm.year),
@@ -2881,18 +2883,26 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   }, profileApproved === true);
   const relationalEnrollmentYear = normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year);
   const relationalEnrollmentSemester = normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester);
+  const shouldPreferRelationalEnrollmentTerm = shouldPreferEnrollmentTermOverProfile({
+    profileYear,
+    profileSemester,
+    profileUpdatedAt: profile.updated_at || profile.created_at,
+    enrollmentYear: relationalEnrollmentYear,
+    enrollmentSemester: relationalEnrollmentSemester,
+    enrollmentUpdatedAt: relationalEnrollmentUpdatedAt,
+  });
   let year = role === "student"
     ? (
       preferLocalOverDbForCurrentUser && fallbackYear !== null
         ? fallbackYear
-        : (profileYear !== null ? profileYear : relationalEnrollmentYear)
+        : (shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentYear : (profileYear !== null ? profileYear : relationalEnrollmentYear))
     )
     : null;
   let semester = role === "student"
     ? (
       preferLocalOverDbForCurrentUser && fallbackSemester !== null
         ? fallbackSemester
-        : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester)
+        : (shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentSemester : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester))
     )
     : null;
   if (role === "student" && canPreserveApprovedFallbackTerm) {
@@ -5979,11 +5989,12 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
   const client = getRelationalClient();
   const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
   if (!client || !ids.length) {
-    return { coursesByUser: {}, termByUser: {} };
+    return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {} };
   }
 
   try {
     const enrollmentMap = Object.fromEntries(ids.map((id) => [id, []]));
+    const latestAssignedAtByUser = Object.fromEntries(ids.map((id) => [id, ""]));
     const termStateByUser = Object.fromEntries(
       ids.map((id) => [
         id,
@@ -5999,7 +6010,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
     for (const idBatch of splitIntoBatches(ids, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const { data, error } = await client
         .from("user_course_enrollments")
-        .select("user_id,course_id")
+        .select("user_id,course_id,assigned_at")
         .in("user_id", idBatch);
       if (error) {
         throw error;
@@ -6011,7 +6022,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
 
     const courseIds = [...new Set(enrollmentRows.map((row) => String(row?.course_id || "").trim()).filter(isUuidValue))];
     if (!courseIds.length) {
-      return { coursesByUser: enrollmentMap, termByUser: {} };
+      return { coursesByUser: enrollmentMap, termByUser: {}, latestAssignedAtByUser };
     }
 
     const courseRows = [];
@@ -6049,6 +6060,11 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       if (!isUuidValue(userId) || !courseMeta?.courseName) {
         return;
       }
+      const assignedAt = String(row?.assigned_at || "").trim();
+      const previousAssignedAt = String(latestAssignedAtByUser[userId] || "").trim();
+      if (parseSyncTimestampMs(assignedAt) > parseSyncTimestampMs(previousAssignedAt)) {
+        latestAssignedAtByUser[userId] = assignedAt;
+      }
       if (!enrollmentMap[userId].includes(courseMeta.courseName)) {
         enrollmentMap[userId].push(courseMeta.courseName);
       }
@@ -6083,10 +6099,11 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
     return {
       coursesByUser: enrollmentMap,
       termByUser,
+      latestAssignedAtByUser,
     };
   } catch (error) {
     if (isMissingRelationError(error)) {
-      return { coursesByUser: {}, termByUser: {} };
+      return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {} };
     }
     throw error;
   }
@@ -6105,7 +6122,7 @@ async function hydrateRelationalProfiles(currentUser) {
     const profilesResult = await fetchRowsPaged((from, to) => (
       client
         .from("profiles")
-        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
+        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at,updated_at")
         .order("created_at", { ascending: true })
         .order("id", { ascending: true })
         .range(from, to)
@@ -6117,7 +6134,7 @@ async function hydrateRelationalProfiles(currentUser) {
   } else {
     const { data: profile, error } = await client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at")
+      .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", currentUser.supabaseAuthId)
       .maybeSingle();
     if (error) {
@@ -6142,10 +6159,12 @@ async function hydrateRelationalProfiles(currentUser) {
 
   let enrollmentCourseMap = {};
   let enrollmentTermMap = {};
+  let enrollmentLatestAssignedAtMap = {};
   try {
     const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
     enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
     enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
+    enrollmentLatestAssignedAtMap = enrollmentSnapshot?.latestAssignedAtByUser || {};
   } catch (enrollmentError) {
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
@@ -6216,14 +6235,15 @@ async function hydrateRelationalProfiles(currentUser) {
     }, Boolean(profile.approved));
     const hasProfileTerm = profileYear !== null && profileSemester !== null;
     const hasEnrolledTerm = enrolledYear !== null && enrolledSemester !== null;
-    // Course enrollments are the authoritative term source when they disagree with
-    // the profile row. This prevents a stale profile semester/year from snapping
-    // the admin UI back to the previous term after a successful enrollment save.
-    const shouldPreferEnrolledTerm = hasEnrolledTerm && (
-      !hasProfileTerm
-      || profileYear !== enrolledYear
-      || profileSemester !== enrolledSemester
-    );
+    // Prefer whichever source is newer when the profile term and enrollment term diverge.
+    const shouldPreferEnrolledTerm = shouldPreferEnrollmentTermOverProfile({
+      profileYear,
+      profileSemester,
+      profileUpdatedAt: profile.updated_at || profile.created_at,
+      enrollmentYear: enrolledYear,
+      enrollmentSemester: enrolledSemester,
+      enrollmentUpdatedAt: enrollmentLatestAssignedAtMap[profile.id],
+    });
     // When local user data was recently modified but hasn't landed in the DB yet,
     // prefer the local (existing) values for year/semester/courses to prevent the
     // DB read from reverting the admin's change.
@@ -7059,7 +7079,16 @@ async function syncNotificationReadsToRelational(user, notificationDbIds) {
 async function hydrateRelationalSessions(currentUser) {
   const client = getRelationalClient();
   const userProfileId = String(getUserProfileId(currentUser) || "").trim();
-  if (!client || !relationalSync.enabled || !isUuidValue(userProfileId)) {
+  if (!currentUser || !client || !relationalSync.enabled || !isUuidValue(userProfileId)) {
+    return;
+  }
+  if (!hasActiveSupabaseSessionForUser(currentUser)) {
+    const ready = await ensureRelationalSyncReady({ force: true }).catch(() => false);
+    if (!ready || !hasActiveSupabaseSessionForUser(currentUser)) {
+      return;
+    }
+  }
+  if (!getRelationalClient()) {
     return;
   }
   if (shouldDeferSessionHydrationOnActiveRoute(currentUser)) {
@@ -7344,6 +7373,34 @@ function shouldPreferRecentLocalUserData(user = null) {
     && user
     && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
   );
+}
+
+function shouldPreferEnrollmentTermOverProfile(options = {}) {
+  const profileYear = normalizeAcademicYearOrNull(options?.profileYear);
+  const profileSemester = normalizeAcademicSemesterOrNull(options?.profileSemester);
+  const enrollmentYear = normalizeAcademicYearOrNull(options?.enrollmentYear);
+  const enrollmentSemester = normalizeAcademicSemesterOrNull(options?.enrollmentSemester);
+  const hasProfileTerm = profileYear !== null && profileSemester !== null;
+  const hasEnrollmentTerm = enrollmentYear !== null && enrollmentSemester !== null;
+  if (!hasEnrollmentTerm) {
+    return false;
+  }
+  if (!hasProfileTerm) {
+    return true;
+  }
+  if (profileYear === enrollmentYear && profileSemester === enrollmentSemester) {
+    return false;
+  }
+
+  const profileUpdatedAtMs = parseSyncTimestampMs(options?.profileUpdatedAt);
+  const enrollmentUpdatedAtMs = parseSyncTimestampMs(options?.enrollmentUpdatedAt);
+  if (!enrollmentUpdatedAtMs) {
+    return false;
+  }
+  if (!profileUpdatedAtMs) {
+    return true;
+  }
+  return enrollmentUpdatedAtMs > profileUpdatedAtMs;
 }
 
 function mergeUserRecord(remoteUser, localUser) {
@@ -11025,16 +11082,29 @@ async function syncSessionsToRelational(sessionsPayload) {
   if (!client || !currentUser) {
     return;
   }
+  if (!hasActiveSupabaseSessionForUser(currentUser)) {
+    const ready = await ensureRelationalSyncReady({ force: true }).catch(() => false);
+    if (!ready || !hasActiveSupabaseSessionForUser(currentUser)) {
+      throw new Error("No active Supabase session. Log in again and retry cloud sync.");
+    }
+  }
 
   const queuedSessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
   const latestLocalSessions = getSessions();
   const latestLocalSessionById = new Map(
     latestLocalSessions.map((session) => [String(session?.id || "").trim(), session]),
   );
-  const sessions = queuedSessions.map((session) => {
+  const dedupedSessions = [];
+  const seenSessionIds = new Set();
+  queuedSessions.forEach((session) => {
     const sessionId = String(session?.id || "").trim();
-    return (sessionId && latestLocalSessionById.get(sessionId)) || session;
+    if (!sessionId || seenSessionIds.has(sessionId)) {
+      return;
+    }
+    seenSessionIds.add(sessionId);
+    dedupedSessions.push((latestLocalSessionById.get(sessionId)) || session);
   });
+  const sessions = dedupedSessions;
   const users = getUsers();
   const questions = getQuestions();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
@@ -11166,24 +11236,31 @@ async function syncSessionsToRelational(sessionsPayload) {
     );
   }
 
-  const itemRows = [];
-  const responseRows = [];
+  const itemRowsBySyncKey = new Map();
+  const responseRowsBySyncKey = new Map();
 
   syncableOwnedSessions.forEach((session) => {
-    const blockDbId = blockIdByExternalId[session.id];
+    const sessionId = String(session?.id || "").trim();
+    const blockDbId = blockIdByExternalId[sessionId];
     if (!blockDbId) return;
     const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
+    const seenQuestionDbIds = new Set();
     questionIds.forEach((localQuestionId, index) => {
       const questionDbId = questionDbIdByLocalId[localQuestionId];
       if (!questionDbId) return;
-      itemRows.push({
+      const responseSyncKey = `${blockDbId}:${questionDbId}`;
+      if (seenQuestionDbIds.has(questionDbId) || responseRowsBySyncKey.has(responseSyncKey)) {
+        return;
+      }
+      seenQuestionDbIds.add(questionDbId);
+      itemRowsBySyncKey.set(`${blockDbId}:${index + 1}`, {
         block_id: blockDbId,
         position: index + 1,
         question_id: questionDbId,
       });
 
       const response = session.responses?.[localQuestionId] || {};
-      responseRows.push({
+      responseRowsBySyncKey.set(responseSyncKey, {
         block_id: blockDbId,
         question_id: questionDbId,
         selected_choice_labels: Array.isArray(response.selected) ? response.selected : [],
@@ -11194,11 +11271,13 @@ async function syncSessionsToRelational(sessionsPayload) {
       });
     });
   });
+  const itemRows = [...itemRowsBySyncKey.values()];
+  const responseRows = [...responseRowsBySyncKey.values()];
 
   if (itemRows.length) {
     for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
       await runRelationalQueryWithTimeout(
-        client.from("test_block_items").insert(itemBatch),
+        client.from("test_block_items").upsert(itemBatch, { onConflict: "block_id,position" }),
         "Session item sync timed out.",
       );
     }
@@ -11206,7 +11285,7 @@ async function syncSessionsToRelational(sessionsPayload) {
   if (responseRows.length) {
     for (const responseBatch of splitIntoBatches(responseRows, RELATIONAL_INSERT_BATCH_SIZE)) {
       await runRelationalQueryWithTimeout(
-        client.from("test_responses").insert(responseBatch),
+        client.from("test_responses").upsert(responseBatch, { onConflict: "block_id,question_id" }),
         "Session response sync timed out.",
       );
     }
