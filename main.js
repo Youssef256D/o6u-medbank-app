@@ -26278,6 +26278,39 @@ function scoreUserNotificationTargetMatch(user, query) {
   return 0;
 }
 
+function rankUsersForNotificationTargetTerm(query, users = null) {
+  const list = Array.isArray(users) ? users : getUsers();
+  const normalizedQuery = normalizeNotificationTargetSearchText(query);
+  if (!normalizedQuery) {
+    return [];
+  }
+  const scoredByKey = new Map();
+  list.forEach((entry, index) => {
+    const score = scoreUserNotificationTargetMatch(entry, normalizedQuery);
+    if (score <= 0) {
+      return;
+    }
+    const userKey = getNotificationTargetSearchIdentityKey(entry);
+    const stableKey = userKey || `fallback:${index}`;
+    const existing = scoredByKey.get(stableKey);
+    if (!existing || score > existing.score) {
+      scoredByKey.set(stableKey, { user: entry, score });
+    }
+  });
+  return [...scoredByKey.values()]
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      const byName = String(a.user?.name || a.user?.full_name || "").localeCompare(String(b.user?.name || b.user?.full_name || ""));
+      if (byName !== 0) {
+        return byName;
+      }
+      return String(a.user?.email || "").localeCompare(String(b.user?.email || ""));
+    })
+    .map((entry) => entry.user);
+}
+
 function searchUsersForNotificationTarget(query, users = null, limit = 8) {
   const list = Array.isArray(users) ? users : getUsers();
   const searchTerms = splitBulkUserSearchTerms(query)
@@ -26294,35 +26327,44 @@ function searchUsersForNotificationTarget(query, users = null, limit = 8) {
   if (!searchTerms.length) {
     return sortedList.slice(0, safeLimit);
   }
-  const scoredByKey = new Map();
-  list.forEach((entry, index) => {
-    const bestScore = searchTerms.reduce(
-      (highest, term) => Math.max(highest, scoreUserNotificationTargetMatch(entry, term)),
-      0,
-    );
-    if (bestScore <= 0) {
+  if (searchTerms.length === 1) {
+    return rankUsersForNotificationTargetTerm(searchTerms[0], list).slice(0, safeLimit);
+  }
+
+  const effectiveLimit = Math.min(list.length, Math.max(safeLimit, searchTerms.length));
+  const rankedByTerm = searchTerms.map((term) => rankUsersForNotificationTargetTerm(term, list));
+  const seen = new Set();
+  const orderedMatches = [];
+  const appendMatch = (entry) => {
+    if (!entry || orderedMatches.length >= effectiveLimit) {
       return;
     }
     const userKey = getNotificationTargetSearchIdentityKey(entry);
-    const stableKey = userKey || `fallback:${index}`;
-    const existing = scoredByKey.get(stableKey);
-    if (!existing || bestScore > existing.score) {
-      scoredByKey.set(stableKey, { user: entry, score: bestScore });
+    if (!userKey || seen.has(userKey)) {
+      return;
     }
+    seen.add(userKey);
+    orderedMatches.push(entry);
+  };
+
+  // First pass: keep bulk search aligned with the typed values by taking the
+  // strongest unseen match for each term in order before filling extras.
+  rankedByTerm.forEach((matches) => {
+    appendMatch(matches[0]);
   });
-  return [...scoredByKey.values()]
-    .sort((a, b) => {
-      if (b.score !== a.score) {
-        return b.score - a.score;
-      }
-      const byName = String(a.user?.name || "").localeCompare(String(b.user?.name || ""));
-      if (byName !== 0) {
-        return byName;
-      }
-      return String(a.user?.email || "").localeCompare(String(b.user?.email || ""));
-    })
-    .map((entry) => entry.user)
-    .slice(0, safeLimit);
+
+  if (orderedMatches.length < effectiveLimit) {
+    rankedByTerm.forEach((matches) => {
+      matches.forEach((entry, index) => {
+        if (index === 0 || orderedMatches.length >= effectiveLimit) {
+          return;
+        }
+        appendMatch(entry);
+      });
+    });
+  }
+
+  return orderedMatches;
 }
 
 function findUserByNotificationTargetQuery(query, users = null) {
