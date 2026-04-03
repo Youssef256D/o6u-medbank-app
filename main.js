@@ -101,6 +101,7 @@ const SUPABASE_FLUSH_DEBOUNCE_MS = 80;
 const SUPABASE_RETRY_FLUSH_MS = 1200;
 const SESSION_SYNC_FLUSH_MS = 600;
 const ADMIN_DATA_REFRESH_MS = 15000;
+const BACKGROUND_SYNC_INTERVAL_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const ADMIN_BACKUP_RESTORE_CHECK_COOLDOWN_MS = 5 * 60 * 1000;
 const STUDENT_DATA_REFRESH_MS = 8000;
@@ -463,7 +464,8 @@ let lastRenderedSessionPointer = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
 let adminDashboardPollHandle = null;
-let adminBackgroundSyncHandle = null;
+let backgroundSyncHandle = null;
+let backgroundSyncInFlight = false;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
@@ -11610,7 +11612,7 @@ async function resumeDeferredAppWork(options = {}) {
     clearProfileAccessRealtimeSubscription();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
-    clearAdminBackgroundSync();
+    clearBackgroundSync();
     syncPresenceRuntime(null);
     resetSiteActivityRuntime();
     syncTopbar();
@@ -11852,14 +11854,13 @@ function bindGlobalEvents() {
       clearLifecycleResumeHandle();
       flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
       endCurrentUserActivitySession().catch(() => { });
-      // For admin users, keep syncing in the background via a slower interval.
       const currentUser = getCurrentUser();
-      if (currentUser?.role === "admin") {
-        scheduleAdminBackgroundSync();
+      if (currentUser) {
+        scheduleBackgroundSync();
       }
       return;
     }
-    clearAdminBackgroundSync();
+    clearBackgroundSync();
     scheduleDeferredAppResume(0);
   });
 
@@ -11875,6 +11876,7 @@ function bindGlobalEvents() {
     resetSiteActivityRuntime();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
+    clearBackgroundSync();
   });
 
   window.addEventListener("pageshow", () => {
@@ -11895,7 +11897,7 @@ function bindGlobalEvents() {
     clearProfileAccessRealtimeSubscription();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
-    clearAdminBackgroundSync();
+    clearBackgroundSync();
     syncPresenceRuntime(null);
     resetSiteActivityRuntime();
     scheduleSyncStatusUiRefresh();
@@ -11999,7 +12001,6 @@ function clearAdminDashboardPolling() {
   }
 }
 
-const ADMIN_BACKGROUND_SYNC_INTERVAL_MS = 15000;
 const ADMIN_USER_MUTATION_COOLDOWN_MS = 12000;
 let adminUserMutationActiveCount = 0;
 let adminUserMutationLastAt = 0;
@@ -12021,24 +12022,81 @@ function isAdminUserMutationCoolingDown() {
   );
 }
 
-function clearAdminBackgroundSync() {
-  if (adminBackgroundSyncHandle) {
-    window.clearInterval(adminBackgroundSyncHandle);
-    adminBackgroundSyncHandle = null;
+function clearBackgroundSync() {
+  if (backgroundSyncHandle) {
+    window.clearInterval(backgroundSyncHandle);
+    backgroundSyncHandle = null;
+  }
+  backgroundSyncInFlight = false;
+}
+
+async function runBackgroundSyncTick() {
+  if (backgroundSyncInFlight) {
+    return;
+  }
+
+  const currentUser = getCurrentUser();
+  if (!currentUser || document.visibilityState !== "hidden") {
+    clearBackgroundSync();
+    return;
+  }
+
+  backgroundSyncInFlight = true;
+  try {
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    if (isBrowserOffline()) {
+      return;
+    }
+
+    if (
+      currentUser.role === "student"
+      && !isStudentOnboardingRoute(state.route, currentUser)
+      && state.route !== "session"
+      && state.route !== "review"
+    ) {
+      const accessStatus = await enforceCurrentStudentAccessStatus(currentUser).catch((error) => {
+        console.warn("Background student access check failed.", error?.message || error);
+        return { checked: false, active: true };
+      });
+      if (accessStatus?.active === false) {
+        return;
+      }
+      await refreshStudentDataSnapshot(currentUser, {
+        rerender: false,
+      }).catch((error) => {
+        console.warn("Background student refresh failed.", error?.message || error);
+      });
+      return;
+    }
+
+    if (currentUser.role === "admin") {
+      if (state.route === "admin" && ADMIN_AUTO_REFRESH_PAGES.has(String(state.adminPage || "").trim())) {
+        await refreshAdminDataSnapshot(currentUser, {
+          surfaceErrors: false,
+          includeHeavyData: false,
+        }).catch((error) => {
+          console.warn("Background admin refresh failed.", error?.message || error);
+        });
+      }
+      await hydrateRelationalNotifications(currentUser).catch((error) => {
+        console.warn("Background admin notification refresh failed.", error?.message || error);
+      });
+    }
+  } finally {
+    backgroundSyncInFlight = false;
   }
 }
 
-function scheduleAdminBackgroundSync() {
-  clearAdminBackgroundSync();
-  adminBackgroundSyncHandle = window.setInterval(() => {
-    const currentUser = getCurrentUser();
-    if (!currentUser || currentUser.role !== "admin" || document.visibilityState !== "hidden") {
-      clearAdminBackgroundSync();
-      return;
-    }
-    // Flush any pending sync writes while the tab is in the background.
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-  }, ADMIN_BACKGROUND_SYNC_INTERVAL_MS);
+function scheduleBackgroundSync() {
+  clearBackgroundSync();
+  runBackgroundSyncTick().catch((error) => {
+    console.warn("Background sync tick failed.", error?.message || error);
+  });
+  backgroundSyncHandle = window.setInterval(() => {
+    runBackgroundSyncTick().catch((error) => {
+      console.warn("Background sync tick failed.", error?.message || error);
+    });
+  }, BACKGROUND_SYNC_INTERVAL_MS);
 }
 
 function ensureAdminDashboardPolling() {
@@ -31778,6 +31836,7 @@ async function logout(options = {}) {
   clearStudentBackgroundRefreshPolling();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
+  clearBackgroundSync();
   resetRelationalSyncState();
   resetSupabaseSyncRuntimeState();
   resetPendingAdminActionRuntimeState();
@@ -31929,6 +31988,7 @@ function renderBootstrapFallback() {
     clearContentRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearStudentAccessPolling();
+    clearBackgroundSync();
     setGoogleOAuthPendingState(false);
     clearAdminDashboardPolling();
     document.body.classList.remove("is-routing");
