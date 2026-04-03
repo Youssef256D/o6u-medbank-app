@@ -448,6 +448,7 @@ const relationalSync = {
   // the write has propagated to the database.
   lastUserLocalWriteAt: 0,
 };
+const pendingEnrollmentScopeOverrides = new Map();
 
 const relationalQuestionColumnSupport = {
   checked: false,
@@ -4889,6 +4890,7 @@ function resetRelationalSyncState() {
   relationalSync.enrollmentWriteAccessDenied = false;
   relationalSync.enrollmentBackfillRetryAt = 0;
   relationalSync.lastUserLocalWriteAt = 0;
+  pendingEnrollmentScopeOverrides.clear();
   relationalQuestionColumnSupport.checked = false;
   relationalQuestionColumnSupport.questionImageUrl = false;
   relationalQuestionColumnSupport.explanationImageUrl = false;
@@ -7367,11 +7369,101 @@ function getUserMergeMatchKeys(user) {
   return [...new Set(keys)];
 }
 
+function getEnrollmentScopeOverrideKey(user) {
+  const profileId = String(getUserProfileId(user) || "").trim().toLowerCase();
+  if (profileId) {
+    return `profile:${profileId}`;
+  }
+  const localId = String(user?.id || "").trim().toLowerCase();
+  return localId ? `local:${localId}` : "";
+}
+
+function rememberPendingEnrollmentScopeOverride(user) {
+  const key = getEnrollmentScopeOverrideKey(user);
+  if (!key) {
+    return false;
+  }
+  if (String(user?.role || "").trim().toLowerCase() !== "student") {
+    return pendingEnrollmentScopeOverrides.delete(key);
+  }
+  pendingEnrollmentScopeOverrides.set(key, {
+    fingerprint: getUserEnrollmentScopeFingerprint(user),
+  });
+  return true;
+}
+
+function clearPendingEnrollmentScopeOverride(userOrKey = null) {
+  const key = typeof userOrKey === "string"
+    ? String(userOrKey || "").trim().toLowerCase()
+    : getEnrollmentScopeOverrideKey(userOrKey);
+  if (!key) {
+    return false;
+  }
+  return pendingEnrollmentScopeOverrides.delete(key);
+}
+
+function hasPendingEnrollmentScopeOverride(user = null) {
+  const key = getEnrollmentScopeOverrideKey(user);
+  return Boolean(key && pendingEnrollmentScopeOverrides.has(key));
+}
+
+function syncPendingEnrollmentScopeOverrides(previousUsers, nextUsers) {
+  const previousList = Array.isArray(previousUsers) ? previousUsers : [];
+  const nextList = Array.isArray(nextUsers) ? nextUsers : [];
+  const previousByKey = new Map();
+  previousList.forEach((user) => {
+    getUserMergeMatchKeys(user).forEach((key) => {
+      if (key && !previousByKey.has(key)) {
+        previousByKey.set(key, user);
+      }
+    });
+  });
+
+  const nextOverrideKeys = new Set();
+  nextList.forEach((nextUser) => {
+    const overrideKey = getEnrollmentScopeOverrideKey(nextUser);
+    if (overrideKey) {
+      nextOverrideKeys.add(overrideKey);
+    }
+
+    const previousUser = getUserMergeMatchKeys(nextUser)
+      .map((key) => previousByKey.get(key))
+      .find(Boolean);
+
+    if (String(nextUser?.role || "").trim().toLowerCase() !== "student") {
+      clearPendingEnrollmentScopeOverride(nextUser);
+      return;
+    }
+
+    if (!previousUser || didUserEnrollmentScopeChange(previousUser, nextUser)) {
+      rememberPendingEnrollmentScopeOverride(nextUser);
+    }
+  });
+
+  previousList.forEach((previousUser) => {
+    const overrideKey = getEnrollmentScopeOverrideKey(previousUser);
+    if (overrideKey && !nextOverrideKeys.has(overrideKey)) {
+      pendingEnrollmentScopeOverrides.delete(overrideKey);
+    }
+  });
+}
+
+function clearPendingEnrollmentScopeOverridesForUsers(users = []) {
+  (Array.isArray(users) ? users : []).forEach((user) => {
+    clearPendingEnrollmentScopeOverride(user);
+  });
+}
+
 function shouldPreferRecentLocalUserData(user = null) {
   return Boolean(
-    relationalSync.lastUserLocalWriteAt
-    && user
-    && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
+    user
+    && (
+      hasPendingEnrollmentScopeOverride(user)
+      || (
+        relationalSync.lastUserLocalWriteAt
+        && (Date.now() - relationalSync.lastUserLocalWriteAt) < 30000
+      )
+    )
   );
 }
 
@@ -9988,6 +10080,9 @@ async function syncProfilesToRelational(usersPayload) {
     }
     console.warn("Could not sync student enrollment rows during profile sync.", enrollmentError?.message || enrollmentError);
   }
+  clearPendingEnrollmentScopeOverridesForUsers(
+    dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
+  );
 }
 
 async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {}) {
@@ -31712,6 +31807,9 @@ function load(key, fallback) {
 }
 
 function save(key, value, options = {}) {
+  if (key === STORAGE_KEYS.users) {
+    syncPendingEnrollmentScopeOverrides(load(STORAGE_KEYS.users, []), value);
+  }
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
   if (key === STORAGE_KEYS.sessions) {
