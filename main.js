@@ -2246,7 +2246,9 @@ async function handleSupabaseAuthStateChange(event, session) {
       setGoogleOAuthPendingState(false);
       setPasswordRecoveryPendingState(true);
     }
-    let localUser = upsertLocalUserFromAuth(session.user);
+    let localUser = upsertLocalUserFromAuth(session.user, {}, {
+      persistLocalOnly: true,
+    });
     const profileSync = await refreshLocalUserFromRelationalProfile(session.user, localUser);
     localUser = profileSync.user;
     const shouldClearBlockedAdminAuthQueue = Boolean(
@@ -2349,7 +2351,9 @@ async function handleSupabaseAuthStateChange(event, session) {
       clearSupabaseSessionRecoveryRetry();
       const recoveredSessionUserId = String(recoveredSessionUser.id || "").trim();
       supabaseAuth.activeUserId = isUuidValue(recoveredSessionUserId) ? recoveredSessionUserId : "";
-      let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser);
+      let recoveredLocalUser = upsertLocalUserFromAuth(recoveredSessionUser, {}, {
+        persistLocalOnly: true,
+      });
       const recoveredProfileSync = await refreshLocalUserFromRelationalProfile(recoveredSessionUser, recoveredLocalUser);
       recoveredLocalUser = recoveredProfileSync.user;
       if (recoveredLocalUser?.role === "student") {
@@ -2509,7 +2513,9 @@ async function initSupabaseAuth() {
       setGoogleOAuthPendingState(false);
     } else if (data?.session?.user) {
       clearSupabaseSessionRecoveryRetry();
-      let localUser = upsertLocalUserFromAuth(data.session.user);
+      let localUser = upsertLocalUserFromAuth(data.session.user, {}, {
+        persistLocalOnly: true,
+      });
       const profileSync = await refreshLocalUserFromRelationalProfile(data.session.user, localUser);
       localUser = profileSync.user;
       if (localUser?.id) {
@@ -2837,7 +2843,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     return { user: fallbackUser, approvalChecked: false };
   }
 
-  const localUser = fallbackUser || upsertLocalUserFromAuth(authUser);
+  const localUser = fallbackUser || upsertLocalUserFromAuth(authUser, {}, {
+    persistLocalOnly: true,
+  });
   const client = getRelationalClient();
   if (!client) {
     return { user: localUser, approvalChecked: false };
@@ -2973,7 +2981,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       semester = fallbackSemester;
     }
   }
-  const resolvedAssignedCourses = role === "student"
+  let resolvedAssignedCourses = role === "student"
     ? (
       relationalAssignedCourses.length
         ? relationalAssignedCourses
@@ -2982,6 +2990,16 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
           : (authProvider === "google" && !preferLocalOverDbForCurrentUser ? [] : fallbackAssignedCourses))
     )
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
+  if (role === "student") {
+    const normalizedEnrollment = normalizeStudentEnrollmentProfile({
+      academicYear: year,
+      academicSemester: semester,
+      assignedCourses: resolvedAssignedCourses,
+    });
+    year = normalizedEnrollment.academicYear;
+    semester = normalizedEnrollment.academicSemester;
+    resolvedAssignedCourses = normalizedEnrollment.assignedCourses;
+  }
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
     role,
     phone: resolvedPhone,
@@ -3034,6 +3052,8 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     authAccessKnownActive: true,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
+  }, {
+    persistLocalOnly: true,
   });
 
   const shouldBackfillProfilePhone = role === "student"
@@ -3862,7 +3882,7 @@ function isLegacyDemoUser(user) {
   return id === "u_admin" || id === "u_student" || email === DEMO_ADMIN_EMAIL || email === DEMO_STUDENT_EMAIL;
 }
 
-function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
+function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) {
   if (!authUser?.id) {
     return null;
   }
@@ -4015,8 +4035,13 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}) {
     });
   }
 
-  save(STORAGE_KEYS.users, users);
-  save(STORAGE_KEYS.currentUserId, nextUser.id);
+  if (options?.persistLocalOnly) {
+    saveLocalOnly(STORAGE_KEYS.users, users);
+    saveLocalOnly(STORAGE_KEYS.currentUserId, nextUser.id);
+  } else {
+    save(STORAGE_KEYS.users, users);
+    save(STORAGE_KEYS.currentUserId, nextUser.id);
+  }
   return nextUser;
 }
 
@@ -13346,6 +13371,18 @@ function ensureContentRealtimeSubscription(user = null) {
     {
       event: "*",
       schema: "public",
+      table: "user_course_enrollments",
+      filter: `user_id=eq.${profileId}`,
+    },
+    () => {
+      scheduleContentRealtimeHydration();
+    },
+  );
+  channel.on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
       table: "profiles",
       filter: `id=eq.${profileId}`,
     },
@@ -15639,7 +15676,9 @@ function wireAuth(mode) {
             "Login request timed out. Check your internet and try again.",
           );
           if (!error && data?.user) {
-            let user = upsertLocalUserFromAuth(data.user);
+            let user = upsertLocalUserFromAuth(data.user, {}, {
+              persistLocalOnly: true,
+            });
             const profileSync = await refreshLocalUserFromRelationalProfile(data.user, user);
             user = profileSync.user;
             if (!user) {
@@ -23281,7 +23320,17 @@ function wireAdmin() {
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
     const current = getCurrentUser();
-    const users = getUsers();
+    let users = getUsers();
+    const pendingUserIds = users
+      .filter((entry) => entry.role === "student" && !isUserAccessApproved(entry))
+      .map((entry) => String(entry.id || "").trim())
+      .filter(Boolean);
+    const syncedPendingRows = await syncEnrollmentRowsForUserIds(pendingUserIds);
+    if (!syncedPendingRows) {
+      return;
+    }
+
+    users = getUsers();
     const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
     const eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentApprovalProfile(entry));
     const eligiblePendingUserIdSet = new Set(eligiblePendingUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
@@ -23497,6 +23546,12 @@ function wireAdmin() {
     const isApproveAction = action === "admin-bulk-approve-users";
     const selectedIdSet = new Set(selectedIds);
     const current = getCurrentUser();
+    if (isApproveAction) {
+      const syncedSelectedRows = await syncEnrollmentRowsForUserIds(selectedIds);
+      if (!syncedSelectedRows) {
+        return;
+      }
+    }
     const users = getUsers();
     const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
     const actionableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
@@ -23841,6 +23896,55 @@ function wireAdmin() {
         patchAdminUserRowUi(row, refreshedUser, getCurrentUser());
       }
     }
+  };
+
+  const waitForEnrollmentRowSaveToSettle = async (row, timeoutMs = 5000) => {
+    if (!row) {
+      return false;
+    }
+    const deadline = Date.now() + Math.max(250, Number(timeoutMs) || 0);
+    while (Date.now() <= deadline) {
+      if (row.dataset.enrollmentSaving !== "1") {
+        return true;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    return row.dataset.enrollmentSaving !== "1";
+  };
+
+  const syncEnrollmentRowsForUserIds = async (userIds = []) => {
+    const targetIds = new Set(
+      (Array.isArray(userIds) ? userIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    );
+    if (!targetIds.size) {
+      return true;
+    }
+
+    const targetRows = Array.from(appEl.querySelectorAll("tr[data-user-id]"))
+      .filter((row) => targetIds.has(String(row?.getAttribute("data-user-id") || "").trim()));
+
+    for (const row of targetRows) {
+      clearEnrollmentAutoSaveTimer(row);
+      if (row.dataset.enrollmentSaving === "1") {
+        const settled = await waitForEnrollmentRowSaveToSettle(row);
+        if (!settled) {
+          toast("Please wait for enrollment changes to finish saving.");
+          return false;
+        }
+      }
+      const saved = await saveUserEnrollmentFromRow(row, {
+        mode: "auto",
+        syncNow: true,
+        suppressSuccessToast: true,
+      });
+      if (!saved) {
+        return false;
+      }
+    }
+
+    return true;
   };
 
   appEl.querySelectorAll("tr[data-user-id]").forEach((row) => {
