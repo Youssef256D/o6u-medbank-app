@@ -208,6 +208,18 @@ const PHONE_COUNTRY_CODES_DESC = PHONE_COUNTRY_RULES
   .sort((a, b) => b.length - a.length);
 let activeTheme = THEME_LIGHT;
 
+function createDefaultAdminAddUserDraft() {
+  return {
+    name: "",
+    email: "",
+    password: "",
+    phone: "",
+    role: "student",
+    academicYear: "1",
+    academicSemester: "1",
+  };
+}
+
 const state = {
   route: INITIAL_ROUTE,
   sessionId: readPersistedActiveSessionId(),
@@ -223,6 +235,8 @@ const state = {
   adminUserFilterYear: "",
   adminUserFilterSemester: "",
   adminAddUserPanelOpen: false,
+  adminAddUserDraft: createDefaultAdminAddUserDraft(),
+  adminAddUserDraftDirty: false,
   adminSelectedUserIds: [],
   adminUserBulkActionRunning: false,
   adminCurriculumYear: 1,
@@ -292,6 +306,51 @@ const state = {
   userMenuOpen: false,
   notificationMenuOpen: false,
 };
+
+function normalizeAdminAddUserDraft(draft = null) {
+  const nextDraft = draft && typeof draft === "object" && !Array.isArray(draft) ? draft : {};
+  return {
+    name: String(nextDraft.name || ""),
+    email: String(nextDraft.email || ""),
+    password: String(nextDraft.password || ""),
+    phone: String(nextDraft.phone || ""),
+    role: String(nextDraft.role || "") === "admin" ? "admin" : "student",
+    academicYear: String(sanitizeAcademicYear(nextDraft.academicYear || 1)),
+    academicSemester: String(sanitizeAcademicSemester(nextDraft.academicSemester || 1)),
+  };
+}
+
+function hasAdminAddUserDraftChanges(draft = null) {
+  const normalizedDraft = normalizeAdminAddUserDraft(draft);
+  return Boolean(
+    normalizedDraft.name.trim()
+    || normalizedDraft.email.trim()
+    || normalizedDraft.password
+    || normalizedDraft.phone.trim()
+    || normalizedDraft.role !== "student"
+    || normalizedDraft.academicYear !== "1"
+    || normalizedDraft.academicSemester !== "1"
+  );
+}
+
+function setAdminAddUserDraft(nextDraft) {
+  state.adminAddUserDraft = normalizeAdminAddUserDraft(nextDraft);
+  state.adminAddUserDraftDirty = hasAdminAddUserDraftChanges(state.adminAddUserDraft);
+}
+
+function resetAdminAddUserDraft() {
+  state.adminAddUserDraft = createDefaultAdminAddUserDraft();
+  state.adminAddUserDraftDirty = false;
+}
+
+function shouldDeferAdminUsersAutoRender() {
+  return (
+    state.route === "admin"
+    && String(state.adminPage || "").trim() === "users"
+    && Boolean(state.adminAddUserPanelOpen)
+    && Boolean(state.adminAddUserDraftDirty)
+  );
+}
 
 let appVersionCheckPromise = null;
 let askAiWindowRef = null;
@@ -12305,6 +12364,9 @@ function ensureAdminDashboardPolling() {
         ) {
           return;
         }
+        if (shouldDeferAdminUsersAutoRender()) {
+          return;
+        }
         state.skipNextRouteAnimation = true;
         render();
       })
@@ -14774,6 +14836,9 @@ function render() {
               return;
             }
             if (initialAdminHydration || ADMIN_AUTO_REFRESH_PAGES.has(adminPageBeforeRefresh)) {
+              if (shouldDeferAdminUsersAutoRender()) {
+                return;
+              }
               state.skipNextRouteAnimation = true;
               render();
             }
@@ -20235,6 +20300,7 @@ function renderAdmin() {
     const bulkDeactivateRunning = Boolean(state.adminUserBulkActionRunning);
     const resetUserFiltersDisabled = !String(userSearchQuery || "").trim() && userFilterYear === null && userFilterSemester === null;
     const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
+    const addUserDraft = normalizeAdminAddUserDraft(state.adminAddUserDraft);
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = filteredUsers
       .map((account) => {
@@ -20383,35 +20449,35 @@ function renderAdmin() {
           <div class="admin-user-create-panel-body">
             <form id="admin-add-user-form" autocomplete="off">
               <div class="form-row">
-                <label>Full name <input name="name" autocomplete="off" required /></label>
-                <label>Email <input type="email" name="email" autocomplete="off" required /></label>
+                <label>Full name <input name="name" autocomplete="off" value="${escapeHtml(addUserDraft.name)}" required /></label>
+                <label>Email <input type="email" name="email" autocomplete="off" value="${escapeHtml(addUserDraft.email)}" required /></label>
               </div>
               <div class="form-row">
-                <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
+                <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" value="${escapeHtml(addUserDraft.password)}" required /></label>
                 <label>Role
                   <select name="role">
-                    <option value="student">Student</option>
-                    <option value="admin">Admin</option>
+                    <option value="student" ${addUserDraft.role === "student" ? "selected" : ""}>Student</option>
+                    <option value="admin" ${addUserDraft.role === "admin" ? "selected" : ""}>Admin</option>
                   </select>
                 </label>
               </div>
               <div class="form-row">
-                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" placeholder="+20 10 0000 0000" /></label>
+                <label>Phone number <input type="tel" name="phone" autocomplete="off" inputmode="tel" maxlength="20" placeholder="+20 10 0000 0000" value="${escapeHtml(addUserDraft.phone)}" /></label>
                 <label>Year
                   <select name="academicYear">
-                    <option value="1">Year 1</option>
-                    <option value="2">Year 2</option>
-                    <option value="3">Year 3</option>
-                    <option value="4">Year 4</option>
-                    <option value="5">Year 5</option>
+                    <option value="1" ${addUserDraft.academicYear === "1" ? "selected" : ""}>Year 1</option>
+                    <option value="2" ${addUserDraft.academicYear === "2" ? "selected" : ""}>Year 2</option>
+                    <option value="3" ${addUserDraft.academicYear === "3" ? "selected" : ""}>Year 3</option>
+                    <option value="4" ${addUserDraft.academicYear === "4" ? "selected" : ""}>Year 4</option>
+                    <option value="5" ${addUserDraft.academicYear === "5" ? "selected" : ""}>Year 5</option>
                   </select>
                 </label>
               </div>
               <div class="form-row">
                 <label>Semester
                   <select name="academicSemester">
-                    <option value="1">Semester 1</option>
-                    <option value="2">Semester 2</option>
+                    <option value="1" ${addUserDraft.academicSemester === "1" ? "selected" : ""}>Semester 1</option>
+                    <option value="2" ${addUserDraft.academicSemester === "2" ? "selected" : ""}>Semester 2</option>
                   </select>
                 </label>
               </div>
@@ -23097,6 +23163,23 @@ function wireAdmin() {
   });
 
   const addUserForm = document.getElementById("admin-add-user-form");
+  const syncAdminAddUserDraftFromForm = () => {
+    if (!(addUserForm instanceof HTMLFormElement)) {
+      return;
+    }
+    const draftData = new FormData(addUserForm);
+    setAdminAddUserDraft({
+      name: draftData.get("name"),
+      email: draftData.get("email"),
+      password: draftData.get("password"),
+      phone: draftData.get("phone"),
+      role: draftData.get("role"),
+      academicYear: draftData.get("academicYear"),
+      academicSemester: draftData.get("academicSemester"),
+    });
+  };
+  addUserForm?.addEventListener("input", syncAdminAddUserDraftFromForm);
+  addUserForm?.addEventListener("change", syncAdminAddUserDraftFromForm);
   addUserForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(addUserForm);
@@ -23111,6 +23194,15 @@ function wireAdmin() {
     const academicSemester = sanitizeAcademicSemester(data.get("academicSemester") || 1);
     const phoneValidation = phone ? validateAndNormalizePhoneNumber(phone) : { ok: true, message: "", number: "" };
     const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
+    setAdminAddUserDraft({
+      name,
+      email,
+      password,
+      phone,
+      role,
+      academicYear,
+      academicSemester,
+    });
 
     if (!name || !email || !password) {
       toast("Name, email, and password are required.");
@@ -23160,6 +23252,7 @@ function wireAdmin() {
       createdAt: nowISO(),
     });
     save(STORAGE_KEYS.users, users);
+    resetAdminAddUserDraft();
     state.adminAddUserPanelOpen = false;
     try {
       await flushPendingSyncNow();
