@@ -112,6 +112,11 @@ const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
 const ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS = 60000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
+const STUDENT_REFRESH_REALTIME_CHANNEL_NAME = "student-refresh-live";
+const STUDENT_REFRESH_BROADCAST_EVENT = "student-refresh-signal";
+const STUDENT_REFRESH_ACK_BROADCAST_EVENT = "student-refresh-ack";
+const STUDENT_REFRESH_ACK_WAIT_MS = 1600;
+const STUDENT_REFRESH_SUBSCRIBE_TIMEOUT_MS = 2200;
 const SITE_MAINTENANCE_GATE_REFRESH_MS = 6000;
 const NOTIFICATION_REALTIME_DEBOUNCE_MS = 220;
 const SESSION_REALTIME_DEBOUNCE_MS = 900;
@@ -675,6 +680,13 @@ let contentRealtimeSubscriptionKey = "";
 let contentRealtimeSubscribed = false;
 let contentRealtimeHydrateTimer = null;
 let contentRealtimeHydrateInFlight = false;
+let studentRefreshRealtimeChannel = null;
+let studentRefreshRealtimeSubscriptionKey = "";
+let studentRefreshRealtimeSubscribed = false;
+let studentRefreshRealtimeHydrateTimer = null;
+let studentRefreshRealtimeHydrateInFlight = false;
+let studentRefreshRealtimeHydrateQueued = false;
+const studentRefreshPendingAckTokens = new Set();
 let profileAccessRealtimeChannel = null;
 let profileAccessRealtimeSubscriptionKey = "";
 let profileAccessRealtimeHydrateTimer = null;
@@ -1489,12 +1501,43 @@ async function shouldForceRefreshAfterSignIn() {
   return Boolean(outcome?.shouldRefresh);
 }
 
-function getStudentRefreshTriggerToken() {
+function getStudentRefreshTriggerPayload() {
   const payload = load(STORAGE_KEYS.studentRefreshTrigger, null);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return "";
+    return null;
   }
-  return String(payload.token || "").trim();
+  return payload;
+}
+
+function normalizeStudentRefreshTriggerPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const token = String(payload.token || "").trim();
+  if (!token) {
+    return null;
+  }
+  const requestedAt = String(payload.requestedAt || "").trim() || nowISO();
+  const requestedById = String(payload.requestedById || "").trim();
+  const requestedBy = String(payload.requestedBy || "Admin").trim() || "Admin";
+  const normalizedKeys = [...new Set(
+    (Array.isArray(payload.changedKeys) ? payload.changedKeys : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )];
+  const reason = String(payload.reason || "").trim();
+  return {
+    token,
+    requestedAt,
+    requestedById: isUuidValue(requestedById) ? requestedById : null,
+    requestedBy,
+    ...(reason ? { reason } : {}),
+    ...(normalizedKeys.length ? { changedKeys: normalizedKeys } : {}),
+  };
+}
+
+function getStudentRefreshTriggerToken() {
+  return String(getStudentRefreshTriggerPayload()?.token || "").trim();
 }
 
 function createStudentRefreshTriggerPayload(user = null, options = {}) {
@@ -1517,6 +1560,32 @@ function createStudentRefreshTriggerPayload(user = null, options = {}) {
   };
 }
 
+function storeStudentRefreshTriggerPayload(payload, options = {}) {
+  const normalizedPayload = normalizeStudentRefreshTriggerPayload(payload);
+  if (!normalizedPayload) {
+    return { stored: false, payload: null, token: "" };
+  }
+
+  const existing = getStudentRefreshTriggerPayload();
+  const existingToken = String(existing?.token || "").trim();
+  const nextToken = normalizedPayload.token;
+  const existingRequestedAtMs = parseSyncTimestampMs(existing?.requestedAt);
+  const nextRequestedAtMs = parseSyncTimestampMs(normalizedPayload.requestedAt);
+  if (
+    !options?.force
+    && existingToken
+    && existingToken !== nextToken
+    && existingRequestedAtMs
+    && nextRequestedAtMs
+    && nextRequestedAtMs < existingRequestedAtMs
+  ) {
+    return { stored: false, payload: existing, token: existingToken, stale: true };
+  }
+
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTrigger, normalizedPayload);
+  return { stored: true, payload: normalizedPayload, token: nextToken, stale: false };
+}
+
 function queueStudentRefreshSignal(options = {}) {
   const current = options?.user || getCurrentUser();
   if (!current || current.role !== "admin") {
@@ -1534,9 +1603,13 @@ function queueStudentRefreshSignal(options = {}) {
   ) {
     return false;
   }
-  const payload = createStudentRefreshTriggerPayload(current, options);
-  saveLocalOnly(STORAGE_KEYS.studentRefreshTrigger, payload);
-  scheduleSupabaseWrite(STORAGE_KEYS.studentRefreshTrigger, payload);
+  const payload = normalizeStudentRefreshTriggerPayload(options?.payload)
+    || createStudentRefreshTriggerPayload(current, options);
+  const storedPayload = storeStudentRefreshTriggerPayload(payload, { force: true }).payload;
+  if (!storedPayload) {
+    return false;
+  }
+  scheduleSupabaseWrite(STORAGE_KEYS.studentRefreshTrigger, storedPayload);
   if (options?.flushNow !== false) {
     flushSupabaseWrites().catch((error) => {
       console.warn("Auto student refresh signal flush failed.", error?.message || error);
@@ -1546,34 +1619,295 @@ function queueStudentRefreshSignal(options = {}) {
   return true;
 }
 
-function shouldForceStudentRefreshFromAdminTrigger(user = null, options = {}) {
+function getPendingStudentRefreshTrigger(user = null) {
   const current = user || getCurrentUser();
   if (!current || current.role !== "student") {
-    return false;
+    return null;
   }
-  const token = getStudentRefreshTriggerToken();
+  const payload = getStudentRefreshTriggerPayload();
+  const token = String(payload?.token || "").trim();
   if (!token) {
-    return false;
+    return null;
   }
   const seenToken = String(load(STORAGE_KEYS.studentRefreshTriggerSeen, "") || "").trim();
   if (seenToken === token) {
+    return null;
+  }
+  return { token, payload };
+}
+
+function markStudentRefreshTriggerSeen(token) {
+  const normalizedToken = String(token || "").trim();
+  if (!normalizedToken) {
     return false;
   }
-  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, token);
-  if (options?.reload === false) {
-    return true;
-  }
-  const nextUrl = new URL(window.location.href);
-  nextUrl.searchParams.set("student_refresh", token);
-  window.location.replace(nextUrl.toString());
+  saveLocalOnly(STORAGE_KEYS.studentRefreshTriggerSeen, normalizedToken);
   return true;
 }
 
-async function shouldForceRefreshForUpdates(user = null) {
+function isStudentExamRefreshRoute(route = state.route) {
+  const normalizedRoute = String(route || "").trim().toLowerCase();
+  return normalizedRoute === "session" || normalizedRoute === "review";
+}
+
+function buildStudentRefreshRealtimeAckPayload(token, options = {}) {
+  const normalizedToken = String(token || "").trim();
+  const current = options?.user || getCurrentUser();
+  const profileId = String(getCurrentSessionProfileId(current) || getUserProfileId(current) || "").trim();
+  if (!normalizedToken || !current || current.role !== "student" || !isUuidValue(profileId)) {
+    return null;
+  }
+  return {
+    token: normalizedToken,
+    userId: profileId,
+    userName: String(current.name || current.email || "Student").trim() || "Student",
+    route: String(state.route || "dashboard").trim() || "dashboard",
+    onExamRoute: isStudentExamRefreshRoute(),
+    syncedAt: nowISO(),
+  };
+}
+
+async function sendStudentRefreshRealtimeAck(token, options = {}) {
+  const normalizedToken = String(token || "").trim();
+  if (!normalizedToken) {
+    return false;
+  }
+  const payload = buildStudentRefreshRealtimeAckPayload(normalizedToken, options);
+  if (!payload) {
+    studentRefreshPendingAckTokens.delete(normalizedToken);
+    return false;
+  }
+  if (!studentRefreshRealtimeChannel || !studentRefreshRealtimeSubscribed) {
+    return false;
+  }
+
+  const sendResult = await Promise.resolve(
+    studentRefreshRealtimeChannel.send({
+      type: "broadcast",
+      event: STUDENT_REFRESH_ACK_BROADCAST_EVENT,
+      payload,
+    }),
+  ).catch(() => "error");
+  const sent = sendResult === "ok" || sendResult == null;
+  if (sent) {
+    studentRefreshPendingAckTokens.delete(normalizedToken);
+  }
+  return sent;
+}
+
+async function processPendingStudentRefreshTrigger(user = null, options = {}) {
+  const current = user || getCurrentUser();
+  const pending = getPendingStudentRefreshTrigger(current);
+  if (!current || current.role !== "student" || !pending) {
+    return { handled: false, pending: false };
+  }
+  if (state.studentDataRefreshing) {
+    return { handled: false, pending: true, token: pending.token };
+  }
+
+  const onExamRoute = isStudentExamRefreshRoute();
+  const refreshed = await refreshStudentDataSnapshot(current, {
+    force: true,
+    rerender: !onExamRoute,
+  }).catch(() => false);
+  if (!refreshed) {
+    return { handled: false, pending: true, token: pending.token };
+  }
+
+  markStudentRefreshTriggerSeen(pending.token);
+  if (studentRefreshPendingAckTokens.has(pending.token)) {
+    sendStudentRefreshRealtimeAck(pending.token, { user: current }).catch(() => false);
+  }
+  if (options?.toast !== false) {
+    toast("Content updated.");
+  }
+  return {
+    handled: true,
+    pending: false,
+    token: pending.token,
+    onExamRoute,
+  };
+}
+
+function shouldForceStudentRefreshFromAdminTrigger(user = null) {
+  const pending = getPendingStudentRefreshTrigger(user);
+  if (!pending) {
+    return false;
+  }
+  return true;
+}
+
+async function handleStudentRefreshRealtimeSignal(payload, options = {}) {
+  const current = options?.user || getCurrentUser();
+  if (!current || current.role !== "student") {
+    return { handled: false, pending: false };
+  }
+
+  const stored = storeStudentRefreshTriggerPayload(payload);
+  if (stored.stale) {
+    return { handled: false, pending: false, ignored: true };
+  }
+  if (!stored.payload || !stored.token) {
+    return { handled: false, pending: false, ignored: true };
+  }
+  const seenToken = String(load(STORAGE_KEYS.studentRefreshTriggerSeen, "") || "").trim();
+  if (seenToken === stored.token) {
+    await sendStudentRefreshRealtimeAck(stored.token, { user: current }).catch(() => false);
+    return { handled: false, pending: false, token: stored.token, alreadyHandled: true };
+  }
+
+  studentRefreshPendingAckTokens.add(stored.token);
+  const result = await processPendingStudentRefreshTrigger(current, options);
+  if (result?.pending) {
+    scheduleStudentRefreshRealtimeHydration(250);
+  } else if (!result?.handled) {
+    studentRefreshPendingAckTokens.delete(stored.token);
+  }
+  return { ...result, token: stored.token };
+}
+
+async function dispatchStudentRefreshRealtimeSignal(payload, options = {}) {
+  const client = getSupabaseAuthClient();
+  const normalizedPayload = normalizeStudentRefreshTriggerPayload(payload);
+  if (!client || !normalizedPayload) {
+    return {
+      broadcastSent: false,
+      ackCount: 0,
+      ackedExamCount: 0,
+    };
+  }
+
+  const expectedCount = Math.max(0, Number(options?.expectedCount || 0));
+  const countKnown = options?.countKnown !== false;
+  const ackWindowMs = expectedCount > 0 || !countKnown
+    ? Math.max(0, Number(options?.waitMs || STUDENT_REFRESH_ACK_WAIT_MS))
+    : Math.min(250, Math.max(0, Number(options?.waitMs || STUDENT_REFRESH_ACK_WAIT_MS)));
+  const ackedUserIds = new Set();
+  const ackedExamUserIds = new Set();
+  let releaseAckWait = null;
+  const channel = client.channel(STUDENT_REFRESH_REALTIME_CHANNEL_NAME);
+  channel.on(
+    "broadcast",
+    { event: STUDENT_REFRESH_ACK_BROADCAST_EVENT },
+    ({ payload: ackPayload }) => {
+      const ackToken = String(ackPayload?.token || "").trim();
+      const ackUserId = String(ackPayload?.userId || "").trim();
+      if (!ackUserId || ackToken !== normalizedPayload.token || ackedUserIds.has(ackUserId)) {
+        return;
+      }
+      ackedUserIds.add(ackUserId);
+      if (Boolean(ackPayload?.onExamRoute)) {
+        ackedExamUserIds.add(ackUserId);
+      }
+      if (releaseAckWait && expectedCount > 0 && ackedUserIds.size >= expectedCount) {
+        const resolve = releaseAckWait;
+        releaseAckWait = null;
+        resolve();
+      }
+    },
+  );
+
+  let subscribed = false;
+  try {
+    subscribed = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      };
+      const timeoutId = window.setTimeout(() => {
+        finish(false);
+      }, STUDENT_REFRESH_SUBSCRIBE_TIMEOUT_MS);
+      channel.subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          finish(true);
+          return;
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          finish(false);
+        }
+      });
+    });
+
+    if (!subscribed) {
+      return {
+        broadcastSent: false,
+        ackCount: 0,
+        ackedExamCount: 0,
+      };
+    }
+
+    const sendResult = await Promise.resolve(
+      channel.send({
+        type: "broadcast",
+        event: STUDENT_REFRESH_BROADCAST_EVENT,
+        payload: normalizedPayload,
+      }),
+    ).catch(() => "error");
+    const broadcastSent = sendResult === "ok" || sendResult == null;
+    if (!broadcastSent) {
+      return {
+        broadcastSent: false,
+        ackCount: 0,
+        ackedExamCount: 0,
+      };
+    }
+
+    if (ackWindowMs > 0 && (expectedCount <= 0 || ackedUserIds.size < expectedCount)) {
+      await new Promise((resolve) => {
+        const timerId = window.setTimeout(() => {
+          if (releaseAckWait) {
+            releaseAckWait = null;
+          }
+          resolve();
+        }, ackWindowMs);
+        releaseAckWait = () => {
+          window.clearTimeout(timerId);
+          resolve();
+        };
+      });
+    }
+
+    return {
+      broadcastSent: true,
+      ackCount: ackedUserIds.size,
+      ackedExamCount: ackedExamUserIds.size,
+    };
+  } finally {
+    if (releaseAckWait) {
+      const resolve = releaseAckWait;
+      releaseAckWait = null;
+      resolve();
+    }
+    if (typeof client.removeChannel === "function") {
+      await Promise.resolve(client.removeChannel(channel)).catch(() => {
+        if (typeof channel.unsubscribe === "function") {
+          try {
+            channel.unsubscribe();
+          } catch {
+            // Ignore realtime cleanup errors.
+          }
+        }
+      });
+    } else if (typeof channel.unsubscribe === "function") {
+      try {
+        channel.unsubscribe();
+      } catch {
+        // Ignore realtime cleanup errors.
+      }
+    }
+  }
+}
+
+async function shouldForceRefreshForUpdates() {
   if (await shouldForceRefreshAfterSignIn()) {
     return true;
   }
-  return shouldForceStudentRefreshFromAdminTrigger(user);
+  return false;
 }
 
 function readRouteFromHash(hashValue = window.location.hash) {
@@ -1707,10 +2041,6 @@ async function init() {
   document.body.classList.add("is-routing");
   render();
 
-  if (shouldForceStudentRefreshFromAdminTrigger()) {
-    return;
-  }
-
   try {
     await initSupabaseAuth();
   } catch (error) {
@@ -1727,12 +2057,18 @@ async function init() {
   }
 
   const bootUser = getCurrentUser();
-  if (bootUser?.role === "student" && !Number(state.studentDataLastSyncAt || 0)) {
-    const hasFreshAdminContent = shouldForceStudentRefreshFromAdminTrigger(bootUser, { reload: false });
-    scheduleStudentBootRefresh(bootUser, {
-      rerender: true,
-      reason: hasFreshAdminContent ? "boot admin trigger" : "page load",
-    }).catch(() => false);
+  if (bootUser?.role === "student") {
+    const hasPendingAdminRefresh = shouldForceStudentRefreshFromAdminTrigger(bootUser);
+    if (hasPendingAdminRefresh) {
+      processPendingStudentRefreshTrigger(bootUser).catch((error) => {
+        console.warn("Pending student refresh processing failed during boot.", error?.message || error);
+      });
+    } else if (!Number(state.studentDataLastSyncAt || 0)) {
+      scheduleStudentBootRefresh(bootUser, {
+        rerender: true,
+        reason: "page load",
+      }).catch(() => false);
+    }
   }
 
   const topicRepairResult = repairCourseTopicCatalogFromQuestions({
@@ -2507,6 +2843,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       clearNotificationRealtimeSubscription();
       clearSessionRealtimeSubscription();
       clearContentRealtimeSubscription();
+      clearStudentRefreshRealtimeSubscription();
       clearProfileAccessRealtimeSubscription();
       clearStudentAccessPolling();
       clearAdminPresencePolling();
@@ -2534,6 +2871,7 @@ async function handleSupabaseAuthStateChange(event, session) {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
+    clearStudentRefreshRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearStudentAccessPolling();
     clearSupabaseSessionRecoveryRetry();
@@ -2741,6 +3079,7 @@ async function initSupabaseAuth() {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
+    clearStudentRefreshRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearStudentAccessPolling();
     supabaseAuth.enabled = false;
@@ -8227,6 +8566,27 @@ function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
   return normalizeCourseTopicGroupMap(merged);
 }
 
+function mergeHydratedStudentRefreshTriggerWithLocal(remotePayload) {
+  const remoteTrigger = normalizeStudentRefreshTriggerPayload(remotePayload);
+  const localTrigger = normalizeStudentRefreshTriggerPayload(load(STORAGE_KEYS.studentRefreshTrigger, null));
+  if (!remoteTrigger) {
+    return localTrigger;
+  }
+  if (!localTrigger) {
+    return remoteTrigger;
+  }
+
+  const remoteRequestedAtMs = parseSyncTimestampMs(remoteTrigger.requestedAt);
+  const localRequestedAtMs = parseSyncTimestampMs(localTrigger.requestedAt);
+  if (remoteRequestedAtMs > localRequestedAtMs) {
+    return remoteTrigger;
+  }
+  if (remoteRequestedAtMs < localRequestedAtMs) {
+    return localTrigger;
+  }
+  return remoteTrigger.token === localTrigger.token ? remoteTrigger : localTrigger;
+}
+
 async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
   if (
     !supabaseSync.enabled ||
@@ -8303,6 +8663,8 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
         payload = mergeHydratedTopicNewCatalogWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.topicNewSeen) {
         payload = mergeHydratedTopicNewSeenWithLocal(payload);
+      } else if (storageKey === STORAGE_KEYS.studentRefreshTrigger) {
+        payload = mergeHydratedStudentRefreshTriggerWithLocal(payload);
       } else if (storageKey === STORAGE_KEYS.siteMaintenance) {
         const resolvedMaintenance = resolveHydratedSiteMaintenanceConfig(payload, { hasPendingWrite });
         payload = resolvedMaintenance.config;
@@ -12297,6 +12659,7 @@ async function resumeDeferredAppWork(options = {}) {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
+    clearStudentRefreshRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
@@ -12336,6 +12699,7 @@ async function resumeDeferredAppWork(options = {}) {
 
   scheduleNotificationRealtimeHydration(0);
   scheduleSessionRealtimeHydration(0);
+  scheduleStudentRefreshRealtimeHydration(0);
   await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
 
   if (
@@ -12564,6 +12928,7 @@ function bindGlobalEvents() {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
+    clearStudentRefreshRealtimeSubscription();
     endCurrentUserActivitySession().catch(() => { });
     markCurrentUserOffline().catch(() => { });
     syncPresenceRuntime(null);
@@ -12598,6 +12963,7 @@ function bindGlobalEvents() {
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
+    clearStudentRefreshRealtimeSubscription();
     clearProfileAccessRealtimeSubscription();
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
@@ -13225,9 +13591,180 @@ function clearStudentForceRefreshPolling() {
   studentForceRefreshInFlight = false;
 }
 
+function clearStudentRefreshRealtimeHydrateTimer() {
+  if (studentRefreshRealtimeHydrateTimer) {
+    window.clearTimeout(studentRefreshRealtimeHydrateTimer);
+    studentRefreshRealtimeHydrateTimer = null;
+  }
+}
+
+function clearStudentRefreshRealtimeSubscription() {
+  clearStudentRefreshRealtimeHydrateTimer();
+  clearStudentForceRefreshPolling();
+  studentRefreshRealtimeHydrateQueued = false;
+  studentRefreshRealtimeHydrateInFlight = false;
+  studentRefreshPendingAckTokens.clear();
+  studentRefreshRealtimeSubscriptionKey = "";
+  studentRefreshRealtimeSubscribed = false;
+  const activeChannel = studentRefreshRealtimeChannel;
+  studentRefreshRealtimeChannel = null;
+  if (!activeChannel) {
+    return;
+  }
+  const client = getSupabaseAuthClient();
+  if (client && typeof client.removeChannel === "function") {
+    Promise.resolve(client.removeChannel(activeChannel)).catch(() => {
+      if (typeof activeChannel.unsubscribe === "function") {
+        try {
+          activeChannel.unsubscribe();
+        } catch {
+          // Ignore realtime unsubscribe errors.
+        }
+      }
+    });
+    return;
+  }
+  if (typeof activeChannel.unsubscribe === "function") {
+    try {
+      activeChannel.unsubscribe();
+    } catch {
+      // Ignore realtime unsubscribe errors.
+    }
+  }
+}
+
+async function runStudentRefreshRealtimeHydration() {
+  if (studentRefreshRealtimeHydrateInFlight) {
+    studentRefreshRealtimeHydrateQueued = true;
+    return;
+  }
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+
+  studentRefreshRealtimeHydrateInFlight = true;
+  try {
+    const result = await hydrateSupabaseSyncKeys([STORAGE_KEYS.studentRefreshTrigger]).catch((error) => ({ error }));
+    if (result?.error) {
+      return;
+    }
+    const refreshResult = await processPendingStudentRefreshTrigger(user);
+    if (refreshResult?.pending) {
+      scheduleStudentRefreshRealtimeHydration(250);
+    }
+  } catch (error) {
+    console.warn("Student refresh hydration failed.", error?.message || error);
+  } finally {
+    studentRefreshRealtimeHydrateInFlight = false;
+    if (studentRefreshRealtimeHydrateQueued) {
+      studentRefreshRealtimeHydrateQueued = false;
+      scheduleStudentRefreshRealtimeHydration(80);
+    }
+  }
+}
+
+function scheduleStudentRefreshRealtimeHydration(delayMs = 0) {
+  const user = getCurrentUser();
+  const profileId = getCurrentSessionProfileId(user);
+  if (!user || user.role !== "student" || !isUuidValue(profileId)) {
+    return;
+  }
+  clearStudentRefreshRealtimeHydrateTimer();
+  studentRefreshRealtimeHydrateTimer = window.setTimeout(() => {
+    studentRefreshRealtimeHydrateTimer = null;
+    runStudentRefreshRealtimeHydration().catch((error) => {
+      console.warn("Realtime student refresh failed.", error?.message || error);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function ensureStudentRefreshRealtimeSubscription(user = null) {
+  const currentUser = user || getCurrentUser();
+  const client = getSupabaseAuthClient();
+  const profileId = getCurrentSessionProfileId(currentUser);
+  if (
+    !client
+    || isBrowserOffline()
+    || currentUser?.role !== "student"
+    || !isUuidValue(profileId)
+    || isStudentOnboardingRoute(state.route, currentUser)
+    || !supabaseSync.enabled
+    || !supabaseSync.tableName
+    || !supabaseSync.storageKeyColumn
+  ) {
+    clearStudentRefreshRealtimeSubscription();
+    return;
+  }
+
+  const nextKey = `student:${profileId}`;
+  if (studentRefreshRealtimeChannel && studentRefreshRealtimeSubscriptionKey === nextKey) {
+    ensureStudentForceRefreshPolling(currentUser);
+    return;
+  }
+
+  clearStudentRefreshRealtimeSubscription();
+  const channel = client.channel(STUDENT_REFRESH_REALTIME_CHANNEL_NAME);
+  channel.on(
+    "broadcast",
+    { event: STUDENT_REFRESH_BROADCAST_EVENT },
+    ({ payload }) => {
+      handleStudentRefreshRealtimeSignal(payload, { user: getCurrentUser() }).catch((error) => {
+        console.warn("Realtime student refresh broadcast failed.", error?.message || error);
+      });
+    },
+  );
+  const realtimeStorageKey = buildRemoteSyncKey(STORAGE_KEYS.studentRefreshTrigger, getSyncScopeForUser(currentUser));
+  const filterColumn = supabaseSync.storageKeyColumn;
+  const tableName = supabaseSync.tableName;
+  channel.on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: tableName,
+      filter: `${filterColumn}=eq.${realtimeStorageKey}`,
+    },
+    () => {
+      scheduleStudentRefreshRealtimeHydration(0);
+    },
+  );
+  if (realtimeStorageKey !== STORAGE_KEYS.studentRefreshTrigger) {
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: tableName,
+        filter: `${filterColumn}=eq.${STORAGE_KEYS.studentRefreshTrigger}`,
+      },
+      () => {
+        scheduleStudentRefreshRealtimeHydration(0);
+      },
+    );
+  }
+
+  channel.subscribe((status) => {
+    studentRefreshRealtimeSubscribed = status === "SUBSCRIBED";
+    if (status === "SUBSCRIBED") {
+      clearStudentForceRefreshPolling();
+      scheduleStudentRefreshRealtimeHydration(0);
+      return;
+    }
+    ensureStudentForceRefreshPolling(currentUser);
+  });
+
+  studentRefreshRealtimeChannel = channel;
+  studentRefreshRealtimeSubscriptionKey = nextKey;
+}
+
 function ensureStudentForceRefreshPolling(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = getCurrentSessionProfileId(currentUser);
+  const realtimeHealthy = currentUser?.role === "student"
+    && studentRefreshRealtimeSubscribed
+    && studentRefreshRealtimeSubscriptionKey === `student:${profileId}`;
   if (
     !currentUser
     || currentUser.role !== "student"
@@ -13238,6 +13775,10 @@ function ensureStudentForceRefreshPolling(user = null) {
     || !supabaseSync.tableName
     || !supabaseSync.storageKeyColumn
   ) {
+    clearStudentForceRefreshPolling();
+    return;
+  }
+  if (realtimeHealthy) {
     clearStudentForceRefreshPolling();
     return;
   }
@@ -13269,15 +13810,15 @@ function ensureStudentForceRefreshPolling(user = null) {
         if (result?.error) {
           return;
         }
-        const hasNewTrigger = shouldForceStudentRefreshFromAdminTrigger(activeUser, { reload: false });
-        if (!hasNewTrigger) {
-          return;
-        }
-        if (state.route === "session" || state.route === "review") {
-          toast("New admin updates are ready. Finish this block to load them.");
-          return;
-        }
-        return refreshStudentDataSnapshot(activeUser, { force: true, rerender: true });
+        return processPendingStudentRefreshTrigger(activeUser).then((refreshResult) => {
+          if (refreshResult?.pending) {
+            window.setTimeout(() => {
+              if (!studentForceRefreshInFlight) {
+                scheduleStudentRefreshRealtimeHydration(0);
+              }
+            }, 250);
+          }
+        });
       })
       .catch((error) => {
         console.warn("Student force-refresh polling failed.", error?.message || error);
@@ -14228,6 +14769,35 @@ async function refreshAdminPresenceSnapshot(options = {}) {
   }
 }
 
+async function getAdminActiveStudentRefreshTargetSummary(options = {}) {
+  const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return { activeCount: 0, solvingCount: 0, countKnown: false };
+  }
+
+  const shouldUseCachedRows = Boolean(
+    Array.isArray(state.adminPresenceRows)
+    && state.adminPresenceRows.length
+    && state.adminPresenceLastSyncAt
+    && !options?.force
+    && (Date.now() - Number(state.adminPresenceLastSyncAt || 0)) < ADMIN_DATA_REFRESH_MS
+  );
+  let countKnown = shouldUseCachedRows;
+  if (!shouldUseCachedRows) {
+    const refreshed = await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => false);
+    countKnown = Boolean(refreshed || (Array.isArray(state.adminPresenceRows) && state.adminPresenceRows.length));
+  }
+
+  const activeStudentRows = (Array.isArray(state.adminPresenceRows) ? state.adminPresenceRows : []).filter((row) => {
+    return String(row?.role || "").trim().toLowerCase() === "student" && shouldTreatPresenceAsOnline(row);
+  });
+  return {
+    activeCount: activeStudentRows.length,
+    solvingCount: activeStudentRows.filter((row) => Boolean(row?.is_solving)).length,
+    countKnown,
+  };
+}
+
 function getLocalDayRange(baseDate = new Date()) {
   const start = new Date(baseDate);
   start.setHours(0, 0, 0, 0);
@@ -14749,9 +15319,6 @@ async function refreshStudentDataFromSupabaseState(user) {
   if (globalRefreshResult?.error) {
     return false;
   }
-  if (shouldForceStudentRefreshFromAdminTrigger(user)) {
-    return true;
-  }
 
   const userScopedKeys = shouldDeferSessionHydrationOnActiveRoute(user)
     ? USER_SCOPED_SYNC_KEYS.filter((key) => key !== STORAGE_KEYS.sessions)
@@ -14854,9 +15421,6 @@ async function refreshStudentDataSnapshot(user, options = {}) {
         STORAGE_KEYS.studentRefreshTrigger,
       ]).catch(() => ({ hadRemoteData: false })),
     ]);
-    if (shouldForceStudentRefreshFromAdminTrigger(user)) {
-      return true;
-    }
     if (!hasPendingSessionWrites) {
       await hydrateRelationalSessions(user);
     }
@@ -15503,6 +16067,7 @@ function syncTopbar() {
   ensureSessionRealtimeSubscription(user);
   ensureStudentSessionPolling(user);
   ensureContentRealtimeSubscription(user);
+  ensureStudentRefreshRealtimeSubscription(user);
   ensureStudentForceRefreshPolling(user);
   ensureStudentBackgroundRefreshPolling(user);
   const isAdmin = user?.role === "admin";
@@ -22213,7 +22778,7 @@ function renderAdmin() {
           <button class="btn ghost admin-btn-sm ${adminForceRefreshBusy ? "is-loading" : ""}" type="button" data-action="admin-force-student-refresh" ${adminForceRefreshBusy || !canForceStudentRefresh ? "disabled" : ""} ${!canForceStudentRefresh ? 'title="Supabase app-state sync must be active to broadcast this action."' : ""}>
             ${adminForceRefreshBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Sending refresh signal...</span>` : "Force student refresh"}
           </button>
-          <small class="subtle">Students auto-refresh every few seconds and pick up admin updates quickly.</small>
+          <small class="subtle">Students receive this instantly through Supabase Realtime. Offline students sync automatically when they reconnect.</small>
           <small class="subtle">Last forced student refresh: <b>${escapeHtml(lastStudentRefreshLabel)}</b></small>
           <small class="subtle">Edits save locally first, then sync automatically in the background.</small>
           ${!canManualSupabaseSync ? '<small class="subtle">Supabase sync requires an active Supabase admin session.</small>' : ""}
@@ -22566,21 +23131,82 @@ function wireAdmin() {
     render();
 
     try {
-      queueStudentRefreshSignal({
+      const activeSummary = await getAdminActiveStudentRefreshTargetSummary({ force: true });
+      const changedKeys = [
+        STORAGE_KEYS.users,
+        STORAGE_KEYS.questions,
+        STORAGE_KEYS.curriculum,
+        STORAGE_KEYS.courseTopics,
+        STORAGE_KEYS.courseTopicGroups,
+        STORAGE_KEYS.courseNotebookLinks,
+        STORAGE_KEYS.siteMaintenance,
+      ];
+      const refreshPayload = createStudentRefreshTriggerPayload(currentUser, {
+        reason: "manual_admin_refresh",
+        changedKeys,
+      });
+      const queued = queueStudentRefreshSignal({
         user: currentUser,
         force: true,
-        reason: "manual_admin_refresh",
+        payload: refreshPayload,
         flushNow: false,
       });
+      if (!queued) {
+        throw new Error("Could not queue the student refresh signal.");
+      }
+      const broadcastResultPromise = dispatchStudentRefreshRealtimeSignal(refreshPayload, {
+        expectedCount: activeSummary.activeCount,
+        countKnown: activeSummary.countKnown,
+      }).catch((error) => {
+        console.warn("Student refresh broadcast failed.", error?.message || error);
+        return { broadcastSent: false, ackCount: 0, ackedExamCount: 0 };
+      });
       await flushPendingSyncNow({ throwOnRelationalFailure: false });
+      const broadcastResult = await broadcastResultPromise;
       const remoteKey = buildRemoteSyncKey(STORAGE_KEYS.studentRefreshTrigger, getSyncScopeForUser(currentUser));
       const deferred = supabaseSync.pendingWrites.has(remoteKey);
       state.adminDataLastSyncAt = Date.now();
       state.adminDataSyncError = "";
+      const activeLabel = `${activeSummary.activeCount} active student${activeSummary.activeCount === 1 ? "" : "s"}`;
+      const solvingLabel = activeSummary.solvingCount
+        ? ` ${activeSummary.solvingCount} ${activeSummary.solvingCount === 1 ? "student is" : "students are"} mid-exam and will sync silently.`
+        : "";
       if (deferred) {
-        toast("Refresh signal queued locally and will sync to cloud automatically.");
+        if (broadcastResult.ackCount > 0) {
+          toast(
+            activeSummary.countKnown
+              ? `Refresh signal queued to cloud. ${broadcastResult.ackCount} of ${activeLabel} already confirmed live delivery.${solvingLabel}`
+              : `Refresh signal queued to cloud. ${broadcastResult.ackCount} student${broadcastResult.ackCount === 1 ? "" : "s"} already confirmed live delivery.`,
+          );
+        } else {
+          toast(activeSummary.countKnown
+            ? `Refresh signal queued for ${activeLabel}. It will sync to cloud automatically, and offline students will catch up on reconnect.${solvingLabel}`
+            : "Refresh signal queued locally and will sync to cloud automatically.");
+        }
       } else {
-        toast("Refresh signal sent. Students will auto-refresh shortly.");
+        if (activeSummary.countKnown && activeSummary.activeCount === 0) {
+          toast("Refresh signal published. No active students were online, and offline students will sync automatically when they reconnect.");
+        } else if (activeSummary.countKnown && broadcastResult.ackCount >= activeSummary.activeCount && activeSummary.activeCount > 0) {
+          toast(`Refresh delivered instantly to all ${activeLabel}.${solvingLabel} Offline students will sync automatically when they reconnect.`);
+        } else if (broadcastResult.ackCount > 0) {
+          if (activeSummary.countKnown) {
+            const remainingCount = Math.max(0, activeSummary.activeCount - broadcastResult.ackCount);
+            const remainingLabel = remainingCount
+              ? ` ${remainingCount} ${remainingCount === 1 ? "student is" : "students are"} still catching up and will sync automatically.`
+              : "";
+            toast(`Refresh delivered instantly to ${broadcastResult.ackCount} of ${activeLabel}.${solvingLabel}${remainingLabel} Offline students will sync on reconnect.`);
+          } else {
+            toast(`Refresh signal published. ${broadcastResult.ackCount} student${broadcastResult.ackCount === 1 ? "" : "s"} confirmed live delivery.${solvingLabel}`);
+          }
+        } else if (broadcastResult.broadcastSent) {
+          toast(activeSummary.countKnown
+            ? `Refresh signal published for ${activeLabel}. Live confirmations are still pending, but the background sync is active.${solvingLabel}`
+            : "Refresh signal published. Live confirmations are still pending, and offline students will sync automatically when they reconnect.");
+        } else {
+          toast(activeSummary.countKnown
+            ? `Refresh signal published for ${activeLabel}. Students will sync automatically in the background, and offline students will catch up on reconnect.${solvingLabel}`
+            : "Refresh signal published. Students will sync automatically in the background.");
+        }
       }
     } catch (error) {
       const message = getErrorMessage(error, "Could not send refresh signal.");
@@ -33172,10 +33798,10 @@ async function logout(options = {}) {
   clearNotificationRealtimeSubscription();
   clearSessionRealtimeSubscription();
   clearContentRealtimeSubscription();
+  clearStudentRefreshRealtimeSubscription();
   clearProfileAccessRealtimeSubscription();
   resetQuestionImageRuntimeState();
   clearStudentAccessPolling();
-  clearStudentForceRefreshPolling();
   clearStudentBackgroundRefreshPolling();
   clearAdminPresencePolling();
   clearAdminDashboardPolling();
