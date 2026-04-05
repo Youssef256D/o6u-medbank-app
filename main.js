@@ -766,6 +766,7 @@ const questionStoreRuntime = {
   initialized: false,
   list: [],
   byId: new Map(),
+  byDbId: new Map(),
   idSet: new Set(),
 };
 const questionImagePreloadRuntime = new Set();
@@ -7857,15 +7858,16 @@ async function hydrateRelationalSessions(currentUser) {
   }
 
   const allUsers = getUsers();
+  const questionStore = getQuestionStore();
   const localQuestionByDbId = Object.fromEntries(
-    getQuestions()
+    questionStore.list
       .filter((question) => question.dbId)
       .map((question) => [question.dbId, question.id]),
   );
 
   let blocksQuery = client
     .from("test_blocks")
-    .select("id,external_id,user_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
+    .select("id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
   const blocksResult = await fetchRowsPaged((from, to) => {
     let query = blocksQuery
       .order("updated_at", { ascending: false })
@@ -7879,6 +7881,28 @@ async function hydrateRelationalSessions(currentUser) {
     return;
   }
   const blocks = Array.isArray(blocksResult.data) ? blocksResult.data : [];
+  const blockCourseIds = [...new Set(
+    blocks
+      .map((block) => String(block?.course_id || "").trim())
+      .filter((courseId) => isUuidValue(courseId)),
+  )];
+  const courseNameById = {};
+  for (const courseIdBatch of splitIntoBatches(blockCourseIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+    const { data, error: coursesError } = await client
+      .from("courses")
+      .select("id,course_name")
+      .in("id", courseIdBatch);
+    if (coursesError) {
+      return;
+    }
+    (Array.isArray(data) ? data : []).forEach((row) => {
+      const courseId = String(row?.id || "").trim();
+      const courseName = String(row?.course_name || "").trim();
+      if (isUuidValue(courseId) && courseName) {
+        courseNameById[courseId] = courseName;
+      }
+    });
+  }
 
   const blockIds = (blocks || []).map((block) => block.id);
   const items = [];
@@ -7954,6 +7978,11 @@ async function hydrateRelationalSessions(currentUser) {
 
     const sessionId = String(block.external_id || block.id);
     const matchingUser = localUserByAuth.get(String(block.user_id || "").trim()) || null;
+    const blockCourseName = String(courseNameById[String(block?.course_id || "").trim()] || "").trim();
+    const blockCourses = blockCourseName
+      ? [blockCourseName]
+      : sanitizeCourseAssignments(matchingUser?.assignedCourses || []);
+    const inferredTerm = inferAcademicTermFromCourses(blockCourses);
     return {
       id: sessionId,
       dbId: block.id,
@@ -7974,9 +8003,9 @@ async function hydrateRelationalSessions(currentUser) {
       createdAt: block.created_at || nowISO(),
       updatedAt: block.updated_at || nowISO(),
       completedAt: block.completed_at || null,
-      academicYear: normalizeAcademicYearOrNull(matchingUser?.academicYear),
-      academicSemester: normalizeAcademicSemesterOrNull(matchingUser?.academicSemester),
-      courses: sanitizeCourseAssignments(matchingUser?.assignedCourses || []),
+      academicYear: normalizeAcademicYearOrNull(matchingUser?.academicYear) ?? inferredTerm.year,
+      academicSemester: normalizeAcademicSemesterOrNull(matchingUser?.academicSemester) ?? inferredTerm.semester,
+      courses: blockCourses,
       originSessionId: null,
     };
   });
@@ -8443,13 +8472,118 @@ function mergeSessionResponseSnapshots(localResponse, remoteResponse, preferLoca
   return merged;
 }
 
+function mergeAliasedSessionResponses(primaryResponse, secondaryResponse) {
+  const primary = isRecordObject(primaryResponse) ? primaryResponse : {};
+  const secondary = isRecordObject(secondaryResponse) ? secondaryResponse : {};
+  return {
+    ...secondary,
+    ...primary,
+    selected: [...new Set([
+      ...(Array.isArray(primary.selected) ? primary.selected : []),
+      ...(Array.isArray(secondary.selected) ? secondary.selected : []),
+    ])],
+    flagged: Boolean(primary.flagged || secondary.flagged),
+    notes: String(primary.notes || "").trim() || String(secondary.notes || ""),
+    submitted: Boolean(primary.submitted || secondary.submitted),
+    struck: [...new Set([
+      ...(Array.isArray(primary.struck) ? primary.struck : []),
+      ...(Array.isArray(secondary.struck) ? secondary.struck : []),
+    ])],
+    timeSpentSec: Math.max(0, Number(primary.timeSpentSec || 0), Number(secondary.timeSpentSec || 0)),
+    highlightedLines: [...new Set([
+      ...(Array.isArray(primary.highlightedLines) ? primary.highlightedLines : []),
+      ...(Array.isArray(secondary.highlightedLines) ? secondary.highlightedLines : []),
+    ])],
+    highlightedLineColors: {
+      ...(isRecordObject(secondary.highlightedLineColors) ? secondary.highlightedLineColors : {}),
+      ...(isRecordObject(primary.highlightedLineColors) ? primary.highlightedLineColors : {}),
+    },
+    highlightedChoices: {
+      ...(isRecordObject(secondary.highlightedChoices) ? secondary.highlightedChoices : {}),
+      ...(isRecordObject(primary.highlightedChoices) ? primary.highlightedChoices : {}),
+    },
+    textHighlights: {
+      lines: {
+        ...(isRecordObject(secondary.textHighlights?.lines) ? secondary.textHighlights.lines : {}),
+        ...(isRecordObject(primary.textHighlights?.lines) ? primary.textHighlights.lines : {}),
+      },
+      choices: {
+        ...(isRecordObject(secondary.textHighlights?.choices) ? secondary.textHighlights.choices : {}),
+        ...(isRecordObject(primary.textHighlights?.choices) ? primary.textHighlights.choices : {}),
+      },
+    },
+  };
+}
+
+function countSubmittedSessionResponses(session) {
+  const responses = isRecordObject(session?.responses) ? session.responses : {};
+  return Object.values(responses).reduce((count, response) => (
+    count + (Boolean(response?.submitted) ? 1 : 0)
+  ), 0);
+}
+
+function getSessionQuestionDataScore(session, questionStore = null) {
+  const store = questionStore || getQuestionStore();
+  const questionIds = Array.isArray(session?.questionIds) ? session.questionIds : [];
+  const resolvedIds = new Set(
+    questionIds
+      .map((qid) => resolveSessionQuestionId(qid, store))
+      .filter(Boolean),
+  );
+  let resolvableCount = 0;
+  resolvedIds.forEach((questionId) => {
+    if (store.byId.has(questionId)) {
+      resolvableCount += 1;
+    }
+  });
+  return {
+    questionCount: questionIds.length,
+    resolvableCount,
+    submittedCount: countSubmittedSessionResponses(session),
+  };
+}
+
+function shouldPreferLocalSessionQuestionData(localSession, remoteSession, questionStore = null) {
+  const localScore = getSessionQuestionDataScore(localSession, questionStore);
+  const remoteScore = getSessionQuestionDataScore(remoteSession, questionStore);
+  if (localScore.resolvableCount !== remoteScore.resolvableCount) {
+    return localScore.resolvableCount > remoteScore.resolvableCount;
+  }
+  if (localScore.questionCount !== remoteScore.questionCount) {
+    return localScore.questionCount > remoteScore.questionCount;
+  }
+  if (localScore.submittedCount !== remoteScore.submittedCount) {
+    return localScore.submittedCount > remoteScore.submittedCount;
+  }
+  return false;
+}
+
 function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession) {
   const activeSessionId = String(state.sessionId || "").trim();
+  const activeReviewSessionId = String(state.reviewSessionId || "").trim();
   if (
     sessionId
     && state.route === "session"
     && activeSessionId === sessionId
     && String(localSession?.status || "").trim() === "in_progress"
+  ) {
+    return true;
+  }
+  if (
+    sessionId
+    && state.route === "review"
+    && activeReviewSessionId === sessionId
+    && String(localSession?.status || "").trim() === "completed"
+  ) {
+    return true;
+  }
+  if (hasPendingSessionSyncForId(sessionId)) {
+    return true;
+  }
+  if (
+    String(localSession?.status || "").trim() === "completed"
+    && String(remoteSession?.status || "").trim() === "in_progress"
+    && countSubmittedSessionResponses(localSession) >= countSubmittedSessionResponses(remoteSession)
   ) {
     return true;
   }
@@ -8461,9 +8595,6 @@ function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession
   if (localUpdatedAtMs < remoteUpdatedAtMs) {
     return false;
   }
-  if (hasPendingSessionSyncForId(sessionId)) {
-    return true;
-  }
   return String(localSession?.status || "") === "in_progress"
     && String(remoteSession?.status || "") === "in_progress";
 }
@@ -8471,6 +8602,7 @@ function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession
 function mergeSessionSnapshots(localSession, remoteSession) {
   const sessionId = String(remoteSession?.id || localSession?.id || "").trim();
   const preferLocal = shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession);
+  const questionStore = getQuestionStore();
   const merged = preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession };
   const localResponses = isRecordObject(localSession?.responses) ? localSession.responses : {};
   const remoteResponses = isRecordObject(remoteSession?.responses) ? remoteSession.responses : {};
@@ -8480,16 +8612,40 @@ function mergeSessionSnapshots(localSession, remoteSession) {
   ]);
   const mergedResponses = {};
   responseQuestionIds.forEach((questionId) => {
-    mergedResponses[questionId] = mergeSessionResponseSnapshots(
+    const resolvedQuestionId = resolveSessionQuestionId(questionId, questionStore);
+    const mergedResponse = mergeSessionResponseSnapshots(
       localResponses[questionId],
       remoteResponses[questionId],
       preferLocal,
     );
+    if (resolvedQuestionId && resolvedQuestionId !== questionId) {
+      mergedResponses[resolvedQuestionId] = mergeAliasedSessionResponses(
+        mergedResponse,
+        mergedResponses[resolvedQuestionId],
+      );
+      return;
+    }
+    mergedResponses[questionId] = mergeAliasedSessionResponses(
+      mergedResponse,
+      mergedResponses[questionId],
+    );
   });
   merged.responses = mergedResponses;
-  merged.questionIds = preferLocal
-    ? [...(Array.isArray(localSession?.questionIds) ? localSession.questionIds : (Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : []))]
-    : [...(Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : (Array.isArray(localSession?.questionIds) ? localSession.questionIds : []))];
+  const localQuestionIds = Array.isArray(localSession?.questionIds) ? localSession.questionIds : [];
+  const remoteQuestionIds = Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : [];
+  const preferLocalQuestionData = preferLocal || shouldPreferLocalSessionQuestionData(localSession, remoteSession, questionStore);
+  merged.questionIds = preferLocalQuestionData
+    ? [...(localQuestionIds.length ? localQuestionIds : remoteQuestionIds)]
+    : [...(remoteQuestionIds.length ? remoteQuestionIds : localQuestionIds)];
+  if (preferLocalQuestionData) {
+    merged.courses = Array.isArray(localSession?.courses) && localSession.courses.length
+      ? [...localSession.courses]
+      : (Array.isArray(remoteSession?.courses) ? [...remoteSession.courses] : []);
+    merged.academicYear = normalizeAcademicYearOrNull(localSession?.academicYear)
+      ?? normalizeAcademicYearOrNull(remoteSession?.academicYear);
+    merged.academicSemester = normalizeAcademicSemesterOrNull(localSession?.academicSemester)
+      ?? normalizeAcademicSemesterOrNull(remoteSession?.academicSemester);
+  }
   return merged;
 }
 
@@ -10034,7 +10190,7 @@ function warmSessionQuestionAssets(session, questionStore = null) {
   if (!session || !Array.isArray(session.questionIds) || !session.questionIds.length) {
     return;
   }
-  const questionsById = (questionStore || getQuestionStore()).byId;
+  const store = questionStore || getQuestionStore();
   const indexes = [session.currentIndex - 1, session.currentIndex, session.currentIndex + 1]
     .filter((index) => index >= 0 && index < session.questionIds.length);
   indexes.forEach((index) => {
@@ -10042,7 +10198,7 @@ function warmSessionQuestionAssets(session, questionStore = null) {
     if (!qid) {
       return;
     }
-    const question = questionsById.get(qid);
+    const question = getQuestionById(resolveSessionQuestionId(qid, store));
     if (!question) {
       return;
     }
@@ -13977,6 +14133,10 @@ async function hydrateStudentSessionsFromCloud(user = null) {
 
   const ready = await ensureRelationalSyncReady().catch(() => false);
   if (ready) {
+    const questionStore = getQuestionStore();
+    if (!questionStore.byDbId.size) {
+      await hydrateRelationalQuestions().catch(() => false);
+    }
     await hydrateRelationalSessions(currentUser);
     state.studentDataLastSyncAt = Date.now();
     return true;
@@ -18134,11 +18294,12 @@ function getSessionTopicSummary(session) {
     return "";
   }
 
-  const questionsById = getQuestionStore().byId;
+  const questionStore = getQuestionStore();
+  const questionsById = questionStore.byId;
   const topics = [];
   const seenTopics = new Set();
   (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
-    const question = questionsById.get(String(qid || "").trim());
+    const question = getQuestionFromLookup(questionsById, qid, questionStore);
     if (!question) {
       return;
     }
@@ -19222,8 +19383,9 @@ function renderSession() {
     `;
   }
   const currentQid = session.questionIds[session.currentIndex];
-  const question = questionsById.get(currentQid);
-  const response = session.responses[currentQid];
+  const question = getQuestionFromLookup(questionsById, currentQid, questionStore);
+  const resolvedCurrentQid = resolveSessionQuestionId(currentQid, questionStore);
+  const response = session.responses[currentQid] || session.responses[resolvedCurrentQid];
   if (!question || !response) {
     if (!questionStore.list.length) {
       if (user?.role === "student") {
@@ -19281,8 +19443,9 @@ function renderSession() {
 
   const sideRows = session.questionIds
     .map((qid, index) => {
-      const entry = session.responses[qid];
-      const navQuestion = questionsById.get(qid) || null;
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const entry = session.responses[qid] || session.responses[resolvedQuestionId];
+      const navQuestion = getQuestionFromLookup(questionsById, qid, questionStore);
       const isSubmittedEntry = Boolean(entry?.submitted);
       const isCorrectEntry = isSubmittedEntry && isSubmittedResponseCorrect(navQuestion, entry);
       const isWrongEntry = isSubmittedEntry && !isCorrectEntry;
@@ -19490,13 +19653,14 @@ function getCurrentSessionResponseContext(session) {
   if (!qid) {
     return null;
   }
+  const resolvedQuestionId = resolveSessionQuestionId(qid);
   const response = session.responses && typeof session.responses === "object"
-    ? session.responses[qid]
+    ? (session.responses[qid] || session.responses[resolvedQuestionId])
     : null;
   if (!response || typeof response !== "object" || Array.isArray(response)) {
     return null;
   }
-  return { qid, response };
+  return { qid: resolvedQuestionId || qid, response };
 }
 
 function syncActiveResponseSelectionFromDom(activeSession) {
@@ -19892,7 +20056,8 @@ async function handleSessionClick(event) {
 
   if (action === "jump-unanswered") {
     const unansweredIndex = session.questionIds.findIndex((qid) => {
-      const response = session.responses[qid];
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const response = session.responses[qid] || session.responses[resolvedQuestionId];
       return !Array.isArray(response?.selected) || response.selected.length === 0;
     });
     if (unansweredIndex === -1) {
@@ -19996,7 +20161,10 @@ async function handleSessionClick(event) {
 
   if (action === "submit-session") {
     const unansweredQuestionNumbers = session.questionIds
-      .map((qid, index) => ({ index, response: session.responses[qid] }))
+      .map((qid, index) => {
+        const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+        return { index, response: session.responses[qid] || session.responses[resolvedQuestionId] };
+      })
       .filter(({ response }) => !Array.isArray(response?.selected) || response.selected.length === 0)
       .map(({ index }) => index + 1);
     if (unansweredQuestionNumbers.length) {
@@ -20012,7 +20180,8 @@ async function handleSessionClick(event) {
     }
 
     session.questionIds.forEach((qid) => {
-      const response = session.responses[qid];
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const response = session.responses[qid] || session.responses[resolvedQuestionId];
       if (response?.selected?.length) {
         response.submitted = true;
       }
@@ -20159,7 +20328,8 @@ function handleSessionHighlighterMouseup() {
   }
   normalizeSession(session, { questionStore: getQuestionStore() });
   const qid = session.questionIds[session.currentIndex];
-  const response = session.responses[qid];
+  const resolvedQuestionId = resolveSessionQuestionId(qid);
+  const response = session.responses[qid] || session.responses[resolvedQuestionId];
   if (!response) {
     return;
   }
@@ -20296,11 +20466,12 @@ function finalizeSession(sessionId, options = {}) {
   const userQueue = new Set(incorrectMap[session.userId] || []);
 
   for (const qid of session.questionIds) {
-    const question = questionStore.byId.get(qid) || null;
-    const response = session.responses[qid];
+    const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+    const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
+    const response = session.responses[qid] || session.responses[resolvedQuestionId];
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
-      userQueue.add(qid);
+      userQueue.add(resolvedQuestionId || qid);
     }
   }
 
@@ -20370,8 +20541,9 @@ function renderReview() {
 
   const questionsById = questionStore.byId;
   const reviewedEntries = selected.questionIds.map((qid) => {
-    const question = questionsById.get(qid) || null;
-    const response = selected.responses[qid] || {
+    const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+    const question = getQuestionFromLookup(questionsById, qid, questionStore);
+    const response = selected.responses[qid] || selected.responses[resolvedQuestionId] || {
       selected: [],
       flagged: false,
       struck: [],
@@ -28206,6 +28378,7 @@ function resetQuestionStoreRuntime() {
   questionStoreRuntime.initialized = false;
   questionStoreRuntime.list = [];
   questionStoreRuntime.byId = new Map();
+  questionStoreRuntime.byDbId = new Map();
   questionStoreRuntime.idSet = new Set();
 }
 
@@ -28216,6 +28389,11 @@ function getQuestionStore() {
     questionStoreRuntime.initialized = true;
     questionStoreRuntime.list = list;
     questionStoreRuntime.byId = new Map(list.map((entry) => [entry.id, entry]));
+    questionStoreRuntime.byDbId = new Map(
+      list
+        .map((entry) => [String(entry?.dbId || "").trim(), entry])
+        .filter(([dbId]) => isUuidValue(dbId)),
+    );
     questionStoreRuntime.idSet = new Set(list.map((entry) => entry.id));
   }
   return questionStoreRuntime;
@@ -28226,7 +28404,22 @@ function getQuestionById(questionId) {
   if (!normalizedQuestionId) {
     return null;
   }
-  return getQuestionStore().byId.get(normalizedQuestionId) || null;
+  const questionStore = getQuestionStore();
+  return questionStore.byId.get(normalizedQuestionId)
+    || questionStore.byDbId.get(normalizedQuestionId)
+    || null;
+}
+
+function resolveSessionQuestionId(questionId, questionStore = null) {
+  const normalizedQuestionId = String(questionId || "").trim();
+  if (!normalizedQuestionId) {
+    return "";
+  }
+  const store = questionStore || getQuestionStore();
+  if (store.byId.has(normalizedQuestionId)) {
+    return normalizedQuestionId;
+  }
+  return String(store.byDbId.get(normalizedQuestionId)?.id || "").trim() || normalizedQuestionId;
 }
 
 function getQuestions() {
@@ -29652,29 +29845,40 @@ function getCompletedSessionsForUser(userId) {
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 }
 
-function getQuestionFromLookup(lookup, questionId) {
-  if (!lookup) {
+function getQuestionFromLookup(lookup, questionId, questionStore = null) {
+  const normalizedQuestionId = String(questionId || "").trim();
+  if (!lookup || !normalizedQuestionId) {
     return null;
   }
+  const store = questionStore || getQuestionStore();
+  const resolvedQuestionId = resolveSessionQuestionId(normalizedQuestionId, store);
   if (lookup instanceof Map) {
-    return lookup.get(questionId) || null;
+    return lookup.get(normalizedQuestionId)
+      || lookup.get(resolvedQuestionId)
+      || store.byDbId.get(normalizedQuestionId)
+      || null;
   }
-  return lookup[questionId] || null;
+  return lookup[normalizedQuestionId]
+    || lookup[resolvedQuestionId]
+    || store.byDbId.get(normalizedQuestionId)
+    || null;
 }
 
 function getIncorrectQuestionIdsForSession(session, questionsById = null) {
   if (!session || !Array.isArray(session.questionIds)) {
     return [];
   }
-  const map = questionsById || getQuestionStore().byId;
+  const questionStore = getQuestionStore();
+  const map = questionsById || questionStore.byId;
   const wrongIds = [];
   session.questionIds.forEach((qid) => {
-    const question = getQuestionFromLookup(map, qid);
-    const response = session.responses?.[qid];
+    const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+    const question = getQuestionFromLookup(map, qid, questionStore);
+    const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
     if (!question || !response) return;
     const isCorrect = isSubmittedResponseCorrect(question, response);
     if (!isCorrect) {
-      wrongIds.push(qid);
+      wrongIds.push(resolvedQuestionId || qid);
     }
   });
   return wrongIds;
@@ -29685,24 +29889,26 @@ function getRetryQuestionMetaForSession(session, questionsById = null) {
     return { questionIds: [], wrongSubmitted: 0, unsolved: 0 };
   }
 
-  const map = questionsById || getQuestionStore().byId;
+  const questionStore = getQuestionStore();
+  const map = questionsById || questionStore.byId;
   const questionIds = [];
   let wrongSubmitted = 0;
   let unsolved = 0;
 
   session.questionIds.forEach((qid) => {
-    const question = getQuestionFromLookup(map, qid);
+    const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+    const question = getQuestionFromLookup(map, qid, questionStore);
     if (!question) {
       return;
     }
-    const response = session.responses?.[qid];
+    const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
     if (!response || !response.submitted) {
-      questionIds.push(qid);
+      questionIds.push(resolvedQuestionId || qid);
       unsolved += 1;
       return;
     }
     if (!isSubmittedResponseCorrect(question, response)) {
-      questionIds.push(qid);
+      questionIds.push(resolvedQuestionId || qid);
       wrongSubmitted += 1;
     }
   });
@@ -29718,8 +29924,9 @@ function getSessionPerformanceSummary(session, questionsById = null) {
   let correct = 0;
   let total = 0;
   session.questionIds.forEach((qid) => {
+    const resolvedQuestionId = resolveSessionQuestionId(qid, getQuestionStore());
     const question = getQuestionFromLookup(map, qid);
-    const response = session.responses?.[qid];
+    const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
     if (!question || !response) return;
     total += 1;
     const isCorrect = isSubmittedResponseCorrect(question, response);
@@ -32077,21 +32284,23 @@ function applySourceFilter(questions, source, userId) {
   const attempted = new Set();
   const incorrect = new Set();
   const flagged = new Set();
+  const questionStore = getQuestionStore();
 
   sessions.forEach((session) => {
     session.questionIds.forEach((qid) => {
-      attempted.add(qid);
-      const response = session.responses[qid];
-      const question = getQuestions().find((entry) => entry.id === qid);
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      attempted.add(resolvedQuestionId || qid);
+      const response = session.responses[qid] || session.responses[resolvedQuestionId];
+      const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
       if (!question || !response) return;
 
       const isCorrect = isSubmittedResponseCorrect(question, response);
       if (!isCorrect) {
-        incorrect.add(qid);
+        incorrect.add(resolvedQuestionId || qid);
       }
 
       if (response.flagged) {
-        flagged.add(qid);
+        flagged.add(resolvedQuestionId || qid);
       }
     });
   });
@@ -32122,20 +32331,23 @@ function getMissRateByQuestion(userId) {
 
   const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "completed");
   const map = {};
+  const questionStore = getQuestionStore();
 
   sessions.forEach((session) => {
     session.questionIds.forEach((qid) => {
-      const response = session.responses[qid];
-      const question = getQuestions().find((entry) => entry.id === qid);
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const response = session.responses[qid] || session.responses[resolvedQuestionId];
+      const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
       if (!question || !response) return;
 
       const correct = isSubmittedResponseCorrect(question, response);
-      if (!map[qid]) {
-        map[qid] = { miss: 0, total: 0 };
+      const rateKey = resolvedQuestionId || qid;
+      if (!map[rateKey]) {
+        map[rateKey] = { miss: 0, total: 0 };
       }
-      map[qid].total += 1;
+      map[rateKey].total += 1;
       if (!correct) {
-        map[qid].miss += 1;
+        map[rateKey].miss += 1;
       }
     });
   });
@@ -32148,7 +32360,9 @@ function getMissRateByQuestion(userId) {
 }
 
 function getQuestionOptionStats(questionId) {
-  const question = getQuestions().find((entry) => entry.id === questionId);
+  const questionStore = getQuestionStore();
+  const resolvedQuestionId = resolveSessionQuestionId(questionId, questionStore);
+  const question = getQuestionFromLookup(questionStore.byId, resolvedQuestionId, questionStore);
   if (!question) {
     return {};
   }
@@ -32161,7 +32375,7 @@ function getQuestionOptionStats(questionId) {
   let totalSubmissions = 0;
   const sessions = getSessions().filter((session) => session.status === "completed" || session.status === "in_progress");
   sessions.forEach((session) => {
-    const response = session.responses?.[questionId];
+    const response = session.responses?.[questionId] || session.responses?.[resolvedQuestionId];
     if (!response || !Array.isArray(response.selected) || response.selected.length === 0) {
       return;
     }
@@ -32201,11 +32415,19 @@ function getAnalyticsQuestionMetaById() {
   getQuestions().forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
     const topic = String(meta.topic || question.topic || "Uncategorized").trim() || "Uncategorized";
-    map.set(question.id, {
+    const questionMeta = {
       question,
       course: String(meta.course || "").trim(),
       topic,
-    });
+    };
+    const externalId = String(question?.id || "").trim();
+    const dbId = String(question?.dbId || "").trim();
+    if (externalId) {
+      map.set(externalId, questionMeta);
+    }
+    if (isUuidValue(dbId)) {
+      map.set(dbId, questionMeta);
+    }
   });
   analyticsRuntime.questionMetaById = map;
   return analyticsRuntime.questionMetaById;
@@ -32646,6 +32868,54 @@ function normalizeSession(session, options = {}) {
     changed = true;
   }
 
+  if (session.questionIds.length) {
+    const normalizedQuestionIds = [];
+    const seenQuestionIds = new Set();
+    session.questionIds.forEach((qid) => {
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const normalizedQuestionId = String(resolvedQuestionId || qid || "").trim();
+      if (!normalizedQuestionId || seenQuestionIds.has(normalizedQuestionId)) {
+        return;
+      }
+      seenQuestionIds.add(normalizedQuestionId);
+      normalizedQuestionIds.push(normalizedQuestionId);
+    });
+    if (session.questionIds.join("|") !== normalizedQuestionIds.join("|")) {
+      session.questionIds = normalizedQuestionIds;
+      changed = true;
+    }
+  }
+
+  if (Object.keys(session.responses).length) {
+    const normalizedResponses = {};
+    Object.entries(session.responses).forEach(([qid, response]) => {
+      const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
+      const normalizedQuestionId = String(resolvedQuestionId || qid || "").trim();
+      if (!normalizedQuestionId) {
+        return;
+      }
+      normalizedResponses[normalizedQuestionId] = normalizedResponses[normalizedQuestionId]
+        ? mergeAliasedSessionResponses(
+          isRecordObject(response) ? response : {},
+          normalizedResponses[normalizedQuestionId],
+        )
+        : (isRecordObject(response) ? response : {});
+    });
+    const currentResponseKeys = Object.keys(session.responses).sort();
+    const normalizedResponseKeys = Object.keys(normalizedResponses).sort();
+    if (currentResponseKeys.join("|") !== normalizedResponseKeys.join("|")) {
+      session.responses = normalizedResponses;
+      changed = true;
+    } else {
+      currentResponseKeys.forEach((key) => {
+        if (session.responses[key] !== normalizedResponses[key]) {
+          session.responses[key] = normalizedResponses[key];
+          changed = true;
+        }
+      });
+    }
+  }
+
   const currentSessionCourses = Array.isArray(session.courses)
     ? session.courses.map((course) => String(course || "").trim()).filter(Boolean)
     : [];
@@ -32679,7 +32949,15 @@ function normalizeSession(session, options = {}) {
   }
 
   if (session.status === "in_progress" && hasQuestionCatalog) {
-    const sanitizedQuestionIds = session.questionIds.filter((qid) => availableQuestionIds.has(qid));
+    const sanitizedQuestionIds = session.questionIds.filter((qid) => {
+      const normalizedQuestionId = String(qid || "").trim();
+      if (!normalizedQuestionId) {
+        return false;
+      }
+      return availableQuestionIds.has(normalizedQuestionId)
+        || questionStore.byDbId.has(normalizedQuestionId)
+        || isUuidValue(normalizedQuestionId);
+    });
     if (sanitizedQuestionIds.length !== session.questionIds.length) {
       session.questionIds = sanitizedQuestionIds;
       changed = true;
@@ -32702,7 +32980,7 @@ function normalizeSession(session, options = {}) {
     const seenCourses = new Set(session.courses);
 
     session.questionIds.forEach((qid) => {
-      const question = questionsById.get(qid);
+      const question = getQuestionFromLookup(questionsById, qid, questionStore);
       if (!question) {
         return;
       }
@@ -33377,9 +33655,10 @@ function getNotebookEntries(userId) {
   const entries = [];
   sessions.forEach((session) => {
     session.questionIds.forEach((qid) => {
-      const note = session.responses[qid]?.notes;
+      const resolvedQuestionId = resolveSessionQuestionId(qid);
+      const note = session.responses[qid]?.notes || session.responses[resolvedQuestionId]?.notes;
       if (note && note.trim()) {
-        entries.push({ questionId: qid, note: note.trim() });
+        entries.push({ questionId: resolvedQuestionId || qid, note: note.trim() });
       }
     });
   });
@@ -33423,10 +33702,12 @@ function advanceSessionClock(session, nowMs = Date.now()) {
   if (session.mode === "timed") {
     session.timeRemainingSec = Math.max(0, Number(session.timeRemainingSec || 0) - elapsedDeltaSec);
     const activeQid = String(session.questionIds?.[session.currentIndex] || "").trim();
-    if (activeQid && session.responses?.[activeQid]) {
-      session.responses[activeQid].timeSpentSec = Math.max(
+    const resolvedActiveQid = resolveSessionQuestionId(activeQid);
+    const activeResponse = session.responses?.[activeQid] || session.responses?.[resolvedActiveQid];
+    if (activeQid && activeResponse) {
+      activeResponse.timeSpentSec = Math.max(
         0,
-        Number(session.responses[activeQid].timeSpentSec || 0) + elapsedDeltaSec,
+        Number(activeResponse.timeSpentSec || 0) + elapsedDeltaSec,
       );
     }
   }
@@ -33528,8 +33809,10 @@ function captureElapsedForCurrentQuestion(session) {
   const previous = session.lastQuestionAt || nowMs;
   const elapsed = Math.max(0, Math.round((nowMs - previous) / 1000));
   const qid = session.questionIds[session.currentIndex];
-  if (session.responses[qid]) {
-    session.responses[qid].timeSpentSec += elapsed;
+  const resolvedQuestionId = resolveSessionQuestionId(qid);
+  const response = session.responses[qid] || session.responses[resolvedQuestionId];
+  if (response) {
+    response.timeSpentSec += elapsed;
   }
   session.lastQuestionAt = nowMs;
 }
