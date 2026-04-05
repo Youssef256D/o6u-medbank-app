@@ -237,6 +237,7 @@ const state = {
   adminAddUserPanelOpen: false,
   adminAddUserDraft: createDefaultAdminAddUserDraft(),
   adminAddUserDraftDirty: false,
+  adminUserEnrollmentDrafts: {},
   adminSelectedUserIds: [],
   adminUserBulkActionRunning: false,
   adminCurriculumYear: 1,
@@ -331,6 +332,107 @@ function hasAdminAddUserDraftChanges(draft = null) {
     || normalizedDraft.academicYear !== "1"
     || normalizedDraft.academicSemester !== "1"
   );
+}
+
+function normalizeAdminUserEnrollmentDraft(draft = null) {
+  const nextDraft = draft && typeof draft === "object" && !Array.isArray(draft) ? draft : {};
+  return {
+    phone: String(nextDraft.phone ?? ""),
+    academicYear: String(normalizeAcademicYearOrNull(nextDraft.academicYear) ?? ""),
+    academicSemester: String(normalizeAcademicSemesterOrNull(nextDraft.academicSemester) ?? ""),
+  };
+}
+
+function getAdminUserEnrollmentDraft(userId) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+  const draft = state.adminUserEnrollmentDrafts?.[normalizedUserId];
+  return draft && typeof draft === "object" && !Array.isArray(draft)
+    ? normalizeAdminUserEnrollmentDraft(draft)
+    : null;
+}
+
+function hasAdminUserEnrollmentDraftChanges(account, draft = null) {
+  if (!account || !draft) {
+    return false;
+  }
+  const normalizedDraft = normalizeAdminUserEnrollmentDraft(draft);
+  const savedPhone = String(account.phone || "").trim();
+  const draftPhone = String(normalizedDraft.phone || "").trim();
+  const savedYear = account.role === "student"
+    ? String(normalizeAcademicYearOrNull(account.academicYear) ?? "")
+    : "";
+  const savedSemester = account.role === "student"
+    ? String(normalizeAcademicSemesterOrNull(account.academicSemester) ?? "")
+    : "";
+  return (
+    draftPhone !== savedPhone
+    || normalizedDraft.academicYear !== savedYear
+    || normalizedDraft.academicSemester !== savedSemester
+  );
+}
+
+function setAdminUserEnrollmentDraft(userId, draft, account = null) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+  const normalizedDraft = normalizeAdminUserEnrollmentDraft(draft);
+  const targetAccount = account || getUsers().find((entry) => String(entry?.id || "").trim() === normalizedUserId) || null;
+  if (!targetAccount || !hasAdminUserEnrollmentDraftChanges(targetAccount, normalizedDraft)) {
+    if (state.adminUserEnrollmentDrafts && Object.prototype.hasOwnProperty.call(state.adminUserEnrollmentDrafts, normalizedUserId)) {
+      delete state.adminUserEnrollmentDrafts[normalizedUserId];
+    }
+    return null;
+  }
+  state.adminUserEnrollmentDrafts[normalizedUserId] = normalizedDraft;
+  return normalizedDraft;
+}
+
+function clearAdminUserEnrollmentDraft(userId) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId || !state.adminUserEnrollmentDrafts || !Object.prototype.hasOwnProperty.call(state.adminUserEnrollmentDrafts, normalizedUserId)) {
+    return false;
+  }
+  delete state.adminUserEnrollmentDrafts[normalizedUserId];
+  return true;
+}
+
+function getAdminUserEnrollmentViewModel(account) {
+  if (!account) {
+    return {
+      account,
+      draft: null,
+      hasUnsavedChanges: false,
+    };
+  }
+  const accountId = String(account.id || "").trim();
+  const draft = accountId ? getAdminUserEnrollmentDraft(accountId) : null;
+  const hasUnsavedChanges = draft ? hasAdminUserEnrollmentDraftChanges(account, draft) : false;
+  if (!hasUnsavedChanges || !draft) {
+    return {
+      account,
+      draft: null,
+      hasUnsavedChanges: false,
+    };
+  }
+  const draftYear = account.role === "student" ? normalizeAcademicYearOrNull(draft.academicYear) : null;
+  const draftSemester = account.role === "student" ? normalizeAcademicSemesterOrNull(draft.academicSemester) : null;
+  return {
+    account: {
+      ...account,
+      phone: draft.phone,
+      academicYear: draftYear,
+      academicSemester: draftSemester,
+      assignedCourses: account.role === "student"
+        ? (draftYear !== null && draftSemester !== null ? getCurriculumCourses(draftYear, draftSemester) : [])
+        : [...sanitizeCourseAssignments(account.assignedCourses || Object.keys(QBANK_COURSE_TOPICS))],
+    },
+    draft,
+    hasUnsavedChanges: true,
+  };
 }
 
 function setAdminAddUserDraft(nextDraft) {
@@ -485,6 +587,7 @@ const relationalSync = {
   inFlightPayloadSignatures: new Map(),
   lastSyncedPayloadSignatures: new Map(),
   lastRejectedPayloadSignatures: new Map(),
+  knownProfileIds: new Set(),
   questionRowSignaturesByExternalId: new Map(),
   questionChoiceSignaturesByExternalId: new Map(),
   blockedStorageKeys: new Set(),
@@ -5519,6 +5622,51 @@ async function syncUsersBackupState(usersPayload) {
   return scheduleSupabaseWrite(STORAGE_KEYS.users, users);
 }
 
+function rememberKnownRelationalProfileIds(profileIds) {
+  const ids = Array.isArray(profileIds) ? profileIds : [profileIds];
+  ids.forEach((profileId) => {
+    const normalizedProfileId = String(profileId || "").trim();
+    if (isUuidValue(normalizedProfileId)) {
+      relationalSync.knownProfileIds.add(normalizedProfileId);
+    }
+  });
+}
+
+function forgetKnownRelationalProfileIds(profileIds) {
+  const ids = Array.isArray(profileIds) ? profileIds : [profileIds];
+  ids.forEach((profileId) => {
+    const normalizedProfileId = String(profileId || "").trim();
+    if (isUuidValue(normalizedProfileId)) {
+      relationalSync.knownProfileIds.delete(normalizedProfileId);
+    }
+  });
+}
+
+function purgeLocallyOrphanedAuthUser(profileId) {
+  const normalizedProfileId = String(profileId || "").trim();
+  if (!isUuidValue(normalizedProfileId)) {
+    return false;
+  }
+
+  const rawUsers = load(STORAGE_KEYS.users, []);
+  if (!Array.isArray(rawUsers) || !rawUsers.length) {
+    return false;
+  }
+
+  const nextUsers = rawUsers.filter((entry) => {
+    const storedProfileId = String(getUserProfileId(entry) || "").trim();
+    const storedAuthId = String(entry?.supabaseAuthId || "").trim();
+    return storedProfileId !== normalizedProfileId && storedAuthId !== normalizedProfileId;
+  });
+  if (nextUsers.length === rawUsers.length) {
+    return false;
+  }
+
+  forgetKnownRelationalProfileIds(normalizedProfileId);
+  saveLocalOnly(STORAGE_KEYS.users, nextUsers, { audit: false });
+  return true;
+}
+
 function purgeDeletedUserLocalState(target = {}) {
   const targetLocalUserId = String(target?.targetLocalUserId || target?.localUserId || target?.userId || "").trim();
   const targetProfileId = String(target?.targetProfileId || target?.profileId || "").trim();
@@ -5891,6 +6039,7 @@ async function deleteRelationalProfile(profileId) {
   if (error) {
     return { ok: false, message: error.message || "Could not remove profile from database." };
   }
+  forgetKnownRelationalProfileIds(profileId);
   return { ok: true };
 }
 
@@ -6242,6 +6391,7 @@ async function hydrateRelationalProfiles(currentUser) {
     saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
     return;
   }
+  rememberKnownRelationalProfileIds(profileRows.map((profile) => profile?.id));
 
   let enrollmentCourseMap = {};
   let enrollmentTermMap = {};
@@ -10032,6 +10182,7 @@ async function syncProfilesToRelational(usersPayload) {
   }
 
   const currentUser = getCurrentUser();
+  const currentSessionProfileId = getCurrentSessionProfileId(currentUser);
   const isAdminSync = currentUser?.role === "admin";
   let users = Array.isArray(usersPayload) ? usersPayload : [];
   if (!isAdminSync) {
@@ -10078,20 +10229,22 @@ async function syncProfilesToRelational(usersPayload) {
     return;
   }
 
-  // Legacy local records may have a UUID `id` without a real Supabase auth user.
-  // Only trust those IDs if they already exist in `profiles` or match the active auth session.
-  const verifiedLegacyProfileIds = new Set();
+  // Only sync rows whose profile already exists, or whose ID matches the active auth session.
+  // This prevents stale local auth IDs from repeatedly hitting the profiles -> auth.users FK.
+  const verifiedSyncableProfileIds = new Set(relationalSync.knownProfileIds);
   const activeAuthId = getActiveSupabaseAuthUserId();
   if (isUuidValue(activeAuthId)) {
-    verifiedLegacyProfileIds.add(activeAuthId);
+    verifiedSyncableProfileIds.add(activeAuthId);
   }
-  const legacyProfileIdsToVerify = [...new Set(
+  if (isUuidValue(currentSessionProfileId)) {
+    verifiedSyncableProfileIds.add(currentSessionProfileId);
+  }
+  const profileIdsToVerify = [...new Set(
     rows
-      .filter((entry) => !entry.hasExplicitAuthId)
       .map((entry) => String(entry?.row?.id || "").trim())
-      .filter((profileId) => isUuidValue(profileId) && !verifiedLegacyProfileIds.has(profileId)),
+      .filter((profileId) => isUuidValue(profileId) && !verifiedSyncableProfileIds.has(profileId)),
   )];
-  for (const profileBatch of splitIntoBatches(legacyProfileIdsToVerify, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+  for (const profileBatch of splitIntoBatches(profileIdsToVerify, RELATIONAL_UUID_IN_BATCH_SIZE)) {
     const data = await runRelationalQueryWithTimeout(
       client
         .from("profiles")
@@ -10103,13 +10256,14 @@ async function syncProfilesToRelational(usersPayload) {
     (Array.isArray(data) ? data : []).forEach((row) => {
       const profileId = String(row?.id || "").trim();
       if (isUuidValue(profileId)) {
-        verifiedLegacyProfileIds.add(profileId);
+        verifiedSyncableProfileIds.add(profileId);
       }
     });
   }
+  rememberKnownRelationalProfileIds(verifiedSyncableProfileIds);
 
   const syncableEntries = rows.filter(
-    (entry) => entry.hasExplicitAuthId || verifiedLegacyProfileIds.has(String(entry?.row?.id || "").trim()),
+    (entry) => verifiedSyncableProfileIds.has(String(entry?.row?.id || "").trim()),
   );
   if (!syncableEntries.length) {
     return;
@@ -10123,6 +10277,7 @@ async function syncProfilesToRelational(usersPayload) {
         client.from("profiles").upsert(rowBatch, { onConflict: "id" }),
         "Profile sync timed out.",
       );
+      rememberKnownRelationalProfileIds(rowBatch.map((row) => row?.id));
     } catch (error) {
       if (!isProfilesIdForeignKeyError(error) && !isProfileUpsertConflictError(error)) {
         throw error;
@@ -10134,17 +10289,23 @@ async function syncProfilesToRelational(usersPayload) {
             client.from("profiles").upsert([row], { onConflict: "id" }),
             "Profile sync timed out.",
           );
+          rememberKnownRelationalProfileIds(row?.id);
         } catch (rowError) {
-          if (isProfilesIdForeignKeyError(rowError) || isProfileUpsertConflictError(rowError)) {
+          if (isProfilesIdForeignKeyError(rowError)) {
+            const rowProfileId = String(row?.id || "").trim();
+            if (rowProfileId && rowProfileId !== currentSessionProfileId) {
+              purgeLocallyOrphanedAuthUser(rowProfileId);
+            }
+            continue;
+          }
+          if (isProfileUpsertConflictError(rowError)) {
             console.warn(
               `Skipped conflicting profile row during sync for ${String(row?.email || row?.id || "unknown")}.`,
               rowError?.message || rowError,
             );
             continue;
           }
-          if (!isProfilesIdForeignKeyError(rowError)) {
-            throw rowError;
-          }
+          throw rowError;
         }
       }
     }
@@ -20113,10 +20274,12 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   if (!row || !account) {
     return false;
   }
-  const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
-  const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+  const enrollmentView = getAdminUserEnrollmentViewModel(account);
+  const displayAccount = enrollmentView.account || account;
+  const year = displayAccount.role === "student" ? normalizeAcademicYearOrNull(displayAccount.academicYear) : null;
+  const semester = displayAccount.role === "student" ? normalizeAcademicSemesterOrNull(displayAccount.academicSemester) : null;
   const isApproved = isUserAccessApproved(account);
-  const visibleCourses = getAdminVisibleCoursesForUser(account);
+  const visibleCourses = getAdminVisibleCoursesForUser(displayAccount);
   const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
   const phoneInput = row.querySelector("input[data-field='phone']");
 
@@ -20131,7 +20294,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   }
 
   if (phoneInput) {
-    phoneInput.value = String(account.phone || "").trim();
+    phoneInput.value = String(displayAccount.phone ?? "");
   }
 
   const coursePreviewEl = row.querySelector(".admin-course-preview");
@@ -20343,20 +20506,17 @@ function renderAdmin() {
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const accountRows = filteredUsers
       .map((account) => {
+        const enrollmentView = getAdminUserEnrollmentViewModel(account);
+        const displayAccount = enrollmentView.account || account;
         const accountId = String(account.id || "").trim();
-        const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
-        const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
+        const year = displayAccount.role === "student" ? normalizeAcademicYearOrNull(displayAccount.academicYear) : null;
+        const semester = displayAccount.role === "student" ? normalizeAcademicSemesterOrNull(displayAccount.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
         const resetPasswordAction = isGoogleAuthUser
           ? ""
           : '<button class="btn ghost admin-btn-sm" data-action="reset-user-password">Set password</button>';
-        const visibleCourses =
-          account.role === "student"
-            ? year && semester
-              ? getCurriculumCourses(year, semester)
-              : sanitizeCourseAssignments(account.assignedCourses || [])
-            : sanitizeCourseAssignments(account.assignedCourses || allCourses);
+        const visibleCourses = getAdminVisibleCoursesForUser(displayAccount, allCourses);
         const compactCourses = visibleCourses.slice(0, 2).map((course) => (course.length > 42 ? `${course.slice(0, 39)}...` : course));
         const coursePreview =
           visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
@@ -20364,7 +20524,7 @@ function renderAdmin() {
         const isLockedAdmin = isForcedAdminEmail(account.email);
         const canBulkSelect = canBulkSelectAdminUser(account, user);
         const isSelected = accountId ? selectedUserSet.has(accountId) : false;
-        const accountPhone = String(account.phone || "").trim();
+        const accountPhone = String(displayAccount.phone ?? "");
         const rowClassNames = [];
         if (isSelected) {
           rowClassNames.push("is-selected");
@@ -23747,6 +23907,35 @@ function wireAdmin() {
     row.dataset.enrollmentAutosaveTimer = "0";
   };
 
+  const readAdminUserEnrollmentDraftFromRow = (row) => {
+    const phoneInput = row?.querySelector("input[data-field='phone']");
+    const yearSelect = row?.querySelector("select[data-field='academicYear']");
+    const semesterSelect = row?.querySelector("select[data-field='academicSemester']");
+    return normalizeAdminUserEnrollmentDraft({
+      phone: phoneInput?.value ?? "",
+      academicYear: yearSelect?.value ?? "",
+      academicSemester: semesterSelect?.value ?? "",
+    });
+  };
+
+  const syncAdminUserEnrollmentDraftFromRow = (row, options = {}) => {
+    const userId = String(row?.getAttribute("data-user-id") || "").trim();
+    if (!row || !userId) {
+      return null;
+    }
+    const users = getUsers();
+    const account = users.find((entry) => String(entry?.id || "").trim() === userId);
+    if (!account) {
+      clearAdminUserEnrollmentDraft(userId);
+      return null;
+    }
+    const draft = setAdminUserEnrollmentDraft(userId, readAdminUserEnrollmentDraftFromRow(row), account);
+    if (options.patchUi !== false) {
+      patchAdminUserRowUi(row, account, getCurrentUser());
+    }
+    return draft;
+  };
+
   const saveUserEnrollmentFromRow = async (row, options = {}) => {
     const mode = options?.mode === "auto" ? "auto" : "manual";
     const syncNow = Boolean(options?.syncNow);
@@ -23848,6 +24037,7 @@ function wireAdmin() {
       });
       save(STORAGE_KEYS.users, users);
       state.adminDataLastSyncAt = Date.now();
+      clearAdminUserEnrollmentDraft(userId);
       if (row.dataset.enrollmentResave !== "1") {
         patchAdminUserRowUi(row, users[idx], getCurrentUser());
       }
@@ -23948,22 +24138,23 @@ function wireAdmin() {
   };
 
   appEl.querySelectorAll("tr[data-user-id]").forEach((row) => {
+    const phoneInput = row.querySelector("input[data-field='phone']");
     const yearSelect = row.querySelector("select[data-field='academicYear']");
     const semesterSelect = row.querySelector("select[data-field='academicSemester']");
-    if (!yearSelect && !semesterSelect) {
+    if (!phoneInput && !yearSelect && !semesterSelect) {
       return;
     }
-    const autoSaveEnrollment = () => {
+    const syncEnrollmentDraftPreview = () => {
       clearEnrollmentAutoSaveTimer(row);
-      row.dataset.enrollmentAutosaveTimer = String(window.setTimeout(() => {
-        row.dataset.enrollmentAutosaveTimer = "0";
-        saveUserEnrollmentFromRow(row, { mode: "auto" }).catch((error) => {
-          console.warn("Auto enrollment save failed.", error?.message || error);
-        });
-      }, 180));
+      syncAdminUserEnrollmentDraftFromRow(row, { patchUi: true });
     };
-    yearSelect?.addEventListener("change", autoSaveEnrollment);
-    semesterSelect?.addEventListener("change", autoSaveEnrollment);
+    const syncEnrollmentDraftOnly = () => {
+      syncAdminUserEnrollmentDraftFromRow(row, { patchUi: false });
+    };
+    phoneInput?.addEventListener("input", syncEnrollmentDraftOnly);
+    phoneInput?.addEventListener("change", syncEnrollmentDraftOnly);
+    yearSelect?.addEventListener("change", syncEnrollmentDraftPreview);
+    semesterSelect?.addEventListener("change", syncEnrollmentDraftPreview);
   });
 
   appEl.querySelectorAll("[data-action='save-user-enrollment']").forEach((button) => {
@@ -24134,6 +24325,7 @@ function wireAdmin() {
         reason: "enrollment_change",
       });
       save(STORAGE_KEYS.users, users);
+      clearAdminUserEnrollmentDraft(userId);
       try {
         await flushPendingSyncNow();
         toast(archivedSessionIds.length
@@ -24324,6 +24516,7 @@ function wireAdmin() {
           targetLocalUserId: userId,
         });
       }
+      clearAdminUserEnrollmentDraft(userId);
 
       try {
         await flushPendingSyncNow({ throwOnRelationalFailure: !queuedDelete });
@@ -32039,7 +32232,7 @@ function readStorageKey(key) {
 }
 
 function isSilentStorageQuotaFallbackKey(key) {
-  return key === STORAGE_KEYS.questions || key === STORAGE_KEYS.sessions;
+  return key === STORAGE_KEYS.questions || key === STORAGE_KEYS.sessions || key === STORAGE_KEYS.users;
 }
 
 function warnStorageQuotaFallbackForKey(key) {
@@ -32262,6 +32455,7 @@ async function logout(options = {}) {
   removeStorageKey(STORAGE_KEYS.currentUserId);
   setGoogleOAuthPendingState(false);
   setPasswordRecoveryPendingState(false);
+  state.adminUserEnrollmentDrafts = {};
   state.userMenuOpen = false;
   state.notificationMenuOpen = false;
   state.sessionId = null;
