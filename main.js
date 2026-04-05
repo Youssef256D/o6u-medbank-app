@@ -547,6 +547,16 @@ const SUPABASE_BACKUP_SYNC_KEY_SET = new Set([
 const LEGACY_SUPABASE_STATE_GLOBAL_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => USER_SCOPED_SYNC_KEY_SET.has(key));
 const RELATIONAL_COMBINED_COURSE_SYNC_MARKER = "__relational_combined_course_topic_sync__";
+const USER_RELATIONAL_SYNC_SCOPE_SAFE = "safe";
+const USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL = "server_backfill";
+const USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE = "student_profile";
+const USER_RELATIONAL_SYNC_SCOPE_ADMIN = "admin";
+const USER_RELATIONAL_SYNC_SCOPE_PRIORITY = new Map([
+  [USER_RELATIONAL_SYNC_SCOPE_SAFE, 0],
+  [USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL, 1],
+  [USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE, 2],
+  [USER_RELATIONAL_SYNC_SCOPE_ADMIN, 3],
+]);
 const AUTO_STUDENT_REFRESH_SYNC_KEYS = new Set([
   STORAGE_KEYS.questions,
   STORAGE_KEYS.curriculum,
@@ -584,9 +594,13 @@ const supabaseAuth = {
 const relationalSync = {
   enabled: false,
   pendingWrites: new Map(),
+  pendingWriteMeta: new Map(),
   inFlightPayloadSignatures: new Map(),
+  inFlightWriteMeta: new Map(),
   lastSyncedPayloadSignatures: new Map(),
+  lastSyncedWriteMeta: new Map(),
   lastRejectedPayloadSignatures: new Map(),
+  lastRejectedWriteMeta: new Map(),
   knownProfileIds: new Set(),
   questionRowSignaturesByExternalId: new Map(),
   questionChoiceSignaturesByExternalId: new Map(),
@@ -2921,7 +2935,10 @@ async function bootstrapRelationalProfileFromAuth(authUser, fallbackUser = null)
     return null;
   }
 
-  const { error: upsertError } = await client.from("profiles").upsert([profileRow], { onConflict: "id" });
+  const { error: upsertError } = await client.from("profiles").upsert([profileRow], {
+    onConflict: "id",
+    ignoreDuplicates: true,
+  });
   if (upsertError) {
     return null;
   }
@@ -3178,6 +3195,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
         }
         syncUserCourseEnrollmentsToRelational([updatedUser], {
           assignedByAuthId: isUuidValue(currentLocal?.supabaseAuthId) ? currentLocal.supabaseAuthId : null,
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
         }).catch((syncError) => {
           if (!isMissingRelationError(syncError)) {
             console.warn("Could not sync enrollment rows after profile phone backfill.", syncError?.message || syncError);
@@ -4142,7 +4160,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
     saveLocalOnly(STORAGE_KEYS.users, users);
     saveLocalOnly(STORAGE_KEYS.currentUserId, nextUser.id);
   } else {
-    save(STORAGE_KEYS.users, users);
+    save(STORAGE_KEYS.users, users, {
+      userSyncScope: normalizeRelationalUserSyncScope(options?.userSyncScope),
+    });
     save(STORAGE_KEYS.currentUserId, nextUser.id);
   }
   return nextUser;
@@ -5057,9 +5077,13 @@ function clearRelationalFlushTimer() {
 function resetRelationalSyncState() {
   relationalSync.enabled = false;
   relationalSync.pendingWrites.clear();
+  relationalSync.pendingWriteMeta.clear();
   relationalSync.inFlightPayloadSignatures.clear();
+  relationalSync.inFlightWriteMeta.clear();
   relationalSync.lastSyncedPayloadSignatures.clear();
+  relationalSync.lastSyncedWriteMeta.clear();
   relationalSync.lastRejectedPayloadSignatures.clear();
+  relationalSync.lastRejectedWriteMeta.clear();
   relationalSync.questionRowSignaturesByExternalId.clear();
   relationalSync.questionChoiceSignaturesByExternalId.clear();
   relationalSync.blockedStorageKeys.clear();
@@ -5125,7 +5149,65 @@ function getPendingRelationalPayloadForStorageKey(storageKey) {
   return undefined;
 }
 
-function scheduleRelationalWrite(storageKey, value) {
+function normalizeRelationalUserSyncScope(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (USER_RELATIONAL_SYNC_SCOPE_PRIORITY.has(normalized)) {
+    return normalized;
+  }
+  return USER_RELATIONAL_SYNC_SCOPE_SAFE;
+}
+
+function getRelationalUserSyncScopePriority(scope) {
+  return USER_RELATIONAL_SYNC_SCOPE_PRIORITY.get(normalizeRelationalUserSyncScope(scope)) ?? 0;
+}
+
+function mergeRelationalWriteMeta(storageKey, previousMeta = null, nextMeta = null) {
+  if (storageKey !== STORAGE_KEYS.users) {
+    return null;
+  }
+  const previousScope = normalizeRelationalUserSyncScope(previousMeta?.userSyncScope);
+  const nextScope = normalizeRelationalUserSyncScope(nextMeta?.userSyncScope);
+  return {
+    userSyncScope: getRelationalUserSyncScopePriority(nextScope) >= getRelationalUserSyncScopePriority(previousScope)
+      ? nextScope
+      : previousScope,
+  };
+}
+
+function getRelationalWriteMeta(storageKey, options = {}) {
+  if (storageKey !== STORAGE_KEYS.users) {
+    return null;
+  }
+  return {
+    userSyncScope: normalizeRelationalUserSyncScope(options?.userSyncScope),
+  };
+}
+
+function getRelationalWriteMetaSignature(storageKey, meta = null) {
+  if (storageKey !== STORAGE_KEYS.users) {
+    return "";
+  }
+  return normalizeRelationalUserSyncScope(meta?.userSyncScope);
+}
+
+function shouldStampRecentLocalUserWrite(meta = null) {
+  const scope = normalizeRelationalUserSyncScope(meta?.userSyncScope);
+  return scope === USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE
+    || scope === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+}
+
+function canWriteStudentEnrollmentProfileToRelational(scope) {
+  const normalizedScope = normalizeRelationalUserSyncScope(scope);
+  return normalizedScope === USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL
+    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE
+    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+}
+
+function canWriteAdminManagedProfileFieldsToRelational(scope) {
+  return normalizeRelationalUserSyncScope(scope) === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+}
+
+function scheduleRelationalWrite(storageKey, value, options = {}) {
   if (!RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
     return false;
   }
@@ -5146,33 +5228,55 @@ function scheduleRelationalWrite(storageKey, value) {
       ? deepClone(value)
       : value;
   const nextSignature = getSyncPayloadSignature(snapshot);
+  const nextMeta = getRelationalWriteMeta(storageKey, options);
+  const nextMetaSignature = getRelationalWriteMetaSignature(storageKey, nextMeta);
   const rejectedSignature = relationalSync.lastRejectedPayloadSignatures.get(storageKey);
-  if (rejectedSignature && rejectedSignature === nextSignature) {
+  const rejectedMetaSignature = getRelationalWriteMetaSignature(
+    storageKey,
+    relationalSync.lastRejectedWriteMeta.get(storageKey),
+  );
+  if (rejectedSignature && rejectedSignature === nextSignature && rejectedMetaSignature === nextMetaSignature) {
     return true;
   }
-  if (rejectedSignature && rejectedSignature !== nextSignature) {
+  if (rejectedSignature && (rejectedSignature !== nextSignature || rejectedMetaSignature !== nextMetaSignature)) {
     relationalSync.lastRejectedPayloadSignatures.delete(storageKey);
+    relationalSync.lastRejectedWriteMeta.delete(storageKey);
   }
   const pendingPayload = getPendingRelationalPayloadForStorageKey(storageKey);
+  const pendingMeta = relationalSync.pendingWriteMeta.get(storageKey);
   if (pendingPayload !== undefined && getSyncPayloadSignature(pendingPayload) === nextSignature) {
+    relationalSync.pendingWriteMeta.set(storageKey, mergeRelationalWriteMeta(storageKey, pendingMeta, nextMeta));
+    if (storageKey === STORAGE_KEYS.users && shouldStampRecentLocalUserWrite(relationalSync.pendingWriteMeta.get(storageKey))) {
+      relationalSync.lastUserLocalWriteAt = Date.now();
+    }
     return true;
   }
   const inFlightSignature = relationalSync.inFlightPayloadSignatures.get(storageKey);
-  if (inFlightSignature && inFlightSignature === nextSignature) {
+  const inFlightMeta = relationalSync.inFlightWriteMeta.get(storageKey);
+  if (
+    inFlightSignature
+    && inFlightSignature === nextSignature
+    && getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
+      <= getRelationalUserSyncScopePriority(inFlightMeta?.userSyncScope)
+  ) {
     return true;
   }
   const lastSyncedSignature = relationalSync.lastSyncedPayloadSignatures.get(storageKey);
+  const lastSyncedMeta = relationalSync.lastSyncedWriteMeta.get(storageKey);
   if (
     !relationalSync.flushing
     && pendingPayload === undefined
     && lastSyncedSignature
     && lastSyncedSignature === nextSignature
+    && getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
+      <= getRelationalUserSyncScopePriority(lastSyncedMeta?.userSyncScope)
   ) {
     return true;
   }
   relationalSync.pendingWrites.set(storageKey, snapshot);
+  relationalSync.pendingWriteMeta.set(storageKey, mergeRelationalWriteMeta(storageKey, pendingMeta, nextMeta));
   relationalSync.lastQueuedAt = Date.now();
-  if (storageKey === STORAGE_KEYS.users) {
+  if (storageKey === STORAGE_KEYS.users && shouldStampRecentLocalUserWrite(relationalSync.pendingWriteMeta.get(storageKey))) {
     relationalSync.lastUserLocalWriteAt = Date.now();
   }
   scheduleSyncStatusUiRefresh();
@@ -5218,7 +5322,9 @@ function markRelationalWriteAccessDenied(storageKeys, errorOrMessage) {
     .filter(Boolean))];
   keys.forEach((storageKey) => {
     relationalSync.pendingWrites.delete(storageKey);
+    relationalSync.pendingWriteMeta.delete(storageKey);
     relationalSync.inFlightPayloadSignatures.delete(storageKey);
+    relationalSync.inFlightWriteMeta.delete(storageKey);
     relationalSync.blockedStorageKeys.add(storageKey);
   });
   relationalSync.lastFailureAt = Date.now();
@@ -5236,9 +5342,14 @@ function discardRejectedRelationalWrite(storageKeys, errorOrMessage, payloadBySt
     const rejectedPayload = payloadByStorageKey instanceof Map ? payloadByStorageKey.get(storageKey) : undefined;
     if (rejectedPayload !== undefined) {
       relationalSync.lastRejectedPayloadSignatures.set(storageKey, getSyncPayloadSignature(rejectedPayload));
+      relationalSync.lastRejectedWriteMeta.set(storageKey, relationalSync.pendingWriteMeta.get(storageKey) || relationalSync.inFlightWriteMeta.get(storageKey) || null);
+    } else {
+      relationalSync.lastRejectedWriteMeta.delete(storageKey);
     }
     relationalSync.pendingWrites.delete(storageKey);
+    relationalSync.pendingWriteMeta.delete(storageKey);
     relationalSync.inFlightPayloadSignatures.delete(storageKey);
+    relationalSync.inFlightWriteMeta.delete(storageKey);
   });
   relationalSync.lastFailureAt = Date.now();
   relationalSync.lastFailureMessage = normalizeCloudSyncFailureMessage(
@@ -6382,11 +6493,7 @@ async function hydrateRelationalProfiles(currentUser) {
     const hasLocalRelationalUsers = usersBefore.some((entry) => Boolean(getUserProfileId(entry)));
     if (isAdmin && hasLocalRelationalUsers && !relationalSync.profilesBackfillAttempted) {
       relationalSync.profilesBackfillAttempted = true;
-      try {
-        await syncProfilesToRelational(usersBefore);
-      } catch (syncError) {
-        console.warn("Profiles backfill failed.", syncError?.message || syncError);
-      }
+      console.warn("Skipped automatic profile backfill from local cache because profiles are now server-authoritative.");
     }
     saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
     return;
@@ -6573,27 +6680,27 @@ async function hydrateRelationalProfiles(currentUser) {
         const mappedPhone = String(mappedEntry.phone || "").trim();
         const mappedPhoneValid = validateAndNormalizePhoneNumber(mappedPhone).ok;
         const canBackfillPhone = missingPhone && mappedPhoneValid;
-        const mappedYear = normalizeAcademicYearOrNull(mappedEntry.academicYear);
-        const mappedSemester = normalizeAcademicSemesterOrNull(mappedEntry.academicSemester);
-        const missingYear = profileYear === null && mappedYear !== null;
-        const missingSemester = profileSemester === null && mappedSemester !== null;
-        const mismatchedTerm = mappedYear !== null
-          && mappedSemester !== null
-          && (profileYear !== mappedYear || profileSemester !== mappedSemester);
-        if (!canBackfillPhone && !missingYear && !missingSemester && !mismatchedTerm) {
+        const enrolledTerm = enrollmentTermMap[String(profile.id || "").trim()] || null;
+        const enrolledYear = normalizeAcademicYearOrNull(enrolledTerm?.year);
+        const enrolledSemester = normalizeAcademicSemesterOrNull(enrolledTerm?.semester);
+        const missingYear = profileYear === null && enrolledYear !== null;
+        const missingSemester = profileSemester === null && enrolledSemester !== null;
+        if (!canBackfillPhone && !missingYear && !missingSemester) {
           return null;
         }
         return {
           ...mappedEntry,
-          academicYear: (missingYear || mismatchedTerm) ? mappedYear : profileYear,
-          academicSemester: (missingSemester || mismatchedTerm) ? mappedSemester : profileSemester,
+          academicYear: missingYear ? enrolledYear : profileYear,
+          academicSemester: missingSemester ? enrolledSemester : profileSemester,
           phone: canBackfillPhone ? mappedPhone : profilePhone,
         };
       })
       .filter(Boolean);
     if (backfillCandidates.length) {
       try {
-        await syncProfilesToRelational(backfillCandidates);
+        await syncProfilesToRelational(backfillCandidates, {
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
+        });
       } catch (error) {
         console.warn("Could not backfill missing student profile fields.", error?.message || error);
       }
@@ -6602,6 +6709,7 @@ async function hydrateRelationalProfiles(currentUser) {
       try {
         await syncUserCourseEnrollmentsToRelational(mapped, {
           assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
         });
         relationalSync.enrollmentBackfillRetryAt = Date.now() + ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS;
       } catch (error) {
@@ -8776,7 +8884,9 @@ async function flushRelationalWrites(options = {}) {
   // Snapshot the keys to sync, but keep them in pendingWrites until each succeeds.
   // This way the pending count decreases incrementally as each key syncs.
   const entryMap = new Map(relationalSync.pendingWrites.entries());
+  const entryMetaMap = new Map(relationalSync.pendingWriteMeta.entries());
   relationalSync.inFlightPayloadSignatures.clear();
+  relationalSync.inFlightWriteMeta.clear();
   if (entryMap.has(STORAGE_KEYS.curriculum) && entryMap.has(STORAGE_KEYS.courseTopics)) {
     // Combine curriculum + courseTopics into one sync operation.
     const combinedCourseSyncPayload = {
@@ -8794,6 +8904,7 @@ async function flushRelationalWrites(options = {}) {
   }
   const entries = Array.from(entryMap.entries());
   entries.forEach(([storageKey, payload]) => {
+    const entryMeta = entryMetaMap.get(storageKey) || null;
     if (
       storageKey === STORAGE_KEYS.curriculum
       && payload
@@ -8811,6 +8922,7 @@ async function flushRelationalWrites(options = {}) {
       return;
     }
     relationalSync.inFlightPayloadSignatures.set(storageKey, getSyncPayloadSignature(payload));
+    relationalSync.inFlightWriteMeta.set(storageKey, entryMeta);
   });
   let firstError = null;
   let succeededCount = 0;
@@ -8818,10 +8930,12 @@ async function flushRelationalWrites(options = {}) {
 
   try {
     for (const [storageKey, payload] of entries) {
+      const entryMeta = entryMetaMap.get(storageKey) || null;
       try {
-        await syncRelationalKey(storageKey, payload);
+        await syncRelationalKey(storageKey, payload, entryMeta || {});
         succeededCount += 1;
         relationalSync.pendingWrites.delete(storageKey);
+        relationalSync.pendingWriteMeta.delete(storageKey);
         if (
           storageKey === STORAGE_KEYS.curriculum
           && payload
@@ -8838,14 +8952,19 @@ async function flushRelationalWrites(options = {}) {
           );
           relationalSync.lastRejectedPayloadSignatures.delete(STORAGE_KEYS.curriculum);
           relationalSync.lastRejectedPayloadSignatures.delete(STORAGE_KEYS.courseTopics);
+          relationalSync.lastRejectedWriteMeta.delete(STORAGE_KEYS.curriculum);
+          relationalSync.lastRejectedWriteMeta.delete(STORAGE_KEYS.courseTopics);
           relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.curriculum);
           relationalSync.inFlightPayloadSignatures.delete(STORAGE_KEYS.courseTopics);
           syncedStorageKeys.add(STORAGE_KEYS.curriculum);
           syncedStorageKeys.add(STORAGE_KEYS.courseTopics);
         } else {
           relationalSync.lastSyncedPayloadSignatures.set(storageKey, getSyncPayloadSignature(payload));
+          relationalSync.lastSyncedWriteMeta.set(storageKey, entryMeta);
           relationalSync.lastRejectedPayloadSignatures.delete(storageKey);
+          relationalSync.lastRejectedWriteMeta.delete(storageKey);
           relationalSync.inFlightPayloadSignatures.delete(storageKey);
+          relationalSync.inFlightWriteMeta.delete(storageKey);
           syncedStorageKeys.add(storageKey);
         }
         scheduleSyncStatusUiRefresh();
@@ -8913,6 +9032,7 @@ async function flushRelationalWrites(options = {}) {
     }
   } finally {
     relationalSync.inFlightPayloadSignatures.clear();
+    relationalSync.inFlightWriteMeta.clear();
     relationalSync.flushing = false;
     if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
       relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
@@ -10139,13 +10259,13 @@ function cloneQuestionsPayloadForSync(payload) {
   }
 }
 
-async function syncRelationalKey(storageKey, payload) {
+async function syncRelationalKey(storageKey, payload, options = {}) {
   if (!relationalSync.enabled) {
     return;
   }
 
   if (storageKey === STORAGE_KEYS.users) {
-    await syncProfilesToRelational(payload);
+    await syncProfilesToRelational(payload, options);
     return;
   }
   if (storageKey === STORAGE_KEYS.curriculum || storageKey === STORAGE_KEYS.courseTopics) {
@@ -10175,7 +10295,7 @@ async function syncRelationalKey(storageKey, payload) {
   }
 }
 
-async function syncProfilesToRelational(usersPayload) {
+async function syncProfilesToRelational(usersPayload, options = {}) {
   const client = getRelationalClient();
   if (!client) {
     return;
@@ -10184,6 +10304,9 @@ async function syncProfilesToRelational(usersPayload) {
   const currentUser = getCurrentUser();
   const currentSessionProfileId = getCurrentSessionProfileId(currentUser);
   const isAdminSync = currentUser?.role === "admin";
+  const userSyncScope = normalizeRelationalUserSyncScope(options?.userSyncScope);
+  const canWriteStudentEnrollmentFields = canWriteStudentEnrollmentProfileToRelational(userSyncScope);
+  const canWriteAdminManagedFields = canWriteAdminManagedProfileFieldsToRelational(userSyncScope);
   let users = Array.isArray(usersPayload) ? usersPayload : [];
   if (!isAdminSync) {
     const currentProfileId = getUserProfileId(currentUser);
@@ -10208,14 +10331,14 @@ async function syncProfilesToRelational(usersPayload) {
         full_name: String(user.name || "").trim() || "Student",
         email: String(user.email || "").trim().toLowerCase(),
         phone: String(user.phone || "").trim() || null,
-        role: isAdminSync ? (user.role === "admin" ? "admin" : "student") : "student",
-        academic_year: user.role === "student" ? normalizedYear : null,
-        academic_semester: user.role === "student" ? normalizedSemester : null,
         auth_provider: normalizedAuthProvider || null,
       };
-      const shouldPersistApproval = isAdminSync
-        || (Boolean(user.isApproved) && shouldAutoApproveStudentAccess(user));
-      if (shouldPersistApproval) {
+      if (canWriteStudentEnrollmentFields) {
+        baseRow.academic_year = user.role === "student" ? normalizedYear : null;
+        baseRow.academic_semester = user.role === "student" ? normalizedSemester : null;
+      }
+      if (canWriteAdminManagedFields) {
+        baseRow.role = user.role === "admin" ? "admin" : "student";
         baseRow.approved = Boolean(user.isApproved);
       }
       return {
@@ -10313,21 +10436,24 @@ async function syncProfilesToRelational(usersPayload) {
 
   const enrollmentSyncOptions = {
     assignedByAuthId: isAdminSync && isUuidValue(getCurrentUser()?.supabaseAuthId) ? getCurrentUser().supabaseAuthId : null,
+    userSyncScope,
   };
-  try {
-    await syncUserCourseEnrollmentsToRelational(
-      dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
-      enrollmentSyncOptions,
-    );
-  } catch (enrollmentError) {
-    if (isAdminSync) {
-      throw enrollmentError;
+  if (canWriteStudentEnrollmentFields) {
+    try {
+      await syncUserCourseEnrollmentsToRelational(
+        dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
+        enrollmentSyncOptions,
+      );
+    } catch (enrollmentError) {
+      if (isAdminSync) {
+        throw enrollmentError;
+      }
+      console.warn("Could not sync student enrollment rows during profile sync.", enrollmentError?.message || enrollmentError);
     }
-    console.warn("Could not sync student enrollment rows during profile sync.", enrollmentError?.message || enrollmentError);
+    clearPendingEnrollmentScopeOverridesForUsers(
+      dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
+    );
   }
-  clearPendingEnrollmentScopeOverridesForUsers(
-    dedupedSyncableEntries.map((entry) => entry.user).filter(Boolean),
-  );
 }
 
 async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {}) {
@@ -10352,6 +10478,9 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
     return;
   }
   if (relationalSync.enrollmentWriteAccessDenied) {
+    return;
+  }
+  if (!canWriteStudentEnrollmentProfileToRelational(options?.userSyncScope)) {
     return;
   }
 
@@ -11394,6 +11523,7 @@ async function persistImportedQuestionsNow(questionsPayload) {
     await syncCoursesTopicsToRelational(curriculum, topics);
     await syncUserCourseEnrollmentsToRelational(getUsers(), {
       assignedByAuthId: currentUser.supabaseAuthId,
+      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
     });
     try {
       await syncQuestionsToRelational(questions);
@@ -11493,7 +11623,11 @@ async function syncSessionsToRelational(sessionsPayload) {
     const shouldBackfillCurrentOwner = activeProfileId && missingOwnerProfileIds.includes(activeProfileId);
     if (shouldBackfillCurrentOwner) {
       const currentOwnerUser = users.find((entry) => String(getUserProfileId(entry) || "").trim() === activeProfileId) || currentUser;
-      await syncProfilesToRelational([currentOwnerUser]);
+      await syncProfilesToRelational([currentOwnerUser], {
+        userSyncScope: currentOwnerUser?.role === "admin"
+          ? USER_RELATIONAL_SYNC_SCOPE_ADMIN
+          : USER_RELATIONAL_SYNC_SCOPE_SAFE,
+      });
       existingOwnerProfileIds = await loadExistingOwnerProfileIds(ownedSessionProfileIds);
     }
   }
@@ -16165,7 +16299,9 @@ function wireAuth(mode) {
           archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
             reason: "enrollment_change",
           });
-          save(STORAGE_KEYS.users, users);
+          save(STORAGE_KEYS.users, users, {
+            userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
+          });
           save(STORAGE_KEYS.currentUserId, users[idx].id);
           await syncUsersBackupState(users).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
@@ -16283,6 +16419,8 @@ function wireAuth(mode) {
             isApproved: autoApproved,
             approvedAt: autoApproved ? nowISO() : null,
             approvedBy: autoApproved ? AUTO_APPROVAL_ACTOR : null,
+          }, {
+            userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
           });
           if (!user) {
             toast("Account created but profile mapping failed.");
@@ -16333,7 +16471,9 @@ function wireAuth(mode) {
         };
 
         users.push(user);
-        save(STORAGE_KEYS.users, users);
+        save(STORAGE_KEYS.users, users, {
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
+        });
         if (autoApproved) {
           save(STORAGE_KEYS.currentUserId, user.id);
           navigate("dashboard");
@@ -16746,7 +16886,9 @@ function wireCompleteProfile() {
       archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
       });
-      save(STORAGE_KEYS.users, users);
+      save(STORAGE_KEYS.users, users, {
+        userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
+      });
       save(STORAGE_KEYS.currentUserId, users[idx].id);
       await syncUsersBackupState(users).catch(() => { });
       await ensureRelationalSyncReady().catch(() => { });
@@ -23450,7 +23592,9 @@ function wireAdmin() {
       academicSemester: normalizedRole === "student" ? academicSemester : null,
       createdAt: nowISO(),
     });
-    save(STORAGE_KEYS.users, users);
+    save(STORAGE_KEYS.users, users, {
+      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+    });
     resetAdminAddUserDraft();
     state.adminAddUserPanelOpen = false;
     try {
@@ -24035,7 +24179,9 @@ function wireAdmin() {
       const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
       });
-      save(STORAGE_KEYS.users, users);
+      save(STORAGE_KEYS.users, users, {
+        userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+      });
       state.adminDataLastSyncAt = Date.now();
       clearAdminUserEnrollmentDraft(userId);
       if (row.dataset.enrollmentResave !== "1") {
@@ -24324,7 +24470,9 @@ function wireAdmin() {
       const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
       });
-      save(STORAGE_KEYS.users, users);
+      save(STORAGE_KEYS.users, users, {
+        userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+      });
       clearAdminUserEnrollmentDraft(userId);
       try {
         await flushPendingSyncNow();
@@ -30066,7 +30214,9 @@ function syncUsersWithCurriculum() {
   });
 
   if (changed) {
-    save(STORAGE_KEYS.users, users);
+    save(STORAGE_KEYS.users, users, {
+      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
+    });
     const current = getCurrentUser();
     if (current?.role === "admin") {
       const syncedUsers = getUsers();
@@ -30076,7 +30226,9 @@ function syncUsersWithCurriculum() {
           if (!ready) {
             return;
           }
-          if (scheduleRelationalWrite(STORAGE_KEYS.users, syncedUsers)) {
+          if (scheduleRelationalWrite(STORAGE_KEYS.users, syncedUsers, {
+            userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
+          })) {
             return flushPendingSyncNow({ throwOnRelationalFailure: false });
           }
           return undefined;
@@ -30355,11 +30507,10 @@ function getAvailableCoursesForUser(user) {
       : [];
     const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
     if (byEnrollment.length) {
-      if (!assigned.length) return byEnrollment;
-      return [...new Set([...byEnrollment, ...assigned])];
+      const scopedAssigned = assigned.filter((course) => byEnrollment.includes(course));
+      return scopedAssigned.length ? scopedAssigned : byEnrollment;
     }
     if (assigned.length) return assigned;
-    if (byEnrollment.length) return byEnrollment;
     return [];
   }
   const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
@@ -32205,7 +32356,7 @@ function save(key, value, options = {}) {
   if (key === STORAGE_KEYS.sessions) {
     scheduleSessionStateSync(options);
   } else {
-    scheduleRelationalWrite(key, value);
+    scheduleRelationalWrite(key, value, options);
     if (key === STORAGE_KEYS.users) {
       syncUsersBackupState(value);
     } else if (!RELATIONAL_SYNC_KEY_SET.has(key) || RELATIONAL_BACKUP_SYNC_KEY_SET.has(key)) {
