@@ -750,6 +750,20 @@ const analyticsRuntime = {
   cache: new Map(),
   questionMetaById: new Map(),
 };
+const questionStoreRuntime = {
+  initialized: false,
+  list: [],
+  byId: new Map(),
+  idSet: new Set(),
+};
+const questionImagePreloadRuntime = new Set();
+const sessionStoreRuntime = {
+  initialized: false,
+  list: [],
+  byId: new Map(),
+  visibleSignature: "",
+  visibleList: [],
+};
 
 const SYSTEM_LOG_MAX_ENTRIES = 2500;
 const SYSTEM_LOG_RECENT_DEDUP_MS = 1200;
@@ -3429,6 +3443,57 @@ function canBulkSelectAdminUser(account, actorUser = null) {
   return true;
 }
 
+function getAdminUserActionLabel(user) {
+  if (!user) {
+    return "Unknown user";
+  }
+  const name = String(user?.name || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  if (name && email && name.toLowerCase() !== email) {
+    return `${name} (${email})`;
+  }
+  return name || email || String(user?.id || "").trim() || "Unknown user";
+}
+
+function formatAdminUserActionLabelList(users, maxVisible = 4) {
+  const labels = [...new Set(
+    (Array.isArray(users) ? users : [])
+      .map((entry) => getAdminUserActionLabel(entry))
+      .filter(Boolean),
+  )];
+  if (!labels.length) {
+    return "";
+  }
+  if (labels.length <= maxVisible) {
+    return labels.join(", ");
+  }
+  return `${labels.slice(0, maxVisible).join(", ")}, +${labels.length - maxVisible} more`;
+}
+
+function snapshotUserApprovalState(user) {
+  return {
+    isApproved: Boolean(user?.isApproved),
+    approvedAt: user?.approvedAt || null,
+    approvedBy: user?.approvedBy || null,
+    authAccessKnownActive: typeof user?.authAccessKnownActive === "boolean"
+      ? user.authAccessKnownActive
+      : undefined,
+  };
+}
+
+function restoreUserApprovalState(user, snapshot) {
+  if (!user || !snapshot) {
+    return false;
+  }
+  user.isApproved = Boolean(snapshot.isApproved);
+  user.approvedAt = snapshot.approvedAt || null;
+  user.approvedBy = snapshot.approvedBy || null;
+  user.authAccessKnownActive = typeof snapshot.authAccessKnownActive === "boolean"
+    ? snapshot.authAccessKnownActive
+    : undefined;
+  return true;
+}
+
 function matchesAdminUserFilters(account, filters = {}) {
   if (!account) {
     return false;
@@ -4279,6 +4344,14 @@ function invalidateAnalyticsCacheForStorageKey(storageKey) {
   });
 }
 
+function invalidateCollectionRuntimeForStorageKey(storageKey) {
+  if (storageKey === STORAGE_KEYS.questions) {
+    resetQuestionStoreRuntime();
+  } else if (storageKey === STORAGE_KEYS.sessions) {
+    resetSessionStoreRuntime();
+  }
+}
+
 function saveLocalOnly(key, value, options = {}) {
   writeStorageKey(key, value);
   invalidateAnalyticsCacheForStorageKey(key);
@@ -5055,6 +5128,10 @@ function refreshCloudSyncIndicators() {
   if (adminSlot) {
     adminSlot.innerHTML = renderCloudSyncPill(model, { compact: false });
   }
+  const sessionSlot = document.getElementById("session-cloud-sync-slot");
+  if (sessionSlot) {
+    sessionSlot.innerHTML = renderCloudSyncPill(model, { compact: true });
+  }
 }
 
 function scheduleSyncStatusUiRefresh() {
@@ -5570,7 +5647,7 @@ async function ensureRelationalSyncReady(options = {}) {
 async function updateRelationalProfileApproval(profileIds, approved) {
   const ids = [...new Set((Array.isArray(profileIds) ? profileIds : []).filter((id) => isUuidValue(id)))];
   if (!ids.length) {
-    return { ok: true, updatedIds: [], skippedIds: [], missingIds: [] };
+    return { ok: true, updatedIds: [], skippedIds: [], missingIds: [], failedIds: [] };
   }
 
   const ready = await ensureRelationalSyncReady();
@@ -5659,50 +5736,50 @@ async function updateRelationalProfileApproval(profileIds, approved) {
       updatedIds: [],
       skippedIds: [...new Set([...missingIds, ...ineligibleIds])],
       missingIds,
+      failedIds: [],
     };
   }
 
-  const updatedRows = [];
-  for (const targetBatch of splitIntoBatches(targetIds, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    const { data, error } = await runWithTimeoutResult(
-      client
-        .from("profiles")
-        .update({ approved: targetApproved })
-        .in("id", targetBatch)
-        .select("id,approved"),
-      SUPABASE_QUERY_TIMEOUT_MS,
-      "Profile approval update timed out.",
-    );
-    if (error) {
-      return { ok: false, message: error.message || "Could not update profile approval in database." };
-    }
-    if (Array.isArray(data) && data.length) {
-      updatedRows.push(...data);
-    }
+  const { data: updatedRows, error } = await runWithTimeoutResult(
+    client
+      .from("profiles")
+      .update({ approved: targetApproved })
+      .in("id", targetIds)
+      .select("id,approved"),
+    SUPABASE_QUERY_TIMEOUT_MS,
+    "Profile approval update timed out.",
+  );
+  if (error) {
+    return {
+      ok: false,
+      message: error.message || "Could not update profile approval in database.",
+      updatedIds: [],
+      skippedIds: [],
+      missingIds,
+      failedIds: targetIds,
+    };
   }
 
   const appliedById = new Map((updatedRows || []).map((row) => [row.id, Boolean(row.approved)]));
   const unresolvedIds = targetIds.filter((id) => appliedById.get(id) !== targetApproved);
   if (unresolvedIds.length) {
-    const verifyRows = [];
-    for (const unresolvedBatch of splitIntoBatches(unresolvedIds, RELATIONAL_IN_BATCH_SIZE)) {
-      const { data, error: verifyError } = await runWithTimeoutResult(
-        client
-          .from("profiles")
-          .select("id,approved")
-          .in("id", unresolvedBatch),
-        SUPABASE_QUERY_TIMEOUT_MS,
-        "Profile approval verification timed out.",
-      );
-      if (verifyError) {
-        return {
-          ok: false,
-          message: verifyError.message || "Could not verify profile approval status after update.",
-        };
-      }
-      if (Array.isArray(data) && data.length) {
-        verifyRows.push(...data);
-      }
+    const { data: verifyRows, error: verifyError } = await runWithTimeoutResult(
+      client
+        .from("profiles")
+        .select("id,approved")
+        .in("id", unresolvedIds),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      "Profile approval verification timed out.",
+    );
+    if (verifyError) {
+      return {
+        ok: false,
+        message: verifyError.message || "Could not verify profile approval status after update.",
+        updatedIds: [],
+        skippedIds: [...new Set([...missingIds, ...ineligibleIds])],
+        missingIds,
+        failedIds: unresolvedIds,
+      };
     }
     const verifiedById = new Map((verifyRows || []).map((row) => [row.id, Boolean(row.approved)]));
     unresolvedIds.splice(0, unresolvedIds.length, ...unresolvedIds.filter((id) => verifiedById.get(id) !== targetApproved));
@@ -5718,10 +5795,11 @@ async function updateRelationalProfileApproval(profileIds, approved) {
       updatedIds,
       skippedIds,
       missingIds,
+      failedIds: [...unresolvedSet],
     };
   }
 
-  return { ok: true, updatedIds, skippedIds, missingIds };
+  return { ok: true, updatedIds, skippedIds, missingIds, failedIds: [...unresolvedSet] };
 }
 
 async function syncUsersBackupState(usersPayload) {
@@ -9554,6 +9632,63 @@ function getRenderableQuestionImageUrl(value) {
   return "";
 }
 
+function preloadQuestionImageSource(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return;
+  }
+
+  const preloadUrl = (url) => {
+    const normalizedUrl = String(url || "").trim();
+    if (!normalizedUrl || questionImagePreloadRuntime.has(normalizedUrl)) {
+      return;
+    }
+    questionImagePreloadRuntime.add(normalizedUrl);
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = normalizedUrl;
+    } catch {
+      // Ignore preload failures and let the normal renderer request the asset.
+    }
+  };
+
+  const renderableUrl = getRenderableQuestionImageUrl(raw);
+  if (renderableUrl) {
+    preloadUrl(renderableUrl);
+    return;
+  }
+
+  if (isPendingSupabaseQuestionImage(raw)) {
+    ensureSupabaseStorageObjectSignedUrl(raw)
+      .then((signedUrl) => {
+        preloadUrl(signedUrl);
+      })
+      .catch(() => { });
+  }
+}
+
+function warmSessionQuestionAssets(session, questionStore = null) {
+  if (!session || !Array.isArray(session.questionIds) || !session.questionIds.length) {
+    return;
+  }
+  const questionsById = (questionStore || getQuestionStore()).byId;
+  const indexes = [session.currentIndex - 1, session.currentIndex, session.currentIndex + 1]
+    .filter((index) => index >= 0 && index < session.questionIds.length);
+  indexes.forEach((index) => {
+    const qid = String(session.questionIds[index] || "").trim();
+    if (!qid) {
+      return;
+    }
+    const question = questionsById.get(qid);
+    if (!question) {
+      return;
+    }
+    preloadQuestionImageSource(question.questionImage);
+    preloadQuestionImageSource(question.explanationImage);
+  });
+}
+
 function isPendingSupabaseQuestionImage(value) {
   const descriptor = parseSupabaseStorageObjectSource(value);
   return Boolean(descriptor && !descriptor.isPublic);
@@ -12405,7 +12540,10 @@ function bindGlobalEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       clearLifecycleResumeHandle();
-      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+      persistInProgressSessionSnapshot({
+        immediate: true,
+        flush: true,
+      });
       endCurrentUserActivitySession().catch(() => { });
       const currentUser = getCurrentUser();
       if (currentUser) {
@@ -12419,7 +12557,10 @@ function bindGlobalEvents() {
 
   window.addEventListener("pagehide", () => {
     clearLifecycleResumeHandle();
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    persistInProgressSessionSnapshot({
+      immediate: true,
+      flush: true,
+    });
     clearNotificationRealtimeSubscription();
     clearSessionRealtimeSubscription();
     clearContentRealtimeSubscription();
@@ -12436,12 +12577,22 @@ function bindGlobalEvents() {
     scheduleDeferredAppResume(0);
   });
 
+  window.addEventListener("beforeunload", () => {
+    persistInProgressSessionSnapshot({
+      immediate: true,
+      flush: true,
+    });
+  });
+
   window.addEventListener("online", () => {
     scheduleDeferredAppResume(0);
   });
 
   window.addEventListener("offline", () => {
     clearLifecycleResumeHandle();
+    persistInProgressSessionSnapshot({
+      immediate: true,
+    });
     clearSupabaseSessionRecoveryRetry();
     clearSupabaseBootstrapRetry();
     clearNotificationRealtimeSubscription();
@@ -17185,8 +17336,9 @@ function renderPreviousTestsSection(userOrId) {
     `;
   }
 
-  const questionsById = Object.fromEntries(getQuestions().map((question) => [question.id, question]));
-  completed.forEach((session) => normalizeSession(session));
+  const questionStore = getQuestionStore();
+  const questionsById = questionStore.byId;
+  completed.forEach((session) => normalizeSession(session, { questionStore }));
   const rows = completed
     .slice(0, 10)
     .map((session) => {
@@ -17417,7 +17569,7 @@ function getSessionTopicSummary(session) {
     return "";
   }
 
-  const questionsById = new Map(getQuestions().map((question) => [String(question?.id || "").trim(), question]));
+  const questionsById = getQuestionStore().byId;
   const topics = [];
   const seenTopics = new Set();
   (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
@@ -18442,6 +18594,14 @@ function undoSessionHighlightChange(session, questionId) {
 
 function renderSession() {
   const user = getCurrentUser();
+  if (!user) {
+    return `
+      <section class="panel">
+        <h2 class="title">Session unavailable</h2>
+        <p class="subtle">Your account is reconnecting. Please wait a moment.</p>
+      </section>
+    `;
+  }
   const session = getActiveSession(user.id, state.sessionId);
 
   if (!session) {
@@ -18459,9 +18619,33 @@ function renderSession() {
 
   state.sessionId = session.id;
   persistActiveSessionId(session.id);
-  normalizeSession(session);
+  const questionStore = getQuestionStore();
+  normalizeSession(session, { questionStore });
+  const sessionSnapshot = syncSessionSnapshot(session, {
+    questionStore,
+    persistOptions: { immediate: true },
+  });
+  if (sessionSnapshot.finalized) {
+    window.setTimeout(() => {
+      if (state.route !== "session") {
+        return;
+      }
+      clearTimer();
+      toast("Time is up. Session submitted automatically.");
+      state.reviewSessionId = session.id;
+      state.reviewIndex = 0;
+      state.sessionPanel = null;
+      navigate("review");
+    }, 0);
+    return `
+      <section class="panel">
+        <h2 class="title">Submitting your session...</h2>
+        <p class="subtle">Time expired, so we are saving your latest answers and opening review.</p>
+      </section>
+    `;
+  }
 
-  const questionsById = new Map(getQuestions().map((entry) => [entry.id, entry]));
+  const questionsById = questionStore.byId;
   const total = session.questionIds.length;
   if (!total) {
     return `
@@ -18476,6 +18660,21 @@ function renderSession() {
   const question = questionsById.get(currentQid);
   const response = session.responses[currentQid];
   if (!question || !response) {
+    if (!questionStore.list.length) {
+      if (user?.role === "student") {
+        scheduleStudentBootRefresh(user, {
+          rerender: true,
+          reason: "session recovery",
+        }).catch(() => { });
+      }
+      return `
+        <section class="panel">
+          <h2 class="title">Restoring your saved session...</h2>
+          <p class="subtle">Your exam is still stored locally. We are reloading the question bank so you can resume exactly where you left off.</p>
+          <div id="session-cloud-sync-slot">${renderCloudSyncPill(getCloudSyncStatusModel(user), { compact: true })}</div>
+        </section>
+      `;
+    }
     return `
       <section class="panel">
         <h2 class="title">Session unavailable</h2>
@@ -18513,6 +18712,7 @@ function renderSession() {
   const currentCourse = mappedCourse || questionCourse;
   const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
   const hasAskAiLink = Boolean(askAiUrl);
+  const syncPillHtml = renderCloudSyncPill(getCloudSyncStatusModel(user), { compact: true });
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -18605,6 +18805,7 @@ function renderSession() {
                 <h3 class="exam-question-title-moodle"><span>Question</span> <b>${session.currentIndex + 1}</b></h3>
                 <p class="exam-question-status exam-question-status-moodle">${statusText}</p>
                 <p class="exam-mark-line exam-mark-line-moodle">${markLineText}</p>
+                <div id="session-cloud-sync-slot">${syncPillHtml}</div>
                 <button class="exam-meta-link exam-meta-link-moodle" data-action="toggle-flag">
                   <span aria-hidden="true">⚑</span>
                   <span>${response.flagged ? "Unflag question" : "Flag question"}</span>
@@ -18636,7 +18837,7 @@ function renderSession() {
                     Copy question
                   </button>
                 </div>
-                ${renderQuestionStemVisual(question)}
+                ${renderQuestionStemVisual(question, { loading: "eager" })}
                 <div class="exam-stem">
                   ${stemLines
       .map((line, index) => {
@@ -18749,19 +18950,37 @@ function syncActiveResponseSelectionFromDom(activeSession) {
 
 function wireSession() {
   const user = getCurrentUser();
+  if (!user) {
+    return;
+  }
   const session = getActiveSession(user.id, state.sessionId);
   if (!session) {
     return;
   }
 
-  normalizeSession(session);
+  const questionStore = getQuestionStore();
+  normalizeSession(session, { questionStore });
+  const sessionSnapshot = syncSessionSnapshot(session, {
+    questionStore,
+    persistOptions: { immediate: true },
+  });
+  if (sessionSnapshot.finalized) {
+    clearTimer();
+    state.reviewSessionId = session.id;
+    state.reviewIndex = 0;
+    state.sessionPanel = null;
+    navigate("review");
+    return;
+  }
 
   if (!session.lastQuestionAt) {
     session.lastQuestionAt = Date.now();
     upsertSession(session);
   }
 
+  warmSessionQuestionAssets(session, questionStore);
   startSessionTicker(session.id);
+  syncSessionTimingDisplays(session);
   syncSessionUiControlsInDom();
 
   const fontScaleSlider = document.getElementById("session-font-scale-slider");
@@ -18779,7 +18998,7 @@ function wireSession() {
         return;
       }
 
-      normalizeSession(latest);
+      normalizeSession(latest, { questionStore: getQuestionStore() });
       const currentContext = getCurrentSessionResponseContext(latest);
       if (!currentContext) {
         state.skipNextRouteAnimation = true;
@@ -18809,7 +19028,7 @@ function wireSession() {
       return;
     }
 
-    normalizeSession(latest);
+    normalizeSession(latest, { questionStore: getQuestionStore() });
     const currentContext = getCurrentSessionResponseContext(latest);
     if (!currentContext) {
       state.skipNextRouteAnimation = true;
@@ -18860,12 +19079,16 @@ async function handleSessionClick(event) {
 
   const action = target.getAttribute("data-action");
   const user = getCurrentUser();
+  if (!user) {
+    return;
+  }
   const session = getActiveSession(user.id, state.sessionId);
   if (!session) {
     return;
   }
 
-  normalizeSession(session);
+  const questionStore = getQuestionStore();
+  normalizeSession(session, { questionStore });
   syncActiveResponseSelectionFromDom(session);
   const currentContext = getCurrentSessionResponseContext(session);
 
@@ -18874,6 +19097,20 @@ async function handleSessionClick(event) {
   const shouldTrackElapsed = trackedActions.has(action);
   if (shouldTrackElapsed) {
     captureElapsedForCurrentQuestion(session);
+    if (session.mode === "timed" && Number(session.timeRemainingSec || 0) <= 0) {
+      finalizeSession(session.id, {
+        sessionOverride: session,
+        questionStore,
+        skipElapsedCapture: true,
+      });
+      clearTimer();
+      toast("Time is up. Session submitted automatically.");
+      state.reviewSessionId = session.id;
+      state.reviewIndex = 0;
+      state.sessionPanel = null;
+      navigate("review");
+      return;
+    }
   }
 
   if (action === "toggle-fullscreen") {
@@ -18967,7 +19204,7 @@ async function handleSessionClick(event) {
       render();
       return;
     }
-    const question = getQuestions().find((entry) => entry.id === qid);
+    const question = getQuestionById(qid);
     if (!question) {
       toast("Current question could not be loaded.");
       return;
@@ -18991,7 +19228,7 @@ async function handleSessionClick(event) {
       render();
       return;
     }
-    const question = getQuestions().find((entry) => entry.id === qid);
+    const question = getQuestionById(qid);
     if (!question) {
       toast("Current question could not be loaded.");
       return;
@@ -19133,6 +19370,7 @@ async function handleSessionClick(event) {
 
   if (action === "toggle-pause") {
     session.paused = !session.paused;
+    session.lastTimerSyncAt = Date.now();
     toast(session.paused ? "Timer paused." : "Timer resumed.");
   }
 
@@ -19157,7 +19395,7 @@ async function handleSessionClick(event) {
       return;
     }
     response.submitted = true;
-    const question = getQuestions().find((entry) => entry.id === qid);
+    const question = getQuestionById(qid);
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
       addQuestionToIncorrectQueue(session.userId, qid);
@@ -19176,8 +19414,11 @@ async function handleSessionClick(event) {
   }
 
   if (action === "save-exit") {
-    session.updatedAt = nowISO();
-    upsertSession(session, { immediate: true });
+    persistInProgressSessionSnapshot({
+      session,
+      user,
+      immediate: true,
+    });
     await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
@@ -19251,7 +19492,7 @@ function handleSessionKeydown(event) {
     if (!session || session.status !== "in_progress") {
       return;
     }
-    normalizeSession(session);
+    normalizeSession(session, { questionStore: getQuestionStore() });
     const questionId = session.questionIds[session.currentIndex];
     if (!questionId) {
       return;
@@ -19351,7 +19592,7 @@ function handleSessionHighlighterMouseup() {
   if (!session || session.status !== "in_progress") {
     return;
   }
-  normalizeSession(session);
+  normalizeSession(session, { questionStore: getQuestionStore() });
   const qid = session.questionIds[session.currentIndex];
   const response = session.responses[qid];
   if (!response) {
@@ -19428,8 +19669,10 @@ function handleSessionHighlighterMouseup() {
 
 function startSessionTicker(sessionId) {
   clearTimer();
-  const countdown = document.getElementById("countdown");
-  const elapsed = document.getElementById("elapsed-time");
+  const initialSession = getSessionById(sessionId);
+  if (initialSession) {
+    syncSessionTimingDisplays(initialSession);
+  }
 
   timerHandle = window.setInterval(() => {
     const session = getSessionById(sessionId);
@@ -19437,48 +19680,18 @@ function startSessionTicker(sessionId) {
       clearTimer();
       return;
     }
-    normalizeSession(session);
 
     if (session.paused) {
+      syncSessionTimingDisplays(session);
       return;
     }
 
-    session.elapsedSec = (session.elapsedSec || 0) + 1;
-    if (elapsed) {
-      elapsed.textContent = formatElapsed(session.elapsedSec);
-    }
+    const clockState = syncSessionSnapshot(session, {
+      questionStore: getQuestionStore(),
+    });
+    syncSessionTimingDisplays(session);
 
-    if (session.mode === "timed") {
-      session.timeRemainingSec = Math.max(0, (session.timeRemainingSec || 0) - 1);
-      const activeQid = session.questionIds[session.currentIndex];
-      if (session.responses[activeQid]) {
-        session.responses[activeQid].timeSpentSec += 1;
-      }
-      if (countdown) {
-        countdown.textContent = formatDuration(session.timeRemainingSec);
-      }
-    }
-
-    const freshSession = getSessionById(sessionId);
-    if (freshSession) {
-      freshSession.elapsedSec = session.elapsedSec;
-      freshSession.updatedAt = nowISO();
-      if (session.mode === "timed") {
-        freshSession.timeRemainingSec = session.timeRemainingSec;
-        const freshActiveQid = freshSession.questionIds[freshSession.currentIndex];
-        if (freshActiveQid && freshSession.responses[freshActiveQid]) {
-          freshSession.responses[freshActiveQid].timeSpentSec =
-            (freshSession.responses[freshActiveQid].timeSpentSec || 0) + 1;
-        }
-      }
-      upsertSession(freshSession);
-    } else {
-      session.updatedAt = nowISO();
-      upsertSession(session);
-    }
-
-    if (session.mode === "timed" && session.timeRemainingSec <= 0) {
-      finalizeSession(session.id);
+    if (clockState.finalized) {
       clearTimer();
       toast("Time is up. Session submitted automatically.");
       state.reviewSessionId = session.id;
@@ -19496,12 +19709,17 @@ function clearTimer() {
   }
 }
 
-function finalizeSession(sessionId) {
-  const session = getSessionById(sessionId);
+function finalizeSession(sessionId, options = {}) {
+  const session = options?.sessionOverride && String(options.sessionOverride?.id || "").trim() === String(sessionId || "").trim()
+    ? options.sessionOverride
+    : getSessionById(sessionId);
   if (!session) {
     return;
   }
-  captureElapsedForCurrentQuestion(session);
+  const questionStore = options?.questionStore || getQuestionStore();
+  if (options?.skipElapsedCapture !== true) {
+    captureElapsedForCurrentQuestion(session);
+  }
 
   session.status = "completed";
   session.completedAt = nowISO();
@@ -19513,7 +19731,7 @@ function finalizeSession(sessionId) {
   const userQueue = new Set(incorrectMap[session.userId] || []);
 
   for (const qid of session.questionIds) {
-    const question = getQuestions().find((entry) => entry.id === qid);
+    const question = questionStore.byId.get(qid) || null;
     const response = session.responses[qid];
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
@@ -19582,10 +19800,10 @@ function renderReview() {
   const selected =
     completedSessions.find((session) => session.id === state.reviewSessionId) || completedSessions[0];
   state.reviewSessionId = selected.id;
-  normalizeSession(selected);
+  const questionStore = getQuestionStore();
+  normalizeSession(selected, { questionStore });
 
-  const questions = getQuestions();
-  const questionsById = new Map(questions.map((entry) => [entry.id, entry]));
+  const questionsById = questionStore.byId;
   const reviewedEntries = selected.questionIds.map((qid) => {
     const question = questionsById.get(qid) || null;
     const response = selected.responses[qid] || {
@@ -23629,7 +23847,7 @@ function wireAdmin() {
       .filter((entry) => entry.role === "student" && !isUserAccessApproved(entry))
       .map((entry) => String(entry.id || "").trim())
       .filter(Boolean);
-    const syncedPendingRows = await syncEnrollmentRowsForUserIds(pendingUserIds);
+    const syncedPendingRows = await syncEnrollmentRowsForUserIds(pendingUserIds, { batchFlush: true });
     if (!syncedPendingRows) {
       return;
     }
@@ -23724,7 +23942,15 @@ function wireAdmin() {
   if (adminUsersSection) {
     scheduleApprovedAdminUserAccessRepair(getUsers(), getCurrentUser());
   }
+  const startAdminUserBulkAction = (actionType) => {
+    beginAdminUserMutation();
+    state.adminUserBulkActionRunning = true;
+    state.adminBulkActionType = actionType;
+    state.skipNextRouteAnimation = true;
+    render();
+  };
   const finishAdminUserBulkAction = () => {
+    endAdminUserMutation();
     state.adminUserBulkActionRunning = false;
     state.adminBulkActionType = "";
     state.skipNextRouteAnimation = true;
@@ -23850,96 +24076,212 @@ function wireAdmin() {
     const isApproveAction = action === "admin-bulk-approve-users";
     const selectedIdSet = new Set(selectedIds);
     const current = getCurrentUser();
+
     if (isApproveAction) {
-      const syncedSelectedRows = await syncEnrollmentRowsForUserIds(selectedIds);
-      if (!syncedSelectedRows) {
-        return;
+      startAdminUserBulkAction("approve");
+      const optimisticSnapshots = new Map();
+      const optimisticTargetProfileIds = new Set();
+      const confirmedApprovedProfileIds = new Set();
+      try {
+        const syncedSelectedRows = await syncEnrollmentRowsForUserIds(selectedIds, { batchFlush: true });
+        if (!syncedSelectedRows) {
+          return;
+        }
+
+        let users = getUsers();
+        const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
+        const actionableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
+        if (!actionableUsers.length) {
+          toast("Selected accounts cannot be approved.");
+          return;
+        }
+
+        const unapprovedUsers = actionableUsers.filter((entry) => !isUserAccessApproved(entry));
+        if (!unapprovedUsers.length) {
+          toast("Selected accounts are already approved.");
+          return;
+        }
+
+        const eligibleUsers = unapprovedUsers.filter((entry) => entry.role === "admin" || hasCompleteStudentApprovalProfile(entry));
+        if (!eligibleUsers.length) {
+          toast("Selected users must complete phone number, year, semester, and course selection before approval.");
+          return;
+        }
+
+        const approvableUsersByProfileId = new Map();
+        const invalidProfileUsers = [];
+        eligibleUsers.forEach((entry) => {
+          const profileId = String(getUserProfileId(entry) || "").trim();
+          if (!isUuidValue(profileId)) {
+            invalidProfileUsers.push(entry);
+            return;
+          }
+          if (!approvableUsersByProfileId.has(profileId)) {
+            approvableUsersByProfileId.set(profileId, entry);
+          }
+        });
+        const targetProfileIds = [...approvableUsersByProfileId.keys()];
+        if (!targetProfileIds.length) {
+          toast("Selected users are not linked to valid Supabase profiles.");
+          return;
+        }
+
+        const invalidProfileNote = invalidProfileUsers.length
+          ? ` ${invalidProfileUsers.length} account(s) are missing Supabase profile links and will be reported as failed.`
+          : "";
+        if (!window.confirm(`Approve ${targetProfileIds.length} selected account(s)?${invalidProfileNote}`)) {
+          return;
+        }
+
+        const targetProfileIdSet = new Set(targetProfileIds);
+        const optimisticApprovedAt = nowISO();
+        optimisticTargetProfileIds.clear();
+        targetProfileIdSet.forEach((profileId) => optimisticTargetProfileIds.add(profileId));
+        users.forEach((entry) => {
+          const profileId = String(getUserProfileId(entry) || "").trim();
+          if (!targetProfileIdSet.has(profileId)) {
+            return;
+          }
+          const userId = String(entry.id || "").trim();
+          if (!userId || optimisticSnapshots.has(userId)) {
+            return;
+          }
+          optimisticSnapshots.set(userId, snapshotUserApprovalState(entry));
+          entry.isApproved = true;
+          entry.approvedAt = entry.approvedAt || optimisticApprovedAt;
+          entry.approvedBy = current?.email || "admin";
+          entry.authAccessKnownActive = false;
+        });
+        saveLocalOnly(STORAGE_KEYS.users, users);
+        state.adminSelectedUserIds = [];
+        state.skipNextRouteAnimation = true;
+        render();
+
+        const dbResult = await updateRelationalProfileApproval(targetProfileIds, true);
+        const approvedProfileIds = new Set(dbResult.updatedIds || []);
+        confirmedApprovedProfileIds.clear();
+        approvedProfileIds.forEach((profileId) => confirmedApprovedProfileIds.add(profileId));
+        const failedProfileIds = targetProfileIds.filter((profileId) => !approvedProfileIds.has(profileId));
+        const failedProfileIdSet = new Set(failedProfileIds);
+        const failedProfileUsers = failedProfileIds
+          .map((profileId) => approvableUsersByProfileId.get(profileId))
+          .filter(Boolean);
+
+        if (failedProfileIdSet.size) {
+          users = getUsers();
+          let restoredFailedUsers = false;
+          users.forEach((entry) => {
+            const profileId = String(getUserProfileId(entry) || "").trim();
+            if (!failedProfileIdSet.has(profileId)) {
+              return;
+            }
+            const snapshot = optimisticSnapshots.get(String(entry.id || "").trim());
+            if (restoreUserApprovalState(entry, snapshot)) {
+              restoredFailedUsers = true;
+            }
+          });
+          if (restoredFailedUsers) {
+            saveLocalOnly(STORAGE_KEYS.users, users);
+            state.skipNextRouteAnimation = true;
+            render();
+          }
+        }
+
+        const confirmedApprovedIds = [...approvedProfileIds];
+        const approvedCount = confirmedApprovedIds.length;
+        let authAccessSyncResult = {
+          ok: true,
+          updatedIds: [],
+          notFoundIds: [],
+          failedIds: [],
+          queuedIds: [],
+          message: "",
+        };
+        if (approvedCount) {
+          authAccessSyncResult = await syncAdminAccessChangeNow(confirmedApprovedIds, true, {
+            users: getUsers(),
+            user: current,
+          });
+        }
+
+        const refreshConfirmed = await refreshAdminDataSnapshot(current, {
+          force: true,
+          surfaceErrors: false,
+          includeHeavyData: false,
+        });
+        if (state.route === "admin" && state.adminPage === "users") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+
+        const failedUsers = [...invalidProfileUsers, ...failedProfileUsers];
+        const queuedAuthIds = new Set(authAccessSyncResult.queuedIds || []);
+        const authFailedUsers = (authAccessSyncResult.failedIds || [])
+          .filter((profileId) => !queuedAuthIds.has(profileId))
+          .map((profileId) => approvableUsersByProfileId.get(profileId))
+          .filter(Boolean);
+        const queuedAuthUsers = [...queuedAuthIds]
+          .map((profileId) => approvableUsersByProfileId.get(profileId))
+          .filter(Boolean);
+
+        if (!approvedCount) {
+          const failedLabel = formatAdminUserActionLabelList(failedUsers);
+          const failureReason = dbResult.message ? ` ${dbResult.message}` : "";
+          toast(
+            failedLabel
+              ? `No selected users were approved. Failed: ${failedLabel}.${failureReason}`
+              : `No selected users were approved.${failureReason}`,
+          );
+          return;
+        }
+
+        let successMessage = `${approvedCount} account(s) approved.`;
+        const failedLabel = formatAdminUserActionLabelList(failedUsers);
+        if (failedLabel) {
+          successMessage += ` Failed: ${failedLabel}.`;
+        }
+        const authFailedLabel = formatAdminUserActionLabelList(authFailedUsers);
+        if (authFailedLabel) {
+          successMessage += ` Auth access sync failed for: ${authFailedLabel}.`;
+        }
+        const queuedAuthLabel = formatAdminUserActionLabelList(queuedAuthUsers);
+        if (queuedAuthLabel) {
+          successMessage += ` Auth access sync queued for: ${queuedAuthLabel}.`;
+        }
+        if (!refreshConfirmed) {
+          successMessage += " User list refresh could not be confirmed.";
+        }
+        toast(successMessage);
+      } catch (bulkError) {
+        if (optimisticSnapshots.size && optimisticTargetProfileIds.size) {
+          const users = getUsers();
+          let restoredUsers = false;
+          users.forEach((entry) => {
+            const profileId = String(getUserProfileId(entry) || "").trim();
+            if (!optimisticTargetProfileIds.has(profileId) || confirmedApprovedProfileIds.has(profileId)) {
+              return;
+            }
+            const snapshot = optimisticSnapshots.get(String(entry.id || "").trim());
+            if (restoreUserApprovalState(entry, snapshot)) {
+              restoredUsers = true;
+            }
+          });
+          if (restoredUsers) {
+            saveLocalOnly(STORAGE_KEYS.users, users);
+          }
+        }
+        toast(`Could not approve selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
+      } finally {
+        finishAdminUserBulkAction();
       }
+      return;
     }
+
     const users = getUsers();
     const selectedUsers = users.filter((entry) => selectedIdSet.has(String(entry.id || "").trim()));
     const actionableUsers = selectedUsers.filter((entry) => canBulkSelectAdminUser(entry, current));
     if (!actionableUsers.length) {
-      toast(isApproveAction ? "Selected accounts cannot be approved." : "Selected accounts cannot be suspended.");
-      return;
-    }
-
-    if (isApproveAction) {
-      // Approve selected users
-      const unapprovedUsers = actionableUsers.filter((entry) => !isUserAccessApproved(entry));
-      if (!unapprovedUsers.length) {
-        toast("Selected accounts are already approved.");
-        return;
-      }
-      const eligibleUsers = unapprovedUsers.filter((entry) => entry.role === "admin" || hasCompleteStudentApprovalProfile(entry));
-      if (!eligibleUsers.length) {
-        toast("Selected users must complete phone number, year, semester, and course selection before approval.");
-        return;
-      }
-      if (!window.confirm(`Approve ${eligibleUsers.length} selected account(s)?`)) {
-        return;
-      }
-
-      state.adminUserBulkActionRunning = true;
-      state.adminBulkActionType = "approve";
-      state.skipNextRouteAnimation = true;
-      render();
-
-      try {
-        const profileIds = eligibleUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
-        const dbResult = await updateRelationalProfileApproval(profileIds, true);
-        if (profileIds.length && !dbResult.ok) {
-          finishAdminUserBulkAction();
-          toast(`Database update failed. ${dbResult.message}`);
-          return;
-        }
-
-        const approvedProfileIds = new Set(dbResult.updatedIds || []);
-        const skippedProfileIds = new Set(dbResult.skippedIds || []);
-        const eligibleIdSet = new Set(eligibleUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
-        let approvedCount = 0;
-        let skippedCount = 0;
-        users.forEach((entry) => {
-          const entryId = String(entry.id || "").trim();
-          if (!eligibleIdSet.has(entryId) || isUserAccessApproved(entry)) {
-            return;
-          }
-          const authId = getUserProfileId(entry);
-          if (isUuidValue(authId) && !approvedProfileIds.has(authId)) {
-            if (skippedProfileIds.has(authId)) {
-              skippedCount += 1;
-            }
-            return;
-          }
-          entry.isApproved = true;
-          entry.approvedAt = nowISO();
-          entry.approvedBy = current?.email || "admin";
-          entry.authAccessKnownActive = false;
-          approvedCount += 1;
-        });
-        if (!approvedCount) {
-          finishAdminUserBulkAction();
-          toast("Selected users could not be approved.");
-          return;
-        }
-
-        save(STORAGE_KEYS.users, users);
-        state.adminSelectedUserIds = [];
-        const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
-          users,
-          user: current,
-        });
-        finishAdminUserBulkAction();
-        toast(
-          (skippedCount
-            ? `${approvedCount} account(s) approved. ${skippedCount} skipped.`
-            : `${approvedCount} account(s) approved.`)
-            + describeAuthAccessSyncOutcome(authAccessSyncResult),
-        );
-      } catch (bulkError) {
-        finishAdminUserBulkAction();
-        toast(`Could not approve selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
-      }
+      toast("Selected accounts cannot be suspended.");
       return;
     }
 
@@ -23953,10 +24295,7 @@ function wireAdmin() {
       return;
     }
 
-    state.adminUserBulkActionRunning = true;
-    state.adminBulkActionType = "suspend";
-    state.skipNextRouteAnimation = true;
-    render();
+    startAdminUserBulkAction("suspend");
 
     try {
       const profileIds = activeUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
@@ -23971,7 +24310,6 @@ function wireAdmin() {
         )),
       );
       if (profileIds.length && !dbResult.ok && !updatedProfileIds.size && !fallbackProfileIds.size) {
-        finishAdminUserBulkAction();
         toast(`Database update failed. ${dbResult.message}`);
         return;
       }
@@ -23997,7 +24335,6 @@ function wireAdmin() {
       });
 
       if (!deactivatedCount) {
-        finishAdminUserBulkAction();
         toast("Selected users could not be suspended.");
         return;
       }
@@ -24013,7 +24350,6 @@ function wireAdmin() {
         user: current,
       });
       state.adminSelectedUserIds = [];
-      finishAdminUserBulkAction();
       toast(
         (skippedCount
           ? `${deactivatedCount} account(s) suspended. ${skippedCount} skipped.`
@@ -24021,8 +24357,9 @@ function wireAdmin() {
           + describeAuthAccessSyncOutcome(authAccessSyncResult),
       );
     } catch (bulkError) {
-      finishAdminUserBulkAction();
       toast(`Could not suspend selected accounts: ${getErrorMessage(bulkError, "Action failed.")}`);
+    } finally {
+      finishAdminUserBulkAction();
     }
   });
 
@@ -24083,6 +24420,7 @@ function wireAdmin() {
   const saveUserEnrollmentFromRow = async (row, options = {}) => {
     const mode = options?.mode === "auto" ? "auto" : "manual";
     const syncNow = Boolean(options?.syncNow);
+    const deferSyncFlush = Boolean(options?.deferSyncFlush);
     const suppressSuccessToast = Boolean(options?.suppressSuccessToast);
     const userId = row?.getAttribute("data-user-id");
     if (!row || !userId) {
@@ -24189,7 +24527,7 @@ function wireAdmin() {
       }
       if (syncNow) {
         await flushPendingSyncNow();
-      } else {
+      } else if (!deferSyncFlush) {
         // Keep ordinary row edits non-blocking unless a follow-up action needs cloud state immediately.
         flushPendingSyncInBackground();
       }
@@ -24248,7 +24586,8 @@ function wireAdmin() {
     return row.dataset.enrollmentSaving !== "1";
   };
 
-  const syncEnrollmentRowsForUserIds = async (userIds = []) => {
+  const syncEnrollmentRowsForUserIds = async (userIds = [], options = {}) => {
+    const batchFlush = Boolean(options?.batchFlush);
     const targetIds = new Set(
       (Array.isArray(userIds) ? userIds : [])
         .map((id) => String(id || "").trim())
@@ -24272,10 +24611,20 @@ function wireAdmin() {
       }
       const saved = await saveUserEnrollmentFromRow(row, {
         mode: "auto",
-        syncNow: true,
+        syncNow: !batchFlush,
+        deferSyncFlush: batchFlush,
         suppressSuccessToast: true,
       });
       if (!saved) {
+        return false;
+      }
+    }
+
+    if (batchFlush) {
+      try {
+        await flushPendingSyncNow();
+      } catch (error) {
+        toast(`Could not save user details: ${getErrorMessage(error, "Save failed.")}`);
         return false;
       }
     }
@@ -27227,19 +27576,80 @@ function dedupeQuestions(questions) {
   return dedupedReversed.reverse();
 }
 
+function resetQuestionStoreRuntime() {
+  questionStoreRuntime.initialized = false;
+  questionStoreRuntime.list = [];
+  questionStoreRuntime.byId = new Map();
+  questionStoreRuntime.idSet = new Set();
+}
+
+function getQuestionStore() {
+  if (!questionStoreRuntime.initialized) {
+    const rawQuestions = load(STORAGE_KEYS.questions, []);
+    const list = dedupeQuestions(rawQuestions);
+    questionStoreRuntime.initialized = true;
+    questionStoreRuntime.list = list;
+    questionStoreRuntime.byId = new Map(list.map((entry) => [entry.id, entry]));
+    questionStoreRuntime.idSet = new Set(list.map((entry) => entry.id));
+  }
+  return questionStoreRuntime;
+}
+
+function getQuestionById(questionId) {
+  const normalizedQuestionId = String(questionId || "").trim();
+  if (!normalizedQuestionId) {
+    return null;
+  }
+  return getQuestionStore().byId.get(normalizedQuestionId) || null;
+}
+
 function getQuestions() {
-  const questions = load(STORAGE_KEYS.questions, []);
-  return dedupeQuestions(questions);
+  return getQuestionStore().list.slice();
+}
+
+function resetSessionStoreRuntime() {
+  sessionStoreRuntime.initialized = false;
+  sessionStoreRuntime.list = [];
+  sessionStoreRuntime.byId = new Map();
+  sessionStoreRuntime.visibleSignature = "";
+  sessionStoreRuntime.visibleList = [];
+}
+
+function buildPendingDeletedLocalUserSignature(targets = null) {
+  const localUserIds = targets?.localUserIds instanceof Set
+    ? [...targets.localUserIds]
+    : [];
+  return localUserIds
+    .filter(Boolean)
+    .sort((a, b) => String(a).localeCompare(String(b)))
+    .join("|");
+}
+
+function getSessionStore() {
+  if (!sessionStoreRuntime.initialized) {
+    const sessions = load(STORAGE_KEYS.sessions, []);
+    const list = Array.isArray(sessions) ? sessions : [];
+    sessionStoreRuntime.initialized = true;
+    sessionStoreRuntime.list = list;
+    sessionStoreRuntime.byId = new Map(list.map((session) => [String(session?.id || "").trim(), session]));
+    sessionStoreRuntime.visibleSignature = "";
+    sessionStoreRuntime.visibleList = [];
+  }
+  return sessionStoreRuntime;
 }
 
 function getSessions() {
-  const sessions = load(STORAGE_KEYS.sessions, []);
-  const list = Array.isArray(sessions) ? sessions : [];
+  const store = getSessionStore();
   const deletedTargets = getPendingDeletedAdminTargets();
-  return list.filter((session) => {
-    const localUserId = String(session?.userId || "").trim();
-    return !deletedTargets.localUserIds.has(localUserId);
-  });
+  const deletedSignature = buildPendingDeletedLocalUserSignature(deletedTargets);
+  if (store.visibleSignature !== deletedSignature) {
+    store.visibleSignature = deletedSignature;
+    store.visibleList = store.list.filter((session) => {
+      const localUserId = String(session?.userId || "").trim();
+      return !deletedTargets.localUserIds.has(localUserId);
+    });
+  }
+  return store.visibleList.slice();
 }
 
 function normalizeSystemLogEntry(entry) {
@@ -28616,14 +29026,24 @@ function getCompletedSessionsForUser(userId) {
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 }
 
+function getQuestionFromLookup(lookup, questionId) {
+  if (!lookup) {
+    return null;
+  }
+  if (lookup instanceof Map) {
+    return lookup.get(questionId) || null;
+  }
+  return lookup[questionId] || null;
+}
+
 function getIncorrectQuestionIdsForSession(session, questionsById = null) {
   if (!session || !Array.isArray(session.questionIds)) {
     return [];
   }
-  const map = questionsById || Object.fromEntries(getQuestions().map((question) => [question.id, question]));
+  const map = questionsById || getQuestionStore().byId;
   const wrongIds = [];
   session.questionIds.forEach((qid) => {
-    const question = map[qid];
+    const question = getQuestionFromLookup(map, qid);
     const response = session.responses?.[qid];
     if (!question || !response) return;
     const isCorrect = isSubmittedResponseCorrect(question, response);
@@ -28639,13 +29059,13 @@ function getRetryQuestionMetaForSession(session, questionsById = null) {
     return { questionIds: [], wrongSubmitted: 0, unsolved: 0 };
   }
 
-  const map = questionsById || Object.fromEntries(getQuestions().map((question) => [question.id, question]));
+  const map = questionsById || getQuestionStore().byId;
   const questionIds = [];
   let wrongSubmitted = 0;
   let unsolved = 0;
 
   session.questionIds.forEach((qid) => {
-    const question = map[qid];
+    const question = getQuestionFromLookup(map, qid);
     if (!question) {
       return;
     }
@@ -28668,11 +29088,11 @@ function getSessionPerformanceSummary(session, questionsById = null) {
   if (!session || !Array.isArray(session.questionIds) || !session.questionIds.length) {
     return { total: 0, correct: 0, wrongCount: 0, accuracy: 0 };
   }
-  const map = questionsById || Object.fromEntries(getQuestions().map((question) => [question.id, question]));
+  const map = questionsById || getQuestionStore().byId;
   let correct = 0;
   let total = 0;
   session.questionIds.forEach((qid) => {
-    const question = map[qid];
+    const question = getQuestionFromLookup(map, qid);
     const response = session.responses?.[qid];
     if (!question || !response) return;
     total += 1;
@@ -28710,6 +29130,8 @@ function createSessionFromQuestions(questions, config = {}) {
   const sessionOwnerProfileId = String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
   const sessionCourses = [];
   const seenSessionCourses = new Set();
+  const createdAtMs = Date.now();
+  const createdAtIso = nowISO();
 
   const responses = {};
   selected.forEach((question) => {
@@ -28759,10 +29181,11 @@ function createSessionFromQuestions(questions, config = {}) {
     responses,
     currentIndex: 0,
     status: "in_progress",
-    lastQuestionAt: Date.now(),
+    lastQuestionAt: createdAtMs,
+    lastTimerSyncAt: createdAtMs,
     elapsedSec: 0,
-    createdAt: nowISO(),
-    updatedAt: nowISO(),
+    createdAt: createdAtIso,
+    updatedAt: createdAtIso,
     completedAt: null,
     originSessionId: config.originSessionId || null,
   };
@@ -28812,7 +29235,8 @@ function getNormalizedActiveSessionForDisplay(userId, preferredId = null) {
   if (!active) {
     return null;
   }
-  normalizeSession(active);
+  const questionStore = getQuestionStore();
+  normalizeSession(active, { questionStore });
   if (active.status === "in_progress" && Array.isArray(active.questionIds) && active.questionIds.length) {
     return active;
   }
@@ -28821,7 +29245,7 @@ function getNormalizedActiveSessionForDisplay(userId, preferredId = null) {
   if (!fallback) {
     return null;
   }
-  normalizeSession(fallback);
+  normalizeSession(fallback, { questionStore });
   if (fallback.status === "in_progress" && Array.isArray(fallback.questionIds) && fallback.questionIds.length) {
     return fallback;
   }
@@ -28829,7 +29253,17 @@ function getNormalizedActiveSessionForDisplay(userId, preferredId = null) {
 }
 
 function getSessionById(sessionId) {
-  return getSessions().find((session) => session.id === sessionId) || null;
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return null;
+  }
+  const session = getSessionStore().byId.get(normalizedSessionId) || null;
+  if (!session) {
+    return null;
+  }
+  const deletedTargets = getPendingDeletedAdminTargets();
+  const localUserId = String(session?.userId || "").trim();
+  return deletedTargets.localUserIds.has(localUserId) ? null : session;
 }
 
 function upsertSession(updated, options = {}) {
@@ -31558,7 +31992,11 @@ function persistSessionUiPreferences() {
   });
 }
 
-function normalizeSession(session) {
+function normalizeSession(session, options = {}) {
+  const questionStore = options?.questionStore || getQuestionStore();
+  const questionsById = questionStore.byId;
+  const availableQuestionIds = questionStore.idSet;
+  const hasQuestionCatalog = availableQuestionIds.size > 0;
   let changed = false;
 
   const normalizedOwnerProfileId = resolveSessionOwnerProfileId(session);
@@ -31614,8 +32052,7 @@ function normalizeSession(session) {
     changed = true;
   }
 
-  if (session.status === "in_progress") {
-    const availableQuestionIds = new Set(getQuestions().map((question) => question.id));
+  if (session.status === "in_progress" && hasQuestionCatalog) {
     const sanitizedQuestionIds = session.questionIds.filter((qid) => availableQuestionIds.has(qid));
     if (sanitizedQuestionIds.length !== session.questionIds.length) {
       session.questionIds = sanitizedQuestionIds;
@@ -31631,8 +32068,10 @@ function normalizeSession(session) {
     });
   }
 
-  if (!session.courses.length || session.academicYear === null || session.academicSemester === null) {
-    const questionsById = new Map(getQuestions().map((question) => [question.id, question]));
+  if (
+    (!session.courses.length || session.academicYear === null || session.academicSemester === null)
+    && questionsById.size
+  ) {
     const inferredCourses = [];
     const seenCourses = new Set(session.courses);
 
@@ -31683,6 +32122,12 @@ function normalizeSession(session) {
 
   if (session.elapsedSec == null) {
     session.elapsedSec = 0;
+    changed = true;
+  }
+
+  const normalizedTimerSyncAt = Number(session.lastTimerSyncAt);
+  if (!Number.isFinite(normalizedTimerSyncAt) || normalizedTimerSyncAt <= 0) {
+    session.lastTimerSyncAt = Date.now();
     changed = true;
   }
 
@@ -32012,7 +32457,7 @@ async function copyTextToClipboard(text) {
   }
 }
 
-function renderQuestionStemVisual(question) {
+function renderQuestionStemVisual(question, options = {}) {
   const questionImage = String(question?.questionImage || "").trim();
   if (!questionImage) {
     return "";
@@ -32025,9 +32470,17 @@ function renderQuestionStemVisual(question) {
       </figure>
     `;
   }
+  const loadingMode = options?.loading === "eager" ? "eager" : "lazy";
+  const fetchPriority = loadingMode === "eager" ? "high" : "auto";
   return `
     <figure class="exam-question-media">
-      <img src="${escapeHtml(displayUrl || questionImage)}" alt="Question visual" loading="lazy" />
+      <img
+        src="${escapeHtml(displayUrl || questionImage)}"
+        alt="Question visual"
+        loading="${loadingMode}"
+        decoding="async"
+        fetchpriority="${fetchPriority}"
+      />
     </figure>
   `;
 }
@@ -32307,24 +32760,152 @@ function getNotebookEntries(userId) {
   return entries;
 }
 
+function syncSessionTimingDisplays(session) {
+  const elapsed = document.getElementById("elapsed-time");
+  if (elapsed) {
+    elapsed.textContent = formatElapsed(Math.max(0, Number(session?.elapsedSec || 0)));
+  }
+
+  const countdown = document.getElementById("countdown");
+  if (countdown && String(session?.mode || "").trim() === "timed") {
+    countdown.textContent = formatDuration(Math.max(0, Number(session?.timeRemainingSec || 0)));
+  }
+}
+
+function advanceSessionClock(session, nowMs = Date.now()) {
+  if (!session || String(session?.status || "").trim() !== "in_progress") {
+    return { changed: false, expired: false, elapsedDeltaSec: 0 };
+  }
+
+  const safeNowMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const previousSyncAt = Number(session.lastTimerSyncAt || 0);
+  if (!Number.isFinite(previousSyncAt) || previousSyncAt <= 0) {
+    session.lastTimerSyncAt = safeNowMs;
+    return { changed: true, expired: false, elapsedDeltaSec: 0 };
+  }
+
+  if (session.paused) {
+    return { changed: false, expired: false, elapsedDeltaSec: 0 };
+  }
+
+  const elapsedDeltaSec = Math.max(0, Math.floor((safeNowMs - previousSyncAt) / 1000));
+  if (!elapsedDeltaSec) {
+    return { changed: false, expired: false, elapsedDeltaSec: 0 };
+  }
+
+  session.elapsedSec = Math.max(0, Number(session.elapsedSec || 0) + elapsedDeltaSec);
+  if (session.mode === "timed") {
+    session.timeRemainingSec = Math.max(0, Number(session.timeRemainingSec || 0) - elapsedDeltaSec);
+    const activeQid = String(session.questionIds?.[session.currentIndex] || "").trim();
+    if (activeQid && session.responses?.[activeQid]) {
+      session.responses[activeQid].timeSpentSec = Math.max(
+        0,
+        Number(session.responses[activeQid].timeSpentSec || 0) + elapsedDeltaSec,
+      );
+    }
+  }
+  session.lastTimerSyncAt = previousSyncAt + (elapsedDeltaSec * 1000);
+  return {
+    changed: true,
+    expired: session.mode === "timed" && Number(session.timeRemainingSec || 0) <= 0,
+    elapsedDeltaSec,
+  };
+}
+
+function syncSessionSnapshot(session, options = {}) {
+  if (!session || String(session?.status || "").trim() !== "in_progress") {
+    return { changed: false, expired: false, finalized: false };
+  }
+  const questionStore = options?.questionStore || getQuestionStore();
+  normalizeSession(session, { questionStore });
+  const clockResult = advanceSessionClock(session, options?.nowMs);
+  if (clockResult.expired) {
+    finalizeSession(session.id, {
+      sessionOverride: session,
+      questionStore,
+      skipElapsedCapture: true,
+    });
+    return { ...clockResult, finalized: true };
+  }
+  if (clockResult.changed && options?.persist !== false) {
+    session.updatedAt = nowISO();
+    upsertSession(session, options?.persistOptions || {});
+  }
+  return { ...clockResult, finalized: false };
+}
+
+function persistInProgressSessionSnapshot(options = {}) {
+  const currentUser = options?.user || getCurrentUser();
+  if (!currentUser) {
+    return null;
+  }
+  const session = options?.session || getActiveSession(currentUser.id, state.sessionId);
+  if (!session || String(session?.status || "").trim() !== "in_progress") {
+    return null;
+  }
+  const questionStore = options?.questionStore || getQuestionStore();
+  normalizeSession(session, { questionStore });
+  if (
+    options?.syncSelectionFromDom !== false
+    && state.route === "session"
+    && String(state.sessionId || "").trim() === String(session.id || "").trim()
+  ) {
+    syncActiveResponseSelectionFromDom(session);
+  }
+  if (options?.captureElapsed !== false) {
+    captureElapsedForCurrentQuestion(session);
+  } else {
+    const clockState = syncSessionSnapshot(session, {
+      questionStore,
+      nowMs: options?.nowMs,
+      persist: false,
+    });
+    if (clockState.finalized) {
+      if (options?.flush) {
+        flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+      }
+      return session;
+    }
+  }
+  if (session.mode === "timed" && Number(session.timeRemainingSec || 0) <= 0) {
+    finalizeSession(session.id, {
+      sessionOverride: session,
+      questionStore,
+      skipElapsedCapture: true,
+    });
+    if (options?.flush) {
+      flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    }
+    return session;
+  }
+  session.updatedAt = nowISO();
+  upsertSession(session, { immediate: options?.immediate === true });
+  if (options?.flush) {
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  }
+  return session;
+}
+
 function captureElapsedForCurrentQuestion(session) {
   if (!session) {
     return;
   }
 
+  const nowMs = Date.now();
+  advanceSessionClock(session, nowMs);
+
   if (session.mode === "timed") {
-    session.lastQuestionAt = Date.now();
+    session.lastQuestionAt = nowMs;
     return;
   }
 
-  const now = Date.now();
-  const previous = session.lastQuestionAt || now;
-  const elapsed = Math.max(0, Math.round((now - previous) / 1000));
+  const previous = session.lastQuestionAt || nowMs;
+  const elapsed = Math.max(0, Math.round((nowMs - previous) / 1000));
   const qid = session.questionIds[session.currentIndex];
   if (session.responses[qid]) {
     session.responses[qid].timeSpentSec += elapsed;
   }
-  session.lastQuestionAt = now;
+  session.lastQuestionAt = nowMs;
 }
 
 function load(key, fallback) {
@@ -32401,6 +32982,7 @@ function bumpQuestionsRevisionForStorageKey(key) {
 }
 
 function writeStorageKey(key, value) {
+  invalidateCollectionRuntimeForStorageKey(key);
   let serialized = null;
   try {
     serialized = JSON.stringify(value);
@@ -32474,6 +33056,7 @@ function writeStorageKey(key, value) {
 }
 
 function removeStorageKey(key) {
+  invalidateCollectionRuntimeForStorageKey(key);
   inMemoryStorage.delete(key);
   storageQuotaRetryThresholds.delete(key);
   removeSessionStorageKey(key);
