@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.15").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.19").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -243,6 +243,7 @@ const state = {
   adminAddUserDraft: createDefaultAdminAddUserDraft(),
   adminAddUserDraftDirty: false,
   adminUserEnrollmentDrafts: {},
+  adminUserEnrollmentSaving: {},
   adminSelectedUserIds: [],
   adminUserBulkActionRunning: false,
   adminCurriculumYear: 1,
@@ -405,6 +406,75 @@ function clearAdminUserEnrollmentDraft(userId) {
   return true;
 }
 
+function hasAdminUserEnrollmentDrafts() {
+  return Boolean(
+    state.adminUserEnrollmentDrafts
+    && Object.keys(state.adminUserEnrollmentDrafts).length,
+  );
+}
+
+function getAdminUserEnrollmentSaveMode(userId) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) {
+    return "";
+  }
+  const mode = String(state.adminUserEnrollmentSaving?.[normalizedUserId] || "").trim();
+  return mode === "auto" ? "auto" : (mode === "manual" ? "manual" : "");
+}
+
+function setAdminUserEnrollmentSaveMode(userId, mode = "") {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) {
+    return "";
+  }
+  const normalizedMode = mode === "auto" ? "auto" : (mode === "manual" ? "manual" : "");
+  if (!normalizedMode) {
+    if (state.adminUserEnrollmentSaving && Object.prototype.hasOwnProperty.call(state.adminUserEnrollmentSaving, normalizedUserId)) {
+      delete state.adminUserEnrollmentSaving[normalizedUserId];
+    }
+    return "";
+  }
+  state.adminUserEnrollmentSaving[normalizedUserId] = normalizedMode;
+  return normalizedMode;
+}
+
+function hasActiveAdminUserEnrollmentSaves() {
+  return Boolean(
+    state.adminUserEnrollmentSaving
+    && Object.keys(state.adminUserEnrollmentSaving).length,
+  );
+}
+
+function getAdminUserEnrollmentBusyLabel(mode = "manual") {
+  return mode === "auto" ? "Auto-saving..." : "Saving...";
+}
+
+function renderAdminUserEnrollmentSaveButtonContent(options = {}) {
+  const busy = Boolean(options?.busy);
+  const mode = options?.mode === "auto" ? "auto" : "manual";
+  const baseLabel = String(options?.baseLabel || "Save details");
+  return busy
+    ? `<span class="inline-loader" aria-hidden="true"></span><span>${escapeHtml(getAdminUserEnrollmentBusyLabel(mode))}</span>`
+    : escapeHtml(baseLabel);
+}
+
+function setAdminUserEnrollmentSaveButtonBusy(button, busy, options = {}) {
+  if (!button) {
+    return;
+  }
+  if (!button.dataset.baseLabel) {
+    button.dataset.baseLabel = button.textContent || "Save details";
+  }
+  const mode = options?.mode === "auto" ? "auto" : "manual";
+  button.disabled = busy;
+  button.classList.toggle("is-loading", busy);
+  button.innerHTML = renderAdminUserEnrollmentSaveButtonContent({
+    busy,
+    mode,
+    baseLabel: button.dataset.baseLabel,
+  });
+}
+
 function getAdminUserEnrollmentViewModel(account) {
   if (!account) {
     return {
@@ -451,11 +521,14 @@ function resetAdminAddUserDraft() {
 }
 
 function shouldDeferAdminUsersAutoRender() {
+  if (state.route !== "admin" || String(state.adminPage || "").trim() !== "users") {
+    return false;
+  }
   return (
-    state.route === "admin"
-    && String(state.adminPage || "").trim() === "users"
-    && Boolean(state.adminAddUserPanelOpen)
-    && Boolean(state.adminAddUserDraftDirty)
+    (Boolean(state.adminAddUserPanelOpen) && Boolean(state.adminAddUserDraftDirty))
+    || hasAdminUserEnrollmentDrafts()
+    || hasActiveAdminUserEnrollmentSaves()
+    || adminUserMutationActiveCount > 0
   );
 }
 
@@ -7809,12 +7882,6 @@ async function hydrateRelationalSessions(currentUser) {
   let blocksQuery = client
     .from("test_blocks")
     .select("id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
-  console.log("[session-hydration] Querying test_blocks", {
-    table: "test_blocks",
-    select: "id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at",
-    filter: currentUser.role !== "admin" ? { user_id: userProfileId } : { user_id: "*" },
-    order: ["updated_at desc", "id asc"],
-  });
   const blocksResult = await fetchRowsPaged((from, to) => {
     let query = blocksQuery
       .order("updated_at", { ascending: false })
@@ -7828,12 +7895,6 @@ async function hydrateRelationalSessions(currentUser) {
     return;
   }
   const blocks = Array.isArray(blocksResult.data) ? blocksResult.data : [];
-  console.log("[session-hydration] test_blocks query result", {
-    table: "test_blocks",
-    userId: currentUser.role !== "admin" ? userProfileId : "*",
-    rowCount: blocks.length,
-    externalIds: blocks.map((block) => String(block?.external_id || block?.id || "").trim()).filter(Boolean),
-  });
   const blockCourseIds = [...new Set(
     blocks
       .map((block) => String(block?.course_id || "").trim())
@@ -8622,6 +8683,18 @@ function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession
   }
   if (localStatus === "completed" && remoteStatus !== "completed") {
     return true;
+  }
+  if (
+    remoteStatus === "completed"
+    && localStatus !== "completed"
+  ) {
+    return false;
+  }
+  if (
+    remoteStatus === "suspended"
+    && localStatus === "in_progress"
+  ) {
+    return false;
   }
   if (
     localStatus === "completed"
@@ -18251,8 +18324,8 @@ function renderDashboard() {
         <h2 class="title">Dr. ${escapeHtml(user.name)}'s Dashboard</h2>
         <div class="stack">
           <button class="btn" data-nav="create-test">Create a Test</button>
-          <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
-            ${state.studentDataRefreshing ? "Refreshing..." : "Get Updates"}
+          <button class="btn ghost ${state.studentDataRefreshing ? "is-loading" : ""}" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+            ${renderStudentRefreshButtonContent()}
           </button>
         </div>
       </div>
@@ -18318,6 +18391,23 @@ function getStudentDataSyncStatusText() {
     minute: "2-digit",
   });
   return `Last synced at ${syncedAt}.`;
+}
+
+function renderStudentRefreshButtonContent() {
+  return state.studentDataRefreshing
+    ? `<span class="inline-loader" aria-hidden="true"></span><span>Getting updates...</span>`
+    : "Get Updates";
+}
+
+function setStudentRefreshButtonBusy(button, busy) {
+  if (!button) {
+    return;
+  }
+  button.disabled = busy;
+  button.classList.toggle("is-loading", busy);
+  button.innerHTML = busy
+    ? `<span class="inline-loader" aria-hidden="true"></span><span>Getting updates...</span>`
+    : "Get Updates";
 }
 
 function renderWeakAreas(snapshotOrUserId, courseFilter = "") {
@@ -18424,7 +18514,18 @@ function renderPreviousTestsSection(userOrId) {
 
 function wireDashboard() {
   appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
-    await refreshStudentAnalyticsNow();
+    const refreshButton = appEl.querySelector("[data-action='refresh-student-analytics']");
+    if (state.studentDataRefreshing || refreshButton?.disabled) {
+      return;
+    }
+    setStudentRefreshButtonBusy(refreshButton, true);
+    try {
+      await refreshStudentAnalyticsNow();
+    } finally {
+      if (!state.studentDataRefreshing && refreshButton && appEl.contains(refreshButton)) {
+        setStudentRefreshButtonBusy(refreshButton, false);
+      }
+    }
   });
 
   appEl.querySelectorAll("[data-action='open-previous-review']").forEach((button) => {
@@ -18501,7 +18602,7 @@ async function refreshStudentAnalyticsNow(options = {}) {
   });
   if (!options?.silent) {
     if (ok) {
-      toast("Analytics refreshed.");
+      toast("Updates received.");
     } else {
       const readyError = String(relationalSync.lastReadyError || "").trim().toLowerCase();
       const noSession = readyError.includes("no active supabase session");
@@ -21289,8 +21390,8 @@ function renderAnalytics() {
             </select>
           </label>
         </form>
-        <button class="btn ghost" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
-          ${state.studentDataRefreshing ? "Refreshing..." : "Get Updates"}
+        <button class="btn ghost ${state.studentDataRefreshing ? "is-loading" : ""}" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+          ${renderStudentRefreshButtonContent()}
         </button>
       </div>
       <small class="subtle">Showing analytics for <b>${escapeHtml(selectedCourse)}</b>. ${escapeHtml(syncStatusText)}</small>
@@ -21362,7 +21463,18 @@ function wireAnalytics() {
   });
 
   appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
-    await refreshStudentAnalyticsNow();
+    const refreshButton = appEl.querySelector("[data-action='refresh-student-analytics']");
+    if (state.studentDataRefreshing || refreshButton?.disabled) {
+      return;
+    }
+    setStudentRefreshButtonBusy(refreshButton, true);
+    try {
+      await refreshStudentAnalyticsNow();
+    } finally {
+      if (!state.studentDataRefreshing && refreshButton && appEl.contains(refreshButton)) {
+        setStudentRefreshButtonBusy(refreshButton, false);
+      }
+    }
   });
 
   appEl.querySelector("[data-action='apply-analytics-plan']")?.addEventListener("click", () => {
@@ -21739,6 +21851,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   if (!row || !account) {
     return false;
   }
+  const accountId = String(account.id || "").trim();
   const enrollmentView = getAdminUserEnrollmentViewModel(account);
   const displayAccount = enrollmentView.account || account;
   const year = displayAccount.role === "student" ? normalizeAcademicYearOrNull(displayAccount.academicYear) : null;
@@ -21747,6 +21860,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const visibleCourses = getAdminVisibleCoursesForUser(displayAccount);
   const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
   const phoneInput = row.querySelector("input[data-field='phone']");
+  const saveButton = row.querySelector("[data-action='save-user-enrollment']");
 
   const yearSelect = row.querySelector("select[data-field='academicYear']");
   if (yearSelect) {
@@ -21760,6 +21874,14 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
 
   if (phoneInput) {
     phoneInput.value = String(displayAccount.phone ?? "");
+  }
+
+  if (saveButton) {
+    setAdminUserEnrollmentSaveButtonBusy(
+      saveButton,
+      Boolean(getAdminUserEnrollmentSaveMode(accountId)),
+      { mode: getAdminUserEnrollmentSaveMode(accountId) || "manual" },
+    );
   }
 
   const coursePreviewEl = row.querySelector(".admin-course-preview");
@@ -21990,6 +22112,8 @@ function renderAdmin() {
         const canBulkSelect = canBulkSelectAdminUser(account, user);
         const isSelected = accountId ? selectedUserSet.has(accountId) : false;
         const accountPhone = String(displayAccount.phone ?? "");
+        const saveMode = accountId ? getAdminUserEnrollmentSaveMode(accountId) : "";
+        const saveBusy = Boolean(saveMode);
         const rowClassNames = [];
         if (isSelected) {
           rowClassNames.push("is-selected");
@@ -22063,7 +22187,7 @@ function renderAdmin() {
             </td>
             <td class="admin-user-actions-cell">
               <div class="admin-user-actions">
-                <button class="btn ghost admin-btn-sm" data-action="save-user-enrollment">Save details</button>
+                <button class="btn ghost admin-btn-sm ${saveBusy ? "is-loading" : ""}" data-action="save-user-enrollment" ${saveBusy ? "disabled" : ""}>${renderAdminUserEnrollmentSaveButtonContent({ busy: saveBusy, mode: saveMode || "manual" })}</button>
                 ${resetPasswordAction}
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
                   ${isApproved ? "Suspend" : "Approve"}
@@ -24792,13 +24916,43 @@ function wireAdmin() {
       toast("Each course must keep at least one topic.");
       return;
     }
+    const questions = getQuestions();
+    const topicQuestionIds = questions
+      .filter((question) => {
+        const meta = getQbankCourseTopicMeta(question);
+        return meta.course === course && normalizeTopicKey(meta.topic) === normalizeTopicKey(currentTopic);
+      })
+      .map((question) => String(question?.id || "").trim())
+      .filter(Boolean);
+    const topicQuestionCount = topicQuestionIds.length;
+    const deleteTopicConfirmed = window.confirm(
+      topicQuestionCount
+        ? `Delete topic "${currentTopic}" from "${course}"? ${topicQuestionCount} related question(s) will also be deleted.`
+        : `Delete topic "${currentTopic}" from "${course}"?`,
+    );
+    if (!deleteTopicConfirmed) {
+      return;
+    }
+    if (topicQuestionCount) {
+      queueQuestionDeletions(topicQuestionIds);
+      const removeSet = new Set(topicQuestionIds);
+      const nextQuestions = questions.filter((question) => !removeSet.has(String(question?.id || "").trim()));
+      if (state.adminEditQuestionId && removeSet.has(state.adminEditQuestionId)) {
+        state.adminEditQuestionId = null;
+      }
+      save(STORAGE_KEYS.questions, nextQuestions);
+    }
     queuePendingCourseTopicDeletion(course, currentTopic);
     applyCourseTopicsUpdate(
       course,
       topics.filter((_, idx) => idx !== topicIndex),
-      { allowQuestionTopicCollapse: true },
+      { allowQuestionTopicCollapse: false },
     );
-    toast("Topic removed.");
+    toast(
+      topicQuestionCount
+        ? `Topic removed. Deleted ${topicQuestionCount} related question(s).`
+        : "Topic removed.",
+    );
     rerenderCoursesPage();
     flushPendingSyncInBackground();
   };
@@ -25529,20 +25683,6 @@ function wireAdmin() {
     }
   });
 
-  const setEnrollmentSaveButtonBusy = (button, busy, busyLabel = "Saving...") => {
-    if (!button) {
-      return;
-    }
-    if (!button.dataset.baseLabel) {
-      button.dataset.baseLabel = button.textContent || "Save details";
-    }
-    button.disabled = busy;
-    button.classList.toggle("is-loading", busy);
-    button.innerHTML = busy
-      ? `<span class="inline-loader" aria-hidden="true"></span><span>${escapeHtml(busyLabel)}</span>`
-      : button.dataset.baseLabel;
-  };
-
   const clearEnrollmentAutoSaveTimer = (row) => {
     if (!row) {
       return;
@@ -25552,6 +25692,16 @@ function wireAdmin() {
       window.clearTimeout(timerId);
     }
     row.dataset.enrollmentAutosaveTimer = "0";
+  };
+
+  const getLiveAdminUserRowById = (userId) => {
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedUserId || !appEl) {
+      return null;
+    }
+    return Array.from(appEl.querySelectorAll("tr[data-user-id]"))
+      .find((candidate) => String(candidate?.getAttribute("data-user-id") || "").trim() === normalizedUserId)
+      || null;
   };
 
   const readAdminUserEnrollmentDraftFromRow = (row) => {
@@ -25611,7 +25761,8 @@ function wireAdmin() {
 
     const saveButton = row.querySelector("[data-action='save-user-enrollment']");
     row.dataset.enrollmentSaving = "1";
-    setEnrollmentSaveButtonBusy(saveButton, true, mode === "auto" ? "Auto-saving..." : "Saving...");
+    setAdminUserEnrollmentSaveMode(userId, mode);
+    setAdminUserEnrollmentSaveButtonBusy(saveButton, true, { mode });
     beginAdminUserMutation();
 
     try {
@@ -25708,8 +25859,6 @@ function wireAdmin() {
       return false;
     } finally {
       endAdminUserMutation();
-      row.dataset.enrollmentSaving = "0";
-      setEnrollmentSaveButtonBusy(saveButton, false);
       const shouldRetryQueuedSave = row.dataset.enrollmentResave === "1";
       const queuedMode = row.dataset.enrollmentResaveMode === "manual" ? "manual" : "auto";
       const queuedSyncNow = row.dataset.enrollmentResaveSyncNow === "1";
@@ -25719,8 +25868,17 @@ function wireAdmin() {
       row.dataset.enrollmentResaveSyncNow = "0";
       row.dataset.enrollmentResaveSuppressSuccessToast = "0";
       if (shouldRetryQueuedSave) {
+        row.dataset.enrollmentSaving = "0";
+        setAdminUserEnrollmentSaveMode(userId, queuedMode);
+        const latestQueuedRow = getLiveAdminUserRowById(userId);
+        setAdminUserEnrollmentSaveButtonBusy(
+          latestQueuedRow?.querySelector("[data-action='save-user-enrollment']") || saveButton,
+          true,
+          { mode: queuedMode },
+        );
         window.setTimeout(() => {
-          saveUserEnrollmentFromRow(row, {
+          const nextRow = getLiveAdminUserRowById(userId) || row;
+          saveUserEnrollmentFromRow(nextRow, {
             mode: queuedMode,
             syncNow: queuedSyncNow,
             suppressSuccessToast: queuedSuppressSuccessToast || queuedMode === "auto",
@@ -25730,10 +25888,17 @@ function wireAdmin() {
         }, 0);
         return;
       }
+      row.dataset.enrollmentSaving = "0";
+      setAdminUserEnrollmentSaveMode(userId, "");
+      const latestRow = getLiveAdminUserRowById(userId) || row;
+      setAdminUserEnrollmentSaveButtonBusy(
+        latestRow?.querySelector("[data-action='save-user-enrollment']") || saveButton,
+        false,
+      );
       const refreshedUsers = getUsers();
       const refreshedUser = refreshedUsers.find((entry) => entry.id === userId);
       if (refreshedUser) {
-        patchAdminUserRowUi(row, refreshedUser, getCurrentUser());
+        patchAdminUserRowUi(latestRow, refreshedUser, getCurrentUser());
       }
     }
   };
@@ -30362,15 +30527,6 @@ function getCompletedSessionsForUser(userId, options = {}) {
         .map((session) => [String(session?.id || "").trim(), session]),
     ).values()]
     : scopedCompletedSessions;
-  console.log("[session-history] Resolved completed sessions for dashboard/review", {
-    userId: String(userId || "").trim(),
-    directIdentityHints,
-    directCount: directlyOwnedCompletedSessions.length,
-    visibleCount: allVisibleCompletedSessions.length,
-    scopedCount: scopedCompletedSessions.length,
-    resolvedCount: resolvedSessions.length,
-    sessionIds: resolvedSessions.map((session) => String(session?.id || "").trim()).filter(Boolean),
-  });
   return resolvedSessions
     .slice()
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
@@ -34671,6 +34827,7 @@ async function logout(options = {}) {
   setGoogleOAuthPendingState(false);
   setPasswordRecoveryPendingState(false);
   state.adminUserEnrollmentDrafts = {};
+  state.adminUserEnrollmentSaving = {};
   state.userMenuOpen = false;
   state.notificationMenuOpen = false;
   state.sessionId = null;
