@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.8").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.9").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -5477,7 +5477,7 @@ function refreshCloudSyncIndicators() {
   }
   const sessionSlot = document.getElementById("session-cloud-sync-slot");
   if (sessionSlot) {
-    sessionSlot.innerHTML = renderCloudSyncPill(model, { compact: true });
+    sessionSlot.innerHTML = "";
   }
 }
 
@@ -19470,7 +19470,6 @@ function renderSession() {
         <section class="panel">
           <h2 class="title">Restoring your saved session...</h2>
           <p class="subtle">Your exam is still stored locally. We are reloading the question bank so you can resume exactly where you left off.</p>
-          <div id="session-cloud-sync-slot">${renderCloudSyncPill(getCloudSyncStatusModel(user), { compact: true })}</div>
         </section>
       `;
     }
@@ -19511,7 +19510,6 @@ function renderSession() {
   const currentCourse = mappedCourse || questionCourse;
   const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
   const hasAskAiLink = Boolean(askAiUrl);
-  const syncPillHtml = renderCloudSyncPill(getCloudSyncStatusModel(user), { compact: true });
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -19605,7 +19603,6 @@ function renderSession() {
                 <h3 class="exam-question-title-moodle"><span>Question</span> <b>${session.currentIndex + 1}</b></h3>
                 <p class="exam-question-status exam-question-status-moodle">${statusText}</p>
                 <p class="exam-mark-line exam-mark-line-moodle">${markLineText}</p>
-                <div id="session-cloud-sync-slot">${syncPillHtml}</div>
                 <button class="exam-meta-link exam-meta-link-moodle" data-action="toggle-flag">
                   <span aria-hidden="true">⚑</span>
                   <span>${response.flagged ? "Unflag question" : "Flag question"}</span>
