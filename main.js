@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.12").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.13").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -6488,25 +6488,15 @@ async function clearUserAnalyticsHistory(userId, profileId = "") {
   if (!isUuidValue(targetProfileId)) {
     return { localCleared, remoteCleared: false };
   }
-
-  const ready = await ensureRelationalSyncReady();
-  if (!ready) {
-    throw new Error("Relational database sync is unavailable.");
-  }
-  const client = getRelationalClient();
-  if (!client) {
-    throw new Error("Supabase relational client is not available.");
-  }
-
-  const { error } = await client
-    .from("test_blocks")
-    .delete()
-    .eq("user_id", targetProfileId);
-  if (error) {
-    throw error;
-  }
-
-  return { localCleared, remoteCleared: true };
+  console.warn("Remote analytics history deletion is disabled in the client to protect student data.", {
+    userId: targetUserId,
+    profileId: targetProfileId,
+  });
+  return {
+    localCleared,
+    remoteCleared: false,
+    message: "Remote analytics deletion is disabled from client-side code.",
+  };
 }
 
 async function deleteRelationalProfile(profileId) {
@@ -12401,7 +12391,7 @@ async function syncSessionsToRelational(sessionsPayload) {
       .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
   );
 
-  const upsertBlocks = syncableOwnedSessions.map((session) => ({
+  const desiredBlocks = syncableOwnedSessions.map((session) => ({
     ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
     external_id: String(session.id || "").trim(),
     user_id: sessionOwnerProfileIdBySessionId.get(String(session?.id || "").trim()),
@@ -12417,11 +12407,48 @@ async function syncSessionsToRelational(sessionsPayload) {
     completed_at: session.completedAt || null,
   }));
 
-  for (const blockBatch of splitIntoBatches(upsertBlocks, RELATIONAL_UPSERT_BATCH_SIZE)) {
-    console.log("[session-sync] Upserting test_blocks", {
+  const externalIds = desiredBlocks.map((entry) => entry.external_id).filter(Boolean);
+  const existingBlocks = [];
+  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("test_blocks")
+        .select("id,external_id,user_id,status,completed_at")
+        .in("external_id", externalIdBatch),
+      "Session block verification timed out.",
+    );
+    if (Array.isArray(data) && data.length) {
+      existingBlocks.push(...data);
+    }
+  }
+  const existingBlockByExternalId = new Map(
+    existingBlocks.map((entry) => [String(entry?.external_id || "").trim(), entry]),
+  );
+  const insertBlocks = desiredBlocks.filter((entry) => !existingBlockByExternalId.has(String(entry?.external_id || "").trim()));
+  const updateBlocks = desiredBlocks
+    .map((entry) => ({
+      desired: entry,
+      existing: existingBlockByExternalId.get(String(entry?.external_id || "").trim()) || null,
+    }))
+    .filter(({ existing }) => Boolean(existing));
+  const isSessionBlockInsertConflictError = (error) => {
+    const code = String(error?.code || error?.status || "").trim().toLowerCase();
+    if (code === "23505" || code === "409") {
+      return true;
+    }
+    const message = String(getErrorMessage(error, "") || "").trim().toLowerCase();
+    return message.includes("duplicate key")
+      || message.includes("violates unique constraint")
+      || message.includes("conflict");
+  };
+
+  for (const blockBatch of splitIntoBatches(insertBlocks, RELATIONAL_INSERT_BATCH_SIZE)) {
+    if (!blockBatch.length) {
+      continue;
+    }
+    console.log("[session-sync] Inserting new test_blocks", {
       table: "test_blocks",
       columns: [
-        "id",
         "external_id",
         "user_id",
         "course_id",
@@ -12437,24 +12464,66 @@ async function syncSessionsToRelational(sessionsPayload) {
       ],
       rows: blockBatch,
     });
-    await runRelationalQueryWithTimeout(
-      client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id", defaultToNull: false }),
-      "Session block sync timed out.",
-    );
-    console.log("[session-sync] test_blocks upsert completed", {
+    try {
+      await runRelationalQueryWithTimeout(
+        client.from("test_blocks").insert(
+          blockBatch.map(({ id, ...row }) => row),
+        ),
+        "Session block insert timed out.",
+      );
+    } catch (error) {
+      if (!isSessionBlockInsertConflictError(error)) {
+        throw error;
+      }
+      console.warn("[session-sync] test_blocks insert conflict; reloading persisted rows instead of overwriting.", {
+        externalIds: blockBatch.map((entry) => entry.external_id),
+        error: error?.message || error,
+      });
+    }
+    console.log("[session-sync] test_blocks insert completed", {
       table: "test_blocks",
       rowCount: blockBatch.length,
       externalIds: blockBatch.map((entry) => entry.external_id),
     });
   }
 
-  const externalIds = upsertBlocks.map((entry) => entry.external_id).filter(Boolean);
+  for (const { desired, existing } of updateBlocks) {
+    if (!existing?.id) {
+      continue;
+    }
+    console.log("[session-sync] Updating existing test_blocks", {
+      table: "test_blocks",
+      blockId: existing.id,
+      externalId: desired.external_id,
+      row: desired,
+    });
+    await runRelationalQueryWithTimeout(
+      client
+        .from("test_blocks")
+        .update({
+          user_id: desired.user_id,
+          course_id: desired.course_id,
+          mode: desired.mode,
+          source: desired.source,
+          status: desired.status,
+          question_count: desired.question_count,
+          duration_minutes: desired.duration_minutes,
+          time_remaining_sec: desired.time_remaining_sec,
+          current_index: desired.current_index,
+          elapsed_seconds: desired.elapsed_seconds,
+          completed_at: desired.completed_at,
+        })
+        .eq("id", existing.id),
+      "Session block update timed out.",
+    );
+  }
+
   const persistedBlocks = [];
   for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
     const data = await runRelationalQueryWithTimeout(
       client
         .from("test_blocks")
-        .select("id,external_id")
+        .select("id,external_id,user_id,status,completed_at")
         .in("external_id", externalIdBatch),
       "Session block verification timed out.",
     );
@@ -12468,18 +12537,6 @@ async function syncSessionsToRelational(sessionsPayload) {
     rows: persistedBlocks,
   });
   const blockIdByExternalId = Object.fromEntries((persistedBlocks || []).map((entry) => [entry.external_id, entry.id]));
-  const blockIds = Object.values(blockIdByExternalId);
-
-  for (const blockIdBatch of splitIntoBatches(blockIds, RELATIONAL_DELETE_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client.from("test_responses").delete().in("block_id", blockIdBatch),
-      "Session response cleanup timed out.",
-    );
-    await runRelationalQueryWithTimeout(
-      client.from("test_block_items").delete().in("block_id", blockIdBatch),
-      "Session item cleanup timed out.",
-    );
-  }
 
   const itemRowsBySyncKey = new Map();
   const responseRowsBySyncKey = new Map();
