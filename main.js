@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.4").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.5").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -18060,7 +18060,7 @@ function renderPreviousTestsSection(userOrId) {
   const user = userOrId && typeof userOrId === "object" ? userOrId : null;
   const userId = String((user?.id) || userOrId || "").trim();
   const questionMetaById = getAnalyticsQuestionMetaById();
-  const completed = getCompletedSessionsForUser(userId, {
+  const completed = getReviewableCompletedSessionsForUser(user || userId, {
     userOverride: user,
     questionMetaById,
     fallbackToAllTerms: true,
@@ -18148,7 +18148,7 @@ function wireDashboard() {
       const sessionId = button.getAttribute("data-session-id");
       const user = getCurrentUser();
       if (!sessionId || !user) return;
-      const session = getCompletedSessionsForUser(user.id, {
+      const session = getReviewableCompletedSessionsForUser(user, {
         userOverride: user,
         fallbackToAllTerms: true,
       }).find((entry) => entry.id === sessionId);
@@ -29879,9 +29879,12 @@ function getCompletedSessionsForUser(userId, options = {}) {
   const scopedCompletedSessions = getAcademicTermScopedSessionsForUser(userId, targetUser, questionMetaById)
     .filter((session) => String(session?.status || "").trim() === "completed");
   const shouldFallbackToAllTerms = options?.fallbackToAllTerms !== false;
-  const resolvedSessions = scopedCompletedSessions.length || !shouldFallbackToAllTerms
-    ? scopedCompletedSessions
-    : allVisibleCompletedSessions;
+  const resolvedSessions = shouldFallbackToAllTerms
+    ? [...new Map(
+      [...scopedCompletedSessions, ...allVisibleCompletedSessions]
+        .map((session) => [String(session?.id || "").trim(), session]),
+    ).values()]
+    : scopedCompletedSessions;
   return resolvedSessions
     .slice()
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
