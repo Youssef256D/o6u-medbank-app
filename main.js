@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.10").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.12").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -3211,18 +3211,6 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
     return null;
   }
   const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
-  const metadataYear = normalizeAcademicYearOrNull(
-    authUser?.user_metadata?.academic_year
-    ?? authUser?.user_metadata?.academicYear
-    ?? fallbackUser?.academicYear
-    ?? null,
-  );
-  const metadataSemester = normalizeAcademicSemesterOrNull(
-    authUser?.user_metadata?.academic_semester
-    ?? authUser?.user_metadata?.academicSemester
-    ?? fallbackUser?.academicSemester
-    ?? null,
-  );
   const rawPhone = String(
     authUser?.user_metadata?.phone_number
     ?? authUser?.user_metadata?.phone
@@ -3244,8 +3232,8 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
     && hasCompleteStudentProfile({
       role: "student",
       phone: normalizedPhone,
-      academicYear: metadataYear,
-      academicSemester: metadataSemester,
+      academicYear: null,
+      academicSemester: null,
     });
   const approved = role === "admin"
     ? true
@@ -3255,8 +3243,8 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
         : shouldAutoApproveStudentAccess({
           role: "student",
           phone: normalizedPhone,
-          academicYear: metadataYear,
-          academicSemester: metadataSemester,
+          academicYear: null,
+          academicSemester: null,
           assignedCourses: metadataCourses,
         })
     );
@@ -3268,8 +3256,6 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
     phone: normalizedPhone || null,
     role,
     approved,
-    academic_year: role === "student" ? metadataYear : null,
-    academic_semester: role === "student" ? metadataSemester : null,
     auth_provider: normalizeAuthProvider(
       getAuthProviderFromAuthUser(authUser)
       || fallbackUser?.authProvider
@@ -3346,22 +3332,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const role = String(profile.role || "student") === "admin" ? "admin" : "student";
   const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
   const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
-  const fallbackYear = normalizeAcademicYearOrNull(
-    localUser?.academicYear
-    ?? authUser?.user_metadata?.academic_year
-    ?? authUser?.user_metadata?.academicYear
-    ?? null,
-  );
-  const fallbackSemester = normalizeAcademicSemesterOrNull(
-    localUser?.academicSemester
-    ?? authUser?.user_metadata?.academic_semester
-    ?? authUser?.user_metadata?.academicSemester
-    ?? null,
-  );
   const profileAuthProvider = normalizeAuthProvider(profile.auth_provider);
-  // When local user data was recently modified, prefer local values over DB
-  // to prevent reverting the admin's change before it propagates to Supabase.
-  const preferLocalOverDbForCurrentUser = shouldPreferRecentLocalUserData(localUser);
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let relationalAssignedCourses = [];
   let relationalEnrollmentTerm = null;
@@ -3385,14 +3356,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     }
   }
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
-  const metadataAssignedCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
-    ? authUser.user_metadata.assigned_courses
-    : (Array.isArray(authUser?.user_metadata?.assignedCourses) ? authUser.user_metadata.assignedCourses : []);
-  const fallbackAssignedCourses = sanitizeCourseAssignments(
-    Array.isArray(localUser?.assignedCourses) && localUser.assignedCourses.length
-      ? localUser.assignedCourses
-      : metadataAssignedCourses,
-  );
+  const fallbackAssignedCourses = role === "student"
+    ? []
+    : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
   const profilePhoneValidation = validateAndNormalizePhoneNumber(String(profile.phone || "").trim());
@@ -3406,23 +3372,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   ).trim());
   const normalizedMetadataPhone = metadataPhoneValidation.ok ? metadataPhoneValidation.number : "";
   const resolvedPhone = normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone;
-  // Keep a fully-approved student profile stable if the DB read is temporarily missing
-  // term/course fields; we backfill those values once the admin snapshot hydrates.
-  const canPreserveApprovedFallbackTerm = role === "student" && canPreserveApprovedStudentCoreProfile({
-    role: "student",
-    phone: resolvedPhone,
-    academicYear: fallbackYear,
-    academicSemester: fallbackSemester,
-    isApproved: true,
-  }, profileApproved === true);
-  const canPreserveApprovedFallbackCourses = role === "student" && canPreserveApprovedStudentProfile({
-    role: "student",
-    phone: resolvedPhone,
-    academicYear: fallbackYear,
-    academicSemester: fallbackSemester,
-    assignedCourses: fallbackAssignedCourses,
-    isApproved: true,
-  }, profileApproved === true);
   const relationalEnrollmentYear = normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year);
   const relationalEnrollmentSemester = normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester);
   const shouldPreferRelationalEnrollmentTerm = shouldPreferEnrollmentTermOverProfile({
@@ -3435,33 +3384,22 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   });
   let year = role === "student"
     ? (
-      preferLocalOverDbForCurrentUser && fallbackYear !== null
-        ? fallbackYear
-        : (shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentYear : (profileYear !== null ? profileYear : relationalEnrollmentYear))
+      shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentYear : (profileYear !== null ? profileYear : relationalEnrollmentYear)
     )
     : null;
   let semester = role === "student"
     ? (
-      preferLocalOverDbForCurrentUser && fallbackSemester !== null
-        ? fallbackSemester
-        : (shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentSemester : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester))
+      shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentSemester : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester)
     )
     : null;
-  if (role === "student" && canPreserveApprovedFallbackTerm) {
-    if (year === null && fallbackYear !== null) {
-      year = fallbackYear;
-    }
-    if (semester === null && fallbackSemester !== null) {
-      semester = fallbackSemester;
-    }
-  }
+  const serverTermCourses = role === "student" && year !== null && semester !== null
+    ? getCurriculumCourses(year, semester)
+    : [];
   let resolvedAssignedCourses = role === "student"
     ? (
       relationalAssignedCourses.length
         ? relationalAssignedCourses
-        : (canPreserveApprovedFallbackCourses
-          ? fallbackAssignedCourses
-          : (authProvider === "google" && !preferLocalOverDbForCurrentUser ? [] : fallbackAssignedCourses))
+        : (serverTermCourses.length ? serverTermCourses : fallbackAssignedCourses)
     )
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   if (role === "student") {
@@ -4436,14 +4374,13 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const nextAuthProvider = normalizeAuthProvider(
     profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
   );
+  const preservePreviousEnrollmentLocally = Boolean(previous) && !hasSupabaseManagedIdentity(previous);
 
   const nextYearInput = profileOverrides.academicYear
-    ?? previous?.academicYear
-    ?? authUser.user_metadata?.academic_year
+    ?? (preservePreviousEnrollmentLocally ? previous?.academicYear : null)
     ?? null;
   const nextSemesterInput = profileOverrides.academicSemester
-    ?? previous?.academicSemester
-    ?? authUser.user_metadata?.academic_semester
+    ?? (preservePreviousEnrollmentLocally ? previous?.academicSemester : null)
     ?? null;
   const nextYear = nextRole === "student" ? normalizeAcademicYearOrNull(nextYearInput) : null;
   const nextSemester = nextRole === "student" ? normalizeAcademicSemesterOrNull(nextSemesterInput) : null;
@@ -4451,15 +4388,14 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   let nextCourses;
   if (nextRole === "student") {
     const overrideCourses = Array.isArray(profileOverrides.assignedCourses) ? profileOverrides.assignedCourses : [];
-    const metadataCourses = Array.isArray(authUser?.user_metadata?.assigned_courses)
-      ? authUser.user_metadata.assigned_courses
-      : (Array.isArray(authUser?.user_metadata?.assignedCourses) ? authUser.user_metadata.assignedCourses : []);
-    const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
+    const previousCourses = preservePreviousEnrollmentLocally && Array.isArray(previous?.assignedCourses)
+      ? previous.assignedCourses
+      : [];
     const requestedCourses = overrideCourses.length
       ? overrideCourses
       : previousCourses.length
         ? previousCourses
-        : metadataCourses;
+        : [];
     if (nextYear !== null && nextSemester !== null) {
       const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
       nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
@@ -5637,15 +5573,14 @@ function getRelationalWriteMetaSignature(storageKey, meta = null) {
 
 function shouldStampRecentLocalUserWrite(meta = null) {
   const scope = normalizeRelationalUserSyncScope(meta?.userSyncScope);
-  return scope === USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE
-    || scope === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+  return scope === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
 }
 
 function canWriteStudentEnrollmentProfileToRelational(scope) {
-  const normalizedScope = normalizeRelationalUserSyncScope(scope);
-  return normalizedScope === USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL
-    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE
-    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+  // Student enrollment is admin-managed only. Non-admin flows may update
+  // local draft/profile state, but they must never push year/semester or
+  // enrollment rows back to Supabase.
+  return normalizeRelationalUserSyncScope(scope) === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
 }
 
 function canWriteAdminManagedProfileFieldsToRelational(scope) {
@@ -6993,8 +6928,6 @@ async function hydrateRelationalProfiles(currentUser) {
     }
     const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
-    const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
-    const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
     const profilePhone = String(profile.phone || "").trim();
@@ -7007,23 +6940,9 @@ async function hydrateRelationalProfiles(currentUser) {
     const existingPhoneValidation = validateAndNormalizePhoneNumber(existingPhone);
     const normalizedExistingPhone = existingPhoneValidation.ok ? existingPhoneValidation.number : "";
     const resolvedPhone = normalizedProfilePhone || normalizedExistingPhone;
-    const existingAssignedCourses = role === "student"
-      ? sanitizeCourseAssignments(existing?.assignedCourses || [])
-      : [];
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
-    // Approved students should not flip back to "pending" just because a later
-    // hydration read is missing the saved term snapshot.
-    const canUseApprovedExistingTerm = role === "student" && canPreserveApprovedStudentCoreProfile({
-      role: "student",
-      phone: resolvedPhone || normalizedExistingPhone,
-      academicYear: existingYear,
-      academicSemester: existingSemester,
-      isApproved: true,
-    }, Boolean(profile.approved));
-    const hasProfileTerm = profileYear !== null && profileSemester !== null;
-    const hasEnrolledTerm = enrolledYear !== null && enrolledSemester !== null;
     // Prefer whichever source is newer when the profile term and enrollment term diverge.
     const shouldPreferEnrolledTerm = shouldPreferEnrollmentTermOverProfile({
       profileYear,
@@ -7033,36 +6952,23 @@ async function hydrateRelationalProfiles(currentUser) {
       enrollmentSemester: enrolledSemester,
       enrollmentUpdatedAt: enrollmentLatestAssignedAtMap[profile.id],
     });
-    // When local user data was recently modified but hasn't landed in the DB yet,
-    // prefer the local (existing) values for year/semester/courses to prevent the
-    // DB read from reverting the admin's change.
+    // Admin-managed enrollment is server-authoritative for hydrated students.
     let year = role === "student"
-      ? (preferLocalOverDb && existingYear !== null
-        ? existingYear
-        : (shouldPreferEnrolledTerm ? enrolledYear : (profileYear !== null ? profileYear : enrolledYear)))
+      ? (shouldPreferEnrolledTerm ? enrolledYear : (profileYear !== null ? profileYear : enrolledYear))
       : null;
     let semester = role === "student"
-      ? (preferLocalOverDb && existingSemester !== null
-        ? existingSemester
-        : (shouldPreferEnrolledTerm ? enrolledSemester : (profileSemester !== null ? profileSemester : enrolledSemester)))
+      ? (shouldPreferEnrolledTerm ? enrolledSemester : (profileSemester !== null ? profileSemester : enrolledSemester))
       : null;
-    if (role === "student" && canUseApprovedExistingTerm) {
-      if (year === null && existingYear !== null) {
-        year = existingYear;
-      }
-      if (semester === null && existingSemester !== null) {
-        semester = existingSemester;
-      }
-    }
+    const serverTermCourses = role === "student" && year !== null && semester !== null
+      ? getCurriculumCourses(year, semester)
+      : [];
     let assignedCourses = role !== "student"
       ? [...allCourses]
-      : preferLocalOverDb && existingAssignedCourses.length
-        ? existingAssignedCourses
-        : enrolledCourses.length
-          ? enrolledCourses
-          : existingAssignedCourses.length
-            ? existingAssignedCourses
-            : [];
+      : enrolledCourses.length
+        ? enrolledCourses
+        : serverTermCourses.length
+          ? serverTermCourses
+          : [];
     if (role === "student") {
       const repairedEnrollment = normalizeStudentEnrollmentProfile({
         academicYear: year,
@@ -7907,6 +7813,12 @@ async function hydrateRelationalSessions(currentUser) {
   let blocksQuery = client
     .from("test_blocks")
     .select("id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
+  console.log("[session-hydration] Querying test_blocks", {
+    table: "test_blocks",
+    select: "id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at",
+    filter: currentUser.role !== "admin" ? { user_id: userProfileId } : { user_id: "*" },
+    order: ["updated_at desc", "id asc"],
+  });
   const blocksResult = await fetchRowsPaged((from, to) => {
     let query = blocksQuery
       .order("updated_at", { ascending: false })
@@ -7920,6 +7832,12 @@ async function hydrateRelationalSessions(currentUser) {
     return;
   }
   const blocks = Array.isArray(blocksResult.data) ? blocksResult.data : [];
+  console.log("[session-hydration] test_blocks query result", {
+    table: "test_blocks",
+    userId: currentUser.role !== "admin" ? userProfileId : "*",
+    rowCount: blocks.length,
+    externalIds: blocks.map((block) => String(block?.external_id || block?.id || "").trim()).filter(Boolean),
+  });
   const blockCourseIds = [...new Set(
     blocks
       .map((block) => String(block?.course_id || "").trim())
@@ -12360,16 +12278,57 @@ async function syncSessionsToRelational(sessionsPayload) {
   const sessions = dedupedSessions;
   const users = getUsers();
   const questions = getQuestions();
+  const currentSessionProfileId = String(
+    getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "",
+  ).trim();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
   const sessionOwnerProfileIdBySessionId = new Map();
+  const skippedSessionDiagnostics = [];
+  const resolveSyncOwnerProfileId = (session) => {
+    let profileId = resolveSessionOwnerProfileId(session, users);
+    if (!isUuidValue(profileId) && isUuidValue(currentSessionProfileId)) {
+      const sessionProfileId = String(session?.ownerProfileId || session?.ownerAuthId || "").trim();
+      const sessionUserId = String(session?.userId || "").trim();
+      const currentUserId = String(currentUser?.id || "").trim();
+      const belongsToCurrentUser = (
+        sessionProfileId === currentSessionProfileId
+        || sessionUserId === currentUserId
+        || doesSessionBelongToUser(session, currentUser)
+      );
+      if (belongsToCurrentUser) {
+        profileId = currentSessionProfileId;
+        session.ownerProfileId = currentSessionProfileId;
+        session.ownerAuthId = currentSessionProfileId;
+        session.ownerIds = normalizeSessionOwnerIdList([
+          ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+          session?.userId,
+          session?.ownerProfileId,
+          session?.ownerAuthId,
+          ...getStoredUserIdentityAliases(currentUser),
+          currentSessionProfileId,
+        ]);
+      }
+    }
+    return isUuidValue(profileId) ? profileId : "";
+  };
   const ownedSessions = sessions.filter((session) => {
-    const profileId = resolveSessionOwnerProfileId(session, users);
+    const profileId = resolveSyncOwnerProfileId(session);
     if (!isUuidValue(profileId)) {
+      skippedSessionDiagnostics.push({
+        sessionId: String(session?.id || "").trim(),
+        status: String(session?.status || "").trim() || "unknown",
+        userId: String(session?.userId || "").trim() || null,
+        ownerProfileId: String(session?.ownerProfileId || session?.ownerAuthId || "").trim() || null,
+        ownerIds: normalizeSessionOwnerIdList(session?.ownerIds || []),
+      });
       return false;
     }
     sessionOwnerProfileIdBySessionId.set(String(session?.id || "").trim(), profileId);
     return true;
   });
+  if (skippedSessionDiagnostics.length) {
+    console.warn("[session-sync] Skipping sessions without a syncable owner profile.", skippedSessionDiagnostics);
+  }
   if (!ownedSessions.length) {
     return;
   }
@@ -12459,10 +12418,34 @@ async function syncSessionsToRelational(sessionsPayload) {
   }));
 
   for (const blockBatch of splitIntoBatches(upsertBlocks, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    console.log("[session-sync] Upserting test_blocks", {
+      table: "test_blocks",
+      columns: [
+        "id",
+        "external_id",
+        "user_id",
+        "course_id",
+        "mode",
+        "source",
+        "status",
+        "question_count",
+        "duration_minutes",
+        "time_remaining_sec",
+        "current_index",
+        "elapsed_seconds",
+        "completed_at",
+      ],
+      rows: blockBatch,
+    });
     await runRelationalQueryWithTimeout(
       client.from("test_blocks").upsert(blockBatch, { onConflict: "external_id", defaultToNull: false }),
       "Session block sync timed out.",
     );
+    console.log("[session-sync] test_blocks upsert completed", {
+      table: "test_blocks",
+      rowCount: blockBatch.length,
+      externalIds: blockBatch.map((entry) => entry.external_id),
+    });
   }
 
   const externalIds = upsertBlocks.map((entry) => entry.external_id).filter(Boolean);
@@ -12479,6 +12462,11 @@ async function syncSessionsToRelational(sessionsPayload) {
       persistedBlocks.push(...data);
     }
   }
+  console.log("[session-sync] Verified persisted test_blocks", {
+    table: "test_blocks",
+    rowCount: persistedBlocks.length,
+    rows: persistedBlocks,
+  });
   const blockIdByExternalId = Object.fromEntries((persistedBlocks || []).map((entry) => [entry.external_id, entry.id]));
   const blockIds = Object.values(blockIdByExternalId);
 
@@ -12533,18 +12521,46 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   if (itemRows.length) {
     for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+      console.log("[session-sync] Upserting test_block_items", {
+        table: "test_block_items",
+        columns: ["block_id", "position", "question_id"],
+        rowCount: itemBatch.length,
+        rows: itemBatch,
+      });
       await runRelationalQueryWithTimeout(
         client.from("test_block_items").upsert(itemBatch, { onConflict: "block_id,position" }),
         "Session item sync timed out.",
       );
+      console.log("[session-sync] test_block_items upsert completed", {
+        table: "test_block_items",
+        rowCount: itemBatch.length,
+      });
     }
   }
   if (responseRows.length) {
     for (const responseBatch of splitIntoBatches(responseRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+      console.log("[session-sync] Upserting test_responses", {
+        table: "test_responses",
+        columns: [
+          "block_id",
+          "question_id",
+          "selected_choice_labels",
+          "flagged",
+          "notes",
+          "submitted",
+          "answered_at",
+        ],
+        rowCount: responseBatch.length,
+        rows: responseBatch,
+      });
       await runRelationalQueryWithTimeout(
         client.from("test_responses").upsert(responseBatch, { onConflict: "block_id,question_id" }),
         "Session response sync timed out.",
       );
+      console.log("[session-sync] test_responses upsert completed", {
+        table: "test_responses",
+        rowCount: responseBatch.length,
+      });
     }
   }
 
@@ -17413,14 +17429,8 @@ function wireAuth(mode) {
             options: {
               data: {
                 full_name: name,
-                academic_year: academicYear,
-                academic_semester: academicSemester,
-                academicYear,
-                academicSemester,
                 phone: normalizedPhone,
                 phone_number: normalizedPhone,
-                assigned_courses: selectedCourses,
-                assignedCourses: selectedCourses,
               },
             },
           }));
@@ -20967,6 +20977,14 @@ function handleReviewClick(event) {
   if (action === "review-finish") {
     state.reviewIndex = 0;
     navigate("dashboard");
+    if (user?.role === "student") {
+      refreshStudentDataSnapshot(user, {
+        force: true,
+        rerender: true,
+      }).catch((error) => {
+        console.warn("Could not refresh completed session history after review.", error?.message || error);
+      });
+    }
   }
 }
 
@@ -29860,11 +29878,28 @@ function getSessionOwnerIdentitySet(userOrId) {
 
 function doesSessionBelongToUser(session, userOrId) {
   const ownerIds = getStoredSessionOwnerIds(session);
-  if (!ownerIds.size) {
-    return false;
-  }
   const userIdentitySet = getSessionOwnerIdentitySet(userOrId);
-  return [...ownerIds].some((ownerId) => userIdentitySet.has(ownerId));
+  if ([...ownerIds].some((ownerId) => userIdentitySet.has(ownerId))) {
+    return true;
+  }
+
+  const normalizedUserId = userOrId && typeof userOrId === "object"
+    ? String(userOrId?.id || "").trim()
+    : String(userOrId || "").trim();
+  const normalizedSessionUserId = String(session?.userId || "").trim();
+  if (normalizedUserId && normalizedSessionUserId && normalizedUserId === normalizedSessionUserId) {
+    return true;
+  }
+
+  const normalizedUserProfileId = userOrId && typeof userOrId === "object"
+    ? String(getCurrentSessionProfileId(userOrId) || getUserProfileId(userOrId) || "").trim()
+    : "";
+  const normalizedSessionProfileId = String(session?.ownerProfileId || session?.ownerAuthId || "").trim();
+  if (normalizedUserProfileId && normalizedSessionProfileId && normalizedUserProfileId === normalizedSessionProfileId) {
+    return true;
+  }
+
+  return false;
 }
 
 function getSessionsForUser(userId) {
@@ -30082,9 +30117,13 @@ function getCompletedSessionsForUser(userId, options = {}) {
   const ownerReference = targetUser || userId;
   const directIdentityHints = normalizeSessionOwnerIdList([
     String(userId || "").trim(),
+    ...(targetUser ? getStoredUserIdentityAliases(targetUser) : []),
     targetUser?.id,
     getUserProfileId(targetUser),
     getCurrentSessionProfileId(targetUser),
+    targetUser && getCurrentUser() && String(getCurrentUser()?.id || "").trim() === String(targetUser?.id || "").trim()
+      ? getActiveSupabaseAuthUserId()
+      : "",
   ]);
   const directlyOwnedCompletedSessions = directIdentityHints.length
     ? getSessions().filter((session) => {
@@ -30093,7 +30132,8 @@ function getCompletedSessionsForUser(userId, options = {}) {
         return false;
       }
       const sessionOwnerIds = getStoredSessionOwnerIds(session);
-      return directIdentityHints.some((identity) => sessionOwnerIds.has(identity));
+      const sessionProfileId = String(session?.ownerProfileId || session?.ownerAuthId || "").trim();
+      return directIdentityHints.some((identity) => sessionOwnerIds.has(identity) || (sessionProfileId && sessionProfileId === identity));
     })
     : [];
   const allVisibleCompletedSessions = getSessionsForUser(ownerReference)
@@ -30110,6 +30150,15 @@ function getCompletedSessionsForUser(userId, options = {}) {
         .map((session) => [String(session?.id || "").trim(), session]),
     ).values()]
     : scopedCompletedSessions;
+  console.log("[session-history] Resolved completed sessions for dashboard/review", {
+    userId: String(userId || "").trim(),
+    directIdentityHints,
+    directCount: directlyOwnedCompletedSessions.length,
+    visibleCount: allVisibleCompletedSessions.length,
+    scopedCount: scopedCompletedSessions.length,
+    resolvedCount: resolvedSessions.length,
+    sessionIds: resolvedSessions.map((session) => String(session?.id || "").trim()).filter(Boolean),
+  });
   return resolvedSessions
     .slice()
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
@@ -32077,6 +32126,9 @@ function getAvailableCoursesForUser(user) {
       const scopedAssigned = assigned.filter((course) => byEnrollment.includes(course));
       return scopedAssigned.length ? scopedAssigned : byEnrollment;
     }
+    if (hasSupabaseManagedIdentity(user)) {
+      return [];
+    }
     if (assigned.length) return assigned;
     return [];
   }
@@ -32093,9 +32145,8 @@ function getPublishedQuestionsForUser(user) {
     )),
     { course: "", topics: [] },
   );
-  // Fail safe: if enrollment metadata is temporarily missing, keep published questions visible.
   if (!availableCourses.size) {
-    return publishedQuestions;
+    return user?.role === "student" ? [] : publishedQuestions;
   }
   return publishedQuestions.filter((question) => availableCourses.has(question.qbankCourse));
 }
