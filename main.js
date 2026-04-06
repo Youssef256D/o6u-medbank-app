@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.19").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.21").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -3545,6 +3545,20 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const shouldBackfillProfilePhone = role === "student"
     && normalizedProfilePhone !== resolvedPhone
     && Boolean(resolvedPhone);
+  const shouldBackfillStudentEnrollment = role === "student" && (
+    (
+      profileYear === null
+      && normalizeAcademicYearOrNull(updatedUser?.academicYear) !== null
+    )
+    || (
+      profileSemester === null
+      && normalizeAcademicSemesterOrNull(updatedUser?.academicSemester) !== null
+    )
+    || (
+      relationalAssignedCourses.length === 0
+      && sanitizeCourseAssignments(updatedUser?.assignedCourses || []).length > 0
+    )
+  );
   if (shouldBackfillProfilePhone) {
     client
       .from("profiles")
@@ -3571,6 +3585,15 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       .catch((patchError) => {
         console.warn("Could not backfill profile phone.", patchError?.message || patchError);
       });
+  }
+  if (shouldBackfillStudentEnrollment) {
+    syncProfilesToRelational([updatedUser], {
+      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
+    }).catch((syncError) => {
+      if (!isMissingRelationError(syncError)) {
+        console.warn("Could not backfill missing student enrollment fields.", syncError?.message || syncError);
+      }
+    });
   }
   return { user: updatedUser, approvalChecked: true };
 }
@@ -5656,10 +5679,12 @@ function shouldStampRecentLocalUserWrite(meta = null) {
 }
 
 function canWriteStudentEnrollmentProfileToRelational(scope) {
-  // Student enrollment is admin-managed only. Non-admin flows may update
-  // local draft/profile state, but they must never push year/semester or
-  // enrollment rows back to Supabase.
-  return normalizeRelationalUserSyncScope(scope) === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
+  const normalizedScope = normalizeRelationalUserSyncScope(scope);
+  return (
+    normalizedScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN
+    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL
+    || normalizedScope === USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE
+  );
 }
 
 function canWriteAdminManagedProfileFieldsToRelational(scope) {
