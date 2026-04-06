@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-01.1").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.2").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8698,7 +8698,18 @@ function hasRenderableLocalSessionRouteState(user = null) {
   }
 
   if (currentRoute === "review") {
-    return getCompletedSessionsForUser(currentUser.id).length > 0;
+    const reviewSession = state.reviewSessionId ? getSessionById(state.reviewSessionId) : null;
+    if (
+      reviewSession
+      && doesSessionBelongToUser(reviewSession, currentUser)
+      && String(reviewSession?.status || "").trim() === "completed"
+    ) {
+      return true;
+    }
+    return getCompletedSessionsForUser(currentUser.id, {
+      userOverride: currentUser,
+      fallbackToAllTerms: true,
+    }).length > 0;
   }
 
   return false;
@@ -18049,9 +18060,11 @@ function renderPreviousTestsSection(userOrId) {
   const user = userOrId && typeof userOrId === "object" ? userOrId : null;
   const userId = String((user?.id) || userOrId || "").trim();
   const questionMetaById = getAnalyticsQuestionMetaById();
-  const completed = getCompletedSessionsForUser(userId).filter((session) => (
-    isSessionWithinUserAcademicTerm(session, user, questionMetaById)
-  ));
+  const completed = getCompletedSessionsForUser(userId, {
+    userOverride: user,
+    questionMetaById,
+    fallbackToAllTerms: true,
+  });
   if (!completed.length) {
     return `
       <section class="panel">
@@ -18135,7 +18148,10 @@ function wireDashboard() {
       const sessionId = button.getAttribute("data-session-id");
       const user = getCurrentUser();
       if (!sessionId || !user) return;
-      const session = getCompletedSessionsForUser(user.id).find((entry) => entry.id === sessionId);
+      const session = getCompletedSessionsForUser(user.id, {
+        userOverride: user,
+        fallbackToAllTerms: true,
+      }).find((entry) => entry.id === sessionId);
       if (!session) {
         toast("Previous test not found.");
         return;
@@ -20521,7 +20537,10 @@ function addQuestionToIncorrectQueue(userId, questionId) {
 
 function renderReview() {
   const user = getCurrentUser();
-  const completedSessions = getCompletedSessionsForUser(user.id);
+  const completedSessions = getCompletedSessionsForUser(user.id, {
+    userOverride: user,
+    fallbackToAllTerms: true,
+  });
 
   if (!completedSessions.length) {
     return `
@@ -20759,7 +20778,10 @@ function handleReviewClick(event) {
   }
 
   const user = getCurrentUser();
-  const completedSessions = getCompletedSessionsForUser(user.id);
+  const completedSessions = getCompletedSessionsForUser(user.id, {
+    userOverride: user,
+    fallbackToAllTerms: true,
+  });
   const selected =
     completedSessions.find((session) => session.id === state.reviewSessionId) || completedSessions[0];
   if (!selected) {
@@ -20817,7 +20839,10 @@ function handleReviewKeydown(event) {
   if (event.key === "ArrowRight") {
     event.preventDefault();
     const user = getCurrentUser();
-    const selected = getCompletedSessionsForUser(user.id)
+    const selected = getCompletedSessionsForUser(user.id, {
+      userOverride: user,
+      fallbackToAllTerms: true,
+    })
       .find((session) => session.id === state.reviewSessionId);
     if (!selected) {
       return;
@@ -29839,9 +29864,24 @@ function getAcademicTermScopedSessionsForUser(userId, userOverride = null, quest
   return visibleSessions.filter((session) => isSessionWithinUserAcademicTerm(session, targetUser, map));
 }
 
-function getCompletedSessionsForUser(userId) {
-  return getAcademicTermScopedSessionsForUser(userId)
-    .filter((session) => session.status === "completed")
+function getCompletedSessionsForUser(userId, options = {}) {
+  const targetUser = options?.userOverride || findUserForAnalytics(userId);
+  const questionMetaById = options?.questionMetaById instanceof Map
+    ? options.questionMetaById
+    : getAnalyticsQuestionMetaById();
+  const allVisibleCompletedSessions = getSessionsForUser(userId)
+    .filter((session) => (
+      String(session?.status || "").trim() === "completed"
+      && String(session?.status || "").trim() !== "suspended"
+    ));
+  const scopedCompletedSessions = getAcademicTermScopedSessionsForUser(userId, targetUser, questionMetaById)
+    .filter((session) => String(session?.status || "").trim() === "completed");
+  const shouldFallbackToAllTerms = options?.fallbackToAllTerms !== false;
+  const resolvedSessions = scopedCompletedSessions.length || !shouldFallbackToAllTerms
+    ? scopedCompletedSessions
+    : allVisibleCompletedSessions;
+  return resolvedSessions
+    .slice()
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 }
 
