@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.14").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.15").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8447,6 +8447,32 @@ function hasPendingSessionSyncForId(sessionId = "") {
   return pendingSessions.some((session) => String(session?.id || "").trim() === targetId);
 }
 
+function hasUnresolvedSessionCloudSync(sessionId = "") {
+  const targetId = String(sessionId || "").trim();
+  if (hasPendingSessionSyncForId(targetId)) {
+    return true;
+  }
+  if (
+    relationalSync.pendingWrites.has(STORAGE_KEYS.sessions)
+    || relationalSync.inFlightPayloadSignatures.has(STORAGE_KEYS.sessions)
+    || relationalSync.blockedStorageKeys.has(STORAGE_KEYS.sessions)
+    || relationalSync.lastRejectedPayloadSignatures.has(STORAGE_KEYS.sessions)
+  ) {
+    return true;
+  }
+  if (!targetId) {
+    return false;
+  }
+  const session = getSessionById(targetId);
+  if (!session) {
+    return false;
+  }
+  if (String(session?.status || "").trim() !== "completed") {
+    return false;
+  }
+  return !isUuidValue(String(session?.dbId || "").trim());
+}
+
 function mergeSessionResponseSnapshots(localResponse, remoteResponse, preferLocal) {
   const local = isRecordObject(localResponse) ? localResponse : {};
   const remote = isRecordObject(remoteResponse) ? remoteResponse : {};
@@ -12272,10 +12298,41 @@ async function syncSessionsToRelational(sessionsPayload) {
   const sessions = dedupedSessions;
   const users = getUsers();
   const questions = getQuestions();
+  const questionStore = getQuestionStore();
   const currentSessionProfileId = String(
     getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "",
   ).trim();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
+  const resolveSessionQuestionDbId = (questionId) => {
+    const normalizedQuestionId = String(questionId || "").trim();
+    if (!normalizedQuestionId) {
+      return "";
+    }
+    const resolvedQuestionId = resolveSessionQuestionId(normalizedQuestionId, questionStore);
+    const matchedQuestion = getQuestionFromLookup(questionStore.byId, normalizedQuestionId, questionStore)
+      || questionStore.byDbId.get(normalizedQuestionId)
+      || questionStore.byDbId.get(resolvedQuestionId)
+      || null;
+    const explicitDbId = String(matchedQuestion?.dbId || "").trim();
+    if (isUuidValue(explicitDbId)) {
+      return explicitDbId;
+    }
+    const mappedDbId = String(
+      questionDbIdByLocalId[normalizedQuestionId]
+      || questionDbIdByLocalId[resolvedQuestionId]
+      || "",
+    ).trim();
+    if (isUuidValue(mappedDbId)) {
+      return mappedDbId;
+    }
+    if (isUuidValue(normalizedQuestionId) && questionStore.byDbId.has(normalizedQuestionId)) {
+      return normalizedQuestionId;
+    }
+    if (isUuidValue(resolvedQuestionId) && questionStore.byDbId.has(resolvedQuestionId)) {
+      return resolvedQuestionId;
+    }
+    return "";
+  };
   const sessionOwnerProfileIdBySessionId = new Map();
   const skippedSessionDiagnostics = [];
   const resolveSyncOwnerProfileId = (session) => {
@@ -12544,6 +12601,7 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   const itemRowsBySyncKey = new Map();
   const responseRowsBySyncKey = new Map();
+  const skippedQuestionDiagnostics = [];
 
   syncableOwnedSessions.forEach((session) => {
     const sessionId = String(session?.id || "").trim();
@@ -12552,8 +12610,17 @@ async function syncSessionsToRelational(sessionsPayload) {
     const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
     const seenQuestionDbIds = new Set();
     questionIds.forEach((localQuestionId, index) => {
-      const questionDbId = questionDbIdByLocalId[localQuestionId];
-      if (!questionDbId) return;
+      const resolvedQuestionId = resolveSessionQuestionId(localQuestionId, questionStore);
+      const questionDbId = resolveSessionQuestionDbId(localQuestionId);
+      if (!questionDbId) {
+        skippedQuestionDiagnostics.push({
+          sessionId,
+          localQuestionId: String(localQuestionId || "").trim() || null,
+          resolvedQuestionId: String(resolvedQuestionId || "").trim() || null,
+          blockDbId,
+        });
+        return;
+      }
       const responseSyncKey = `${blockDbId}:${questionDbId}`;
       if (seenQuestionDbIds.has(questionDbId) || responseRowsBySyncKey.has(responseSyncKey)) {
         return;
@@ -12565,7 +12632,7 @@ async function syncSessionsToRelational(sessionsPayload) {
         question_id: questionDbId,
       });
 
-      const response = session.responses?.[localQuestionId] || {};
+      const response = session.responses?.[localQuestionId] || session.responses?.[resolvedQuestionId] || {};
       responseRowsBySyncKey.set(responseSyncKey, {
         block_id: blockDbId,
         question_id: questionDbId,
@@ -12579,6 +12646,9 @@ async function syncSessionsToRelational(sessionsPayload) {
   });
   const itemRows = [...itemRowsBySyncKey.values()];
   const responseRows = [...responseRowsBySyncKey.values()];
+  if (skippedQuestionDiagnostics.length) {
+    console.warn("[session-sync] Some session questions could not be matched to relational question IDs.", skippedQuestionDiagnostics);
+  }
 
   if (itemRows.length) {
     for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
@@ -19600,6 +19670,7 @@ function renderSession() {
       state.reviewIndex = 0;
       state.sessionPanel = null;
       navigate("review");
+      flushPendingSyncInBackground();
     }, 0);
     return `
       <section class="panel">
@@ -19934,6 +20005,7 @@ function wireSession() {
     state.reviewIndex = 0;
     state.sessionPanel = null;
     navigate("review");
+    flushPendingSyncInBackground();
     return;
   }
 
@@ -20422,6 +20494,16 @@ async function handleSessionClick(event) {
       }
     });
     finalizeSession(session.id, { questionStore });
+    let syncWarning = "";
+    try {
+      await flushPendingSyncNow({ throwOnRelationalFailure: true });
+    } catch (error) {
+      console.warn("Could not persist completed block before opening review.", error?.message || error);
+      syncWarning = "Block submitted locally, but cloud sync has not finished yet. Keep this tab open until sync completes.";
+    }
+    if (!syncWarning && hasUnresolvedSessionCloudSync(session.id)) {
+      syncWarning = "Block submitted locally, but cloud sync is still pending. Keep this tab open until sync completes.";
+    }
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
     document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
@@ -20429,8 +20511,7 @@ async function handleSessionClick(event) {
     state.reviewSessionId = session.id;
     state.reviewIndex = 0;
     navigate("review");
-    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
-    toast("Block submitted.");
+    toast(syncWarning || "Block submitted.");
     return;
   }
 
@@ -20668,6 +20749,7 @@ function startSessionTicker(sessionId) {
       state.reviewIndex = 0;
       state.sessionPanel = null;
       navigate("review");
+      flushPendingSyncInBackground();
     }
   }, 1000);
 }
@@ -21004,7 +21086,7 @@ function wireReview() {
   document.addEventListener("keydown", handleReviewKeydown);
 }
 
-function handleReviewClick(event) {
+async function handleReviewClick(event) {
   if (state.route !== "review") {
     return;
   }
@@ -21048,8 +21130,22 @@ function handleReviewClick(event) {
   }
 
   if (action === "review-finish") {
+    let syncWarning = "";
+    try {
+      await flushPendingSyncNow({ throwOnRelationalFailure: true });
+    } catch (error) {
+      console.warn("Could not persist completed block before returning to dashboard.", error?.message || error);
+      syncWarning = "Your finished block is saved locally, but cloud sync has not finished yet. Keep this tab open and try Dashboard refresh again in a moment.";
+    }
+    if (!syncWarning && hasUnresolvedSessionCloudSync(selected.id)) {
+      syncWarning = "Your finished block is still waiting for cloud sync. Keep this tab open and try Dashboard refresh again in a moment.";
+    }
     state.reviewIndex = 0;
     navigate("dashboard");
+    if (syncWarning) {
+      toast(syncWarning);
+      return;
+    }
     if (user?.role === "student") {
       refreshStudentDataSnapshot(user, {
         force: true,
