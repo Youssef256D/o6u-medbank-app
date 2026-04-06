@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.2").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.3").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -20202,8 +20202,7 @@ async function handleSessionClick(event) {
         response.submitted = true;
       }
     });
-    finalizeSession(session.id);
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    finalizeSession(session.id, { questionStore });
     appEl.removeEventListener("click", handleSessionClick);
     document.removeEventListener("keydown", handleSessionKeydown);
     document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
@@ -20211,6 +20210,7 @@ async function handleSessionClick(event) {
     state.reviewSessionId = session.id;
     state.reviewIndex = 0;
     navigate("review");
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
     toast("Block submitted.");
     return;
   }
