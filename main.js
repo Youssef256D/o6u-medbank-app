@@ -4378,28 +4378,30 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const nextAuthProvider = normalizeAuthProvider(
     profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
   );
-  const preservePreviousEnrollmentLocally = Boolean(previous) && !hasSupabaseManagedIdentity(previous);
+  const hasExplicitAcademicYear = Object.prototype.hasOwnProperty.call(profileOverrides, "academicYear");
+  const hasExplicitAcademicSemester = Object.prototype.hasOwnProperty.call(profileOverrides, "academicSemester");
+  const hasExplicitAssignedCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "assignedCourses");
 
-  const nextYearInput = profileOverrides.academicYear
-    ?? (preservePreviousEnrollmentLocally ? previous?.academicYear : null)
-    ?? null;
-  const nextSemesterInput = profileOverrides.academicSemester
-    ?? (preservePreviousEnrollmentLocally ? previous?.academicSemester : null)
-    ?? null;
+  // Supabase auth events can arrive before the relational profile/enrollment
+  // refresh finishes. Preserve the current enrollment snapshot unless this
+  // caller explicitly supplied new enrollment fields, otherwise a token refresh
+  // can look like an enrollment change and suspend the active test mid-session.
+  const nextYearInput = hasExplicitAcademicYear
+    ? profileOverrides.academicYear
+    : (previous?.academicYear ?? null);
+  const nextSemesterInput = hasExplicitAcademicSemester
+    ? profileOverrides.academicSemester
+    : (previous?.academicSemester ?? null);
   const nextYear = nextRole === "student" ? normalizeAcademicYearOrNull(nextYearInput) : null;
   const nextSemester = nextRole === "student" ? normalizeAcademicSemesterOrNull(nextSemesterInput) : null;
 
   let nextCourses;
   if (nextRole === "student") {
-    const overrideCourses = Array.isArray(profileOverrides.assignedCourses) ? profileOverrides.assignedCourses : [];
-    const previousCourses = preservePreviousEnrollmentLocally && Array.isArray(previous?.assignedCourses)
-      ? previous.assignedCourses
-      : [];
-    const requestedCourses = overrideCourses.length
-      ? overrideCourses
-      : previousCourses.length
-        ? previousCourses
-        : [];
+    const overrideCourses = hasExplicitAssignedCourses && Array.isArray(profileOverrides.assignedCourses)
+      ? profileOverrides.assignedCourses
+      : null;
+    const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
+    const requestedCourses = overrideCourses ?? previousCourses;
     if (nextYear !== null && nextSemester !== null) {
       const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
       nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
@@ -12904,9 +12906,9 @@ function seedData() {
     save(STORAGE_KEYS.sessions, []);
   } else {
     const sessions = getSessions();
-    const repairedCompletedArchives = restoreCompletedSessionsArchivedByEnrollmentChange(sessions);
+    const repairedEnrollmentArchives = restoreSessionsArchivedByEnrollmentChange(sessions, getUsers());
     const repairedOwnerAliases = repairSessionOwnerAliasesInList(sessions, getUsers());
-    if (repairedCompletedArchives || repairedOwnerAliases) {
+    if (repairedEnrollmentArchives || repairedOwnerAliases) {
       save(STORAGE_KEYS.sessions, sessions);
     }
   }
@@ -30103,8 +30105,25 @@ function getUserEnrollmentScopeFingerprint(user) {
   return `student|${year ?? "na"}|${semester ?? "na"}|${courses.join("||")}`;
 }
 
+function hasStableStudentEnrollmentScope(user) {
+  if (!user || typeof user !== "object") {
+    return false;
+  }
+  const role = String(user?.role || "student").trim().toLowerCase() === "admin" ? "admin" : "student";
+  if (role !== "student") {
+    return true;
+  }
+  const year = normalizeAcademicYearOrNull(user?.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(user?.academicSemester);
+  const courses = getNormalizedEnrollmentCourseList(user);
+  return year !== null && semester !== null && courses.length > 0;
+}
+
 function didUserEnrollmentScopeChange(previousUser, nextUser) {
   if (!previousUser || !nextUser) {
+    return false;
+  }
+  if (!hasStableStudentEnrollmentScope(previousUser) || !hasStableStudentEnrollmentScope(nextUser)) {
     return false;
   }
   return getUserEnrollmentScopeFingerprint(previousUser) !== getUserEnrollmentScopeFingerprint(nextUser);
@@ -30140,8 +30159,10 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
   return [...new Set(archivedSessionIds.filter(Boolean))];
 }
 
-function restoreCompletedSessionsArchivedByEnrollmentChange(sessions) {
+function restoreSessionsArchivedByEnrollmentChange(sessions, usersOverride = null) {
   const list = Array.isArray(sessions) ? sessions : [];
+  const users = Array.isArray(usersOverride) ? usersOverride : getUsers();
+  const questionMetaById = getAnalyticsQuestionMetaById();
   let changed = false;
   list.forEach((session) => {
     if (!session || typeof session !== "object") {
@@ -30150,11 +30171,33 @@ function restoreCompletedSessionsArchivedByEnrollmentChange(sessions) {
     const status = String(session?.status || "").trim();
     const previousStatus = String(session?.previousStatus || "").trim();
     const archivedReason = String(session?.archivedReason || "").trim();
-    if (status !== "suspended" || previousStatus !== "completed" || archivedReason !== "enrollment_change") {
+    if (status !== "suspended" || archivedReason !== "enrollment_change") {
       return;
     }
-    session.status = "completed";
-    session.completedAt = session.completedAt || session.updatedAt || session.createdAt || nowISO();
+
+    if (previousStatus === "completed") {
+      session.status = "completed";
+      session.completedAt = session.completedAt || session.updatedAt || session.createdAt || nowISO();
+      delete session.previousStatus;
+      delete session.archivedAt;
+      delete session.archivedReason;
+      changed = true;
+      return;
+    }
+
+    if (previousStatus !== "in_progress") {
+      return;
+    }
+
+    const matchingUser = findMatchingUserForSessionOwner(session, users);
+    if (!matchingUser || !hasStableStudentEnrollmentScope(matchingUser)) {
+      return;
+    }
+    if (!isSessionWithinUserAcademicTerm(session, matchingUser, questionMetaById)) {
+      return;
+    }
+
+    session.status = "in_progress";
     delete session.previousStatus;
     delete session.archivedAt;
     delete session.archivedReason;
