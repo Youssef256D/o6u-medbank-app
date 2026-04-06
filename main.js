@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.7").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.8").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -8582,13 +8582,15 @@ function shouldPreferLocalSessionQuestionData(localSession, remoteSession, quest
 }
 
 function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession) {
+  const localStatus = String(localSession?.status || "").trim();
+  const remoteStatus = String(remoteSession?.status || "").trim();
   const activeSessionId = String(state.sessionId || "").trim();
   const activeReviewSessionId = String(state.reviewSessionId || "").trim();
   if (
     sessionId
     && state.route === "session"
     && activeSessionId === sessionId
-    && String(localSession?.status || "").trim() === "in_progress"
+    && localStatus === "in_progress"
   ) {
     return true;
   }
@@ -8596,16 +8598,19 @@ function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession
     sessionId
     && state.route === "review"
     && activeReviewSessionId === sessionId
-    && String(localSession?.status || "").trim() === "completed"
+    && localStatus === "completed"
   ) {
     return true;
   }
   if (hasPendingSessionSyncForId(sessionId)) {
     return true;
   }
+  if (localStatus === "completed" && remoteStatus !== "completed") {
+    return true;
+  }
   if (
-    String(localSession?.status || "").trim() === "completed"
-    && String(remoteSession?.status || "").trim() === "in_progress"
+    localStatus === "completed"
+    && remoteStatus === "in_progress"
     && countSubmittedSessionResponses(localSession) >= countSubmittedSessionResponses(remoteSession)
   ) {
     return true;
@@ -8627,6 +8632,8 @@ function mergeSessionSnapshots(localSession, remoteSession) {
   const preferLocal = shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession);
   const questionStore = getQuestionStore();
   const merged = preferLocal ? { ...remoteSession, ...localSession } : { ...localSession, ...remoteSession };
+  const localStatus = String(localSession?.status || "").trim();
+  const remoteStatus = String(remoteSession?.status || "").trim();
   const localResponses = isRecordObject(localSession?.responses) ? localSession.responses : {};
   const remoteResponses = isRecordObject(remoteSession?.responses) ? remoteSession.responses : {};
   const responseQuestionIds = new Set([
@@ -8668,6 +8675,10 @@ function mergeSessionSnapshots(localSession, remoteSession) {
       ?? normalizeAcademicYearOrNull(remoteSession?.academicYear);
     merged.academicSemester = normalizeAcademicSemesterOrNull(localSession?.academicSemester)
       ?? normalizeAcademicSemesterOrNull(remoteSession?.academicSemester);
+  }
+  if (localStatus === "completed" && remoteStatus !== "completed") {
+    merged.status = "completed";
+    merged.completedAt = localSession?.completedAt || merged.completedAt || localSession?.updatedAt || localSession?.createdAt || nowISO();
   }
   merged.ownerIds = normalizeSessionOwnerIdList([
     ...(Array.isArray(localSession?.ownerIds) ? localSession.ownerIds : []),
