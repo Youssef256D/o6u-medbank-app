@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.5").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.7").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -4587,6 +4587,13 @@ function migrateLocalUserReferences(previousUserId, nextUserId) {
   sessions.forEach((session) => {
     if (String(session?.userId || "").trim() === previousId) {
       session.userId = nextId;
+      session.ownerIds = normalizeSessionOwnerIdList([
+        ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+        previousId,
+        nextId,
+        session?.ownerProfileId,
+        session?.ownerAuthId,
+      ]);
       sessionsChanged = true;
     }
   });
@@ -7171,6 +7178,10 @@ async function hydrateRelationalProfiles(currentUser) {
   archiveSessionsForChangedUserEnrollments(usersBefore, nextUsers, {
     reason: "enrollment_change",
   });
+  const sessionsAfterHydration = getSessions();
+  if (repairSessionOwnerAliasesInList(sessionsAfterHydration, nextUsers)) {
+    saveLocalOnly(STORAGE_KEYS.sessions, sessionsAfterHydration);
+  }
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
   saveLocalOnly(STORAGE_KEYS.currentUserId, currentUser.supabaseAuthId);
   syncUsersWithCurriculum();
@@ -7989,6 +8000,10 @@ async function hydrateRelationalSessions(currentUser) {
       userId: localUserIdByAuth[block.user_id] || block.user_id,
       ownerProfileId: isUuidValue(block.user_id) ? block.user_id : null,
       ownerAuthId: isUuidValue(block.user_id) ? block.user_id : null,
+      ownerIds: normalizeSessionOwnerIdList([
+        localUserIdByAuth[block.user_id] || block.user_id,
+        block.user_id,
+      ]),
       mode: String(block.mode || "tutor"),
       source: String(block.source || "all"),
       durationMin: Number(block.duration_minutes || 20),
@@ -8106,6 +8121,14 @@ function sanitizeUserScopedPayload(storageKey, payload, user = null) {
         userId: String(session?.userId || "").trim() || currentUserId,
         ownerProfileId: resolveSessionOwnerProfileId(session) || normalizedOwnerProfileId || null,
         ownerAuthId: resolveSessionOwnerProfileId(session) || normalizedOwnerProfileId || null,
+        ownerIds: normalizeSessionOwnerIdList([
+          ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+          session?.userId,
+          session?.ownerProfileId,
+          session?.ownerAuthId,
+          currentUserId,
+          normalizedOwnerProfileId,
+        ]),
       }));
   }
 
@@ -8646,6 +8669,16 @@ function mergeSessionSnapshots(localSession, remoteSession) {
     merged.academicSemester = normalizeAcademicSemesterOrNull(localSession?.academicSemester)
       ?? normalizeAcademicSemesterOrNull(remoteSession?.academicSemester);
   }
+  merged.ownerIds = normalizeSessionOwnerIdList([
+    ...(Array.isArray(localSession?.ownerIds) ? localSession.ownerIds : []),
+    ...(Array.isArray(remoteSession?.ownerIds) ? remoteSession.ownerIds : []),
+    localSession?.userId,
+    localSession?.ownerProfileId,
+    localSession?.ownerAuthId,
+    remoteSession?.userId,
+    remoteSession?.ownerProfileId,
+    remoteSession?.ownerAuthId,
+  ]);
   return merged;
 }
 
@@ -12445,6 +12478,11 @@ async function syncSessionsToRelational(sessionsPayload) {
       ...(dbId ? { dbId } : {}),
       ownerProfileId: nextOwnerProfileId,
       ownerAuthId: nextOwnerProfileId,
+      ownerIds: normalizeSessionOwnerIdList([
+        ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+        session?.userId,
+        nextOwnerProfileId,
+      ]),
     };
   };
 
@@ -12623,6 +12661,13 @@ function seedData() {
 
   if (!load(STORAGE_KEYS.sessions, null)) {
     save(STORAGE_KEYS.sessions, []);
+  } else {
+    const sessions = getSessions();
+    const repairedCompletedArchives = restoreCompletedSessionsArchivedByEnrollmentChange(sessions);
+    const repairedOwnerAliases = repairSessionOwnerAliasesInList(sessions, getUsers());
+    if (repairedCompletedArchives || repairedOwnerAliases) {
+      save(STORAGE_KEYS.sessions, sessions);
+    }
   }
 
   if (!load(STORAGE_KEYS.notifications, null)) {
@@ -29595,19 +29640,44 @@ function addKnownUserMatchKeys(targetSet, user) {
   return targetSet;
 }
 
-function getStoredSessionOwnerIds(session) {
-  const ownerIds = new Set();
-  [
+function normalizeSessionOwnerIdList(ownerIds = []) {
+  return [...new Set(
+    (Array.isArray(ownerIds) ? ownerIds : [ownerIds])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+function findMatchingUserForSessionOwner(session, usersOverride = null, ownerIdsOverride = null) {
+  const users = Array.isArray(usersOverride) ? usersOverride : getUsers();
+  const ownerIds = normalizeSessionOwnerIdList(ownerIdsOverride || [
+    ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
     session?.userId,
     session?.ownerProfileId,
     session?.ownerAuthId,
-  ].forEach((entry) => {
-    const normalized = String(entry || "").trim();
-    if (normalized) {
-      ownerIds.add(normalized);
-    }
-  });
-  const resolvedProfileId = resolveSessionOwnerProfileId(session);
+  ]);
+  if (!ownerIds.length) {
+    return null;
+  }
+  return (Array.isArray(users) ? users : []).find((entry) => {
+    const localId = String(entry?.id || "").trim();
+    const authId = String(entry?.supabaseAuthId || "").trim();
+    return ownerIds.some((ownerId) => ownerId && (ownerId === localId || ownerId === authId));
+  }) || null;
+}
+
+function getStoredSessionOwnerIds(session, usersOverride = null) {
+  const ownerIds = new Set(
+    normalizeSessionOwnerIdList([
+      ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+      session?.userId,
+      session?.ownerProfileId,
+      session?.ownerAuthId,
+    ]),
+  );
+  const matchingUser = findMatchingUserForSessionOwner(session, usersOverride, [...ownerIds]);
+  addKnownUserIds(ownerIds, matchingUser);
+  const resolvedProfileId = resolveSessionOwnerProfileId(session, usersOverride);
   if (resolvedProfileId) {
     ownerIds.add(resolvedProfileId);
   }
@@ -29625,12 +29695,7 @@ function resolveSessionOwnerProfileId(session, usersOverride = null) {
     return ownerId;
   }
 
-  const users = Array.isArray(usersOverride) ? usersOverride : getUsers();
-  const matchingUser = (Array.isArray(users) ? users : []).find((entry) => {
-    const localId = String(entry?.id || "").trim();
-    const authId = String(entry?.supabaseAuthId || "").trim();
-    return ownerId && (localId === ownerId || authId === ownerId);
-  });
+  const matchingUser = findMatchingUserForSessionOwner(session, usersOverride);
   const resolvedProfileId = String(getUserProfileId(matchingUser) || "").trim();
   return isUuidValue(resolvedProfileId) ? resolvedProfileId : "";
 }
@@ -29766,7 +29831,7 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
       return;
     }
     const status = String(session?.status || "").trim();
-    if (status !== "in_progress" && status !== "completed") {
+    if (status !== "in_progress") {
       return;
     }
 
@@ -29779,6 +29844,60 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
   });
 
   return [...new Set(archivedSessionIds.filter(Boolean))];
+}
+
+function restoreCompletedSessionsArchivedByEnrollmentChange(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  let changed = false;
+  list.forEach((session) => {
+    if (!session || typeof session !== "object") {
+      return;
+    }
+    const status = String(session?.status || "").trim();
+    const previousStatus = String(session?.previousStatus || "").trim();
+    const archivedReason = String(session?.archivedReason || "").trim();
+    if (status !== "suspended" || previousStatus !== "completed" || archivedReason !== "enrollment_change") {
+      return;
+    }
+    session.status = "completed";
+    session.completedAt = session.completedAt || session.updatedAt || session.createdAt || nowISO();
+    delete session.previousStatus;
+    delete session.archivedAt;
+    delete session.archivedReason;
+    changed = true;
+  });
+  return changed;
+}
+
+function repairSessionOwnerAliasesInList(sessions, usersOverride = null) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  let changed = false;
+  list.forEach((session) => {
+    if (!session || typeof session !== "object") {
+      return;
+    }
+    const normalizedOwnerIds = normalizeSessionOwnerIdList([
+      ...getStoredSessionOwnerIds(session, usersOverride),
+      session?.userId,
+      session?.ownerProfileId,
+      session?.ownerAuthId,
+    ]);
+    if (JSON.stringify(Array.isArray(session?.ownerIds) ? session.ownerIds : []) !== JSON.stringify(normalizedOwnerIds)) {
+      session.ownerIds = normalizedOwnerIds;
+      changed = true;
+    }
+    const resolvedOwnerProfileId = resolveSessionOwnerProfileId(session, usersOverride) || null;
+    if ((String(session?.ownerProfileId || "").trim() || null) !== resolvedOwnerProfileId) {
+      session.ownerProfileId = resolvedOwnerProfileId;
+      changed = true;
+    }
+    const resolvedOwnerAuthId = resolvedOwnerProfileId || String(session?.ownerAuthId || "").trim() || null;
+    if ((String(session?.ownerAuthId || "").trim() || null) !== resolvedOwnerAuthId) {
+      session.ownerAuthId = resolvedOwnerAuthId;
+      changed = true;
+    }
+  });
+  return changed;
 }
 
 function archiveSessionsForChangedUserEnrollments(previousUsers, nextUsers, options = {}) {
@@ -30031,6 +30150,12 @@ function createSessionFromQuestions(questions, config = {}) {
   const sessionAcademicSemester = user.role === "student" ? normalizeAcademicSemesterOrNull(user.academicSemester) : null;
   const sessionId = makeId("s");
   const sessionOwnerProfileId = String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
+  const sessionOwnerIds = normalizeSessionOwnerIdList([
+    user?.id,
+    getUserProfileId(user),
+    user?.supabaseAuthId,
+    sessionOwnerProfileId,
+  ]);
   const sessionCourses = [];
   const seenSessionCourses = new Set();
   const createdAtMs = Date.now();
@@ -30070,6 +30195,7 @@ function createSessionFromQuestions(questions, config = {}) {
     userId: user.id,
     ownerProfileId: isUuidValue(sessionOwnerProfileId) ? sessionOwnerProfileId : null,
     ownerAuthId: isUuidValue(sessionOwnerProfileId) ? sessionOwnerProfileId : null,
+    ownerIds: sessionOwnerIds,
     name: sessionName,
     testId: sessionTestId,
     mode,
@@ -32912,12 +33038,24 @@ function persistSessionUiPreferences() {
 
 function normalizeSession(session, options = {}) {
   const questionStore = options?.questionStore || getQuestionStore();
+  const users = Array.isArray(options?.users) ? options.users : getUsers();
   const questionsById = questionStore.byId;
   const availableQuestionIds = questionStore.idSet;
   const hasQuestionCatalog = availableQuestionIds.size > 0;
   let changed = false;
 
-  const normalizedOwnerProfileId = resolveSessionOwnerProfileId(session);
+  const normalizedOwnerIds = normalizeSessionOwnerIdList([
+    ...getStoredSessionOwnerIds(session, users),
+    session?.userId,
+    session?.ownerProfileId,
+    session?.ownerAuthId,
+  ]);
+  if (JSON.stringify(Array.isArray(session?.ownerIds) ? session.ownerIds : []) !== JSON.stringify(normalizedOwnerIds)) {
+    session.ownerIds = normalizedOwnerIds;
+    changed = true;
+  }
+
+  const normalizedOwnerProfileId = resolveSessionOwnerProfileId(session, users);
   const normalizedOwnerAuthId = normalizedOwnerProfileId || String(session?.ownerAuthId || "").trim() || null;
   if ((String(session?.ownerProfileId || "").trim() || null) !== (normalizedOwnerProfileId || null)) {
     session.ownerProfileId = normalizedOwnerProfileId || null;
