@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.13").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.14").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -2749,6 +2749,24 @@ async function handleSupabaseAuthStateChange(event, session) {
       }
       return;
     }
+    if (shouldClearBlockedAdminAuthQueue) {
+      schedulePendingAdminActionFlush(300);
+    }
+    if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
+      return;
+    }
+    if (localUser?.role === "student") {
+      await ensureFreshStudentDataAfterAuth(localUser, {
+        reason: event === "SIGNED_IN" ? "sign-in" : "auth state change",
+      }).catch((warmupError) => {
+        console.warn("Student auth refresh failed.", warmupError?.message || warmupError);
+      });
+      localUser = getCurrentUser() || localUser;
+    } else {
+      schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+        console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+      });
+    }
     const completionRoute = getStudentProfileCompletionRoute(localUser);
     if (localUser && completionRoute) {
       setGoogleOAuthPendingState(false);
@@ -2775,24 +2793,6 @@ async function handleSupabaseAuthStateChange(event, session) {
       }
       render();
       return;
-    }
-    if (shouldClearBlockedAdminAuthQueue) {
-      schedulePendingAdminActionFlush(300);
-    }
-    if (event === "SIGNED_IN" && (await shouldForceRefreshForUpdates(localUser))) {
-      return;
-    }
-    if (localUser?.role === "student") {
-      await ensureFreshStudentDataAfterAuth(localUser, {
-        reason: event === "SIGNED_IN" ? "sign-in" : "auth state change",
-      }).catch((warmupError) => {
-        console.warn("Student auth refresh failed.", warmupError?.message || warmupError);
-      });
-      localUser = getCurrentUser() || localUser;
-    } else {
-      schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
-        console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
-      });
     }
     if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
       const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
@@ -3006,6 +3006,23 @@ async function initSupabaseAuth() {
         }
         return;
       }
+      if (localUser) {
+        if (await shouldForceRefreshForUpdates(localUser)) {
+          return;
+        }
+        if (localUser.role === "student") {
+          await ensureFreshStudentDataAfterAuth(localUser, {
+            reason: "session bootstrap",
+          }).catch((warmupError) => {
+            console.warn("Student bootstrap refresh failed.", warmupError?.message || warmupError);
+          });
+          localUser = getCurrentUser() || localUser;
+        } else {
+          schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
+            console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
+          });
+        }
+      }
       const completionRoute = getStudentProfileCompletionRoute(localUser);
       if (localUser && completionRoute) {
         setGoogleOAuthPendingState(false);
@@ -3029,22 +3046,6 @@ async function initSupabaseAuth() {
           render();
         }
         return;
-      } else if (localUser) {
-        if (await shouldForceRefreshForUpdates(localUser)) {
-          return;
-        }
-        if (localUser.role === "student") {
-          await ensureFreshStudentDataAfterAuth(localUser, {
-            reason: "session bootstrap",
-          }).catch((warmupError) => {
-            console.warn("Student bootstrap refresh failed.", warmupError?.message || warmupError);
-          });
-          localUser = getCurrentUser() || localUser;
-        } else {
-          schedulePostAuthDataWarmup(localUser).catch((warmupError) => {
-            console.warn("Deferred post-auth warmup failed.", warmupError?.message || warmupError);
-          });
-        }
       }
     } else if (isGoogleOAuthPendingState()) {
       setGoogleOAuthPendingState(false);
@@ -4140,6 +4141,9 @@ function buildAdminUserStatistics(users = []) {
 
 function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
+    return false;
+  }
+  if (hasSupabaseManagedIdentity(user) && user.profileCompleted === true) {
     return false;
   }
   const missingCoreProfile = !hasCompleteStudentProfile(user);
@@ -17084,6 +17088,14 @@ function wireAuth(mode) {
                 return;
               }
             }
+            if (user.role === "student") {
+              await ensureFreshStudentDataAfterAuth(user, {
+                reason: "password sign-in",
+              }).catch((warmupError) => {
+                console.warn("Student password login refresh failed.", warmupError?.message || warmupError);
+              });
+              user = getCurrentUser() || user;
+            }
             if (routeUserToProfileCompletion(user)) {
               return;
             }
@@ -17382,6 +17394,8 @@ function wireAuth(mode) {
             ...users[idx],
             assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
           };
+          const wasApproved = previousUser.isApproved === true;
+          const nextApproved = wasApproved || autoApproved;
           users[idx].name = onboardingUser?.name || name;
           users[idx].email = onboardingUser?.email || email;
           users[idx].phone = normalizedPhone;
@@ -17389,9 +17403,9 @@ function wireAuth(mode) {
           users[idx].academicYear = academicYear;
           users[idx].academicSemester = academicSemester;
           users[idx].assignedCourses = selectedCourses;
-          users[idx].isApproved = autoApproved;
-          users[idx].approvedAt = autoApproved ? users[idx].approvedAt || nowISO() : null;
-          users[idx].approvedBy = autoApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
+          users[idx].isApproved = nextApproved;
+          users[idx].approvedAt = nextApproved ? users[idx].approvedAt || nowISO() : null;
+          users[idx].approvedBy = nextApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
           users[idx].profileCompleted = true;
           users[idx].authProvider = "google";
 
@@ -17404,7 +17418,7 @@ function wireAuth(mode) {
           save(STORAGE_KEYS.currentUserId, users[idx].id);
           await syncUsersBackupState(users).catch(() => { });
           await ensureRelationalSyncReady().catch(() => { });
-          if (autoApproved) {
+          if (nextApproved && !wasApproved) {
             const profileId = getUserProfileId(users[idx]);
             if (isUuidValue(profileId)) {
               await updateRelationalProfileApproval([profileId], true).catch(() => { });
@@ -17413,9 +17427,9 @@ function wireAuth(mode) {
           await flushPendingSyncNow();
           clearStudentOnboardingDraft(users[idx], "signup");
 
-          if (autoApproved) {
+          if (nextApproved) {
             save(STORAGE_KEYS.currentUserId, users[idx].id);
-            toast("Account created and approved. You can start now.");
+            toast(wasApproved ? "Account details updated." : "Account created and approved. You can start now.");
             navigate("dashboard");
           } else {
             const authClient = getSupabaseAuthClient();
@@ -17965,14 +17979,16 @@ function wireCompleteProfile() {
         ...users[idx],
         assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
       };
+      const wasApproved = previousUser.isApproved === true;
+      const nextApproved = wasApproved || autoApproved;
       users[idx].phone = normalizedPhone;
       users[idx].role = "student";
       users[idx].academicYear = academicYear;
       users[idx].academicSemester = academicSemester;
       users[idx].assignedCourses = assignedCourses;
-      users[idx].isApproved = autoApproved;
-      users[idx].approvedAt = autoApproved ? users[idx].approvedAt || nowISO() : null;
-      users[idx].approvedBy = autoApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
+      users[idx].isApproved = nextApproved;
+      users[idx].approvedAt = nextApproved ? users[idx].approvedAt || nowISO() : null;
+      users[idx].approvedBy = nextApproved ? users[idx].approvedBy || AUTO_APPROVAL_ACTOR : null;
       users[idx].profileCompleted = true;
       users[idx].authProvider = normalizeAuthProvider(users[idx].authProvider || getAuthProviderFromUser(current));
 
@@ -17985,7 +18001,7 @@ function wireCompleteProfile() {
       save(STORAGE_KEYS.currentUserId, users[idx].id);
       await syncUsersBackupState(users).catch(() => { });
       await ensureRelationalSyncReady().catch(() => { });
-      if (autoApproved) {
+      if (nextApproved && !wasApproved) {
         const profileId = getUserProfileId(users[idx]);
         if (isUuidValue(profileId)) {
           await updateRelationalProfileApproval([profileId], true).catch(() => { });
@@ -17994,9 +18010,9 @@ function wireCompleteProfile() {
       await flushPendingSyncNow();
       clearStudentOnboardingDraft(users[idx], "complete-profile");
 
-      if (autoApproved) {
+      if (nextApproved) {
         save(STORAGE_KEYS.currentUserId, users[idx].id);
-        toast("Profile submitted and approved. Welcome.");
+        toast(wasApproved ? "Profile updated." : "Profile submitted and approved. Welcome.");
         navigate("dashboard");
       } else {
         const authClient = getSupabaseAuthClient();
