@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.9").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.10").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -4544,6 +4544,12 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
       ? profileOverrides.authAccessKnownActive
       : true,
     profileCompleted: nextProfileCompleted,
+    identityAliases: normalizeUserIdentityAliasList([
+      ...getStoredUserIdentityAliases(previous),
+      previous?.id,
+      previous?.supabaseAuthId,
+      authUser.id,
+    ]),
   };
 
   if (idx >= 0) {
@@ -4585,16 +4591,31 @@ function migrateLocalUserReferences(previousUserId, nextUserId) {
   const sessions = getSessions();
   let sessionsChanged = false;
   sessions.forEach((session) => {
+    const ownerIds = normalizeSessionOwnerIdList([
+      ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+      session?.userId,
+      session?.ownerProfileId,
+      session?.ownerAuthId,
+    ]);
     if (String(session?.userId || "").trim() === previousId) {
       session.userId = nextId;
-      session.ownerIds = normalizeSessionOwnerIdList([
-        ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+      sessionsChanged = true;
+    }
+    if (ownerIds.includes(previousId) || ownerIds.includes(nextId)) {
+      const nextOwnerIds = normalizeSessionOwnerIdList([
+        ...ownerIds,
         previousId,
         nextId,
-        session?.ownerProfileId,
-        session?.ownerAuthId,
       ]);
-      sessionsChanged = true;
+      if (JSON.stringify(ownerIds) !== JSON.stringify(nextOwnerIds)) {
+        session.ownerIds = nextOwnerIds;
+        sessionsChanged = true;
+      }
+      if (!isUuidValue(String(session?.ownerProfileId || "").trim()) && isUuidValue(nextId)) {
+        session.ownerProfileId = nextId;
+        session.ownerAuthId = nextId;
+        sessionsChanged = true;
+      }
     }
   });
   if (sessionsChanged) {
@@ -7079,6 +7100,12 @@ async function hydrateRelationalProfiles(currentUser) {
       profileCompleted: typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : role !== "student",
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
       supabaseAuthId: profile.id,
+      identityAliases: normalizeUserIdentityAliasList([
+        ...getStoredUserIdentityAliases(existing),
+        existing?.id,
+        existing?.supabaseAuthId,
+        profile.id,
+      ]),
     };
   });
   const mappedByAuthId = new Map(
@@ -7175,6 +7202,7 @@ async function hydrateRelationalProfiles(currentUser) {
     migrateLocalUserReferences(existing.id, entry.id);
   });
   const nextUsers = [...preservedLocalOnly, ...preservedRelational, ...mapped];
+  repairUserIdentityAliasesInList(nextUsers);
   archiveSessionsForChangedUserEnrollments(usersBefore, nextUsers, {
     reason: "enrollment_change",
   });
@@ -8001,6 +8029,7 @@ async function hydrateRelationalSessions(currentUser) {
       ownerProfileId: isUuidValue(block.user_id) ? block.user_id : null,
       ownerAuthId: isUuidValue(block.user_id) ? block.user_id : null,
       ownerIds: normalizeSessionOwnerIdList([
+        ...getStoredUserIdentityAliases(matchingUser),
         localUserIdByAuth[block.user_id] || block.user_id,
         block.user_id,
       ]),
@@ -8160,20 +8189,57 @@ function isRecordObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeUserIdentityAliasList(identityAliases = []) {
+  return [...new Set(
+    (Array.isArray(identityAliases) ? identityAliases : [identityAliases])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+function getStoredUserIdentityAliases(user) {
+  if (!isRecordObject(user)) {
+    return [];
+  }
+  return normalizeUserIdentityAliasList([
+    ...(Array.isArray(user?.identityAliases) ? user.identityAliases : []),
+    user?.id,
+    user?.supabaseAuthId,
+    getUserProfileId(user),
+  ]);
+}
+
+function repairUserIdentityAliasesInList(users = []) {
+  const list = Array.isArray(users) ? users : [];
+  let changed = false;
+  list.forEach((user) => {
+    if (!isRecordObject(user)) {
+      return;
+    }
+    const normalizedAliases = getStoredUserIdentityAliases(user);
+    const currentAliases = normalizeUserIdentityAliasList(user?.identityAliases || []);
+    if (JSON.stringify(currentAliases) !== JSON.stringify(normalizedAliases)) {
+      user.identityAliases = normalizedAliases;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 function getUserMergeMatchKeys(user) {
   if (!isRecordObject(user)) {
     return [];
   }
   const keys = [];
-  const authId = String(user.supabaseAuthId || "").trim().toLowerCase();
-  const id = String(user.id || "").trim().toLowerCase();
   const email = String(user.email || "").trim().toLowerCase();
-  if (authId) {
-    keys.push(`auth:${authId}`);
-  }
-  if (id) {
-    keys.push(`id:${id}`);
-  }
+  getStoredUserIdentityAliases(user).forEach((identity) => {
+    const normalizedIdentity = String(identity || "").trim().toLowerCase();
+    if (!normalizedIdentity) {
+      return;
+    }
+    keys.push(`auth:${normalizedIdentity}`);
+    keys.push(`id:${normalizedIdentity}`);
+  });
   if (email) {
     keys.push(`email:${email}`);
   }
@@ -8322,6 +8388,14 @@ function mergeUserRecord(remoteUser, localUser) {
   const remoteSemester = normalizeAcademicSemesterOrNull(remoteUser?.academicSemester);
   const localSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
   const preferLocal = shouldPreferRecentLocalUserData(localUser);
+  const mergedIdentityAliases = normalizeUserIdentityAliasList([
+    ...getStoredUserIdentityAliases(remoteUser),
+    ...getStoredUserIdentityAliases(localUser),
+    remoteUser?.id,
+    remoteUser?.supabaseAuthId,
+    localUser?.id,
+    localUser?.supabaseAuthId,
+  ]);
   return {
     ...(preferLocal
       ? (isRecordObject(remoteUser) ? remoteUser : {})
@@ -8353,6 +8427,7 @@ function mergeUserRecord(remoteUser, localUser) {
     profileCompleted: preferLocal
       ? (typeof localUser?.profileCompleted === "boolean" ? localUser.profileCompleted : Boolean(remoteUser?.profileCompleted))
       : (typeof remoteUser?.profileCompleted === "boolean" ? remoteUser.profileCompleted : Boolean(localUser?.profileCompleted)),
+    identityAliases: mergedIdentityAliases,
   };
 }
 
@@ -12477,6 +12552,7 @@ async function syncSessionsToRelational(sessionsPayload) {
     const dbId = blockIdByExternalId[String(session?.id || "").trim()];
     const ownerProfileId = resolveSessionOwnerProfileId(session, users);
     const nextOwnerProfileId = isUuidValue(ownerProfileId) ? ownerProfileId : null;
+    const matchingUser = findMatchingUserForSessionOwner(session, users);
     if (
       !dbId
       && String(session?.ownerProfileId || "").trim() === String(nextOwnerProfileId || "").trim()
@@ -12487,11 +12563,13 @@ async function syncSessionsToRelational(sessionsPayload) {
     return {
       ...session,
       ...(dbId ? { dbId } : {}),
+      userId: String(matchingUser?.id || session?.userId || "").trim() || session?.userId,
       ownerProfileId: nextOwnerProfileId,
       ownerAuthId: nextOwnerProfileId,
       ownerIds: normalizeSessionOwnerIdList([
         ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
         session?.userId,
+        ...getStoredUserIdentityAliases(matchingUser),
         nextOwnerProfileId,
       ]),
     };
@@ -12559,6 +12637,7 @@ function seedData() {
         academicYear: null,
         academicSemester: null,
         createdAt: nowISO(),
+        identityAliases: ["u_admin"],
       },
       {
         id: "u_student",
@@ -12575,6 +12654,7 @@ function seedData() {
         academicYear: 1,
         academicSemester: 1,
         createdAt: nowISO(),
+        identityAliases: ["u_student"],
       },
     ];
     save(STORAGE_KEYS.users, users);
@@ -12661,6 +12741,9 @@ function seedData() {
         }
       }
     });
+    if (repairUserIdentityAliasesInList(users)) {
+      changed = true;
+    }
     if (changed) {
       save(STORAGE_KEYS.users, users);
     }
@@ -20523,6 +20606,24 @@ function finalizeSession(sessionId, options = {}) {
   const questionStore = options?.questionStore || getQuestionStore();
   if (options?.skipElapsedCapture !== true) {
     captureElapsedForCurrentQuestion(session);
+  }
+
+  const currentUser = getCurrentUser();
+  const currentSessionProfileId = String(getCurrentSessionProfileId(currentUser) || "").trim();
+  if (currentUser && currentUser.role === "student") {
+    session.userId = String(currentUser?.id || session.userId || "").trim();
+    if (isUuidValue(currentSessionProfileId)) {
+      session.ownerProfileId = currentSessionProfileId;
+      session.ownerAuthId = currentSessionProfileId;
+    }
+    session.ownerIds = normalizeSessionOwnerIdList([
+      ...(Array.isArray(session?.ownerIds) ? session.ownerIds : []),
+      session?.userId,
+      session?.ownerProfileId,
+      session?.ownerAuthId,
+      ...getStoredUserIdentityAliases(currentUser),
+      currentSessionProfileId,
+    ]);
   }
 
   session.status = "completed";
@@ -28734,10 +28835,7 @@ function getCurrentUser() {
   const users = getUsers();
   const activeAuthId = getActiveSupabaseAuthUserId();
   if (activeAuthId) {
-    const byActiveAuthId = users.find((user) => (
-      String(user?.supabaseAuthId || "").trim() === activeAuthId
-      || String(user?.id || "").trim() === activeAuthId
-    ));
+    const byActiveAuthId = users.find((user) => getStoredUserIdentityAliases(user).includes(activeAuthId));
     if (byActiveAuthId) {
       return byActiveAuthId;
     }
@@ -28746,11 +28844,7 @@ function getCurrentUser() {
   if (!userId) {
     return null;
   }
-  const byLocalId = users.find((user) => String(user?.id || "").trim() === userId);
-  if (byLocalId) {
-    return byLocalId;
-  }
-  return users.find((user) => String(user?.supabaseAuthId || "").trim() === userId) || null;
+  return users.find((user) => getStoredUserIdentityAliases(user).includes(userId)) || null;
 }
 
 function isLikelyJwtToken(token) {
@@ -29625,18 +29719,7 @@ function addKnownUserIds(targetSet, user) {
   if (!(targetSet instanceof Set) || !user || typeof user !== "object") {
     return targetSet;
   }
-  const localId = String(user?.id || "").trim();
-  const profileId = String(getUserProfileId(user) || "").trim();
-  const authId = String(user?.supabaseAuthId || "").trim();
-  if (localId) {
-    targetSet.add(localId);
-  }
-  if (profileId) {
-    targetSet.add(profileId);
-  }
-  if (authId) {
-    targetSet.add(authId);
-  }
+  getStoredUserIdentityAliases(user).forEach((identity) => targetSet.add(identity));
   return targetSet;
 }
 
@@ -29668,9 +29751,8 @@ function findMatchingUserForSessionOwner(session, usersOverride = null, ownerIds
     return null;
   }
   return (Array.isArray(users) ? users : []).find((entry) => {
-    const localId = String(entry?.id || "").trim();
-    const authId = String(entry?.supabaseAuthId || "").trim();
-    return ownerIds.some((ownerId) => ownerId && (ownerId === localId || ownerId === authId));
+    const knownIds = getStoredUserIdentityAliases(entry);
+    return ownerIds.some((ownerId) => ownerId && knownIds.includes(ownerId));
   }) || null;
 }
 
@@ -29998,6 +30080,22 @@ function getCompletedSessionsForUser(userId, options = {}) {
     ? options.questionMetaById
     : getAnalyticsQuestionMetaById();
   const ownerReference = targetUser || userId;
+  const directIdentityHints = normalizeSessionOwnerIdList([
+    String(userId || "").trim(),
+    targetUser?.id,
+    getUserProfileId(targetUser),
+    getCurrentSessionProfileId(targetUser),
+  ]);
+  const directlyOwnedCompletedSessions = directIdentityHints.length
+    ? getSessions().filter((session) => {
+      const status = String(session?.status || "").trim();
+      if (status !== "completed") {
+        return false;
+      }
+      const sessionOwnerIds = getStoredSessionOwnerIds(session);
+      return directIdentityHints.some((identity) => sessionOwnerIds.has(identity));
+    })
+    : [];
   const allVisibleCompletedSessions = getSessionsForUser(ownerReference)
     .filter((session) => (
       String(session?.status || "").trim() === "completed"
@@ -30008,7 +30106,7 @@ function getCompletedSessionsForUser(userId, options = {}) {
   const shouldFallbackToAllTerms = options?.fallbackToAllTerms !== false;
   const resolvedSessions = shouldFallbackToAllTerms
     ? [...new Map(
-      [...scopedCompletedSessions, ...allVisibleCompletedSessions]
+      [...scopedCompletedSessions, ...allVisibleCompletedSessions, ...directlyOwnedCompletedSessions]
         .map((session) => [String(session?.id || "").trim(), session]),
     ).values()]
     : scopedCompletedSessions;
@@ -30159,9 +30257,7 @@ function createSessionFromQuestions(questions, config = {}) {
   const sessionId = makeId("s");
   const sessionOwnerProfileId = String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
   const sessionOwnerIds = normalizeSessionOwnerIdList([
-    user?.id,
-    getUserProfileId(user),
-    user?.supabaseAuthId,
+    ...getStoredUserIdentityAliases(user),
     sessionOwnerProfileId,
   ]);
   const sessionCourses = [];
@@ -32642,10 +32738,7 @@ function findUserForAnalytics(userId) {
   if (!normalizedUserId) {
     return null;
   }
-  return getUsers().find((entry) => (
-    String(entry?.id || "").trim() === normalizedUserId
-    || String(entry?.supabaseAuthId || "").trim() === normalizedUserId
-  )) || null;
+  return getUsers().find((entry) => getStoredUserIdentityAliases(entry).includes(normalizedUserId)) || null;
 }
 
 function getSessionCourseList(session, questionMetaById = null) {
