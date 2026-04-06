@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.3").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.4").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -20537,7 +20537,7 @@ function addQuestionToIncorrectQueue(userId, questionId) {
 
 function renderReview() {
   const user = getCurrentUser();
-  const completedSessions = getCompletedSessionsForUser(user.id, {
+  const completedSessions = getReviewableCompletedSessionsForUser(user, {
     userOverride: user,
     fallbackToAllTerms: true,
   });
@@ -20778,7 +20778,7 @@ function handleReviewClick(event) {
   }
 
   const user = getCurrentUser();
-  const completedSessions = getCompletedSessionsForUser(user.id, {
+  const completedSessions = getReviewableCompletedSessionsForUser(user, {
     userOverride: user,
     fallbackToAllTerms: true,
   });
@@ -20839,7 +20839,7 @@ function handleReviewKeydown(event) {
   if (event.key === "ArrowRight") {
     event.preventDefault();
     const user = getCurrentUser();
-    const selected = getCompletedSessionsForUser(user.id, {
+    const selected = getReviewableCompletedSessionsForUser(user, {
       userOverride: user,
       fallbackToAllTerms: true,
     })
@@ -29854,8 +29854,9 @@ function archiveSessionsForChangedUserEnrollments(previousUsers, nextUsers, opti
 }
 
 function getAcademicTermScopedSessionsForUser(userId, userOverride = null, questionMetaById = null) {
-  const sessions = getSessionsForUser(userId);
   const targetUser = userOverride || findUserForAnalytics(userId);
+  const ownerReference = targetUser || userId;
+  const sessions = getSessionsForUser(ownerReference);
   const visibleSessions = sessions.filter((session) => String(session?.status || "").trim() !== "suspended");
   if (!targetUser || targetUser.role !== "student") {
     return visibleSessions;
@@ -29869,7 +29870,8 @@ function getCompletedSessionsForUser(userId, options = {}) {
   const questionMetaById = options?.questionMetaById instanceof Map
     ? options.questionMetaById
     : getAnalyticsQuestionMetaById();
-  const allVisibleCompletedSessions = getSessionsForUser(userId)
+  const ownerReference = targetUser || userId;
+  const allVisibleCompletedSessions = getSessionsForUser(ownerReference)
     .filter((session) => (
       String(session?.status || "").trim() === "completed"
       && String(session?.status || "").trim() !== "suspended"
@@ -29882,6 +29884,31 @@ function getCompletedSessionsForUser(userId, options = {}) {
     : allVisibleCompletedSessions;
   return resolvedSessions
     .slice()
+    .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
+}
+
+function getReviewableCompletedSessionsForUser(userOrId, options = {}) {
+  const user = userOrId && typeof userOrId === "object"
+    ? userOrId
+    : (options?.userOverride || findUserForAnalytics(userOrId));
+  const userId = String(user?.id || userOrId || "").trim();
+  const completedSessions = getCompletedSessionsForUser(userId, {
+    ...options,
+    userOverride: user || options?.userOverride || null,
+    fallbackToAllTerms: options?.fallbackToAllTerms !== false,
+  });
+  const reviewSession = state.reviewSessionId ? getSessionById(state.reviewSessionId) : null;
+  if (
+    !reviewSession
+    || String(reviewSession?.status || "").trim() !== "completed"
+    || !doesSessionBelongToUser(reviewSession, user || userId)
+  ) {
+    return completedSessions;
+  }
+  if (completedSessions.some((session) => String(session?.id || "").trim() === String(reviewSession.id || "").trim())) {
+    return completedSessions;
+  }
+  return [reviewSession, ...completedSessions]
     .sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
 }
 
