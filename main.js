@@ -613,6 +613,7 @@ const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS
 const LEGACY_SUPABASE_STATE_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_SYNC_KEY_SET = new Set(LEGACY_SUPABASE_STATE_SYNC_KEYS);
 const RELATIONAL_BACKUP_SYNC_KEYS = [
+  STORAGE_KEYS.sessions,
   STORAGE_KEYS.questions,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
@@ -4786,10 +4787,13 @@ function queueSessionStateForCloud() {
 
   const sessions = getSessions();
   const queuedRelational = scheduleRelationalWrite(STORAGE_KEYS.sessions, sessions);
-  if (!queuedRelational) {
+  const queuedBackup = scheduleSupabaseWrite(STORAGE_KEYS.sessions, sessions);
+  if (!queuedRelational && !queuedBackup) {
     return false;
   }
-  sessionSyncRuntime.dirty = false;
+  // Keep the session marked dirty until the relational write is queued so
+  // completed tests still make it into test_blocks/test_block_items/test_responses.
+  sessionSyncRuntime.dirty = !queuedRelational;
   return true;
 }
 
@@ -8096,17 +8100,39 @@ async function hydrateRelationalSessions(currentUser) {
       .map((session) => String(session?.id || "").trim())
       .filter(Boolean),
   );
-  const hasRepairableLocalSessions = [...incompleteRemoteSessionIds].some((sessionId) => {
-    const localSession = localSessionById.get(sessionId);
-    return Boolean(
-      localSession
-      && Array.isArray(localSession.questionIds)
-      && localSession.questionIds.length
-      && isRecordObject(localSession.responses)
-      && Object.keys(localSession.responses).length,
+  const collectRepairableLocalSessionIds = (sessionList) => {
+    const sessionMap = new Map(
+      (Array.isArray(sessionList) ? sessionList : [])
+        .map((session) => [String(session?.id || "").trim(), session]),
     );
-  });
-  if (hasRepairableLocalSessions && scheduleRelationalWrite(STORAGE_KEYS.sessions, mergedSessions, { force: true })) {
+    return [...incompleteRemoteSessionIds].filter((sessionId) => {
+      const localSession = sessionMap.get(sessionId);
+      return Boolean(
+        localSession
+        && Array.isArray(localSession.questionIds)
+        && localSession.questionIds.length
+        && isRecordObject(localSession.responses)
+        && Object.keys(localSession.responses).length,
+      );
+    });
+  };
+
+  let repairableSessionIds = collectRepairableLocalSessionIds(localSessions);
+  if (!repairableSessionIds.length && incompleteRemoteSessionIds.size) {
+    const scope = getSyncScopeForUser(currentUser);
+    if (scope) {
+      const backupResult = await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
+      if (backupResult?.hadRemoteData) {
+        repairableSessionIds = collectRepairableLocalSessionIds(getSessions());
+      }
+    }
+  }
+
+  const repairableSessionIdSet = new Set(repairableSessionIds);
+  const repairableSessions = repairableSessionIdSet.size
+    ? getSessions().filter((session) => repairableSessionIdSet.has(String(session?.id || "").trim()))
+    : [];
+  if (repairableSessions.length && scheduleRelationalWrite(STORAGE_KEYS.sessions, repairableSessions, { force: true })) {
     flushPendingSyncInBackground();
   }
 }
@@ -8675,6 +8701,61 @@ function countSubmittedSessionResponses(session) {
   ), 0);
 }
 
+function countAnsweredSessionResponses(session) {
+  const responses = isRecordObject(session?.responses) ? session.responses : {};
+  return Object.values(responses).reduce((count, response) => {
+    const hasSelection = Array.isArray(response?.selected) && response.selected.length > 0;
+    return count + (Boolean(response?.submitted) || hasSelection ? 1 : 0);
+  }, 0);
+}
+
+function countSessionResponseHighlights(response) {
+  const highlightedLinesCount = Array.isArray(response?.highlightedLines) ? response.highlightedLines.length : 0;
+  const highlightedChoicesCount = isRecordObject(response?.highlightedChoices) ? Object.keys(response.highlightedChoices).length : 0;
+  const lineRangeCount = isRecordObject(response?.textHighlights?.lines)
+    ? Object.values(response.textHighlights.lines).reduce((total, ranges) => total + (Array.isArray(ranges) ? ranges.length : 0), 0)
+    : 0;
+  const choiceRangeCount = isRecordObject(response?.textHighlights?.choices)
+    ? Object.values(response.textHighlights.choices).reduce((total, ranges) => total + (Array.isArray(ranges) ? ranges.length : 0), 0)
+    : 0;
+  return highlightedLinesCount + highlightedChoicesCount + lineRangeCount + choiceRangeCount;
+}
+
+function getSessionResponseProgressMetrics(response) {
+  const normalizedResponse = isRecordObject(response) ? response : {};
+  return {
+    submitted: Boolean(normalizedResponse.submitted),
+    selectedCount: Array.isArray(normalizedResponse.selected) ? normalizedResponse.selected.filter(Boolean).length : 0,
+    notePresent: Boolean(String(normalizedResponse.notes || "").trim()),
+    flagged: Boolean(normalizedResponse.flagged),
+    highlightCount: countSessionResponseHighlights(normalizedResponse),
+    struckCount: Array.isArray(normalizedResponse.struck) ? normalizedResponse.struck.length : 0,
+    timeSpentSec: Math.max(0, Number(normalizedResponse.timeSpentSec || 0)),
+  };
+}
+
+function shouldPreferLocalSessionResponse(localResponse, remoteResponse, fallback = false) {
+  const localMetrics = getSessionResponseProgressMetrics(localResponse);
+  const remoteMetrics = getSessionResponseProgressMetrics(remoteResponse);
+  const orderedKeys = [
+    "submitted",
+    "selectedCount",
+    "notePresent",
+    "flagged",
+    "highlightCount",
+    "struckCount",
+    "timeSpentSec",
+  ];
+  for (const key of orderedKeys) {
+    const localValue = Number(localMetrics[key]);
+    const remoteValue = Number(remoteMetrics[key]);
+    if (localValue !== remoteValue) {
+      return localValue > remoteValue;
+    }
+  }
+  return fallback;
+}
+
 function getSessionQuestionDataScore(session, questionStore = null) {
   const store = questionStore || getQuestionStore();
   const questionIds = Array.isArray(session?.questionIds) ? session.questionIds : [];
@@ -8692,7 +8773,9 @@ function getSessionQuestionDataScore(session, questionStore = null) {
   return {
     questionCount: questionIds.length,
     resolvableCount,
+    answeredCount: countAnsweredSessionResponses(session),
     submittedCount: countSubmittedSessionResponses(session),
+    currentIndex: Math.max(0, Math.floor(Number(session?.currentIndex) || 0)),
   };
 }
 
@@ -8705,8 +8788,14 @@ function shouldPreferLocalSessionQuestionData(localSession, remoteSession, quest
   if (localScore.questionCount !== remoteScore.questionCount) {
     return localScore.questionCount > remoteScore.questionCount;
   }
+  if (localScore.answeredCount !== remoteScore.answeredCount) {
+    return localScore.answeredCount > remoteScore.answeredCount;
+  }
   if (localScore.submittedCount !== remoteScore.submittedCount) {
     return localScore.submittedCount > remoteScore.submittedCount;
+  }
+  if (localScore.currentIndex !== remoteScore.currentIndex) {
+    return localScore.currentIndex > remoteScore.currentIndex;
   }
   return false;
 }
@@ -8782,13 +8871,19 @@ function mergeSessionSnapshots(localSession, remoteSession) {
     ...Object.keys(localResponses),
     ...Object.keys(remoteResponses),
   ]);
+  const preferLocalProgressData = preferLocal || shouldPreferLocalSessionQuestionData(localSession, remoteSession, questionStore);
   const mergedResponses = {};
   responseQuestionIds.forEach((questionId) => {
     const resolvedQuestionId = resolveSessionQuestionId(questionId, questionStore);
+    const preferLocalResponse = shouldPreferLocalSessionResponse(
+      localResponses[questionId],
+      remoteResponses[questionId],
+      preferLocalProgressData,
+    );
     const mergedResponse = mergeSessionResponseSnapshots(
       localResponses[questionId],
       remoteResponses[questionId],
-      preferLocal,
+      preferLocalResponse,
     );
     if (resolvedQuestionId && resolvedQuestionId !== questionId) {
       mergedResponses[resolvedQuestionId] = mergeAliasedSessionResponses(
@@ -8805,11 +8900,43 @@ function mergeSessionSnapshots(localSession, remoteSession) {
   merged.responses = mergedResponses;
   const localQuestionIds = Array.isArray(localSession?.questionIds) ? localSession.questionIds : [];
   const remoteQuestionIds = Array.isArray(remoteSession?.questionIds) ? remoteSession.questionIds : [];
-  const preferLocalQuestionData = preferLocal || shouldPreferLocalSessionQuestionData(localSession, remoteSession, questionStore);
-  merged.questionIds = preferLocalQuestionData
+  merged.questionIds = preferLocalProgressData
     ? [...(localQuestionIds.length ? localQuestionIds : remoteQuestionIds)]
     : [...(remoteQuestionIds.length ? remoteQuestionIds : localQuestionIds)];
-  if (preferLocalQuestionData) {
+  const preferredProgressSession = preferLocalProgressData ? localSession : remoteSession;
+  const fallbackProgressSession = preferLocalProgressData ? remoteSession : localSession;
+  merged.currentIndex = Math.max(
+    0,
+    Math.floor(Number(preferredProgressSession?.currentIndex ?? fallbackProgressSession?.currentIndex ?? merged.currentIndex) || 0),
+  );
+  merged.elapsedSec = Math.max(
+    0,
+    Number(preferredProgressSession?.elapsedSec ?? fallbackProgressSession?.elapsedSec ?? merged.elapsedSec ?? 0),
+  );
+  if (
+    preferredProgressSession?.timeRemainingSec != null
+    || fallbackProgressSession?.timeRemainingSec != null
+    || merged.timeRemainingSec != null
+  ) {
+    merged.timeRemainingSec = preferredProgressSession?.timeRemainingSec
+      ?? fallbackProgressSession?.timeRemainingSec
+      ?? merged.timeRemainingSec
+      ?? null;
+  }
+  merged.lastQuestionAt = Number(
+    preferredProgressSession?.lastQuestionAt
+    || fallbackProgressSession?.lastQuestionAt
+    || merged.lastQuestionAt
+    || Date.now(),
+  );
+  merged.lastTimerSyncAt = Number(
+    preferredProgressSession?.lastTimerSyncAt
+    || fallbackProgressSession?.lastTimerSyncAt
+    || merged.lastTimerSyncAt
+    || Date.now(),
+  );
+  merged.paused = Boolean(preferredProgressSession?.paused ?? fallbackProgressSession?.paused ?? merged.paused);
+  if (preferLocalProgressData) {
     merged.courses = Array.isArray(localSession?.courses) && localSession.courses.length
       ? [...localSession.courses]
       : (Array.isArray(remoteSession?.courses) ? [...remoteSession.courses] : []);
@@ -9385,7 +9512,10 @@ function scheduleSupabaseWrite(storageKey, value) {
   }
 
   const currentUser = getCurrentUser();
-  if (!currentUser || currentUser.role === "student" || !hasActiveSupabaseSessionForUser(currentUser)) {
+  if (!currentUser || !hasActiveSupabaseSessionForUser(currentUser)) {
+    return false;
+  }
+  if (currentUser.role === "student" && !isUserScopedSyncKey(storageKey)) {
     return false;
   }
   const scope = getSyncScopeForUser(currentUser);
@@ -9763,6 +9893,30 @@ async function flushRelationalWrites(options = {}) {
         scheduleSyncStatusUiRefresh();
       } catch (error) {
         console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+        const retryPayload = (
+          storageKey === STORAGE_KEYS.sessions
+          && Array.isArray(error?.retryRelationalPayload)
+          && error.retryRelationalPayload.length
+        )
+          ? (
+            error.retryRelationalPayload && typeof error.retryRelationalPayload === "object"
+              ? deepClone(error.retryRelationalPayload)
+              : error.retryRelationalPayload
+          )
+          : null;
+        if (retryPayload) {
+          relationalSync.pendingWrites.set(storageKey, retryPayload);
+          relationalSync.pendingWriteMeta.set(storageKey, entryMeta || null);
+          relationalSync.lastFailureAt = Date.now();
+          relationalSync.lastFailureMessage = String(
+            error?.retryRelationalMessage
+            || "Some test history is still waiting for question mapping. The remaining items will retry soon.",
+          ).trim();
+          if (error?.partialRelationalSuccess) {
+            succeededCount += 1;
+          }
+          continue;
+        }
         if (isNonRetryableCloudSyncPermissionError(error)) {
           if (
             storageKey === STORAGE_KEYS.curriculum
@@ -12835,18 +12989,33 @@ async function syncSessionsToRelational(sessionsPayload) {
 
   const itemRowsBySyncKey = new Map();
   const responseRowsBySyncKey = new Map();
+  const retryableSessionIds = new Set();
   const skippedQuestionDiagnostics = [];
 
   syncableOwnedSessions.forEach((session) => {
     const sessionId = String(session?.id || "").trim();
     const blockDbId = blockIdByExternalId[sessionId];
-    if (!blockDbId) return;
+    if (!blockDbId) {
+      retryableSessionIds.add(sessionId);
+      skippedQuestionDiagnostics.push({
+        sessionId,
+        localQuestionId: null,
+        resolvedQuestionId: null,
+        blockDbId: null,
+        reason: "missing_block_id",
+      });
+      return;
+    }
     const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
+    const sessionItemRows = new Map();
+    const sessionResponseRows = new Map();
     const seenQuestionDbIds = new Set();
+    let hasUnresolvedQuestionMapping = false;
     questionIds.forEach((localQuestionId, index) => {
       const resolvedQuestionId = resolveSessionQuestionId(localQuestionId, questionStore);
       const questionDbId = resolveSessionQuestionDbId(localQuestionId);
       if (!questionDbId) {
+        hasUnresolvedQuestionMapping = true;
         skippedQuestionDiagnostics.push({
           sessionId,
           localQuestionId: String(localQuestionId || "").trim() || null,
@@ -12855,19 +13024,20 @@ async function syncSessionsToRelational(sessionsPayload) {
         });
         return;
       }
+      const itemSyncKey = `${blockDbId}:${index + 1}`;
       const responseSyncKey = `${blockDbId}:${questionDbId}`;
-      if (seenQuestionDbIds.has(questionDbId) || responseRowsBySyncKey.has(responseSyncKey)) {
+      if (seenQuestionDbIds.has(questionDbId) || sessionResponseRows.has(responseSyncKey)) {
         return;
       }
       seenQuestionDbIds.add(questionDbId);
-      itemRowsBySyncKey.set(`${blockDbId}:${index + 1}`, {
+      sessionItemRows.set(itemSyncKey, {
         block_id: blockDbId,
         position: index + 1,
         question_id: questionDbId,
       });
 
       const response = session.responses?.[localQuestionId] || session.responses?.[resolvedQuestionId] || {};
-      responseRowsBySyncKey.set(responseSyncKey, {
+      sessionResponseRows.set(responseSyncKey, {
         block_id: blockDbId,
         question_id: questionDbId,
         selected_choice_labels: Array.isArray(response.selected) ? response.selected : [],
@@ -12877,25 +13047,19 @@ async function syncSessionsToRelational(sessionsPayload) {
         answered_at: response.submitted ? session.updatedAt || nowISO() : null,
       });
     });
+    if (hasUnresolvedQuestionMapping) {
+      retryableSessionIds.add(sessionId);
+      return;
+    }
+    sessionItemRows.forEach((row, syncKey) => {
+      itemRowsBySyncKey.set(syncKey, row);
+    });
+    sessionResponseRows.forEach((row, syncKey) => {
+      responseRowsBySyncKey.set(syncKey, row);
+    });
   });
   const itemRows = [...itemRowsBySyncKey.values()];
   const responseRows = [...responseRowsBySyncKey.values()];
-  if (skippedQuestionDiagnostics.length) {
-    console.warn("[session-sync] Some session questions could not be matched to relational question IDs.", skippedQuestionDiagnostics);
-    const affectedSessionCount = new Set(
-      skippedQuestionDiagnostics
-        .map((entry) => String(entry?.sessionId || "").trim())
-        .filter(Boolean),
-    ).size;
-    const sample = skippedQuestionDiagnostics
-      .slice(0, 3)
-      .map((entry) => `${entry.sessionId}:${entry.localQuestionId || entry.resolvedQuestionId || "unknown"}`)
-      .join(", ");
-    throw new Error(
-      `Session question mapping is still loading for ${affectedSessionCount || skippedQuestionDiagnostics.length} test(s); retrying automatically. `
-      + (sample ? `Examples: ${sample}` : ""),
-    );
-  }
 
   if (itemRows.length) {
     for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
@@ -12982,6 +13146,35 @@ async function syncSessionsToRelational(sessionsPayload) {
     syncedSessions.push(applySyncedSessionMetadata(session));
   });
   saveLocalOnly(STORAGE_KEYS.sessions, syncedSessions);
+
+  if (skippedQuestionDiagnostics.length) {
+    console.warn("[session-sync] Some session questions could not be matched to relational question IDs.", skippedQuestionDiagnostics);
+    const syncedSessionById = new Map(
+      syncedSessions.map((session) => [String(session?.id || "").trim(), session]),
+    );
+    const retryableSessions = [...retryableSessionIds]
+      .map((sessionId) => syncedSessionById.get(sessionId) || latestLocalSessionById.get(sessionId) || null)
+      .filter(Boolean);
+    const affectedSessionCount = new Set(
+      skippedQuestionDiagnostics
+        .map((entry) => String(entry?.sessionId || "").trim())
+        .filter(Boolean),
+    ).size;
+    const sample = skippedQuestionDiagnostics
+      .slice(0, 3)
+      .map((entry) => `${entry.sessionId}:${entry.localQuestionId || entry.resolvedQuestionId || entry.reason || "unknown"}`)
+      .join(", ");
+    const retryError = new Error(
+      `Session question mapping is still loading for ${affectedSessionCount || skippedQuestionDiagnostics.length} test(s); retrying automatically. `
+      + (sample ? `Examples: ${sample}` : ""),
+    );
+    retryError.partialRelationalSuccess = Boolean(itemRows.length || responseRows.length);
+    retryError.retryRelationalPayload = retryableSessions;
+    retryError.retryRelationalMessage = `${
+      retryableSessions.length || affectedSessionCount || skippedQuestionDiagnostics.length
+    } test history item(s) are still waiting for question mapping. The synced tests are already saved; the remaining ones will retry soon.`;
+    throw retryError;
+  }
 }
 
 function seedData() {
@@ -33732,8 +33925,6 @@ function normalizeSession(session, options = {}) {
   const questionStore = options?.questionStore || getQuestionStore();
   const users = Array.isArray(options?.users) ? options.users : getUsers();
   const questionsById = questionStore.byId;
-  const availableQuestionIds = questionStore.idSet;
-  const hasQuestionCatalog = availableQuestionIds.size > 0;
   let changed = false;
 
   const normalizedOwnerIds = normalizeSessionOwnerIdList([
@@ -33846,30 +34037,6 @@ function normalizeSession(session, options = {}) {
   if (session.name !== normalizedName) {
     session.name = normalizedName;
     changed = true;
-  }
-
-  if (session.status === "in_progress" && hasQuestionCatalog) {
-    const sanitizedQuestionIds = session.questionIds.filter((qid) => {
-      const normalizedQuestionId = String(qid || "").trim();
-      if (!normalizedQuestionId) {
-        return false;
-      }
-      return availableQuestionIds.has(normalizedQuestionId)
-        || questionStore.byDbId.has(normalizedQuestionId)
-        || isUuidValue(normalizedQuestionId);
-    });
-    const hasMissingCatalogQuestions = sanitizedQuestionIds.length !== session.questionIds.length;
-    if (!hasMissingCatalogQuestions) {
-      // Preserve in-progress answers if the question catalog is temporarily partial;
-      // otherwise we can jump the student backwards and wipe saved responses.
-      const allowedQuestionIds = new Set(session.questionIds);
-      Object.keys(session.responses).forEach((qid) => {
-        if (!allowedQuestionIds.has(qid)) {
-          delete session.responses[qid];
-          changed = true;
-        }
-      });
-    }
   }
 
   if (
