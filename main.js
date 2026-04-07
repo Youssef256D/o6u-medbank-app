@@ -14875,6 +14875,10 @@ async function hydrateStudentSessionsFromCloud(user = null) {
       await hydrateRelationalQuestions().catch(() => false);
     }
     await hydrateRelationalSessions(currentUser);
+    const scope = getSyncScopeForUser(currentUser);
+    if (scope) {
+      await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
+    }
     state.studentDataLastSyncAt = Date.now();
     return true;
   }
@@ -16320,6 +16324,10 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     ]);
     if (!hasPendingSessionWrites) {
       await hydrateRelationalSessions(user);
+      const scope = getSyncScopeForUser(user);
+      if (scope) {
+        await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
+      }
     }
     state.studentDataLastSyncAt = Date.now();
     if (
@@ -17664,7 +17672,11 @@ function wireAuth(mode) {
             toast("This account uses Google sign-in. Use Continue with Google.");
             return;
           }
-          toast(isSupabaseAccessRevokedMessage(error) ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE : (error?.message || "Invalid credentials."));
+          toast(
+            isSupabaseAccessRevokedMessage(error)
+              ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
+              : (isInvalidLoginCredentialsMessage(error) ? getInvalidLoginCredentialsMessage() : (error?.message || getInvalidLoginCredentialsMessage())),
+          );
           return;
         }
 
@@ -17675,7 +17687,7 @@ function wireAuth(mode) {
             toast("This account uses Google sign-in. Use Continue with Google.");
             return;
           }
-          toast("Invalid credentials.");
+          toast(getInvalidLoginCredentialsMessage());
           return;
         }
         if (routeUserToProfileCompletion(user)) {
@@ -17693,7 +17705,11 @@ function wireAuth(mode) {
         navigate(user.role === "admin" ? "admin" : "dashboard");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
-        toast(isSupabaseAccessRevokedMessage(error) ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE : (error?.message || "Login failed. Please try again."));
+        toast(
+          isSupabaseAccessRevokedMessage(error)
+            ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
+            : (isInvalidLoginCredentialsMessage(error) ? getInvalidLoginCredentialsMessage() : (error?.message || "Login failed. Please try again.")),
+        );
       } finally {
         lockAuthForm(form, false);
       }
@@ -29628,6 +29644,23 @@ function isSupabaseAccessRevokedMessage(errorOrMessage) {
     || text.includes("banned user")
     || text.includes("account has been disabled")
     || text.includes("account is disabled");
+}
+
+function isInvalidLoginCredentialsMessage(errorOrMessage) {
+  const text = String(
+    typeof errorOrMessage === "string"
+      ? errorOrMessage
+      : (errorOrMessage?.message || errorOrMessage?.error_description || errorOrMessage?.error || ""),
+  ).trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return text.includes("invalid login credentials")
+    || text.includes("invalid credentials");
+}
+
+function getInvalidLoginCredentialsMessage() {
+  return "User name or password is incorrect.";
 }
 
 function normalizeApiBaseUrl(baseUrl) {
