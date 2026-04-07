@@ -5695,6 +5695,7 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
   if (!RELATIONAL_SYNC_KEY_SET.has(storageKey)) {
     return false;
   }
+  const forceWrite = Boolean(options?.force);
   if (relationalSync.blockedStorageKeys.has(storageKey)) {
     return false;
   }
@@ -5719,7 +5720,7 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
     storageKey,
     relationalSync.lastRejectedWriteMeta.get(storageKey),
   );
-  if (rejectedSignature && rejectedSignature === nextSignature && rejectedMetaSignature === nextMetaSignature) {
+  if (!forceWrite && rejectedSignature && rejectedSignature === nextSignature && rejectedMetaSignature === nextMetaSignature) {
     return true;
   }
   if (rejectedSignature && (rejectedSignature !== nextSignature || rejectedMetaSignature !== nextMetaSignature)) {
@@ -5728,7 +5729,7 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
   }
   const pendingPayload = getPendingRelationalPayloadForStorageKey(storageKey);
   const pendingMeta = relationalSync.pendingWriteMeta.get(storageKey);
-  if (pendingPayload !== undefined && getSyncPayloadSignature(pendingPayload) === nextSignature) {
+  if (!forceWrite && pendingPayload !== undefined && getSyncPayloadSignature(pendingPayload) === nextSignature) {
     relationalSync.pendingWriteMeta.set(storageKey, mergeRelationalWriteMeta(storageKey, pendingMeta, nextMeta));
     if (storageKey === STORAGE_KEYS.users && shouldStampRecentLocalUserWrite(relationalSync.pendingWriteMeta.get(storageKey))) {
       relationalSync.lastUserLocalWriteAt = Date.now();
@@ -5738,7 +5739,8 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
   const inFlightSignature = relationalSync.inFlightPayloadSignatures.get(storageKey);
   const inFlightMeta = relationalSync.inFlightWriteMeta.get(storageKey);
   if (
-    inFlightSignature
+    !forceWrite
+    && inFlightSignature
     && inFlightSignature === nextSignature
     && getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
       <= getRelationalUserSyncScopePriority(inFlightMeta?.userSyncScope)
@@ -5748,7 +5750,8 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
   const lastSyncedSignature = relationalSync.lastSyncedPayloadSignatures.get(storageKey);
   const lastSyncedMeta = relationalSync.lastSyncedWriteMeta.get(storageKey);
   if (
-    !relationalSync.flushing
+    !forceWrite
+    && !relationalSync.flushing
     && pendingPayload === undefined
     && lastSyncedSignature
     && lastSyncedSignature === nextSignature
@@ -8025,6 +8028,7 @@ async function hydrateRelationalSessions(currentUser) {
     return {
       id: sessionId,
       dbId: block.id,
+      questionCount: Math.max(0, Number(block.question_count || questionIds.length || 0)),
       userId: localUserIdByAuth[block.user_id] || block.user_id,
       ownerProfileId: isUuidValue(block.user_id) ? block.user_id : null,
       ownerAuthId: isUuidValue(block.user_id) ? block.user_id : null,
@@ -8079,7 +8083,32 @@ async function hydrateRelationalSessions(currentUser) {
     mergedSessionById.set(sessionId, localSession);
   });
 
-  saveLocalOnly(STORAGE_KEYS.sessions, [...mergedSessionById.values()]);
+  const mergedSessions = [...mergedSessionById.values()];
+  saveLocalOnly(STORAGE_KEYS.sessions, mergedSessions);
+
+  const incompleteRemoteSessionIds = new Set(
+    mappedSessions
+      .filter((session) => {
+        const expectedQuestionCount = Math.max(0, Number(session?.questionCount || 0));
+        const responseCount = isRecordObject(session?.responses) ? Object.keys(session.responses).length : 0;
+        return expectedQuestionCount > 0 && (!Array.isArray(session?.questionIds) || !session.questionIds.length) && responseCount === 0;
+      })
+      .map((session) => String(session?.id || "").trim())
+      .filter(Boolean),
+  );
+  const hasRepairableLocalSessions = [...incompleteRemoteSessionIds].some((sessionId) => {
+    const localSession = localSessionById.get(sessionId);
+    return Boolean(
+      localSession
+      && Array.isArray(localSession.questionIds)
+      && localSession.questionIds.length
+      && isRecordObject(localSession.responses)
+      && Object.keys(localSession.responses).length,
+    );
+  });
+  if (hasRepairableLocalSessions && scheduleRelationalWrite(STORAGE_KEYS.sessions, mergedSessions, { force: true })) {
+    flushPendingSyncInBackground();
+  }
 }
 
 function getSyncScopeForUser(user = null) {
@@ -12397,12 +12426,22 @@ async function syncSessionsToRelational(sessionsPayload) {
   });
   const sessions = dedupedSessions;
   const users = getUsers();
-  const questions = getQuestions();
-  const questionStore = getQuestionStore();
+  let questions = getQuestions();
+  let questionStore = getQuestionStore();
   const currentSessionProfileId = String(
     getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "",
   ).trim();
   const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
+  const knownQuestionDbIds = new Set(
+    questions
+      .map((entry) => String(entry?.dbId || "").trim())
+      .filter((dbId) => isUuidValue(dbId)),
+  );
+  const questionIndexByExternalId = new Map(
+    questions
+      .map((entry, index) => [String(entry?.id || "").trim(), index])
+      .filter(([externalId]) => Boolean(externalId)),
+  );
   const resolveSessionQuestionDbId = (questionId) => {
     const normalizedQuestionId = String(questionId || "").trim();
     if (!normalizedQuestionId) {
@@ -12425,13 +12464,107 @@ async function syncSessionsToRelational(sessionsPayload) {
     if (isUuidValue(mappedDbId)) {
       return mappedDbId;
     }
-    if (isUuidValue(normalizedQuestionId) && questionStore.byDbId.has(normalizedQuestionId)) {
+    if (isUuidValue(normalizedQuestionId) && knownQuestionDbIds.has(normalizedQuestionId)) {
       return normalizedQuestionId;
     }
-    if (isUuidValue(resolvedQuestionId) && questionStore.byDbId.has(resolvedQuestionId)) {
+    if (isUuidValue(resolvedQuestionId) && knownQuestionDbIds.has(resolvedQuestionId)) {
       return resolvedQuestionId;
     }
     return "";
+  };
+  const persistFetchedQuestionDbIds = (rows) => {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) {
+      return false;
+    }
+    let changed = false;
+    const nextQuestions = questions.slice();
+    list.forEach((row) => {
+      const externalId = String(row?.external_id || "").trim();
+      const dbId = String(row?.id || "").trim();
+      if (!externalId || !isUuidValue(dbId)) {
+        return;
+      }
+      questionDbIdByLocalId[externalId] = dbId;
+      knownQuestionDbIds.add(dbId);
+      const questionIndex = questionIndexByExternalId.get(externalId);
+      if (questionIndex == null) {
+        return;
+      }
+      const existingQuestion = nextQuestions[questionIndex];
+      if (String(existingQuestion?.dbId || "").trim() === dbId) {
+        return;
+      }
+      nextQuestions[questionIndex] = {
+        ...existingQuestion,
+        dbId,
+      };
+      changed = true;
+    });
+    if (!changed) {
+      return false;
+    }
+    questions = nextQuestions;
+    saveLocalOnly(STORAGE_KEYS.questions, nextQuestions, { audit: false });
+    questionStore = getQuestionStore();
+    return true;
+  };
+  const loadMissingQuestionDbIds = async (sessionList) => {
+    const externalIds = new Set();
+    const directDbIds = new Set();
+
+    (Array.isArray(sessionList) ? sessionList : []).forEach((session) => {
+      const questionIds = Array.isArray(session?.questionIds) ? session.questionIds : [];
+      questionIds.forEach((questionId) => {
+        if (resolveSessionQuestionDbId(questionId)) {
+          return;
+        }
+        const normalizedQuestionId = String(questionId || "").trim();
+        const resolvedQuestionId = resolveSessionQuestionId(normalizedQuestionId, questionStore);
+        [normalizedQuestionId, resolvedQuestionId].forEach((candidateId) => {
+          const normalizedCandidateId = String(candidateId || "").trim();
+          if (!normalizedCandidateId || resolveSessionQuestionDbId(normalizedCandidateId)) {
+            return;
+          }
+          if (isUuidValue(normalizedCandidateId)) {
+            directDbIds.add(normalizedCandidateId);
+            return;
+          }
+          externalIds.add(normalizedCandidateId);
+        });
+      });
+    });
+
+    if (!externalIds.size && !directDbIds.size) {
+      return;
+    }
+
+    const fetchedRows = [];
+    for (const externalIdBatch of splitIntoBatches([...externalIds], RELATIONAL_IN_BATCH_SIZE)) {
+      const data = await runRelationalQueryWithTimeout(
+        client
+          .from("questions")
+          .select("id,external_id")
+          .in("external_id", externalIdBatch),
+        "Session question lookup timed out.",
+      );
+      if (Array.isArray(data) && data.length) {
+        fetchedRows.push(...data);
+      }
+    }
+    for (const questionIdBatch of splitIntoBatches([...directDbIds], RELATIONAL_UUID_IN_BATCH_SIZE)) {
+      const data = await runRelationalQueryWithTimeout(
+        client
+          .from("questions")
+          .select("id,external_id")
+          .in("id", questionIdBatch),
+        "Session question lookup timed out.",
+      );
+      if (Array.isArray(data) && data.length) {
+        fetchedRows.push(...data);
+      }
+    }
+    persistFetchedQuestionDbIds(fetchedRows);
   };
   const sessionOwnerProfileIdBySessionId = new Map();
   const skippedSessionDiagnostics = [];
@@ -12533,6 +12666,7 @@ async function syncSessionsToRelational(sessionsPayload) {
   if (!syncableOwnedSessions.length) {
     return;
   }
+  await loadMissingQuestionDbIds(syncableOwnedSessions);
 
   const courseRowsResult = await fetchRowsPaged((from, to) => (
     client
@@ -12748,6 +12882,19 @@ async function syncSessionsToRelational(sessionsPayload) {
   const responseRows = [...responseRowsBySyncKey.values()];
   if (skippedQuestionDiagnostics.length) {
     console.warn("[session-sync] Some session questions could not be matched to relational question IDs.", skippedQuestionDiagnostics);
+    const affectedSessionCount = new Set(
+      skippedQuestionDiagnostics
+        .map((entry) => String(entry?.sessionId || "").trim())
+        .filter(Boolean),
+    ).size;
+    const sample = skippedQuestionDiagnostics
+      .slice(0, 3)
+      .map((entry) => `${entry.sessionId}:${entry.localQuestionId || entry.resolvedQuestionId || "unknown"}`)
+      .join(", ");
+    throw new Error(
+      `Session question mapping is still loading for ${affectedSessionCount || skippedQuestionDiagnostics.length} test(s); retrying automatically. `
+      + (sample ? `Examples: ${sample}` : ""),
+    );
   }
 
   if (itemRows.length) {
@@ -19824,13 +19971,13 @@ function renderSession() {
   const resolvedCurrentQid = resolveSessionQuestionId(currentQid, questionStore);
   const response = session.responses[currentQid] || session.responses[resolvedCurrentQid];
   if (!question || !response) {
-    if (!questionStore.list.length) {
-      if (user?.role === "student") {
-        scheduleStudentBootRefresh(user, {
-          rerender: true,
-          reason: "session recovery",
-        }).catch(() => { });
-      }
+    if (user?.role === "student") {
+      scheduleStudentBootRefresh(user, {
+        rerender: true,
+        reason: "session recovery",
+      }).catch(() => { });
+    }
+    if (!questionStore.list.length || user?.role === "student") {
       return `
         <section class="panel">
           <h2 class="title">Restoring your saved session...</h2>
@@ -33711,18 +33858,18 @@ function normalizeSession(session, options = {}) {
         || questionStore.byDbId.has(normalizedQuestionId)
         || isUuidValue(normalizedQuestionId);
     });
-    if (sanitizedQuestionIds.length !== session.questionIds.length) {
-      session.questionIds = sanitizedQuestionIds;
-      changed = true;
+    const hasMissingCatalogQuestions = sanitizedQuestionIds.length !== session.questionIds.length;
+    if (!hasMissingCatalogQuestions) {
+      // Preserve in-progress answers if the question catalog is temporarily partial;
+      // otherwise we can jump the student backwards and wipe saved responses.
+      const allowedQuestionIds = new Set(session.questionIds);
+      Object.keys(session.responses).forEach((qid) => {
+        if (!allowedQuestionIds.has(qid)) {
+          delete session.responses[qid];
+          changed = true;
+        }
+      });
     }
-
-    const allowedQuestionIds = new Set(session.questionIds);
-    Object.keys(session.responses).forEach((qid) => {
-      if (!allowedQuestionIds.has(qid)) {
-        delete session.responses[qid];
-        changed = true;
-      }
-    });
   }
 
   if (
