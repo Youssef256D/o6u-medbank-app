@@ -849,7 +849,7 @@ const sessionStoreRuntime = {
   initialized: false,
   list: [],
   byId: new Map(),
-  visibleSignature: "",
+  visibleSignature: null,
   visibleList: [],
 };
 
@@ -3432,9 +3432,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     }
   }
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
-  const fallbackAssignedCourses = role === "student"
-    ? []
-    : sanitizeCourseAssignments(localUser?.assignedCourses || []);
+  const fallbackEnrollmentYear = normalizeAcademicYearOrNull(localUser?.academicYear);
+  const fallbackEnrollmentSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
+  const fallbackAssignedCourses = sanitizeCourseAssignments(localUser?.assignedCourses || []);
   const profileApproved = typeof profile.approved === "boolean" ? profile.approved : null;
   const localApproval = typeof localUser?.isApproved === "boolean" ? localUser.isApproved : null;
   const profilePhoneValidation = validateAndNormalizePhoneNumber(String(profile.phone || "").trim());
@@ -3460,12 +3460,16 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   });
   let year = role === "student"
     ? (
-      shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentYear : (profileYear !== null ? profileYear : relationalEnrollmentYear)
+      shouldPreferRelationalEnrollmentTerm
+        ? (relationalEnrollmentYear ?? profileYear ?? fallbackEnrollmentYear)
+        : (profileYear ?? relationalEnrollmentYear ?? fallbackEnrollmentYear)
     )
     : null;
   let semester = role === "student"
     ? (
-      shouldPreferRelationalEnrollmentTerm ? relationalEnrollmentSemester : (profileSemester !== null ? profileSemester : relationalEnrollmentSemester)
+      shouldPreferRelationalEnrollmentTerm
+        ? (relationalEnrollmentSemester ?? profileSemester ?? fallbackEnrollmentSemester)
+        : (profileSemester ?? relationalEnrollmentSemester ?? fallbackEnrollmentSemester)
     )
     : null;
   const serverTermCourses = role === "student" && year !== null && semester !== null
@@ -3475,7 +3479,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     ? (
       relationalAssignedCourses.length
         ? relationalAssignedCourses
-        : (serverTermCourses.length ? serverTermCourses : fallbackAssignedCourses)
+        : (fallbackAssignedCourses.length ? fallbackAssignedCourses : serverTermCourses)
     )
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   if (role === "student") {
@@ -3495,14 +3499,33 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     academicSemester: semester,
     assignedCourses: resolvedAssignedCourses,
   });
+  const shouldTrustCompleteLocalApproval = (
+    role === "student"
+    && profileApproved === false
+    && (localApproval === true || autoApprovalFallback)
+    && hasCompleteStudentProfile({
+      role: "student",
+      phone: resolvedPhone,
+      academicYear: year,
+      academicSemester: semester,
+      assignedCourses: resolvedAssignedCourses,
+    })
+    && (
+      profileYear === null
+      || profileSemester === null
+      || relationalAssignedCourses.length === 0
+    )
+  );
   const resolvedApproval = role === "admin"
     ? true
     : (
-      profileApproved !== null
-        ? profileApproved
-        : localApproval !== null
-          ? localApproval
-          : autoApprovalFallback
+      shouldTrustCompleteLocalApproval
+        ? true
+        : profileApproved !== null
+          ? profileApproved
+          : localApproval !== null
+            ? localApproval
+            : autoApprovalFallback
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
@@ -3561,6 +3584,12 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       && sanitizeCourseAssignments(updatedUser?.assignedCourses || []).length > 0
     )
   );
+  const shouldBackfillStudentApproval = (
+    role === "student"
+    && profileApproved === false
+    && resolvedApproval === true
+    && hasCompleteStudentProfile(updatedUser)
+  );
   if (shouldBackfillProfilePhone) {
     client
       .from("profiles")
@@ -3588,14 +3617,30 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
         console.warn("Could not backfill profile phone.", patchError?.message || patchError);
       });
   }
-  if (shouldBackfillStudentEnrollment) {
+  if (shouldBackfillStudentEnrollment || shouldBackfillStudentApproval) {
     syncProfilesToRelational([updatedUser], {
       userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
-    }).catch((syncError) => {
-      if (!isMissingRelationError(syncError)) {
-        console.warn("Could not backfill missing student enrollment fields.", syncError?.message || syncError);
-      }
-    });
+    })
+      .then(async () => {
+        if (!shouldBackfillStudentApproval) {
+          return;
+        }
+        const approvalResult = await updateRelationalProfileApproval([updatedUser.id], true).catch((syncError) => ({
+          ok: false,
+          message: syncError?.message || syncError,
+        }));
+        if (approvalResult?.ok === false) {
+          console.warn(
+            "Could not backfill missing student approval state.",
+            approvalResult?.message || "Unknown approval sync error.",
+          );
+        }
+      })
+      .catch((syncError) => {
+        if (!isMissingRelationError(syncError)) {
+          console.warn("Could not backfill missing student enrollment fields.", syncError?.message || syncError);
+        }
+      });
   }
   return { user: updatedUser, approvalChecked: true };
 }
@@ -4983,6 +5028,16 @@ async function ensureFreshStudentDataAfterAuth(user, options = {}) {
     await hydrateUserScopedSupabaseState(currentUser);
   } catch (hydrateError) {
     console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
+  }
+
+  const completedLocalSessions = getCompletedSessionsForRelationalHistorySync()
+    .filter((session) => doesSessionBelongToUser(session, currentUser));
+  if (completedLocalSessions.length && hasActiveSupabaseSessionForUser(currentUser)) {
+    relationalSync.blockedStorageKeys.delete(STORAGE_KEYS.sessions);
+    sessionSyncRuntime.dirty = true;
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
+      console.warn("Could not backfill completed session history after auth.", syncError?.message || syncError);
+    });
   }
 
   return refreshed;
@@ -17681,14 +17736,29 @@ function wireAuth(mode) {
             return;
           }
 
-          const user = upsertLocalUserFromAuth(authData.user, {
+          let effectiveAuthData = authData;
+          if (!effectiveAuthData?.session) {
+            const signInResult = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signInWithPassword({
+              email,
+              password,
+            }));
+            if (!signInResult?.error && signInResult?.data?.user) {
+              effectiveAuthData = {
+                ...authData,
+                user: signInResult.data.user,
+                session: signInResult.data.session || null,
+              };
+            }
+          }
+
+          const user = upsertLocalUserFromAuth(effectiveAuthData.user, {
             name,
             role: "student",
             academicYear,
             academicSemester,
             assignedCourses: selectedCourses,
             phone: normalizedPhone,
-            verified: Boolean(authData.session),
+            verified: Boolean(effectiveAuthData.session),
             isApproved: autoApproved,
             approvedAt: autoApproved ? nowISO() : null,
             approvedBy: autoApproved ? AUTO_APPROVAL_ACTOR : null,
@@ -17711,10 +17781,10 @@ function wireAuth(mode) {
           }
           await flushPendingSyncNow();
 
-          if (authData.session && !autoApproved) {
+          if (effectiveAuthData.session && !autoApproved) {
             await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
           }
-          if (autoApproved && authData.session) {
+          if (autoApproved && effectiveAuthData.session) {
             save(STORAGE_KEYS.currentUserId, user.id);
             navigate(user.role === "admin" ? "admin" : "dashboard");
             toast("Account created and approved. Welcome.");
@@ -28984,7 +29054,7 @@ function resetSessionStoreRuntime() {
   sessionStoreRuntime.initialized = false;
   sessionStoreRuntime.list = [];
   sessionStoreRuntime.byId = new Map();
-  sessionStoreRuntime.visibleSignature = "";
+  sessionStoreRuntime.visibleSignature = null;
   sessionStoreRuntime.visibleList = [];
 }
 
@@ -29005,7 +29075,7 @@ function getSessionStore() {
     sessionStoreRuntime.initialized = true;
     sessionStoreRuntime.list = list;
     sessionStoreRuntime.byId = new Map(list.map((session) => [String(session?.id || "").trim(), session]));
-    sessionStoreRuntime.visibleSignature = "";
+    sessionStoreRuntime.visibleSignature = null;
     sessionStoreRuntime.visibleList = [];
   }
   return sessionStoreRuntime;
