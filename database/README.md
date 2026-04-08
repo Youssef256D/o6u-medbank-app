@@ -52,6 +52,7 @@ psql -d o6umedbank -f database/seed.sql
 - Enrollment mapping (student -> courses)
 - Questions, answer choices, tags, and revisions
 - Test blocks/sessions, block items, and responses
+- Previous-test history snapshots (`test_history_entries`) for reliable completed-test recovery
 - Incorrect queue and flashcards
 - Bulk import jobs and import errors
 - Feedback and support messages

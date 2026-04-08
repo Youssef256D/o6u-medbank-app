@@ -159,6 +159,7 @@ const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
 const QUESTION_RELATIONAL_PAGE_SIZE = 250;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
+const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
 const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
@@ -4780,20 +4781,41 @@ function resetSessionSyncRuntime() {
   sessionSyncRuntime.flushing = false;
 }
 
+function getCompletedSessionsForRelationalHistorySync(sessionsPayload = null) {
+  const sourceSessions = Array.isArray(sessionsPayload) ? sessionsPayload : getSessions();
+  const completedSessionsById = new Map();
+
+  sourceSessions.forEach((session) => {
+    const sessionId = String(session?.id || "").trim();
+    if (!sessionId || String(session?.status || "").trim() !== "completed") {
+      return;
+    }
+    completedSessionsById.set(sessionId, session);
+  });
+
+  return [...completedSessionsById.values()]
+    .sort((a, b) => (
+      parseSyncTimestampMs(b?.completedAt || b?.updatedAt || b?.createdAt)
+      - parseSyncTimestampMs(a?.completedAt || a?.updatedAt || a?.createdAt)
+    ));
+}
+
 function queueSessionStateForCloud() {
   if (!sessionSyncRuntime.dirty) {
     return false;
   }
 
   const sessions = getSessions();
-  const queuedRelational = scheduleRelationalWrite(STORAGE_KEYS.sessions, sessions);
+  const completedHistorySessions = getCompletedSessionsForRelationalHistorySync(sessions);
+  const queuedRelational = !completedHistorySessions.length
+    || scheduleRelationalWrite(STORAGE_KEYS.sessions, completedHistorySessions);
   const queuedBackup = scheduleSupabaseWrite(STORAGE_KEYS.sessions, sessions);
   if (!queuedRelational && !queuedBackup) {
     return false;
   }
-  // Keep the session marked dirty until the relational write is queued so
-  // completed tests still make it into test_blocks/test_block_items/test_responses.
-  sessionSyncRuntime.dirty = !queuedRelational;
+  // Only completed tests require the relational history write; in-progress
+  // state is preserved through the app-state backup path.
+  sessionSyncRuntime.dirty = completedHistorySessions.length ? !queuedRelational : false;
   return true;
 }
 
@@ -7884,6 +7906,109 @@ async function syncNotificationReadsToRelational(user, notificationDbIds) {
   return { ok: true };
 }
 
+function getSessionHistorySourceValue(value) {
+  const normalized = String(value || "").trim();
+  return ["all", "unused", "incorrect", "flagged", "previous-incorrect"].includes(normalized)
+    ? normalized
+    : "all";
+}
+
+function buildRelationalSessionHistorySnapshot(session) {
+  const snapshot = isRecordObject(session) ? deepClone(session) : {};
+  delete snapshot.dbId;
+  snapshot.status = "completed";
+  snapshot.completedAt = snapshot.completedAt || snapshot.updatedAt || nowISO();
+  snapshot.questionIds = Array.isArray(snapshot.questionIds) ? snapshot.questionIds : [];
+  snapshot.responses = isRecordObject(snapshot.responses) ? snapshot.responses : {};
+  return snapshot;
+}
+
+function mapRelationalSessionHistoryRowToLocal(row, options = {}) {
+  const users = Array.isArray(options?.users) ? options.users : getUsers();
+  const courseNameById = options?.courseNameById instanceof Map ? options.courseNameById : new Map();
+  const payload = isRecordObject(row?.payload) ? deepClone(row.payload) : {};
+  const rowUserId = String(row?.user_id || "").trim();
+  const matchingUser = users.find((entry) => String(getUserProfileId(entry) || "").trim() === rowUserId) || null;
+  const payloadCourses = Array.isArray(payload?.courses)
+    ? payload.courses.map((course) => String(course || "").trim()).filter(Boolean)
+    : [];
+  const courseName = String(courseNameById.get(String(row?.course_id || "").trim()) || "").trim();
+  const courses = payloadCourses.length
+    ? [...new Set(payloadCourses)]
+    : (courseName ? [courseName] : []);
+  const inferredTerm = inferAcademicTermFromCourses(courses);
+  const externalId = String(row?.external_id || payload?.id || row?.id || "").trim();
+  const defaultName = buildAutoSessionName({
+    courses,
+    mode: row?.mode || payload?.mode,
+    source: row?.source || payload?.source,
+    questionCount: Math.max(
+      0,
+      Number(
+        row?.question_count
+        || payload?.questionCount
+        || (Array.isArray(payload?.questionIds) ? payload.questionIds.length : 0)
+        || 0,
+      ),
+    ),
+  });
+  const ownerProfileId = isUuidValue(rowUserId)
+    ? rowUserId
+    : (resolveSessionOwnerProfileId(payload, users) || null);
+
+  return {
+    ...payload,
+    id: externalId,
+    dbId: String(row?.id || "").trim() || String(payload?.dbId || "").trim() || null,
+    questionCount: Math.max(
+      0,
+      Number(
+        row?.question_count
+        || payload?.questionCount
+        || (Array.isArray(payload?.questionIds) ? payload.questionIds.length : 0)
+        || 0,
+      ),
+    ),
+    userId: String(matchingUser?.id || payload?.userId || rowUserId || "").trim() || payload?.userId,
+    ownerProfileId,
+    ownerAuthId: ownerProfileId,
+    ownerIds: normalizeSessionOwnerIdList([
+      ...(Array.isArray(payload?.ownerIds) ? payload.ownerIds : []),
+      payload?.userId,
+      payload?.ownerProfileId,
+      payload?.ownerAuthId,
+      matchingUser?.id,
+      ...getStoredUserIdentityAliases(matchingUser),
+      rowUserId,
+    ]),
+    name: normalizeSessionName(row?.session_name, payload?.name || defaultName),
+    testId: normalizeSessionTestId(row?.session_test_id || payload?.testId, externalId),
+    mode: row?.mode === "timed" ? "timed" : "tutor",
+    source: getSessionHistorySourceValue(row?.source || payload?.source),
+    durationMin: Math.max(5, Number(row?.duration_minutes || payload?.durationMin || 20) || 20),
+    timeRemainingSec: payload?.timeRemainingSec == null ? null : Number(payload.timeRemainingSec),
+    paused: false,
+    questionIds: Array.isArray(payload?.questionIds) ? payload.questionIds : [],
+    responses: isRecordObject(payload?.responses) ? payload.responses : {},
+    currentIndex: Math.max(0, Math.floor(Number(payload?.currentIndex || 0) || 0)),
+    status: "completed",
+    lastQuestionAt: Number(payload?.lastQuestionAt || 0) || Date.now(),
+    lastTimerSyncAt: Number(payload?.lastTimerSyncAt || 0) || Date.now(),
+    elapsedSec: Math.max(0, Number(row?.elapsed_seconds || payload?.elapsedSec || 0) || 0),
+    createdAt: row?.created_at || payload?.createdAt || nowISO(),
+    updatedAt: row?.updated_at || payload?.updatedAt || payload?.completedAt || nowISO(),
+    completedAt: row?.completed_at || payload?.completedAt || payload?.updatedAt || nowISO(),
+    academicYear: normalizeAcademicYearOrNull(payload?.academicYear)
+      ?? normalizeAcademicYearOrNull(matchingUser?.academicYear)
+      ?? inferredTerm.year,
+    academicSemester: normalizeAcademicSemesterOrNull(payload?.academicSemester)
+      ?? normalizeAcademicSemesterOrNull(matchingUser?.academicSemester)
+      ?? inferredTerm.semester,
+    courses,
+    originSessionId: payload?.originSessionId || null,
+  };
+}
+
 async function hydrateRelationalSessions(currentUser) {
   const client = getRelationalClient();
   const userProfileId = String(getUserProfileId(currentUser) || "").trim();
@@ -7905,17 +8030,10 @@ async function hydrateRelationalSessions(currentUser) {
 
   const allUsers = getUsers();
   const questionStore = getQuestionStore();
-  const localQuestionByDbId = Object.fromEntries(
-    questionStore.list
-      .filter((question) => question.dbId)
-      .map((question) => [question.dbId, question.id]),
-  );
-
-  let blocksQuery = client
-    .from("test_blocks")
-    .select("id,external_id,user_id,course_id,mode,source,status,question_count,duration_minutes,time_remaining_sec,current_index,elapsed_seconds,created_at,updated_at,completed_at");
-  const blocksResult = await fetchRowsPaged((from, to) => {
-    let query = blocksQuery
+  const historyResult = await fetchRowsPaged((from, to) => {
+    let query = client
+      .from(RELATIONAL_SESSION_HISTORY_TABLE)
+      .select("id,external_id,user_id,course_id,session_name,session_test_id,mode,source,status,question_count,duration_minutes,elapsed_seconds,payload,created_at,updated_at,completed_at")
       .order("updated_at", { ascending: false })
       .order("id", { ascending: true });
     if (currentUser.role !== "admin") {
@@ -7923,16 +8041,16 @@ async function hydrateRelationalSessions(currentUser) {
     }
     return query.range(from, to);
   });
-  if (blocksResult.error) {
+  if (historyResult.error) {
     return;
   }
-  const blocks = Array.isArray(blocksResult.data) ? blocksResult.data : [];
+  const historyRows = Array.isArray(historyResult.data) ? historyResult.data : [];
   const blockCourseIds = [...new Set(
-    blocks
+    historyRows
       .map((block) => String(block?.course_id || "").trim())
       .filter((courseId) => isUuidValue(courseId)),
   )];
-  const courseNameById = {};
+  const courseNameById = new Map();
   for (const courseIdBatch of splitIntoBatches(blockCourseIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
     const { data, error: coursesError } = await client
       .from("courses")
@@ -7945,122 +8063,23 @@ async function hydrateRelationalSessions(currentUser) {
       const courseId = String(row?.id || "").trim();
       const courseName = String(row?.course_name || "").trim();
       if (isUuidValue(courseId) && courseName) {
-        courseNameById[courseId] = courseName;
+        courseNameById.set(courseId, courseName);
       }
     });
   }
-
-  const blockIds = (blocks || []).map((block) => block.id);
-  const items = [];
-  for (const blockBatch of splitIntoBatches(blockIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error: itemsError } = await client
-      .from("test_block_items")
-      .select("block_id,position,question_id")
-      .in("block_id", blockBatch)
-      .order("position");
-    if (itemsError) {
-      return;
-    }
-    if (Array.isArray(data) && data.length) {
-      items.push(...data);
-    }
-  }
-  const responses = [];
-  for (const blockBatch of splitIntoBatches(blockIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const { data, error: responsesError } = await client
-      .from("test_responses")
-      .select("block_id,question_id,selected_choice_labels,flagged,notes,submitted,answered_at")
-      .in("block_id", blockBatch);
-    if (responsesError) {
-      return;
-    }
-    if (Array.isArray(data) && data.length) {
-      responses.push(...data);
-    }
-  }
-
-  const localUserIdByAuth = Object.fromEntries(
-    allUsers
-      .map((entry) => [getUserProfileId(entry), entry.id])
-      .filter(([profileId]) => Boolean(profileId)),
-  );
-  const localUserByAuth = new Map(
-    allUsers
-      .map((entry) => [String(getUserProfileId(entry) || "").trim(), entry])
-      .filter(([profileId]) => isUuidValue(profileId)),
-  );
-  const itemsByBlock = {};
-  (items || []).forEach((item) => {
-    if (!itemsByBlock[item.block_id]) {
-      itemsByBlock[item.block_id] = [];
-    }
-    itemsByBlock[item.block_id].push(item);
-  });
-  const responsesByBlockQuestion = {};
-  (responses || []).forEach((response) => {
-    responsesByBlockQuestion[`${response.block_id}::${response.question_id}`] = response;
-  });
-
-  const mappedSessions = (blocks || []).map((block) => {
-    const orderedItems = (itemsByBlock[block.id] || []).sort((a, b) => a.position - b.position);
-    const questionIds = orderedItems.map((item) => localQuestionByDbId[item.question_id] || item.question_id);
-    const responseMap = {};
-    orderedItems.forEach((item) => {
-      const localQuestionId = localQuestionByDbId[item.question_id] || item.question_id;
-      const response = responsesByBlockQuestion[`${block.id}::${item.question_id}`];
-      responseMap[localQuestionId] = {
-        selected: Array.isArray(response?.selected_choice_labels) ? response.selected_choice_labels : [],
-        flagged: Boolean(response?.flagged),
-        struck: [],
-        notes: String(response?.notes || ""),
-        timeSpentSec: 0,
-        highlightedLines: [],
-        highlightedLineColors: {},
-        highlightedChoices: {},
-        textHighlights: buildEmptyTextHighlightStore(),
-        submitted: Boolean(response?.submitted),
-      };
-    });
-
-    const sessionId = String(block.external_id || block.id);
-    const matchingUser = localUserByAuth.get(String(block.user_id || "").trim()) || null;
-    const blockCourseName = String(courseNameById[String(block?.course_id || "").trim()] || "").trim();
-    const blockCourses = blockCourseName
-      ? [blockCourseName]
-      : sanitizeCourseAssignments(matchingUser?.assignedCourses || []);
-    const inferredTerm = inferAcademicTermFromCourses(blockCourses);
-    return {
-      id: sessionId,
-      dbId: block.id,
-      questionCount: Math.max(0, Number(block.question_count || questionIds.length || 0)),
-      userId: localUserIdByAuth[block.user_id] || block.user_id,
-      ownerProfileId: isUuidValue(block.user_id) ? block.user_id : null,
-      ownerAuthId: isUuidValue(block.user_id) ? block.user_id : null,
-      ownerIds: normalizeSessionOwnerIdList([
-        ...getStoredUserIdentityAliases(matchingUser),
-        localUserIdByAuth[block.user_id] || block.user_id,
-        block.user_id,
-      ]),
-      mode: String(block.mode || "tutor"),
-      source: String(block.source || "all"),
-      durationMin: Number(block.duration_minutes || 20),
-      timeRemainingSec: block.time_remaining_sec == null ? null : Number(block.time_remaining_sec),
-      paused: false,
-      questionIds,
-      responses: responseMap,
-      currentIndex: Math.min(Math.max(Number(block.current_index || 0), 0), Math.max(0, questionIds.length - 1)),
-      status: String(block.status || "in_progress"),
-      lastQuestionAt: Date.now(),
-      elapsedSec: Number(block.elapsed_seconds || 0),
-      createdAt: block.created_at || nowISO(),
-      updatedAt: block.updated_at || nowISO(),
-      completedAt: block.completed_at || null,
-      academicYear: normalizeAcademicYearOrNull(matchingUser?.academicYear) ?? inferredTerm.year,
-      academicSemester: normalizeAcademicSemesterOrNull(matchingUser?.academicSemester) ?? inferredTerm.semester,
-      courses: blockCourses,
-      originSessionId: null,
-    };
-  });
+  const mappedSessions = historyRows
+    .map((row) => {
+      const session = mapRelationalSessionHistoryRowToLocal(row, {
+        users: allUsers,
+        courseNameById,
+      });
+      if (!session?.id) {
+        return null;
+      }
+      normalizeSession(session, { questionStore, users: allUsers });
+      return session;
+    })
+    .filter(Boolean);
   const localSessions = getSessions();
   const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
   const mergedSessionById = new Map();
@@ -8089,52 +8108,6 @@ async function hydrateRelationalSessions(currentUser) {
 
   const mergedSessions = [...mergedSessionById.values()];
   saveLocalOnly(STORAGE_KEYS.sessions, mergedSessions);
-
-  const incompleteRemoteSessionIds = new Set(
-    mappedSessions
-      .filter((session) => {
-        const expectedQuestionCount = Math.max(0, Number(session?.questionCount || 0));
-        const responseCount = isRecordObject(session?.responses) ? Object.keys(session.responses).length : 0;
-        return expectedQuestionCount > 0 && (!Array.isArray(session?.questionIds) || !session.questionIds.length) && responseCount === 0;
-      })
-      .map((session) => String(session?.id || "").trim())
-      .filter(Boolean),
-  );
-  const collectRepairableLocalSessionIds = (sessionList) => {
-    const sessionMap = new Map(
-      (Array.isArray(sessionList) ? sessionList : [])
-        .map((session) => [String(session?.id || "").trim(), session]),
-    );
-    return [...incompleteRemoteSessionIds].filter((sessionId) => {
-      const localSession = sessionMap.get(sessionId);
-      return Boolean(
-        localSession
-        && Array.isArray(localSession.questionIds)
-        && localSession.questionIds.length
-        && isRecordObject(localSession.responses)
-        && Object.keys(localSession.responses).length,
-      );
-    });
-  };
-
-  let repairableSessionIds = collectRepairableLocalSessionIds(localSessions);
-  if (!repairableSessionIds.length && incompleteRemoteSessionIds.size) {
-    const scope = getSyncScopeForUser(currentUser);
-    if (scope) {
-      const backupResult = await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
-      if (backupResult?.hadRemoteData) {
-        repairableSessionIds = collectRepairableLocalSessionIds(getSessions());
-      }
-    }
-  }
-
-  const repairableSessionIdSet = new Set(repairableSessionIds);
-  const repairableSessions = repairableSessionIdSet.size
-    ? getSessions().filter((session) => repairableSessionIdSet.has(String(session?.id || "").trim()))
-    : [];
-  if (repairableSessions.length && scheduleRelationalWrite(STORAGE_KEYS.sessions, repairableSessions, { force: true })) {
-    flushPendingSyncInBackground();
-  }
 }
 
 function getSyncScopeForUser(user = null) {
@@ -9910,7 +9883,7 @@ async function flushRelationalWrites(options = {}) {
           relationalSync.lastFailureAt = Date.now();
           relationalSync.lastFailureMessage = String(
             error?.retryRelationalMessage
-            || "Some test history is still waiting for question mapping. The remaining items will retry soon.",
+            || "Some test history is still queued for retry. The remaining items will sync again soon.",
           ).trim();
           if (error?.partialRelationalSuccess) {
             succeededCount += 1;
@@ -12563,7 +12536,7 @@ async function syncSessionsToRelational(sessionsPayload) {
     }
   }
 
-  const queuedSessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
+  const queuedSessions = getCompletedSessionsForRelationalHistorySync(sessionsPayload);
   const latestLocalSessions = getSessions();
   const latestLocalSessionById = new Map(
     latestLocalSessions.map((session) => [String(session?.id || "").trim(), session]),
@@ -12579,147 +12552,13 @@ async function syncSessionsToRelational(sessionsPayload) {
     dedupedSessions.push((latestLocalSessionById.get(sessionId)) || session);
   });
   const sessions = dedupedSessions;
+  if (!sessions.length) {
+    return;
+  }
   const users = getUsers();
-  let questions = getQuestions();
-  let questionStore = getQuestionStore();
   const currentSessionProfileId = String(
     getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "",
   ).trim();
-  const questionDbIdByLocalId = Object.fromEntries(questions.filter((entry) => entry.dbId).map((entry) => [entry.id, entry.dbId]));
-  const knownQuestionDbIds = new Set(
-    questions
-      .map((entry) => String(entry?.dbId || "").trim())
-      .filter((dbId) => isUuidValue(dbId)),
-  );
-  const questionIndexByExternalId = new Map(
-    questions
-      .map((entry, index) => [String(entry?.id || "").trim(), index])
-      .filter(([externalId]) => Boolean(externalId)),
-  );
-  const resolveSessionQuestionDbId = (questionId) => {
-    const normalizedQuestionId = String(questionId || "").trim();
-    if (!normalizedQuestionId) {
-      return "";
-    }
-    const resolvedQuestionId = resolveSessionQuestionId(normalizedQuestionId, questionStore);
-    const matchedQuestion = getQuestionFromLookup(questionStore.byId, normalizedQuestionId, questionStore)
-      || questionStore.byDbId.get(normalizedQuestionId)
-      || questionStore.byDbId.get(resolvedQuestionId)
-      || null;
-    const explicitDbId = String(matchedQuestion?.dbId || "").trim();
-    if (isUuidValue(explicitDbId)) {
-      return explicitDbId;
-    }
-    const mappedDbId = String(
-      questionDbIdByLocalId[normalizedQuestionId]
-      || questionDbIdByLocalId[resolvedQuestionId]
-      || "",
-    ).trim();
-    if (isUuidValue(mappedDbId)) {
-      return mappedDbId;
-    }
-    if (isUuidValue(normalizedQuestionId) && knownQuestionDbIds.has(normalizedQuestionId)) {
-      return normalizedQuestionId;
-    }
-    if (isUuidValue(resolvedQuestionId) && knownQuestionDbIds.has(resolvedQuestionId)) {
-      return resolvedQuestionId;
-    }
-    return "";
-  };
-  const persistFetchedQuestionDbIds = (rows) => {
-    const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) {
-      return false;
-    }
-    let changed = false;
-    const nextQuestions = questions.slice();
-    list.forEach((row) => {
-      const externalId = String(row?.external_id || "").trim();
-      const dbId = String(row?.id || "").trim();
-      if (!externalId || !isUuidValue(dbId)) {
-        return;
-      }
-      questionDbIdByLocalId[externalId] = dbId;
-      knownQuestionDbIds.add(dbId);
-      const questionIndex = questionIndexByExternalId.get(externalId);
-      if (questionIndex == null) {
-        return;
-      }
-      const existingQuestion = nextQuestions[questionIndex];
-      if (String(existingQuestion?.dbId || "").trim() === dbId) {
-        return;
-      }
-      nextQuestions[questionIndex] = {
-        ...existingQuestion,
-        dbId,
-      };
-      changed = true;
-    });
-    if (!changed) {
-      return false;
-    }
-    questions = nextQuestions;
-    saveLocalOnly(STORAGE_KEYS.questions, nextQuestions, { audit: false });
-    questionStore = getQuestionStore();
-    return true;
-  };
-  const loadMissingQuestionDbIds = async (sessionList) => {
-    const externalIds = new Set();
-    const directDbIds = new Set();
-
-    (Array.isArray(sessionList) ? sessionList : []).forEach((session) => {
-      const questionIds = Array.isArray(session?.questionIds) ? session.questionIds : [];
-      questionIds.forEach((questionId) => {
-        if (resolveSessionQuestionDbId(questionId)) {
-          return;
-        }
-        const normalizedQuestionId = String(questionId || "").trim();
-        const resolvedQuestionId = resolveSessionQuestionId(normalizedQuestionId, questionStore);
-        [normalizedQuestionId, resolvedQuestionId].forEach((candidateId) => {
-          const normalizedCandidateId = String(candidateId || "").trim();
-          if (!normalizedCandidateId || resolveSessionQuestionDbId(normalizedCandidateId)) {
-            return;
-          }
-          if (isUuidValue(normalizedCandidateId)) {
-            directDbIds.add(normalizedCandidateId);
-            return;
-          }
-          externalIds.add(normalizedCandidateId);
-        });
-      });
-    });
-
-    if (!externalIds.size && !directDbIds.size) {
-      return;
-    }
-
-    const fetchedRows = [];
-    for (const externalIdBatch of splitIntoBatches([...externalIds], RELATIONAL_IN_BATCH_SIZE)) {
-      const data = await runRelationalQueryWithTimeout(
-        client
-          .from("questions")
-          .select("id,external_id")
-          .in("external_id", externalIdBatch),
-        "Session question lookup timed out.",
-      );
-      if (Array.isArray(data) && data.length) {
-        fetchedRows.push(...data);
-      }
-    }
-    for (const questionIdBatch of splitIntoBatches([...directDbIds], RELATIONAL_UUID_IN_BATCH_SIZE)) {
-      const data = await runRelationalQueryWithTimeout(
-        client
-          .from("questions")
-          .select("id,external_id")
-          .in("id", questionIdBatch),
-        "Session question lookup timed out.",
-      );
-      if (Array.isArray(data) && data.length) {
-        fetchedRows.push(...data);
-      }
-    }
-    persistFetchedQuestionDbIds(fetchedRows);
-  };
   const sessionOwnerProfileIdBySessionId = new Map();
   const skippedSessionDiagnostics = [];
   const resolveSyncOwnerProfileId = (session) => {
@@ -12820,7 +12659,6 @@ async function syncSessionsToRelational(sessionsPayload) {
   if (!syncableOwnedSessions.length) {
     return;
   }
-  await loadMissingQuestionDbIds(syncableOwnedSessions);
 
   const courseRowsResult = await fetchRowsPaged((from, to) => (
     client
@@ -12839,285 +12677,86 @@ async function syncSessionsToRelational(sessionsPayload) {
       .map((row) => [String(row?.course_name || "").trim(), String(row?.id || "").trim()])
       .filter(([courseName, courseId]) => courseName && isUuidValue(courseId)),
   );
-
-  const desiredBlocks = syncableOwnedSessions.map((session) => ({
-    ...(isUuidValue(session.dbId) ? { id: session.dbId } : {}),
-    external_id: String(session.id || "").trim(),
-    user_id: sessionOwnerProfileIdBySessionId.get(String(session?.id || "").trim()),
-    course_id: courseIdByName[String(getSessionCourseList(session)[0] || "").trim()] || null,
-    mode: session.mode === "timed" ? "timed" : "tutor",
-    source: ["all", "unused", "incorrect", "flagged"].includes(String(session.source || "")) ? session.source : "all",
-    status: ["in_progress", "completed", "suspended"].includes(String(session.status || "")) ? session.status : "in_progress",
-    question_count: Math.max(1, Number(session.questionIds?.length || 1)),
-    duration_minutes: Number(session.durationMin || 20),
-    time_remaining_sec: session.timeRemainingSec == null ? null : Number(session.timeRemainingSec),
-    current_index: Math.max(0, Number(session.currentIndex || 0)),
-    elapsed_seconds: Math.max(0, Number(session.elapsedSec || 0)),
-    completed_at: session.completedAt || null,
-  }));
-
-  const externalIds = desiredBlocks.map((entry) => entry.external_id).filter(Boolean);
-  const existingBlocks = [];
-  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const data = await runRelationalQueryWithTimeout(
-      client
-        .from("test_blocks")
-        .select("id,external_id,user_id,status,completed_at")
-        .in("external_id", externalIdBatch),
-      "Session block verification timed out.",
+  const desiredRows = syncableOwnedSessions.map((session) => {
+    const sessionId = String(session?.id || "").trim();
+    const ownerProfileId = String(sessionOwnerProfileIdBySessionId.get(sessionId) || "").trim();
+    const snapshot = buildRelationalSessionHistorySnapshot(session);
+    const courseName = String(getSessionCourseList(session)[0] || snapshot?.courses?.[0] || "").trim();
+    const questionCount = Math.max(
+      0,
+      Number(
+        snapshot?.questionCount
+        || (Array.isArray(snapshot?.questionIds) ? snapshot.questionIds.length : 0)
+        || (Array.isArray(session?.questionIds) ? session.questionIds.length : 0)
+        || 0,
+      ),
     );
-    if (Array.isArray(data) && data.length) {
-      existingBlocks.push(...data);
-    }
+    return {
+      row: {
+        user_id: ownerProfileId,
+        external_id: sessionId,
+        course_id: courseIdByName[courseName] || null,
+        session_name: getSessionDisplayName(session),
+        session_test_id: getSessionDisplayId(session),
+        mode: session.mode === "timed" ? "timed" : "tutor",
+        source: getSessionHistorySourceValue(session.source),
+        status: "completed",
+        question_count: questionCount,
+        duration_minutes: Math.max(5, Number(session.durationMin || 20) || 20),
+        elapsed_seconds: Math.max(0, Number(session.elapsedSec || 0) || 0),
+        payload: snapshot,
+        created_at: session.createdAt || snapshot.createdAt || nowISO(),
+        updated_at: session.updatedAt || snapshot.updatedAt || session.completedAt || nowISO(),
+        completed_at: session.completedAt || snapshot.completedAt || session.updatedAt || nowISO(),
+      },
+    };
+  }).filter((entry) => entry.row.external_id && isUuidValue(entry.row.user_id));
+  if (!desiredRows.length) {
+    return;
   }
-  const existingBlockByExternalId = new Map(
-    existingBlocks.map((entry) => [String(entry?.external_id || "").trim(), entry]),
-  );
-  const insertBlocks = desiredBlocks.filter((entry) => !existingBlockByExternalId.has(String(entry?.external_id || "").trim()));
-  const updateBlocks = desiredBlocks
-    .map((entry) => ({
-      desired: entry,
-      existing: existingBlockByExternalId.get(String(entry?.external_id || "").trim()) || null,
-    }))
-    .filter(({ existing }) => Boolean(existing));
-  const isSessionBlockInsertConflictError = (error) => {
-    const code = String(error?.code || error?.status || "").trim().toLowerCase();
-    if (code === "23505" || code === "409") {
-      return true;
-    }
-    const message = String(getErrorMessage(error, "") || "").trim().toLowerCase();
-    return message.includes("duplicate key")
-      || message.includes("violates unique constraint")
-      || message.includes("conflict");
-  };
 
-  for (const blockBatch of splitIntoBatches(insertBlocks, RELATIONAL_INSERT_BATCH_SIZE)) {
-    if (!blockBatch.length) {
-      continue;
-    }
-    console.log("[session-sync] Inserting new test_blocks", {
-      table: "test_blocks",
-      columns: [
-        "external_id",
-        "user_id",
-        "course_id",
-        "mode",
-        "source",
-        "status",
-        "question_count",
-        "duration_minutes",
-        "time_remaining_sec",
-        "current_index",
-        "elapsed_seconds",
-        "completed_at",
-      ],
-      rows: blockBatch,
-    });
+  const persistedHistoryBySyncKey = new Map();
+  for (const rowBatch of splitIntoBatches(desiredRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+    const batchRows = rowBatch.map((entry) => entry.row);
+    let persistedRows;
     try {
-      await runRelationalQueryWithTimeout(
-        client.from("test_blocks").insert(
-          blockBatch.map(({ id, ...row }) => row),
-        ),
-        "Session block insert timed out.",
+      persistedRows = await runRelationalQueryWithTimeout(
+        client
+          .from(RELATIONAL_SESSION_HISTORY_TABLE)
+          .upsert(batchRows, {
+            onConflict: "user_id,external_id",
+            defaultToNull: false,
+          })
+          .select("id,user_id,external_id"),
+        "Completed session history sync timed out.",
       );
     } catch (error) {
-      if (!isSessionBlockInsertConflictError(error)) {
-        throw error;
+      if (isMissingRelationError(error)) {
+        throw new Error("Previous-test history table is missing in Supabase. Run the latest migration first.");
       }
-      console.warn("[session-sync] test_blocks insert conflict; reloading persisted rows instead of overwriting.", {
-        externalIds: blockBatch.map((entry) => entry.external_id),
-        error: error?.message || error,
-      });
+      throw error;
     }
-    console.log("[session-sync] test_blocks insert completed", {
-      table: "test_blocks",
-      rowCount: blockBatch.length,
-      externalIds: blockBatch.map((entry) => entry.external_id),
-    });
-  }
-
-  for (const { desired, existing } of updateBlocks) {
-    if (!existing?.id) {
-      continue;
-    }
-    console.log("[session-sync] Updating existing test_blocks", {
-      table: "test_blocks",
-      blockId: existing.id,
-      externalId: desired.external_id,
-      row: desired,
-    });
-    await runRelationalQueryWithTimeout(
-      client
-        .from("test_blocks")
-        .update({
-          user_id: desired.user_id,
-          course_id: desired.course_id,
-          mode: desired.mode,
-          source: desired.source,
-          status: desired.status,
-          question_count: desired.question_count,
-          duration_minutes: desired.duration_minutes,
-          time_remaining_sec: desired.time_remaining_sec,
-          current_index: desired.current_index,
-          elapsed_seconds: desired.elapsed_seconds,
-          completed_at: desired.completed_at,
-        })
-        .eq("id", existing.id),
-      "Session block update timed out.",
-    );
-  }
-
-  const persistedBlocks = [];
-  for (const externalIdBatch of splitIntoBatches(externalIds, RELATIONAL_IN_BATCH_SIZE)) {
-    const data = await runRelationalQueryWithTimeout(
-      client
-        .from("test_blocks")
-        .select("id,external_id,user_id,status,completed_at")
-        .in("external_id", externalIdBatch),
-      "Session block verification timed out.",
-    );
-    if (Array.isArray(data) && data.length) {
-      persistedBlocks.push(...data);
-    }
-  }
-  console.log("[session-sync] Verified persisted test_blocks", {
-    table: "test_blocks",
-    rowCount: persistedBlocks.length,
-    rows: persistedBlocks,
-  });
-  const blockIdByExternalId = Object.fromEntries((persistedBlocks || []).map((entry) => [entry.external_id, entry.id]));
-
-  const itemRowsBySyncKey = new Map();
-  const responseRowsBySyncKey = new Map();
-  const retryableSessionIds = new Set();
-  const skippedQuestionDiagnostics = [];
-
-  syncableOwnedSessions.forEach((session) => {
-    const sessionId = String(session?.id || "").trim();
-    const blockDbId = blockIdByExternalId[sessionId];
-    if (!blockDbId) {
-      retryableSessionIds.add(sessionId);
-      skippedQuestionDiagnostics.push({
-        sessionId,
-        localQuestionId: null,
-        resolvedQuestionId: null,
-        blockDbId: null,
-        reason: "missing_block_id",
-      });
-      return;
-    }
-    const questionIds = Array.isArray(session.questionIds) ? session.questionIds : [];
-    const sessionItemRows = new Map();
-    const sessionResponseRows = new Map();
-    const seenQuestionDbIds = new Set();
-    let hasUnresolvedQuestionMapping = false;
-    questionIds.forEach((localQuestionId, index) => {
-      const resolvedQuestionId = resolveSessionQuestionId(localQuestionId, questionStore);
-      const questionDbId = resolveSessionQuestionDbId(localQuestionId);
-      if (!questionDbId) {
-        hasUnresolvedQuestionMapping = true;
-        skippedQuestionDiagnostics.push({
-          sessionId,
-          localQuestionId: String(localQuestionId || "").trim() || null,
-          resolvedQuestionId: String(resolvedQuestionId || "").trim() || null,
-          blockDbId,
-        });
-        return;
+    (Array.isArray(persistedRows) ? persistedRows : []).forEach((entry) => {
+      const syncKey = `${String(entry?.user_id || "").trim()}::${String(entry?.external_id || "").trim()}`;
+      if (syncKey !== "::" && isUuidValue(entry?.id)) {
+        persistedHistoryBySyncKey.set(syncKey, String(entry.id).trim());
       }
-      const itemSyncKey = `${blockDbId}:${index + 1}`;
-      const responseSyncKey = `${blockDbId}:${questionDbId}`;
-      if (seenQuestionDbIds.has(questionDbId) || sessionResponseRows.has(responseSyncKey)) {
-        return;
-      }
-      seenQuestionDbIds.add(questionDbId);
-      sessionItemRows.set(itemSyncKey, {
-        block_id: blockDbId,
-        position: index + 1,
-        question_id: questionDbId,
-      });
-
-      const response = session.responses?.[localQuestionId] || session.responses?.[resolvedQuestionId] || {};
-      sessionResponseRows.set(responseSyncKey, {
-        block_id: blockDbId,
-        question_id: questionDbId,
-        selected_choice_labels: Array.isArray(response.selected) ? response.selected : [],
-        flagged: Boolean(response.flagged),
-        notes: String(response.notes || "") || null,
-        submitted: Boolean(response.submitted),
-        answered_at: response.submitted ? session.updatedAt || nowISO() : null,
-      });
     });
-    if (hasUnresolvedQuestionMapping) {
-      retryableSessionIds.add(sessionId);
-      return;
-    }
-    sessionItemRows.forEach((row, syncKey) => {
-      itemRowsBySyncKey.set(syncKey, row);
-    });
-    sessionResponseRows.forEach((row, syncKey) => {
-      responseRowsBySyncKey.set(syncKey, row);
-    });
-  });
-  const itemRows = [...itemRowsBySyncKey.values()];
-  const responseRows = [...responseRowsBySyncKey.values()];
-
-  if (itemRows.length) {
-    for (const itemBatch of splitIntoBatches(itemRows, RELATIONAL_INSERT_BATCH_SIZE)) {
-      console.log("[session-sync] Upserting test_block_items", {
-        table: "test_block_items",
-        columns: ["block_id", "position", "question_id"],
-        rowCount: itemBatch.length,
-        rows: itemBatch,
-      });
-      await runRelationalQueryWithTimeout(
-        client.from("test_block_items").upsert(itemBatch, { onConflict: "block_id,position" }),
-        "Session item sync timed out.",
-      );
-      console.log("[session-sync] test_block_items upsert completed", {
-        table: "test_block_items",
-        rowCount: itemBatch.length,
-      });
-    }
-  }
-  if (responseRows.length) {
-    for (const responseBatch of splitIntoBatches(responseRows, RELATIONAL_INSERT_BATCH_SIZE)) {
-      console.log("[session-sync] Upserting test_responses", {
-        table: "test_responses",
-        columns: [
-          "block_id",
-          "question_id",
-          "selected_choice_labels",
-          "flagged",
-          "notes",
-          "submitted",
-          "answered_at",
-        ],
-        rowCount: responseBatch.length,
-        rows: responseBatch,
-      });
-      await runRelationalQueryWithTimeout(
-        client.from("test_responses").upsert(responseBatch, { onConflict: "block_id,question_id" }),
-        "Session response sync timed out.",
-      );
-      console.log("[session-sync] test_responses upsert completed", {
-        table: "test_responses",
-        rowCount: responseBatch.length,
-      });
-    }
   }
 
   const applySyncedSessionMetadata = (session) => {
-    const dbId = blockIdByExternalId[String(session?.id || "").trim()];
-    const ownerProfileId = resolveSessionOwnerProfileId(session, users);
+    const sessionId = String(session?.id || "").trim();
+    const ownerProfileId = String(
+      sessionOwnerProfileIdBySessionId.get(sessionId)
+      || resolveSessionOwnerProfileId(session, users)
+      || session?.ownerProfileId
+      || session?.ownerAuthId
+      || "",
+    ).trim();
+    const syncKey = `${ownerProfileId}::${sessionId}`;
+    const dbId = persistedHistoryBySyncKey.get(syncKey) || String(session?.dbId || "").trim();
     const nextOwnerProfileId = isUuidValue(ownerProfileId) ? ownerProfileId : null;
     const matchingUser = findMatchingUserForSessionOwner(session, users);
-    if (
-      !dbId
-      && String(session?.ownerProfileId || "").trim() === String(nextOwnerProfileId || "").trim()
-      && String(session?.ownerAuthId || "").trim() === String(nextOwnerProfileId || "").trim()
-    ) {
-      return session;
-    }
     return {
       ...session,
       ...(dbId ? { dbId } : {}),
@@ -13146,35 +12785,6 @@ async function syncSessionsToRelational(sessionsPayload) {
     syncedSessions.push(applySyncedSessionMetadata(session));
   });
   saveLocalOnly(STORAGE_KEYS.sessions, syncedSessions);
-
-  if (skippedQuestionDiagnostics.length) {
-    console.warn("[session-sync] Some session questions could not be matched to relational question IDs.", skippedQuestionDiagnostics);
-    const syncedSessionById = new Map(
-      syncedSessions.map((session) => [String(session?.id || "").trim(), session]),
-    );
-    const retryableSessions = [...retryableSessionIds]
-      .map((sessionId) => syncedSessionById.get(sessionId) || latestLocalSessionById.get(sessionId) || null)
-      .filter(Boolean);
-    const affectedSessionCount = new Set(
-      skippedQuestionDiagnostics
-        .map((entry) => String(entry?.sessionId || "").trim())
-        .filter(Boolean),
-    ).size;
-    const sample = skippedQuestionDiagnostics
-      .slice(0, 3)
-      .map((entry) => `${entry.sessionId}:${entry.localQuestionId || entry.resolvedQuestionId || entry.reason || "unknown"}`)
-      .join(", ");
-    const retryError = new Error(
-      `Session question mapping is still loading for ${affectedSessionCount || skippedQuestionDiagnostics.length} test(s); retrying automatically. `
-      + (sample ? `Examples: ${sample}` : ""),
-    );
-    retryError.partialRelationalSuccess = Boolean(itemRows.length || responseRows.length);
-    retryError.retryRelationalPayload = retryableSessions;
-    retryError.retryRelationalMessage = `${
-      retryableSessions.length || affectedSessionCount || skippedQuestionDiagnostics.length
-    } test history item(s) are still waiting for question mapping. The synced tests are already saved; the remaining ones will retry soon.`;
-    throw retryError;
-  }
 }
 
 function seedData() {
@@ -15129,13 +14739,43 @@ function ensureSessionRealtimeSubscription(user = null) {
     {
       event: "*",
       schema: "public",
-      table: "test_blocks",
+      table: RELATIONAL_SESSION_HISTORY_TABLE,
       filter: `user_id=eq.${profileId}`,
     },
     () => {
       scheduleSessionRealtimeHydration();
     },
   );
+  const sessionScope = getSyncScopeForUser(currentUser);
+  const realtimeStorageKey = buildRemoteSyncKey(STORAGE_KEYS.sessions, sessionScope);
+  if (supabaseSync.enabled && supabaseSync.tableName && supabaseSync.storageKeyColumn && realtimeStorageKey) {
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: supabaseSync.tableName,
+        filter: `${supabaseSync.storageKeyColumn}=eq.${realtimeStorageKey}`,
+      },
+      () => {
+        scheduleSessionRealtimeHydration();
+      },
+    );
+    if (realtimeStorageKey !== STORAGE_KEYS.sessions) {
+      channel.on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: supabaseSync.tableName,
+          filter: `${supabaseSync.storageKeyColumn}=eq.${STORAGE_KEYS.sessions}`,
+        },
+        () => {
+          scheduleSessionRealtimeHydration();
+        },
+      );
+    }
+  }
 
   channel.subscribe((status) => {
     sessionRealtimeSubscribed = status === "SUBSCRIBED";
@@ -15819,12 +15459,12 @@ async function buildAdminActivityReportSnapshot() {
     ),
     runWithTimeoutResult(
       client
-        .from("test_blocks")
+        .from(RELATIONAL_SESSION_HISTORY_TABLE)
         .select("id,user_id,course_id,status,question_count,elapsed_seconds,created_at,completed_at,updated_at")
         .gte("updated_at", lookbackStartIso)
         .order("updated_at", { ascending: false }),
       ADMIN_REQUEST_TIMEOUT_MS,
-      "Test blocks query timed out.",
+      "Test history query timed out.",
     ),
     runWithTimeoutResult(
       client.from("courses").select("id,course_name,course_code"),

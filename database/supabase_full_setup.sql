@@ -219,6 +219,34 @@ CREATE TABLE IF NOT EXISTS test_responses (
   CONSTRAINT struck_choice_labels_valid_ck CHECK (struck_choice_labels <@ ARRAY['A', 'B', 'C', 'D', 'E'])
 );
 
+CREATE TABLE IF NOT EXISTS test_history_entries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  course_id UUID REFERENCES courses(id) ON DELETE SET NULL,
+  external_id TEXT NOT NULL,
+  session_name TEXT,
+  session_test_id TEXT,
+  mode TEXT NOT NULL DEFAULT 'tutor' CHECK (mode IN ('tutor', 'timed')),
+  source TEXT NOT NULL DEFAULT 'all' CHECK (source IN ('all', 'unused', 'incorrect', 'flagged', 'previous-incorrect')),
+  status TEXT NOT NULL DEFAULT 'completed' CHECK (status = 'completed'),
+  question_count INTEGER NOT NULL DEFAULT 0 CHECK (question_count >= 0),
+  duration_minutes INTEGER NOT NULL DEFAULT 20 CHECK (duration_minutes BETWEEN 5 AND 300),
+  elapsed_seconds INTEGER NOT NULL DEFAULT 0 CHECK (elapsed_seconds >= 0),
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT test_history_entries_external_id_ck CHECK (BTRIM(external_id) <> ''),
+  CONSTRAINT test_history_entries_payload_object_ck CHECK (jsonb_typeof(payload) = 'object'),
+  CONSTRAINT test_history_entries_user_external_unique UNIQUE (user_id, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS test_history_entries_user_completed_idx
+  ON test_history_entries (user_id, completed_at DESC, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS test_history_entries_course_completed_idx
+  ON test_history_entries (course_id, completed_at DESC);
+
 CREATE TABLE IF NOT EXISTS incorrect_queue (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   question_id UUID NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
@@ -335,6 +363,12 @@ EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_test_blocks_updated_at ON test_blocks;
 CREATE TRIGGER trg_test_blocks_updated_at
 BEFORE UPDATE ON test_blocks
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_test_history_entries_updated_at ON test_history_entries;
+CREATE TRIGGER trg_test_history_entries_updated_at
+BEFORE UPDATE ON test_history_entries
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 

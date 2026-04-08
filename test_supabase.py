@@ -1,7 +1,7 @@
 import urllib.request
 import json
 
-tables = ['profiles', 'courses', 'course_topics', 'questions', 'question_choices', 'test_blocks', 'test_block_items', 'test_responses']
+tables = ['profiles', 'courses', 'course_topics', 'questions', 'question_choices', 'test_blocks', 'test_block_items', 'test_responses', 'test_history_entries']
 headers = {
     'apikey': 'sb_publishable_h0rAeFDW-_yQA3EGqay-hA_wcupylm0',
     'Authorization': 'Bearer sb_publishable_h0rAeFDW-_yQA3EGqay-hA_wcupylm0',
