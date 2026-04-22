@@ -4649,6 +4649,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   if (previous) {
     archiveSessionsForChangedUserEnrollments([previous], [nextUser], {
       reason: "enrollment_change",
+      includeCompleted: false,
     });
   }
 
@@ -7289,9 +7290,12 @@ async function hydrateRelationalProfiles(currentUser) {
   repairUserIdentityAliasesInList(nextUsers);
   archiveSessionsForChangedUserEnrollments(usersBefore, nextUsers, {
     reason: "enrollment_change",
+    includeCompleted: false,
   });
   const sessionsAfterHydration = getSessions();
-  if (repairSessionOwnerAliasesInList(sessionsAfterHydration, nextUsers)) {
+  const repairedEnrollmentArchives = restoreSessionsArchivedByEnrollmentChange(sessionsAfterHydration, nextUsers);
+  const repairedOwnerAliases = repairSessionOwnerAliasesInList(sessionsAfterHydration, nextUsers);
+  if (repairedEnrollmentArchives || repairedOwnerAliases) {
     saveLocalOnly(STORAGE_KEYS.sessions, sessionsAfterHydration);
   }
   saveLocalOnly(STORAGE_KEYS.users, nextUsers);
@@ -17640,6 +17644,7 @@ function wireAuth(mode) {
 
           archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
             reason: "enrollment_change",
+            includeCompleted: true,
           });
           save(STORAGE_KEYS.users, users, {
             userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
@@ -18238,6 +18243,7 @@ function wireCompleteProfile() {
 
       archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
+        includeCompleted: true,
       });
       save(STORAGE_KEYS.users, users, {
         userSyncScope: USER_RELATIONAL_SYNC_SCOPE_STUDENT_PROFILE,
@@ -25932,6 +25938,7 @@ function wireAdmin() {
 
       const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
+        includeCompleted: true,
       });
       save(STORAGE_KEYS.users, users, {
         userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
@@ -26248,6 +26255,7 @@ function wireAdmin() {
       }
       const archivedSessionIds = archiveSessionsForChangedUserEnrollments([previousUser], [users[idx]], {
         reason: "enrollment_change",
+        includeCompleted: true,
       });
       save(STORAGE_KEYS.users, users, {
         userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
@@ -30418,6 +30426,7 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
 
   const archiveAt = String(options?.archivedAt || nowISO()).trim() || nowISO();
   const archiveReason = String(options?.reason || "enrollment_change").trim() || "enrollment_change";
+  const includeCompleted = Boolean(options?.includeCompleted);
   const archivedSessionIds = [];
 
   list.forEach((session) => {
@@ -30425,7 +30434,7 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
       return;
     }
     const status = String(session?.status || "").trim();
-    if (status !== "in_progress" && status !== "completed") {
+    if (status !== "in_progress" && (!includeCompleted || status !== "completed")) {
       return;
     }
 
@@ -30572,6 +30581,7 @@ function archiveSessionsForChangedUserEnrollments(previousUsers, nextUsers, opti
 
   const archivedSessionIds = new Set();
   const processedUsers = new Set();
+  const includeCompleted = Boolean(options?.includeCompleted);
   nextList.forEach((nextUser) => {
     const previousUser = getUserMergeMatchKeys(nextUser)
       .map((key) => previousByKey.get(key))
@@ -30595,7 +30605,10 @@ function archiveSessionsForChangedUserEnrollments(previousUsers, nextUsers, opti
       processedUsers.add(processedKey);
     }
 
-    archiveEnrollmentResetSessionsInList(sessions, nextUser, options).forEach((sessionId) => {
+    archiveEnrollmentResetSessionsInList(sessions, nextUser, {
+      ...options,
+      includeCompleted,
+    }).forEach((sessionId) => {
       archivedSessionIds.add(sessionId);
     });
   });
