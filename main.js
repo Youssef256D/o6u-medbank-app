@@ -8831,8 +8831,15 @@ function shouldPreferLocalSessionQuestionData(localSession, remoteSession, quest
 function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession) {
   const localStatus = String(localSession?.status || "").trim();
   const remoteStatus = String(remoteSession?.status || "").trim();
+  const localArchivedReason = String(localSession?.archivedReason || "").trim();
   const activeSessionId = String(state.sessionId || "").trim();
   const activeReviewSessionId = String(state.reviewSessionId || "").trim();
+  if (
+    localStatus === "suspended"
+    && localArchivedReason === "enrollment_change"
+  ) {
+    return true;
+  }
   if (
     sessionId
     && state.route === "session"
@@ -13009,9 +13016,10 @@ function seedData() {
     save(STORAGE_KEYS.sessions, []);
   } else {
     const sessions = getSessions();
-    const repairedEnrollmentArchives = restoreSessionsArchivedByEnrollmentChange(sessions, getUsers());
     const repairedOwnerAliases = repairSessionOwnerAliasesInList(sessions, getUsers());
-    if (repairedEnrollmentArchives || repairedOwnerAliases) {
+    const repairedOutOfScopeSessions = archiveOutOfScopeSessionsForCurrentEnrollment(sessions, getUsers());
+    const repairedEnrollmentArchives = restoreSessionsArchivedByEnrollmentChange(sessions, getUsers());
+    if (repairedEnrollmentArchives || repairedOutOfScopeSessions || repairedOwnerAliases) {
       save(STORAGE_KEYS.sessions, sessions);
     }
   }
@@ -30417,7 +30425,7 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
       return;
     }
     const status = String(session?.status || "").trim();
-    if (status !== "in_progress") {
+    if (status !== "in_progress" && status !== "completed") {
       return;
     }
 
@@ -30430,6 +30438,44 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
   });
 
   return [...new Set(archivedSessionIds.filter(Boolean))];
+}
+
+function archiveOutOfScopeSessionsForCurrentEnrollment(sessions, usersOverride = null, options = {}) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const users = Array.isArray(usersOverride) ? usersOverride : getUsers();
+  const questionMetaById = getAnalyticsQuestionMetaById();
+  const archiveAt = String(options?.archivedAt || nowISO()).trim() || nowISO();
+  let changed = false;
+
+  list.forEach((session) => {
+    if (!session || typeof session !== "object") {
+      return;
+    }
+    const status = String(session?.status || "").trim();
+    if (status !== "in_progress" && status !== "completed") {
+      return;
+    }
+    if (String(session?.archivedReason || "").trim() === "enrollment_change") {
+      return;
+    }
+
+    const matchingUser = findMatchingUserForSessionOwner(session, users);
+    if (!matchingUser || String(matchingUser?.role || "").trim() !== "student" || !hasStableStudentEnrollmentScope(matchingUser)) {
+      return;
+    }
+    if (isSessionWithinUserAcademicTerm(session, matchingUser, questionMetaById)) {
+      return;
+    }
+
+    session.previousStatus = status;
+    session.status = "suspended";
+    session.archivedAt = archiveAt;
+    session.archivedReason = "enrollment_change";
+    session.updatedAt = archiveAt;
+    changed = true;
+  });
+
+  return changed;
 }
 
 function restoreSessionsArchivedByEnrollmentChange(sessions, usersOverride = null) {
@@ -30448,17 +30494,7 @@ function restoreSessionsArchivedByEnrollmentChange(sessions, usersOverride = nul
       return;
     }
 
-    if (previousStatus === "completed") {
-      session.status = "completed";
-      session.completedAt = session.completedAt || session.updatedAt || session.createdAt || nowISO();
-      delete session.previousStatus;
-      delete session.archivedAt;
-      delete session.archivedReason;
-      changed = true;
-      return;
-    }
-
-    if (previousStatus !== "in_progress") {
+    if (previousStatus !== "in_progress" && previousStatus !== "completed") {
       return;
     }
 
@@ -30470,7 +30506,10 @@ function restoreSessionsArchivedByEnrollmentChange(sessions, usersOverride = nul
       return;
     }
 
-    session.status = "in_progress";
+    session.status = previousStatus;
+    if (previousStatus === "completed") {
+      session.completedAt = session.completedAt || session.updatedAt || session.createdAt || nowISO();
+    }
     delete session.previousStatus;
     delete session.archivedAt;
     delete session.archivedReason;
