@@ -263,6 +263,12 @@ const state = {
     topicSource: "",
   },
   createTestSource: "all",
+  previousTestFilters: {
+    dateKey: "",
+    course: "",
+    topic: "",
+    sort: "newest",
+  },
   createTestNameDraft: "",
   analyticsCourse: "",
   sessionPanel: null,
@@ -18579,6 +18585,183 @@ function renderDashboardCoach(snapshot) {
   `;
 }
 
+function getPreviousTestFilters() {
+  const current = state.previousTestFilters && typeof state.previousTestFilters === "object"
+    ? state.previousTestFilters
+    : {};
+  const allowedSorts = new Set(["newest", "oldest", "best", "most-wrong"]);
+  const sort = allowedSorts.has(String(current.sort || "")) ? String(current.sort) : "newest";
+  state.previousTestFilters = {
+    dateKey: String(current.dateKey || "").trim(),
+    course: String(current.course || "").trim(),
+    topic: String(current.topic || "").trim(),
+    sort,
+  };
+  return state.previousTestFilters;
+}
+
+function getPreviousTestCompletedDate(session) {
+  const candidates = [session?.completedAt, session?.updatedAt, session?.createdAt];
+  for (const value of candidates) {
+    const date = new Date(value || "");
+    if (!Number.isNaN(date.getTime())) {
+      return date;
+    }
+  }
+  return new Date(0);
+}
+
+function getPreviousTestDateKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatPreviousTestDateLabel(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "Unknown date";
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatPreviousTestTimeLabel(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function getSessionTopicList(session, questionStore = null, questionMetaById = null) {
+  if (!session || typeof session !== "object") {
+    return [];
+  }
+  const store = questionStore || getQuestionStore();
+  const map = questionMetaById instanceof Map ? questionMetaById : getAnalyticsQuestionMetaById();
+  const topics = [];
+  const seenTopics = new Set();
+  (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
+    const resolvedQuestionId = resolveSessionQuestionId(qid, store);
+    const question = getQuestionForSession(session, qid, store)
+      || map.get(qid)?.question
+      || map.get(resolvedQuestionId)?.question;
+    const fallbackMeta = map.get(qid) || map.get(resolvedQuestionId);
+    const meta = question ? getQbankCourseTopicMeta(question) : fallbackMeta;
+    if (!meta) {
+      return;
+    }
+    const topic = String(meta.topic || question?.qbankTopic || question?.topic || "").trim();
+    if (!topic || seenTopics.has(topic)) {
+      return;
+    }
+    seenTopics.add(topic);
+    topics.push(topic);
+  });
+  return topics;
+}
+
+function renderPreviousTestMiniChips(values, fallback = "Unsorted") {
+  const list = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (!list.length) {
+    return `<span class="previous-test-chip is-muted">${escapeHtml(fallback)}</span>`;
+  }
+  const visible = list.slice(0, 2);
+  const overflow = list.length - visible.length;
+  return `
+    ${visible.map((value) => `<span class="previous-test-chip">${escapeHtml(value)}</span>`).join("")}
+    ${overflow ? `<span class="previous-test-chip is-muted">+${overflow}</span>` : ""}
+  `;
+}
+
+function buildPreviousTestRecord(session, questionStore, questionMetaById = null) {
+  normalizeSession(session, { questionStore });
+  const completedDate = getPreviousTestCompletedDate(session);
+  const summary = getSessionPerformanceSummary(session, questionStore.byId);
+  const courses = getSessionCourseList(session, questionMetaById).filter(Boolean);
+  const topics = getSessionTopicList(session, questionStore, questionMetaById);
+  const questionCount = Math.max(
+    summary.total,
+    Number(session?.questionCount || 0) || 0,
+    Array.isArray(session?.questionIds) ? session.questionIds.length : 0,
+  );
+  return {
+    session,
+    summary,
+    completedDate,
+    completedMs: completedDate.getTime(),
+    dateKey: getPreviousTestDateKey(completedDate),
+    dateLabel: formatPreviousTestDateLabel(completedDate),
+    timeLabel: formatPreviousTestTimeLabel(completedDate),
+    courses,
+    topics,
+    questionCount,
+    sourceLabel: getCreateTestSourceLabel(session?.source || "all"),
+    modeLabel: formatSessionModeLabel(session?.mode),
+    name: getSessionDisplayName(session),
+    displayId: getSessionDisplayId(session),
+  };
+}
+
+function getCountMap(values) {
+  const map = new Map();
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const key = String(value || "").trim();
+    if (!key) {
+      return;
+    }
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  return map;
+}
+
+function renderPreviousTestOptions(values, selectedValue, placeholder, countMap = null) {
+  const options = [`<option value="">${escapeHtml(placeholder)}</option>`];
+  values.forEach((value) => {
+    const count = countMap instanceof Map ? Number(countMap.get(value) || 0) : 0;
+    const label = count ? `${value} (${count})` : value;
+    options.push(`<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHtml(label)}</option>`);
+  });
+  return options.join("");
+}
+
+function applyPreviousTestFilters(records, filters) {
+  const filtered = records.filter((record) => {
+    if (filters.dateKey && record.dateKey !== filters.dateKey) {
+      return false;
+    }
+    if (filters.course && !record.courses.includes(filters.course)) {
+      return false;
+    }
+    if (filters.topic && !record.topics.includes(filters.topic)) {
+      return false;
+    }
+    return true;
+  });
+
+  return filtered.sort((a, b) => {
+    if (filters.sort === "oldest") {
+      return a.completedMs - b.completedMs;
+    }
+    if (filters.sort === "best") {
+      return b.summary.accuracy - a.summary.accuracy || b.completedMs - a.completedMs;
+    }
+    if (filters.sort === "most-wrong") {
+      return b.summary.wrongCount - a.summary.wrongCount || b.completedMs - a.completedMs;
+    }
+    return b.completedMs - a.completedMs;
+  });
+}
+
 function renderPreviousTestsSection(userOrId) {
   const user = userOrId && typeof userOrId === "object" ? userOrId : null;
   const userId = String((user?.id) || userOrId || "").trim();
@@ -18598,44 +18781,180 @@ function renderPreviousTestsSection(userOrId) {
   }
 
   const questionStore = getQuestionStore();
-  completed.forEach((session) => normalizeSession(session, { questionStore }));
-  const rows = completed
-    .map((session) => {
-      const summary = getSessionPerformanceSummary(session, questionStore.byId);
-      const completedAt = new Date(session.completedAt || session.createdAt).toLocaleString();
+  const records = completed.map((session) => buildPreviousTestRecord(session, questionStore, questionMetaById));
+  const filters = getPreviousTestFilters();
+  const dateCountMap = getCountMap(records.map((record) => record.dateKey));
+  const courseCountMap = getCountMap(records.flatMap((record) => record.courses));
+  const dateOptions = [...dateCountMap.keys()]
+    .sort((a, b) => b.localeCompare(a))
+    .map((dateKey) => ({
+      key: dateKey,
+      label: records.find((record) => record.dateKey === dateKey)?.dateLabel || dateKey,
+      count: dateCountMap.get(dateKey) || 0,
+    }));
+  const courseOptions = [...courseCountMap.keys()].sort((a, b) => a.localeCompare(b));
+
+  if (filters.dateKey && !dateCountMap.has(filters.dateKey)) {
+    filters.dateKey = "";
+  }
+  if (filters.course && !courseCountMap.has(filters.course)) {
+    filters.course = "";
+    filters.topic = "";
+  }
+
+  const topicSourceRecords = filters.course
+    ? records.filter((record) => record.courses.includes(filters.course))
+    : records;
+  const topicCountMap = getCountMap(topicSourceRecords.flatMap((record) => record.topics));
+  const topicOptions = [...topicCountMap.keys()].sort((a, b) => a.localeCompare(b));
+
+  if (filters.topic && !topicCountMap.has(filters.topic)) {
+    filters.topic = "";
+  }
+
+  const filteredRecords = applyPreviousTestFilters(records, filters);
+  const filteredQuestionCount = filteredRecords.reduce((sum, record) => sum + record.questionCount, 0);
+  const filteredCorrect = filteredRecords.reduce((sum, record) => sum + record.summary.correct, 0);
+  const filteredAnswered = filteredRecords.reduce((sum, record) => sum + record.summary.total, 0);
+  const filteredAccuracy = filteredAnswered ? Math.round((filteredCorrect / filteredAnswered) * 100) : 0;
+  const selectedDateLabel = dateOptions.find((option) => option.key === filters.dateKey)?.label || "";
+  const sortLabels = {
+    newest: "Newest first",
+    oldest: "Oldest first",
+    best: "Best score",
+    "most-wrong": "Most wrong",
+  };
+  const activeFilterText = [
+    selectedDateLabel,
+    filters.course,
+    filters.topic,
+    filters.sort !== "newest" ? sortLabels[filters.sort] : "",
+  ].filter(Boolean).join(" • ");
+  const hasActivePreviousTestFilters = Boolean(activeFilterText);
+
+  const dateIndex = `
+    <div class="previous-tests-date-index" aria-label="Previous tests by solved date">
+      <button type="button" class="previous-test-date-pill ${filters.dateKey ? "" : "is-active"}" data-action="previous-test-date-index" data-date-key="">
+        <span>All dates</span>
+        <b>${records.length}</b>
+      </button>
+      ${dateOptions.map((option) => `
+        <button type="button" class="previous-test-date-pill ${filters.dateKey === option.key ? "is-active" : ""}" data-action="previous-test-date-index" data-date-key="${escapeHtml(option.key)}">
+          <span>${escapeHtml(option.label)}</span>
+          <b>${option.count}</b>
+        </button>
+      `).join("")}
+    </div>
+  `;
+
+  const rows = filteredRecords.length
+    ? filteredRecords
+      .map((record) => {
+        const { session, summary } = record;
       return `
-        <tr>
-          <td>
-            <div><b>${escapeHtml(getSessionDisplayName(session))}</b></div>
-            <small class="subtle">${escapeHtml(getSessionDisplayId(session))}</small>
+        <tr class="previous-test-row">
+          <td class="previous-test-title-cell">
+            <div class="previous-test-name">${escapeHtml(record.name)}</div>
+            <div class="previous-test-meta-line">
+              <span>${escapeHtml(record.displayId)}</span>
+              <span>${escapeHtml(record.sourceLabel)}</span>
+              <span>${record.questionCount} q</span>
+            </div>
           </td>
-          <td>${escapeHtml(completedAt)}</td>
-          <td>${escapeHtml(formatSessionModeLabel(session.mode))}</td>
+          <td class="previous-test-date-cell">
+            <span class="previous-test-date-main">${escapeHtml(record.dateLabel)}</span>
+            <small>${escapeHtml(record.timeLabel)}</small>
+          </td>
+          <td>
+            <div class="previous-test-chip-row">${renderPreviousTestMiniChips(record.courses, "No course")}</div>
+          </td>
+          <td>
+            <div class="previous-test-chip-row">${renderPreviousTestMiniChips(record.topics, "No topic")}</div>
+          </td>
+          <td>${escapeHtml(record.modeLabel)}</td>
           <td>${summary.correct}/${summary.total} (${summary.accuracy}%)</td>
           <td>${summary.wrongCount}</td>
           <td>
-            <div class="stack">
-              <button class="btn ghost admin-btn-sm" data-action="open-previous-review" data-session-id="${session.id}">Review</button>
-              <button class="btn admin-btn-sm" data-action="retry-wrong-session" data-session-id="${session.id}" ${summary.wrongCount ? "" : "disabled"}>
+            <div class="previous-test-actions">
+              <button class="btn ghost admin-btn-sm" type="button" data-action="open-previous-review" data-session-id="${escapeHtml(session.id)}">Review</button>
+              <button class="btn admin-btn-sm" type="button" data-action="retry-wrong-session" data-session-id="${escapeHtml(session.id)}" ${summary.wrongCount ? "" : "disabled"}>
                 Retry wrong
               </button>
             </div>
           </td>
         </tr>
       `;
-    })
-    .join("");
+      })
+      .join("")
+    : `
+      <tr>
+        <td colspan="8">
+          <div class="previous-tests-empty">
+            <b>No previous tests match these filters.</b>
+            <span>${escapeHtml(activeFilterText || "Try another date, course, or topic.")}</span>
+          </div>
+        </td>
+      </tr>
+    `;
 
   return `
-    <section class="panel">
-      <h3 style="margin-top: 0;">Previous Tests</h3>
-      <p class="subtle">Review completed blocks or generate a new test from questions you got wrong.</p>
-      <div class="table-wrap">
-        <table>
+    <section class="panel previous-tests-panel">
+      <div class="previous-tests-head">
+        <div>
+          <h3>Previous Tests</h3>
+          <p class="subtle">Review completed blocks or generate a new test from questions you got wrong.</p>
+        </div>
+        <button class="btn ghost admin-btn-sm" type="button" data-action="reset-previous-test-filters" ${hasActivePreviousTestFilters ? "" : "disabled"}>Reset filters</button>
+      </div>
+
+      <div class="previous-tests-summary-strip" aria-label="Previous tests summary">
+        <span><b>${filteredRecords.length}</b><small>shown</small></span>
+        <span><b>${records.length}</b><small>total</small></span>
+        <span><b>${filteredQuestionCount}</b><small>questions</small></span>
+        <span><b>${filteredAccuracy}%</b><small>accuracy</small></span>
+      </div>
+
+      ${dateIndex}
+
+      <div class="previous-tests-filter-grid">
+        <label>
+          Date solved
+          <select data-role="previous-test-filter" data-filter="dateKey">
+            <option value="">All dates</option>
+            ${dateOptions.map((option) => `<option value="${escapeHtml(option.key)}" ${filters.dateKey === option.key ? "selected" : ""}>${escapeHtml(`${option.label} (${option.count})`)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          Course
+          <select data-role="previous-test-filter" data-filter="course">
+            ${renderPreviousTestOptions(courseOptions, filters.course, "All courses", courseCountMap)}
+          </select>
+        </label>
+        <label>
+          Topic
+          <select data-role="previous-test-filter" data-filter="topic">
+            ${renderPreviousTestOptions(topicOptions, filters.topic, filters.course ? "All topics in course" : "All topics", topicCountMap)}
+          </select>
+        </label>
+        <label>
+          Sort
+          <select data-role="previous-test-filter" data-filter="sort">
+            <option value="newest" ${filters.sort === "newest" ? "selected" : ""}>Newest first</option>
+            <option value="oldest" ${filters.sort === "oldest" ? "selected" : ""}>Oldest first</option>
+            <option value="best" ${filters.sort === "best" ? "selected" : ""}>Best score</option>
+            <option value="most-wrong" ${filters.sort === "most-wrong" ? "selected" : ""}>Most wrong</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="table-wrap previous-tests-table-wrap">
+        <table class="previous-tests-table">
           <thead>
             <tr>
               <th>Test</th>
-              <th>Date</th>
+              <th>Solved</th>
+              <th>Course</th>
+              <th>Topic</th>
               <th>Mode</th>
               <th>Score</th>
               <th>Wrong</th>
@@ -18663,6 +18982,44 @@ function wireDashboard() {
         setStudentRefreshButtonBusy(refreshButton, false);
       }
     }
+  });
+
+  appEl.querySelectorAll("[data-role='previous-test-filter']").forEach((control) => {
+    control.addEventListener("change", () => {
+      const filterKey = String(control.getAttribute("data-filter") || "").trim();
+      if (!["dateKey", "course", "topic", "sort"].includes(filterKey)) {
+        return;
+      }
+      const filters = getPreviousTestFilters();
+      filters[filterKey] = String(control.value || "").trim();
+      if (filterKey === "course") {
+        filters.topic = "";
+      }
+      state.previousTestFilters = filters;
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='previous-test-date-index']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const filters = getPreviousTestFilters();
+      filters.dateKey = String(button.getAttribute("data-date-key") || "").trim();
+      state.previousTestFilters = filters;
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelector("[data-action='reset-previous-test-filters']")?.addEventListener("click", () => {
+    state.previousTestFilters = {
+      dateKey: "",
+      course: "",
+      topic: "",
+      sort: "newest",
+    };
+    state.skipNextRouteAnimation = true;
+    render();
   });
 
   appEl.querySelectorAll("[data-action='open-previous-review']").forEach((button) => {
