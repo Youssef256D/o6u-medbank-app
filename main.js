@@ -18832,21 +18832,6 @@ function renderPreviousTestsSection(userOrId) {
   ].filter(Boolean).join(" • ");
   const hasActivePreviousTestFilters = Boolean(activeFilterText);
 
-  const dateIndex = `
-    <div class="previous-tests-date-index" aria-label="Previous tests by solved date">
-      <button type="button" class="previous-test-date-pill ${filters.dateKey ? "" : "is-active"}" data-action="previous-test-date-index" data-date-key="">
-        <span>All dates</span>
-        <b>${records.length}</b>
-      </button>
-      ${dateOptions.map((option) => `
-        <button type="button" class="previous-test-date-pill ${filters.dateKey === option.key ? "is-active" : ""}" data-action="previous-test-date-index" data-date-key="${escapeHtml(option.key)}">
-          <span>${escapeHtml(option.label)}</span>
-          <b>${option.count}</b>
-        </button>
-      `).join("")}
-    </div>
-  `;
-
   const rows = filteredRecords.length
     ? filteredRecords
       .map((record) => {
@@ -18913,8 +18898,6 @@ function renderPreviousTestsSection(userOrId) {
         <span><b>${filteredQuestionCount}</b><small>questions</small></span>
         <span><b>${filteredAccuracy}%</b><small>accuracy</small></span>
       </div>
-
-      ${dateIndex}
 
       <div class="previous-tests-filter-grid">
         <label>
@@ -18995,16 +18978,6 @@ function wireDashboard() {
       if (filterKey === "course") {
         filters.topic = "";
       }
-      state.previousTestFilters = filters;
-      state.skipNextRouteAnimation = true;
-      render();
-    });
-  });
-
-  appEl.querySelectorAll("[data-action='previous-test-date-index']").forEach((button) => {
-    button.addEventListener("click", () => {
-      const filters = getPreviousTestFilters();
-      filters.dateKey = String(button.getAttribute("data-date-key") || "").trim();
       state.previousTestFilters = filters;
       state.skipNextRouteAnimation = true;
       render();

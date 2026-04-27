@@ -3928,64 +3928,6 @@ table {
   font-weight: 700;
 }
 
-.previous-tests-date-index {
-  display: flex;
-  gap: 0.45rem;
-  overflow-x: auto;
-  padding-bottom: 0.12rem;
-  -webkit-overflow-scrolling: touch;
-}
-
-.previous-test-date-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex: 0 0 auto;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.62);
-  color: var(--muted);
-  padding: 0.44rem 0.68rem;
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-  transition:
-    transform 160ms ease,
-    border-color 160ms ease,
-    background 160ms ease,
-    color 160ms ease;
-}
-
-.previous-test-date-pill:hover,
-.previous-test-date-pill:focus-visible {
-  transform: translateY(-1px);
-  border-color: rgba(23, 126, 137, 0.4);
-  color: var(--brand-strong);
-}
-
-.previous-test-date-pill.is-active {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: #fff;
-}
-
-.previous-test-date-pill b {
-  display: inline-flex;
-  min-width: 1.55rem;
-  min-height: 1.55rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--brand-strong);
-  font-size: 0.78rem;
-}
-
-.previous-test-date-pill.is-active b {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
-}
-
 .previous-tests-filter-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -5950,8 +5892,7 @@ body.theme-dark .previous-tests-summary-strip {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
 }
 
-body.theme-dark .previous-tests-summary-strip span,
-body.theme-dark .previous-test-date-pill {
+body.theme-dark .previous-tests-summary-strip span {
   background: rgba(255, 255, 255, 0.07);
   border-color: rgba(255, 255, 255, 0.12);
 }
@@ -5968,8 +5909,7 @@ body.theme-comfort .previous-tests-summary-strip {
   background: linear-gradient(135deg, rgba(118, 86, 63, 0.14), rgba(255, 250, 241, 0.42));
 }
 
-body.theme-comfort .previous-tests-summary-strip span,
-body.theme-comfort .previous-test-date-pill {
+body.theme-comfort .previous-tests-summary-strip span {
   background: rgba(255, 250, 241, 0.58);
   border-color: rgba(124, 95, 71, 0.18);
 }
