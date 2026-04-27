@@ -2881,6 +2881,16 @@ async function handleSupabaseAuthStateChange(event, session) {
 
   if (event === "SIGNED_OUT") {
     const preservedLocalUser = getCurrentUser();
+    const persistedSession = persistInProgressSessionSnapshot({
+      user: preservedLocalUser,
+      immediate: true,
+      flush: false,
+    });
+    if (persistedSession) {
+      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((flushError) => {
+        console.warn("Session snapshot flush during sign-out failed.", flushError?.message || flushError);
+      });
+    }
     const skipRecovery = suppressSupabaseSignedOutRecovery;
     suppressSupabaseSignedOutRecovery = false;
     resetPostAuthWarmupRuntimeState();
@@ -4827,13 +4837,24 @@ function resetSessionSyncRuntime() {
   sessionSyncRuntime.flushing = false;
 }
 
+function isReviewableCompletedSession(session) {
+  const status = String(session?.status || "").trim();
+  if (status === "completed") {
+    return true;
+  }
+  return (
+    status === "suspended"
+    && String(session?.previousStatus || "").trim() === "completed"
+  );
+}
+
 function getCompletedSessionsForRelationalHistorySync(sessionsPayload = null) {
   const sourceSessions = Array.isArray(sessionsPayload) ? sessionsPayload : getSessions();
   const completedSessionsById = new Map();
 
   sourceSessions.forEach((session) => {
     const sessionId = String(session?.id || "").trim();
-    if (!sessionId || String(session?.status || "").trim() !== "completed") {
+    if (!sessionId || !isReviewableCompletedSession(session)) {
       return;
     }
     completedSessionsById.set(sessionId, session);
@@ -7979,6 +8000,7 @@ function buildRelationalSessionHistorySnapshot(session) {
   snapshot.completedAt = snapshot.completedAt || snapshot.updatedAt || nowISO();
   snapshot.questionIds = Array.isArray(snapshot.questionIds) ? snapshot.questionIds : [];
   snapshot.responses = isRecordObject(snapshot.responses) ? snapshot.responses : {};
+  snapshot.questionSnapshots = isRecordObject(snapshot.questionSnapshots) ? snapshot.questionSnapshots : {};
   return snapshot;
 }
 
@@ -8642,7 +8664,7 @@ function hasUnresolvedSessionCloudSync(sessionId = "") {
   if (!session) {
     return false;
   }
-  if (String(session?.status || "").trim() !== "completed") {
+  if (!isReviewableCompletedSession(session)) {
     return false;
   }
   return !isUuidValue(String(session?.dbId || "").trim());
@@ -8798,7 +8820,7 @@ function getSessionQuestionDataScore(session, questionStore = null) {
   );
   let resolvableCount = 0;
   resolvedIds.forEach((questionId) => {
-    if (store.byId.has(questionId)) {
+    if (store.byId.has(questionId) || getQuestionSnapshotFromSession(session, questionId, store)) {
       resolvableCount += 1;
     }
   });
@@ -8897,6 +8919,36 @@ function shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession
     && String(remoteSession?.status || "") === "in_progress";
 }
 
+function mergeSessionQuestionSnapshots(localSession, remoteSession, preferLocalSnapshots, questionStore = null) {
+  const store = questionStore || getQuestionStore();
+  const mergedSnapshots = {};
+  const appendSnapshots = (session) => {
+    const snapshots = session?.questionSnapshots && typeof session.questionSnapshots === "object" && !Array.isArray(session.questionSnapshots)
+      ? session.questionSnapshots
+      : {};
+    Object.values(snapshots).forEach((snapshot) => {
+      const normalized = normalizeQuestionForSessionSnapshot(snapshot);
+      if (!normalized) {
+        return;
+      }
+      getQuestionIdentityCandidates(normalized, store).forEach((id) => {
+        if (id && !mergedSnapshots[id]) {
+          mergedSnapshots[id] = deepClone(normalized);
+        }
+      });
+    });
+  };
+
+  if (preferLocalSnapshots) {
+    appendSnapshots(localSession);
+    appendSnapshots(remoteSession);
+  } else {
+    appendSnapshots(remoteSession);
+    appendSnapshots(localSession);
+  }
+  return mergedSnapshots;
+}
+
 function mergeSessionSnapshots(localSession, remoteSession) {
   const sessionId = String(remoteSession?.id || localSession?.id || "").trim();
   const preferLocal = shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession);
@@ -8942,6 +8994,12 @@ function mergeSessionSnapshots(localSession, remoteSession) {
   merged.questionIds = preferLocalProgressData
     ? [...(localQuestionIds.length ? localQuestionIds : remoteQuestionIds)]
     : [...(remoteQuestionIds.length ? remoteQuestionIds : localQuestionIds)];
+  merged.questionSnapshots = mergeSessionQuestionSnapshots(
+    localSession,
+    remoteSession,
+    preferLocalProgressData,
+    questionStore,
+  );
   const preferredProgressSession = preferLocalProgressData ? localSession : remoteSession;
   const fallbackProgressSession = preferLocalProgressData ? remoteSession : localSession;
   merged.currentIndex = Math.max(
@@ -9054,7 +9112,7 @@ function hasRenderableLocalSessionRouteState(user = null) {
     if (
       reviewSession
       && doesSessionBelongToUser(reviewSession, currentUser)
-      && String(reviewSession?.status || "").trim() === "completed"
+      && isReviewableCompletedSession(reviewSession)
     ) {
       return true;
     }
@@ -10588,7 +10646,7 @@ function warmSessionQuestionAssets(session, questionStore = null) {
     if (!qid) {
       return;
     }
-    const question = getQuestionById(resolveSessionQuestionId(qid, store));
+    const question = getQuestionForSession(session, qid, store);
     if (!question) {
       return;
     }
@@ -11916,43 +11974,10 @@ async function deleteRelationalQuestionsAndDependents(client, questionIds) {
   for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
       client
-        .from("question_choices")
-        .delete()
-        .in("question_id", idBatch),
-      "Question choice cleanup timed out.",
-      QUESTION_RELATIONAL_TIMEOUT_MS,
-    );
-  }
-
-  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client
-        .from("test_responses")
-        .delete()
-        .in("question_id", idBatch),
-      "Question response cleanup timed out.",
-      QUESTION_RELATIONAL_TIMEOUT_MS,
-    );
-  }
-
-  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client
-        .from("test_block_items")
-        .delete()
-        .in("question_id", idBatch),
-      "Question block-item cleanup timed out.",
-      QUESTION_RELATIONAL_TIMEOUT_MS,
-    );
-  }
-
-  for (const idBatch of splitIntoBatches(ids, QUESTION_RELATIONAL_BATCH_SIZE)) {
-    await runRelationalQueryWithTimeout(
-      client
         .from("questions")
-        .delete()
+        .update({ status: "archived", updated_at: nowISO() })
         .in("id", idBatch),
-      "Question cleanup timed out.",
+      "Question archive sync timed out.",
       QUESTION_RELATIONAL_TIMEOUT_MS,
     );
   }
@@ -11968,7 +11993,7 @@ async function flushPendingRelationalQuestionDeletions(client, pendingExternalId
     return [];
   }
 
-  const deleteDbIds = [];
+  const archiveDbIds = [];
   for (const extIdBatch of splitIntoBatches(pendingDeletions, QUESTION_RELATIONAL_BATCH_SIZE)) {
     const matchRows = await runRelationalQueryWithTimeout(
       client
@@ -11980,13 +12005,22 @@ async function flushPendingRelationalQuestionDeletions(client, pendingExternalId
     );
     (matchRows || []).forEach((row) => {
       if (isUuidValue(row?.id)) {
-        deleteDbIds.push(row.id);
+        archiveDbIds.push(row.id);
       }
     });
   }
 
-  if (deleteDbIds.length) {
-    await deleteRelationalQuestionsAndDependents(client, deleteDbIds);
+  if (archiveDbIds.length) {
+    for (const idBatch of splitIntoBatches([...new Set(archiveDbIds)], QUESTION_RELATIONAL_BATCH_SIZE)) {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("questions")
+          .update({ status: "archived", updated_at: nowISO() })
+          .in("id", idBatch),
+        "Question archive sync timed out.",
+        QUESTION_RELATIONAL_TIMEOUT_MS,
+      );
+    }
   }
 
   clearQuestionDeletions(pendingDeletions);
@@ -12746,6 +12780,7 @@ async function syncSessionsToRelational(sessionsPayload) {
   const desiredRows = syncableOwnedSessions.map((session) => {
     const sessionId = String(session?.id || "").trim();
     const ownerProfileId = String(sessionOwnerProfileIdBySessionId.get(sessionId) || "").trim();
+    normalizeSession(session, { questionStore: getQuestionStore(), users });
     const snapshot = buildRelationalSessionHistorySnapshot(session);
     const courseName = String(getSessionCourseList(session)[0] || snapshot?.courses?.[0] || "").trim();
     const questionCount = Math.max(
@@ -14541,8 +14576,11 @@ async function hydrateStudentSessionsFromCloud(user = null) {
     return false;
   }
   const profileId = getCurrentSessionProfileId(currentUser);
-  if (!isUuidValue(profileId) || hasPendingSessionSyncForId()) {
+  if (!isUuidValue(profileId)) {
     return false;
+  }
+  if (hasPendingSessionSyncForId()) {
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
   }
 
   const ready = await ensureRelationalSyncReady().catch(() => false);
@@ -15990,10 +16028,6 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
     const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
     const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
-    const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions)
-      || relationalSync.flushing
-      || sessionSyncRuntime.dirty
-      || sessionSyncRuntime.flushing;
     let completedFullSync = false;
     if (needsFullSync) {
       // Run courses/topics and profiles in parallel — they are independent DB reads.
@@ -16029,7 +16063,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
         STORAGE_KEYS.studentRefreshTrigger,
       ]).catch(() => ({ hadRemoteData: false })),
     ]);
-    if (!hasPendingSessionWrites) {
+    if (!shouldDeferSessionHydrationOnActiveRoute(user)) {
       await hydrateRelationalSessions(user);
       const scope = getSyncScopeForUser(user);
       if (scope) {
@@ -18564,12 +18598,10 @@ function renderPreviousTestsSection(userOrId) {
   }
 
   const questionStore = getQuestionStore();
-  const questionsById = questionStore.byId;
   completed.forEach((session) => normalizeSession(session, { questionStore }));
   const rows = completed
-    .slice(0, 10)
     .map((session) => {
-      const summary = getSessionPerformanceSummary(session, questionsById);
+      const summary = getSessionPerformanceSummary(session, questionStore.byId);
       const completedAt = new Date(session.completedAt || session.createdAt).toLocaleString();
       return `
         <tr>
@@ -18657,9 +18689,12 @@ function wireDashboard() {
         return;
       }
 
-      const publishedMap = new Map(getPublishedQuestionsForUser(user).map((question) => [question.id, question]));
+      const questionStore = getQuestionStore();
+      const publishedMap = buildQuestionIdentityLookup(getPublishedQuestionsForUser(user), questionStore);
       const retryMeta = getRetryQuestionMetaForSession(session);
-      const pool = retryMeta.questionIds.map((id) => publishedMap.get(id)).filter(Boolean);
+      const pool = retryMeta.questionIds
+        .map((id) => getQuestionFromIdentityLookup(publishedMap, id, questionStore))
+        .filter(Boolean);
       if (!pool.length) {
         toast("No available wrong/unsolved questions to retry for this test.");
         return;
@@ -18811,11 +18846,10 @@ function getSessionTopicSummary(session) {
   }
 
   const questionStore = getQuestionStore();
-  const questionsById = questionStore.byId;
   const topics = [];
   const seenTopics = new Set();
   (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
-    const question = getQuestionFromLookup(questionsById, qid, questionStore);
+    const question = getQuestionForSession(session, qid, questionStore);
     if (!question) {
       return;
     }
@@ -19888,7 +19922,6 @@ function renderSession() {
     `;
   }
 
-  const questionsById = questionStore.byId;
   const total = session.questionIds.length;
   if (!total) {
     return `
@@ -19900,7 +19933,7 @@ function renderSession() {
     `;
   }
   const currentQid = session.questionIds[session.currentIndex];
-  const question = getQuestionFromLookup(questionsById, currentQid, questionStore);
+  const question = getQuestionForSession(session, currentQid, questionStore);
   const resolvedCurrentQid = resolveSessionQuestionId(currentQid, questionStore);
   const response = session.responses[currentQid] || session.responses[resolvedCurrentQid];
   if (!question || !response) {
@@ -19960,7 +19993,7 @@ function renderSession() {
     .map((qid, index) => {
       const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
       const entry = session.responses[qid] || session.responses[resolvedQuestionId];
-      const navQuestion = getQuestionFromLookup(questionsById, qid, questionStore);
+      const navQuestion = getQuestionForSession(session, qid, questionStore);
       const isSubmittedEntry = Boolean(entry?.submitted);
       const isCorrectEntry = isSubmittedEntry && isSubmittedResponseCorrect(navQuestion, entry);
       const isWrongEntry = isSubmittedEntry && !isCorrectEntry;
@@ -20448,7 +20481,7 @@ async function handleSessionClick(event) {
       render();
       return;
     }
-    const question = getQuestionById(qid);
+    const question = getQuestionForSession(session, qid, questionStore);
     if (!question) {
       toast("Current question could not be loaded.");
       return;
@@ -20472,7 +20505,7 @@ async function handleSessionClick(event) {
       render();
       return;
     }
-    const question = getQuestionById(qid);
+    const question = getQuestionForSession(session, qid, questionStore);
     if (!question) {
       toast("Current question could not be loaded.");
       return;
@@ -20640,7 +20673,7 @@ async function handleSessionClick(event) {
       return;
     }
     response.submitted = true;
-    const question = getQuestionById(qid);
+    const question = getQuestionForSession(session, qid, questionStore);
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
       addQuestionToIncorrectQueue(session.userId, qid);
@@ -21010,7 +21043,7 @@ function finalizeSession(sessionId, options = {}) {
 
   for (const qid of session.questionIds) {
     const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
-    const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
+    const question = getQuestionForSession(session, qid, questionStore);
     const response = session.responses[qid] || session.responses[resolvedQuestionId];
     const correct = isSubmittedResponseCorrect(question, response);
     if (!correct) {
@@ -21085,10 +21118,9 @@ function renderReview() {
   const questionStore = getQuestionStore();
   normalizeSession(selected, { questionStore });
 
-  const questionsById = questionStore.byId;
   const reviewedEntries = selected.questionIds.map((qid) => {
     const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
-    const question = getQuestionFromLookup(questionsById, qid, questionStore);
+    const question = getQuestionForSession(selected, qid, questionStore);
     const response = selected.responses[qid] || selected.responses[resolvedQuestionId] || {
       selected: [],
       flagged: false,
@@ -21781,6 +21813,7 @@ function resolveAdminQuestionListView(questions, allCourses, preferredCourse = "
   const selectedTopicKey = normalizeAdminQuestionFilterToken(selectedTopic);
 
   const filteredQuestions = questionList
+    .filter((question) => String(question?.status || "").trim().toLowerCase() !== "archived")
     .filter((question) => {
       const meta = getQbankCourseTopicMeta(question);
       return normalizeAdminQuestionFilterToken(meta.course) === selectedCourseKey;
@@ -26888,6 +26921,7 @@ function wireAdmin() {
         let localMessage = "";
 
         if (actionType === "delete") {
+          preserveQuestionSnapshotsForQuestions([...selectedSet], questions);
           const nextQuestions = questions.filter((entry) => !selectedSet.has(String(entry.id || "").trim()));
           queueQuestionDeletions([...selectedSet]);
           save(STORAGE_KEYS.questions, nextQuestions);
@@ -26984,7 +27018,9 @@ function wireAdmin() {
     render();
 
     try {
-      const questions = getQuestions().filter((entry) => String(entry.id || "").trim() !== qid);
+      const currentQuestions = getQuestions();
+      preserveQuestionSnapshotsForQuestions([qid], currentQuestions);
+      const questions = currentQuestions.filter((entry) => String(entry.id || "").trim() !== qid);
       queueQuestionDeletions([qid]);
       save(STORAGE_KEYS.questions, questions);
       state.adminSelectedQuestionIds = normalizeQuestionIdList(
@@ -27634,6 +27670,66 @@ function clearQuestionDeletions(externalIds) {
   }
   const current = getPendingQuestionDeletions();
   savePendingQuestionDeletions(current.filter((id) => !removeSet.has(id)));
+}
+
+function preserveQuestionSnapshotsForQuestions(questionIds, questionsOverride = null) {
+  const ids = new Set(
+    (Array.isArray(questionIds) ? questionIds : [questionIds])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  );
+  if (!ids.size) {
+    return false;
+  }
+  const questions = Array.isArray(questionsOverride) ? questionsOverride : getQuestions();
+  const questionStore = getQuestionStore();
+  const questionByIdentity = buildQuestionIdentityLookup(questions, questionStore);
+  const snapshotsById = new Map();
+  ids.forEach((id) => {
+    const question = getQuestionFromIdentityLookup(questionByIdentity, id, questionStore);
+    const snapshot = normalizeQuestionForSessionSnapshot(question);
+    if (snapshot) {
+      snapshotsById.set(id, snapshot);
+      getQuestionIdentityCandidates(snapshot, questionStore).forEach((identity) => {
+        if (identity) {
+          snapshotsById.set(identity, snapshot);
+        }
+      });
+    }
+  });
+  if (!snapshotsById.size) {
+    return false;
+  }
+
+  const sessions = getSessions();
+  let changed = false;
+  sessions.forEach((session) => {
+    if (!session || !Array.isArray(session.questionIds)) {
+      return;
+    }
+    const snapshots = getSessionQuestionSnapshotMap(session);
+    session.questionIds.forEach((qid) => {
+      const matchingSnapshot = getQuestionIdentityCandidates(qid, questionStore)
+        .map((id) => snapshotsById.get(id))
+        .find(Boolean);
+      if (!matchingSnapshot) {
+        return;
+      }
+      getQuestionIdentityCandidates(matchingSnapshot, questionStore).forEach((id) => {
+        if (!id) {
+          return;
+        }
+        if (JSON.stringify(snapshots[id] || null) !== JSON.stringify(matchingSnapshot)) {
+          snapshots[id] = deepClone(matchingSnapshot);
+          changed = true;
+        }
+      });
+    });
+  });
+  if (changed) {
+    save(STORAGE_KEYS.sessions, sessions, { immediate: true });
+  }
+  return changed;
 }
 
 function normalizePendingCourseDeletionEntry(entry) {
@@ -30664,8 +30760,7 @@ function getCompletedSessionsForUser(userId, options = {}) {
   ]);
   const directlyOwnedCompletedSessions = directIdentityHints.length
     ? getSessions().filter((session) => {
-      const status = String(session?.status || "").trim();
-      if (status !== "completed") {
+      if (!isReviewableCompletedSession(session)) {
         return false;
       }
       const sessionOwnerIds = getStoredSessionOwnerIds(session);
@@ -30674,12 +30769,9 @@ function getCompletedSessionsForUser(userId, options = {}) {
     })
     : [];
   const allVisibleCompletedSessions = getSessionsForUser(ownerReference)
-    .filter((session) => (
-      String(session?.status || "").trim() === "completed"
-      && String(session?.status || "").trim() !== "suspended"
-    ));
+    .filter((session) => isReviewableCompletedSession(session));
   const scopedCompletedSessions = getAcademicTermScopedSessionsForUser(userId, targetUser, questionMetaById)
-    .filter((session) => String(session?.status || "").trim() === "completed");
+    .filter((session) => isReviewableCompletedSession(session));
   const shouldFallbackToAllTerms = options?.fallbackToAllTerms !== false;
   const resolvedSessions = shouldFallbackToAllTerms
     ? [...new Map(
@@ -30705,7 +30797,7 @@ function getReviewableCompletedSessionsForUser(userOrId, options = {}) {
   const reviewSession = state.reviewSessionId ? getSessionById(state.reviewSessionId) : null;
   if (
     !reviewSession
-    || String(reviewSession?.status || "").trim() !== "completed"
+    || !isReviewableCompletedSession(reviewSession)
     || !doesSessionBelongToUser(reviewSession, user || userId)
   ) {
     return completedSessions;
@@ -30736,6 +30828,170 @@ function getQuestionFromLookup(lookup, questionId, questionStore = null) {
     || null;
 }
 
+function normalizeQuestionForSessionSnapshot(question) {
+  if (!question || typeof question !== "object") {
+    return null;
+  }
+  const questionId = String(question.id || "").trim();
+  const stem = String(question.stem || "").trim();
+  const choices = normalizeQuestionChoiceEntries(question.choices);
+  if (!questionId || !stem || choices.length < 2) {
+    return null;
+  }
+  const meta = getQbankCourseTopicMeta(question);
+  return {
+    ...deepClone(question),
+    id: questionId,
+    dbId: String(question.dbId || "").trim() || null,
+    qbankCourse: meta.course,
+    qbankTopic: meta.topic,
+    course: meta.course || String(question.course || "").trim(),
+    topic: meta.topic || String(question.topic || "").trim(),
+    system: String(question.system || meta.course || "").trim(),
+    difficulty: normalizeImportDifficulty(question.difficulty),
+    tags: Array.isArray(question.tags) ? question.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
+    stem,
+    choices,
+    correct: getNormalizedQuestionCorrectChoiceIds(question),
+    explanation: String(question.explanation || "").trim(),
+    objective: String(question.objective || "").trim(),
+    references: String(question.references || "").trim(),
+    questionImage: String(question.questionImage || "").trim(),
+    explanationImage: String(question.explanationImage || "").trim(),
+    status: String(question.status || "published").trim() || "published",
+  };
+}
+
+function getSessionQuestionSnapshotMap(session) {
+  if (!session || typeof session !== "object") {
+    return {};
+  }
+  if (!session.questionSnapshots || typeof session.questionSnapshots !== "object" || Array.isArray(session.questionSnapshots)) {
+    session.questionSnapshots = {};
+  }
+  return session.questionSnapshots;
+}
+
+function getQuestionSnapshotFromSession(session, questionId, questionStore = null) {
+  if (!session || typeof session !== "object") {
+    return null;
+  }
+  const store = questionStore || getQuestionStore();
+  const snapshots = session.questionSnapshots && typeof session.questionSnapshots === "object" && !Array.isArray(session.questionSnapshots)
+    ? session.questionSnapshots
+    : {};
+  const candidates = getQuestionIdentityCandidates(questionId, store);
+  for (const candidate of candidates) {
+    const snapshot = normalizeQuestionForSessionSnapshot(snapshots[candidate]);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+  return Object.values(snapshots)
+    .map((snapshot) => normalizeQuestionForSessionSnapshot(snapshot))
+    .find((snapshot) => getQuestionIdentityCandidates(snapshot, store).some((id) => candidates.includes(id)))
+    || null;
+}
+
+function getQuestionForSession(session, questionId, questionStore = null) {
+  const store = questionStore || getQuestionStore();
+  return getQuestionSnapshotFromSession(session, questionId, store)
+    || getQuestionFromLookup(store.byId, questionId, store);
+}
+
+function ensureSessionQuestionSnapshots(session, questionStore = null) {
+  if (!session || typeof session !== "object") {
+    return false;
+  }
+  const store = questionStore || getQuestionStore();
+  const snapshots = getSessionQuestionSnapshotMap(session);
+  let changed = false;
+
+  (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
+    const normalizedQid = String(qid || "").trim();
+    if (!normalizedQid) {
+      return;
+    }
+    const existingSnapshot = getQuestionSnapshotFromSession(session, normalizedQid, store);
+    const bankQuestion = getQuestionFromLookup(store.byId, normalizedQid, store);
+    const snapshot = normalizeQuestionForSessionSnapshot(existingSnapshot || bankQuestion);
+    if (!snapshot) {
+      return;
+    }
+    getQuestionIdentityCandidates(snapshot, store).forEach((id) => {
+      if (!id) {
+        return;
+      }
+      if (JSON.stringify(snapshots[id] || null) !== JSON.stringify(snapshot)) {
+        snapshots[id] = deepClone(snapshot);
+        changed = true;
+      }
+    });
+    const resolvedQid = resolveSessionQuestionId(normalizedQid, store);
+    const canonicalKey = resolvedQid || normalizedQid;
+    if (!snapshots[canonicalKey]) {
+      snapshots[canonicalKey] = deepClone(snapshot);
+      changed = true;
+    }
+  });
+
+  return changed;
+}
+
+function getQuestionIdentityCandidates(questionOrId, questionStore = null) {
+  const store = questionStore || getQuestionStore();
+  const ids = new Set();
+  const addId = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+      return;
+    }
+    ids.add(normalized);
+    const resolved = resolveSessionQuestionId(normalized, store);
+    if (resolved) {
+      ids.add(resolved);
+    }
+    const resolvedQuestion = getQuestionFromLookup(store.byId, normalized, store);
+    if (resolvedQuestion?.id) {
+      ids.add(String(resolvedQuestion.id).trim());
+    }
+    if (resolvedQuestion?.dbId) {
+      ids.add(String(resolvedQuestion.dbId).trim());
+    }
+  };
+
+  if (questionOrId && typeof questionOrId === "object") {
+    addId(questionOrId.id);
+    addId(questionOrId.dbId);
+  } else {
+    addId(questionOrId);
+  }
+  return [...ids].filter(Boolean);
+}
+
+function buildQuestionIdentityLookup(questions, questionStore = null) {
+  const store = questionStore || getQuestionStore();
+  const lookup = new Map();
+  (Array.isArray(questions) ? questions : []).forEach((question) => {
+    getQuestionIdentityCandidates(question, store).forEach((id) => {
+      if (!lookup.has(id)) {
+        lookup.set(id, question);
+      }
+    });
+  });
+  return lookup;
+}
+
+function getQuestionFromIdentityLookup(lookup, questionId, questionStore = null) {
+  if (!(lookup instanceof Map)) {
+    return null;
+  }
+  const store = questionStore || getQuestionStore();
+  return getQuestionIdentityCandidates(questionId, store)
+    .map((id) => lookup.get(id))
+    .find(Boolean) || null;
+}
+
 function getIncorrectQuestionIdsForSession(session, questionsById = null) {
   if (!session || !Array.isArray(session.questionIds)) {
     return [];
@@ -30745,7 +31001,7 @@ function getIncorrectQuestionIdsForSession(session, questionsById = null) {
   const wrongIds = [];
   session.questionIds.forEach((qid) => {
     const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
-    const question = getQuestionFromLookup(map, qid, questionStore);
+    const question = getQuestionForSession(session, qid, questionStore) || getQuestionFromLookup(map, qid, questionStore);
     const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
     if (!question || !response) return;
     const isCorrect = isSubmittedResponseCorrect(question, response);
@@ -30769,7 +31025,7 @@ function getRetryQuestionMetaForSession(session, questionsById = null) {
 
   session.questionIds.forEach((qid) => {
     const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
-    const question = getQuestionFromLookup(map, qid, questionStore);
+    const question = getQuestionForSession(session, qid, questionStore) || getQuestionFromLookup(map, qid, questionStore);
     if (!question) {
       return;
     }
@@ -30797,7 +31053,7 @@ function getSessionPerformanceSummary(session, questionsById = null) {
   let total = 0;
   session.questionIds.forEach((qid) => {
     const resolvedQuestionId = resolveSessionQuestionId(qid, getQuestionStore());
-    const question = getQuestionFromLookup(map, qid);
+    const question = getQuestionForSession(session, qid) || getQuestionFromLookup(map, qid);
     const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
     if (!question || !response) return;
     total += 1;
@@ -30843,6 +31099,7 @@ function createSessionFromQuestions(questions, config = {}) {
   const createdAtIso = nowISO();
 
   const responses = {};
+  const questionSnapshots = {};
   selected.forEach((question) => {
     responses[question.id] = {
       selected: [],
@@ -30856,6 +31113,14 @@ function createSessionFromQuestions(questions, config = {}) {
       textHighlights: buildEmptyTextHighlightStore(),
       submitted: false,
     };
+    const snapshot = normalizeQuestionForSessionSnapshot(question);
+    if (snapshot) {
+      getQuestionIdentityCandidates(snapshot).forEach((id) => {
+        if (id) {
+          questionSnapshots[id] = deepClone(snapshot);
+        }
+      });
+    }
     const mappedCourse = String(getQbankCourseTopicMeta(question).course || "").trim();
     if (mappedCourse && !seenSessionCourses.has(mappedCourse)) {
       seenSessionCourses.add(mappedCourse);
@@ -30889,6 +31154,7 @@ function createSessionFromQuestions(questions, config = {}) {
     academicSemester: sessionAcademicSemester,
     questionIds: selected.map((question) => question.id),
     responses,
+    questionSnapshots,
     currentIndex: 0,
     status: "in_progress",
     lastQuestionAt: createdAtMs,
@@ -33159,41 +33425,58 @@ function applySourceFilter(questions, source, userId) {
     return questions;
   }
 
-  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "completed");
+  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => isReviewableCompletedSession(session));
   const attempted = new Set();
   const incorrect = new Set();
   const flagged = new Set();
   const questionStore = getQuestionStore();
+  const questionMatchesIdSet = (question, idSet) => {
+    if (!question || !idSet?.size) {
+      return false;
+    }
+    const questionId = String(question.id || "").trim();
+    const resolvedQuestionId = resolveSessionQuestionId(questionId, questionStore);
+    const dbId = String(question.dbId || "").trim();
+    return idSet.has(questionId) || idSet.has(resolvedQuestionId) || idSet.has(dbId);
+  };
 
   sessions.forEach((session) => {
-    session.questionIds.forEach((qid) => {
+    const questionIds = Array.isArray(session?.questionIds) ? session.questionIds : [];
+    const responses = session?.responses && typeof session.responses === "object" ? session.responses : {};
+    questionIds.forEach((qid) => {
       const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
-      attempted.add(resolvedQuestionId || qid);
-      const response = session.responses[qid] || session.responses[resolvedQuestionId];
-      const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
-      if (!question || !response) return;
+      const filterQuestionId = resolvedQuestionId || qid;
+      const response = responses[qid] || responses[resolvedQuestionId];
+      const question = getQuestionForSession(session, qid, questionStore);
+      if (!question || !response) {
+        return;
+      }
+
+      if (response.submitted) {
+        attempted.add(filterQuestionId);
+      }
 
       const isCorrect = isSubmittedResponseCorrect(question, response);
-      if (!isCorrect) {
-        incorrect.add(resolvedQuestionId || qid);
+      if (response.submitted && !isCorrect) {
+        incorrect.add(filterQuestionId);
       }
 
       if (response.flagged) {
-        flagged.add(resolvedQuestionId || qid);
+        flagged.add(filterQuestionId);
       }
     });
   });
 
   if (source === "unused") {
-    return questions.filter((question) => !attempted.has(question.id));
+    return questions.filter((question) => !questionMatchesIdSet(question, attempted));
   }
 
   if (source === "incorrect") {
-    return questions.filter((question) => incorrect.has(question.id));
+    return questions.filter((question) => questionMatchesIdSet(question, incorrect));
   }
 
   if (source === "flagged") {
-    return questions.filter((question) => flagged.has(question.id));
+    return questions.filter((question) => questionMatchesIdSet(question, flagged));
   }
 
   return questions;
@@ -33208,7 +33491,7 @@ function getMissRateByQuestion(userId) {
     return {};
   }
 
-  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => session.status === "completed");
+  const sessions = getAcademicTermScopedSessionsForUser(userId).filter((session) => isReviewableCompletedSession(session));
   const map = {};
   const questionStore = getQuestionStore();
 
@@ -33216,7 +33499,7 @@ function getMissRateByQuestion(userId) {
     session.questionIds.forEach((qid) => {
       const resolvedQuestionId = resolveSessionQuestionId(qid, questionStore);
       const response = session.responses[qid] || session.responses[resolvedQuestionId];
-      const question = getQuestionFromLookup(questionStore.byId, qid, questionStore);
+      const question = getQuestionForSession(session, qid, questionStore);
       if (!question || !response) return;
 
       const correct = isSubmittedResponseCorrect(question, response);
@@ -33252,7 +33535,7 @@ function getQuestionOptionStats(questionId) {
   });
 
   let totalSubmissions = 0;
-  const sessions = getSessions().filter((session) => session.status === "completed" || session.status === "in_progress");
+  const sessions = getSessions().filter((session) => session.status === "in_progress" || isReviewableCompletedSession(session));
   sessions.forEach((session) => {
     const response = session.responses?.[questionId] || session.responses?.[resolvedQuestionId];
     if (!response || !Array.isArray(response.selected) || response.selected.length === 0) {
@@ -33345,7 +33628,9 @@ function getSessionCourseList(session, questionMetaById = null) {
     if (qid == null || qid === "") {
       return;
     }
-    const questionMeta = map.get(qid) || map.get(String(qid || "").trim());
+    const resolvedQuestionId = resolveSessionQuestionId(qid);
+    const question = getQuestionForSession(session, qid) || map.get(qid)?.question || map.get(resolvedQuestionId)?.question;
+    const questionMeta = question ? getQbankCourseTopicMeta(question) : (map.get(qid) || map.get(String(qid || "").trim()));
     const mappedCourse = String(questionMeta?.course || "").trim();
     if (!mappedCourse || seenCourses.has(mappedCourse)) {
       return;
@@ -33521,7 +33806,7 @@ function buildStudentAnalyticsSnapshot(userId, courseFilter = "", userOverride =
   const targetUser = userOverride || findUserForAnalytics(userId);
   const questionMetaById = getAnalyticsQuestionMetaById();
   const sessions = getAcademicTermScopedSessionsForUser(userId, targetUser, questionMetaById)
-    .filter((session) => session.status === "completed")
+    .filter((session) => isReviewableCompletedSession(session))
     .slice()
     .sort((a, b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt));
   const byTopic = new Map();
@@ -33539,16 +33824,18 @@ function buildStudentAnalyticsSnapshot(userId, courseFilter = "", userOverride =
     let sessionTotalTime = 0;
 
     (Array.isArray(session.questionIds) ? session.questionIds : []).forEach((qid) => {
-      const response = session.responses?.[qid];
-      const questionMeta = questionMetaById.get(qid);
-      if (!questionMeta || !response) {
+      const resolvedQuestionId = resolveSessionQuestionId(qid);
+      const response = session.responses?.[qid] || session.responses?.[resolvedQuestionId];
+      const question = getQuestionForSession(session, qid) || questionMetaById.get(qid)?.question || questionMetaById.get(resolvedQuestionId)?.question;
+      if (!question || !response) {
         return;
       }
+      const questionMeta = getQbankCourseTopicMeta(question);
       if (normalizedFilter && questionMeta.course !== normalizedFilter) {
         return;
       }
 
-      const isCorrect = isSubmittedResponseCorrect(questionMeta.question, response);
+      const isCorrect = isSubmittedResponseCorrect(question, response);
       const timeSpent = Math.max(0, Number(response.timeSpentSec || 0));
       const topic = questionMeta.topic;
 
@@ -33719,7 +34006,6 @@ function persistSessionUiPreferences() {
 function normalizeSession(session, options = {}) {
   const questionStore = options?.questionStore || getQuestionStore();
   const users = Array.isArray(options?.users) ? options.users : getUsers();
-  const questionsById = questionStore.byId;
   let changed = false;
 
   const normalizedOwnerIds = normalizeSessionOwnerIdList([
@@ -33751,6 +34037,10 @@ function normalizeSession(session, options = {}) {
 
   if (!session.responses || typeof session.responses !== "object" || Array.isArray(session.responses)) {
     session.responses = {};
+    changed = true;
+  }
+  if (!session.questionSnapshots || typeof session.questionSnapshots !== "object" || Array.isArray(session.questionSnapshots)) {
+    session.questionSnapshots = {};
     changed = true;
   }
 
@@ -33836,13 +34126,13 @@ function normalizeSession(session, options = {}) {
 
   if (
     (!session.courses.length || session.academicYear === null || session.academicSemester === null)
-    && questionsById.size
+    && (questionStore.byId.size || Object.keys(session.questionSnapshots || {}).length)
   ) {
     const inferredCourses = [];
     const seenCourses = new Set(session.courses);
 
     session.questionIds.forEach((qid) => {
-      const question = getQuestionFromLookup(questionsById, qid, questionStore);
+      const question = getQuestionForSession(session, qid, questionStore);
       if (!question) {
         return;
       }
@@ -33870,6 +34160,10 @@ function normalizeSession(session, options = {}) {
         changed = true;
       }
     }
+  }
+
+  if (ensureSessionQuestionSnapshots(session, questionStore)) {
+    changed = true;
   }
 
   if (!session.questionIds.length && session.status === "in_progress") {
@@ -35015,9 +35309,19 @@ function getNormalizedQuestionCorrectChoiceIds(question) {
     return [];
   }
   const choiceIds = new Set(choices.map((choice) => choice.id));
-  return [...new Set(
+  const explicitCorrectIds = [...new Set(
     (Array.isArray(question?.correct) ? question.correct : [])
       .map((entry) => normalizeQuestionChoiceLabel(entry))
+      .filter((entry) => choiceIds.has(entry)),
+  )].sort();
+  if (explicitCorrectIds.length) {
+    return explicitCorrectIds;
+  }
+
+  return [...new Set(
+    (Array.isArray(question?.choices) ? question.choices : [])
+      .filter((choice) => Boolean(choice?.correct) || Boolean(choice?.is_correct))
+      .map((choice) => normalizeQuestionChoiceLabel(choice?.id || choice?.choice_label || choice?.label))
       .filter((entry) => choiceIds.has(entry)),
   )].sort();
 }
