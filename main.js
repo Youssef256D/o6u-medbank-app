@@ -5978,6 +5978,15 @@ function normalizeRelationalUserSyncScope(value) {
   return USER_RELATIONAL_SYNC_SCOPE_SAFE;
 }
 
+function normalizeProfileSyncIdList(value) {
+  const entries = Array.isArray(value) ? value : [value];
+  return [...new Set(
+    entries
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  )];
+}
+
 function getRelationalUserSyncScopePriority(scope) {
   return USER_RELATIONAL_SYNC_SCOPE_PRIORITY.get(normalizeRelationalUserSyncScope(scope)) ?? 0;
 }
@@ -5988,10 +5997,15 @@ function mergeRelationalWriteMeta(storageKey, previousMeta = null, nextMeta = nu
   }
   const previousScope = normalizeRelationalUserSyncScope(previousMeta?.userSyncScope);
   const nextScope = normalizeRelationalUserSyncScope(nextMeta?.userSyncScope);
+  const profileSyncIds = normalizeProfileSyncIdList([
+    ...normalizeProfileSyncIdList(previousMeta?.profileSyncIds),
+    ...normalizeProfileSyncIdList(nextMeta?.profileSyncIds),
+  ]);
   return {
     userSyncScope: getRelationalUserSyncScopePriority(nextScope) >= getRelationalUserSyncScopePriority(previousScope)
       ? nextScope
       : previousScope,
+    ...(profileSyncIds.length ? { profileSyncIds } : {}),
   };
 }
 
@@ -5999,8 +6013,10 @@ function getRelationalWriteMeta(storageKey, options = {}) {
   if (storageKey !== STORAGE_KEYS.users) {
     return null;
   }
+  const profileSyncIds = normalizeProfileSyncIdList(options?.profileSyncIds);
   return {
     userSyncScope: normalizeRelationalUserSyncScope(options?.userSyncScope),
+    ...(profileSyncIds.length ? { profileSyncIds } : {}),
   };
 }
 
@@ -6008,7 +6024,31 @@ function getRelationalWriteMetaSignature(storageKey, meta = null) {
   if (storageKey !== STORAGE_KEYS.users) {
     return "";
   }
-  return normalizeRelationalUserSyncScope(meta?.userSyncScope);
+  const scope = normalizeRelationalUserSyncScope(meta?.userSyncScope);
+  const profileSyncIds = normalizeProfileSyncIdList(meta?.profileSyncIds).sort();
+  return `${scope}:${profileSyncIds.join(",")}`;
+}
+
+function doesRelationalWriteMetaCover(storageKey, existingMeta = null, nextMeta = null) {
+  if (storageKey !== STORAGE_KEYS.users) {
+    return true;
+  }
+  if (
+    getRelationalUserSyncScopePriority(existingMeta?.userSyncScope)
+    < getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
+  ) {
+    return false;
+  }
+  const requestedProfileIds = normalizeProfileSyncIdList(nextMeta?.profileSyncIds);
+  const existingProfileIds = normalizeProfileSyncIdList(existingMeta?.profileSyncIds);
+  if (!requestedProfileIds.length) {
+    return !existingProfileIds.length;
+  }
+  if (!existingProfileIds.length) {
+    return true;
+  }
+  const existingProfileIdSet = new Set(existingProfileIds);
+  return requestedProfileIds.every((profileId) => existingProfileIdSet.has(profileId));
 }
 
 function shouldStampRecentLocalUserWrite(meta = null) {
@@ -6080,8 +6120,7 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
     !forceWrite
     && inFlightSignature
     && inFlightSignature === nextSignature
-    && getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
-      <= getRelationalUserSyncScopePriority(inFlightMeta?.userSyncScope)
+    && doesRelationalWriteMetaCover(storageKey, inFlightMeta, nextMeta)
   ) {
     return true;
   }
@@ -6093,8 +6132,7 @@ function scheduleRelationalWrite(storageKey, value, options = {}) {
     && pendingPayload === undefined
     && lastSyncedSignature
     && lastSyncedSignature === nextSignature
-    && getRelationalUserSyncScopePriority(nextMeta?.userSyncScope)
-      <= getRelationalUserSyncScopePriority(lastSyncedMeta?.userSyncScope)
+    && doesRelationalWriteMetaCover(storageKey, lastSyncedMeta, nextMeta)
   ) {
     return true;
   }
@@ -7503,6 +7541,7 @@ async function hydrateRelationalProfiles(currentUser) {
         await syncUserCourseEnrollmentsToRelational(mapped, {
           assignedByAuthId: isUuidValue(currentUser?.supabaseAuthId) ? currentUser.supabaseAuthId : null,
           userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
+          allowBroadEnrollmentSync: true,
         });
         relationalSync.enrollmentBackfillRetryAt = Date.now() + ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS;
       } catch (error) {
@@ -11652,6 +11691,7 @@ async function syncProfilesToRelational(usersPayload, options = {}) {
   const currentSessionProfileId = getCurrentSessionProfileId(currentUser);
   const isAdminSync = currentUser?.role === "admin";
   const userSyncScope = normalizeRelationalUserSyncScope(options?.userSyncScope);
+  const requestedProfileSyncIds = normalizeProfileSyncIdList(options?.profileSyncIds);
   const canWriteStudentEnrollmentFields = canWriteStudentEnrollmentProfileToRelational(userSyncScope);
   const canWriteAdminManagedFields = canWriteAdminManagedProfileFieldsToRelational(userSyncScope);
   let users = Array.isArray(usersPayload) ? usersPayload : [];
@@ -11661,6 +11701,12 @@ async function syncProfilesToRelational(usersPayload, options = {}) {
       return;
     }
     users = users.filter((user) => getUserProfileId(user) === currentProfileId);
+  } else if (requestedProfileSyncIds.length) {
+    const requestedProfileSyncIdSet = new Set(requestedProfileSyncIds);
+    users = users.filter((user) => requestedProfileSyncIdSet.has(String(getUserProfileId(user) || "").trim()));
+  } else if (userSyncScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN && users.length > 1) {
+    console.warn("Skipped broad admin profile sync without explicit target profile IDs.");
+    return;
   }
 
   const rows = users
@@ -11810,6 +11856,16 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   }
 
   const users = Array.isArray(usersPayload) ? usersPayload : [];
+  const userSyncScope = normalizeRelationalUserSyncScope(options?.userSyncScope);
+  if (
+    getCurrentUser()?.role === "admin"
+    && userSyncScope === USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL
+    && users.length > 1
+    && options?.allowBroadEnrollmentSync !== true
+  ) {
+    console.warn("Skipped broad enrollment sync from local cache without a server-authoritative source.");
+    return;
+  }
   const studentsByUserId = new Map();
   users.forEach((user) => {
     if (user?.role !== "student") {
@@ -11827,7 +11883,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   if (relationalSync.enrollmentWriteAccessDenied) {
     return;
   }
-  if (!canWriteStudentEnrollmentProfileToRelational(options?.userSyncScope)) {
+  if (!canWriteStudentEnrollmentProfileToRelational(userSyncScope)) {
     return;
   }
 
@@ -12844,10 +12900,6 @@ async function persistImportedQuestionsNow(questionsPayload) {
     const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
     const topics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     await syncCoursesTopicsToRelational(curriculum, topics);
-    await syncUserCourseEnrollmentsToRelational(getUsers(), {
-      assignedByAuthId: currentUser.supabaseAuthId,
-      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
-    });
     try {
       await syncQuestionsToRelational(questions);
     } catch (error) {
@@ -25831,7 +25883,7 @@ function wireAdmin() {
       : false;
     const newUserApproved = normalizedRole === "admin" ? true : newStudentAutoApproval;
 
-    users.push({
+    const newUser = {
       id: makeId("u"),
       name,
       email,
@@ -25846,9 +25898,11 @@ function wireAdmin() {
       academicYear: normalizedRole === "student" ? academicYear : null,
       academicSemester: normalizedRole === "student" ? academicSemester : null,
       createdAt: nowISO(),
-    });
+    };
+    users.push(newUser);
     save(STORAGE_KEYS.users, users, {
       userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+      profileSyncIds: [getUserProfileId(newUser)],
     });
     resetAdminAddUserDraft();
     state.adminAddUserPanelOpen = false;
@@ -26554,6 +26608,7 @@ function wireAdmin() {
       });
       save(STORAGE_KEYS.users, users, {
         userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+        profileSyncIds: [getUserProfileId(users[idx])],
       });
       state.adminDataLastSyncAt = Date.now();
       clearAdminUserEnrollmentDraft(userId);
@@ -26871,6 +26926,7 @@ function wireAdmin() {
       });
       save(STORAGE_KEYS.users, users, {
         userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+        profileSyncIds: [getUserProfileId(users[idx])],
       });
       clearAdminUserEnrollmentDraft(userId);
       try {
@@ -33218,29 +33274,7 @@ function syncUsersWithCurriculum() {
   });
 
   if (changed) {
-    save(STORAGE_KEYS.users, users, {
-      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
-    });
-    const current = getCurrentUser();
-    if (current?.role === "admin") {
-      const syncedUsers = getUsers();
-      syncUsersBackupState(syncedUsers).catch(() => { });
-      ensureRelationalSyncReady()
-        .then((ready) => {
-          if (!ready) {
-            return;
-          }
-          if (scheduleRelationalWrite(STORAGE_KEYS.users, syncedUsers, {
-            userSyncScope: USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL,
-          })) {
-            return flushPendingSyncNow({ throwOnRelationalFailure: false });
-          }
-          return undefined;
-        })
-        .catch((syncError) => {
-          console.warn("Could not sync repaired student enrollment data.", syncError?.message || syncError);
-        });
-    }
+    saveLocalOnly(STORAGE_KEYS.users, users);
   }
 }
 
