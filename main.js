@@ -39,13 +39,17 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-06.21").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-28.01").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
 const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
 const ACTIVE_SESSION_ID_KEY = "mcq_active_session_id";
 const ACTIVE_SESSION_ID_LOCAL_KEY = "mcq_active_session_id_local";
+const SESSION_VAULT_DB_NAME = "o6u_medbank_session_vault";
+const SESSION_VAULT_DB_VERSION = 1;
+const SESSION_VAULT_STORE_NAME = "payloads";
+const SESSION_VAULT_PAYLOAD_KEY = STORAGE_KEYS.sessions;
 const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
 const PASSWORD_RECOVERY_PENDING_KEY = "mcq_password_recovery_pending";
 const KNOWN_ROUTES = new Set([
@@ -87,6 +91,7 @@ const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about",
 const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
+let sessionVaultDbPromise = null;
 const storageQuotaRetryThresholds = new Map();
 let storageFallbackWarned = false;
 let largeQuestionStorageWarned = false;
@@ -2108,6 +2113,9 @@ function clearPersistedActiveSessionId(targetSessionId = "") {
 }
 
 async function init() {
+  await restoreSessionsFromLocalVault({
+    scheduleSync: false,
+  }).catch(() => ({ restored: false }));
   seedData();
   syncUsersWithCurriculum();
   sanitizeSystemLogsToAdminOnly();
@@ -4828,6 +4836,227 @@ function saveLocalOnly(key, value, options = {}) {
   if (options?.audit !== false) {
     appendStorageMutationLog("save_local", key, value);
   }
+}
+
+function canUseSessionVault() {
+  return typeof indexedDB !== "undefined" && typeof Promise !== "undefined";
+}
+
+function openSessionVaultDb() {
+  if (!canUseSessionVault()) {
+    return Promise.resolve(null);
+  }
+  if (sessionVaultDbPromise) {
+    return sessionVaultDbPromise;
+  }
+
+  sessionVaultDbPromise = new Promise((resolve) => {
+    let request = null;
+    try {
+      request = indexedDB.open(SESSION_VAULT_DB_NAME, SESSION_VAULT_DB_VERSION);
+    } catch (error) {
+      console.warn("Session vault is unavailable.", error?.message || error);
+      resolve(null);
+      return;
+    }
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SESSION_VAULT_STORE_NAME)) {
+        db.createObjectStore(SESSION_VAULT_STORE_NAME, { keyPath: "key" });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch {
+          // Ignore close failures.
+        }
+        sessionVaultDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      sessionVaultDbPromise = null;
+      resolve(null);
+    };
+    request.onblocked = () => {
+      resolve(null);
+    };
+  });
+
+  return sessionVaultDbPromise;
+}
+
+function getRawStoredSessions() {
+  const rawSessions = load(STORAGE_KEYS.sessions, []);
+  return Array.isArray(rawSessions) ? rawSessions.filter(isRecordObject) : [];
+}
+
+function normalizeSessionVaultList(value) {
+  return (Array.isArray(value) ? value : [])
+    .filter(isRecordObject)
+    .filter((session) => String(session?.id || "").trim());
+}
+
+async function readSessionsFromLocalVault() {
+  const db = await openSessionVaultDb();
+  if (!db) {
+    return [];
+  }
+
+  return new Promise((resolve) => {
+    let request = null;
+    try {
+      request = db
+        .transaction(SESSION_VAULT_STORE_NAME, "readonly")
+        .objectStore(SESSION_VAULT_STORE_NAME)
+        .get(SESSION_VAULT_PAYLOAD_KEY);
+    } catch {
+      resolve([]);
+      return;
+    }
+
+    request.onsuccess = () => {
+      const record = request.result;
+      resolve(normalizeSessionVaultList(record?.sessions));
+    };
+    request.onerror = () => {
+      resolve([]);
+    };
+  });
+}
+
+async function persistSessionsToLocalVault(sessionsPayload) {
+  const sessions = normalizeSessionVaultList(sessionsPayload);
+  if (!sessions.length) {
+    return false;
+  }
+  const db = await openSessionVaultDb();
+  if (!db) {
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    let transaction = null;
+    try {
+      transaction = db.transaction(SESSION_VAULT_STORE_NAME, "readwrite");
+      transaction.objectStore(SESSION_VAULT_STORE_NAME).put({
+        key: SESSION_VAULT_PAYLOAD_KEY,
+        sessions: deepClone(sessions),
+        sessionCount: sessions.length,
+        updatedAt: nowISO(),
+      });
+    } catch (error) {
+      console.warn("Could not write session vault.", error?.message || error);
+      resolve(false);
+      return;
+    }
+
+    transaction.oncomplete = () => resolve(true);
+    transaction.onerror = () => resolve(false);
+    transaction.onabort = () => resolve(false);
+  });
+}
+
+function scheduleSessionVaultPersist(sessionsPayload) {
+  if (!Array.isArray(sessionsPayload) || !sessionsPayload.length) {
+    return;
+  }
+  persistSessionsToLocalVault(sessionsPayload).catch((error) => {
+    console.warn("Session vault backup failed.", error?.message || error);
+  });
+}
+
+function mergeSessionCollectionsForRecovery(primarySessions = [], secondarySessions = []) {
+  const mergedById = new Map();
+  const appendSession = (session) => {
+    const sessionId = String(session?.id || "").trim();
+    if (!sessionId || !isRecordObject(session)) {
+      return;
+    }
+    const existing = mergedById.get(sessionId);
+    if (!existing) {
+      mergedById.set(sessionId, deepClone(session));
+      return;
+    }
+    mergedById.set(sessionId, mergeSessionSnapshots(existing, session));
+  };
+
+  normalizeSessionVaultList(primarySessions).forEach(appendSession);
+  normalizeSessionVaultList(secondarySessions).forEach(appendSession);
+  return [...mergedById.values()];
+}
+
+function shouldResyncMergedSessionState(localSessions = [], remoteSessions = []) {
+  const local = normalizeSessionVaultList(localSessions);
+  if (!local.length) {
+    return false;
+  }
+  const remoteById = new Map(
+    normalizeSessionVaultList(remoteSessions)
+      .map((session) => [String(session?.id || "").trim(), session]),
+  );
+  return local.some((localSession) => {
+    const sessionId = String(localSession?.id || "").trim();
+    if (!sessionId) {
+      return false;
+    }
+    const remoteSession = remoteById.get(sessionId);
+    if (!remoteSession) {
+      return true;
+    }
+    return shouldPreferLocalSessionSnapshot(sessionId, localSession, remoteSession)
+      || shouldPreferLocalSessionQuestionData(localSession, remoteSession, getQuestionStore());
+  });
+}
+
+function scheduleRecoveredSessionSync(options = {}) {
+  sessionSyncRuntime.dirty = true;
+  scheduleSessionStateSync({ immediate: options?.immediate === true });
+}
+
+async function restoreSessionsFromLocalVault(options = {}) {
+  const vaultSessions = await readSessionsFromLocalVault();
+  if (!vaultSessions.length) {
+    return { restored: false, count: 0 };
+  }
+
+  const localSessions = getRawStoredSessions();
+  const mergedSessions = mergeSessionCollectionsForRecovery(localSessions, vaultSessions);
+  if (!mergedSessions.length || getSyncPayloadSignature(localSessions) === getSyncPayloadSignature(mergedSessions)) {
+    return { restored: false, count: vaultSessions.length };
+  }
+
+  saveLocalOnly(STORAGE_KEYS.sessions, mergedSessions, { audit: false });
+  if (options?.scheduleSync !== false) {
+    scheduleRecoveredSessionSync({ immediate: options?.immediate === true });
+  }
+  return { restored: true, count: mergedSessions.length };
+}
+
+async function protectLocalSessionStateBeforeCloudRead(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  if (currentUser?.role === "student") {
+    persistInProgressSessionSnapshot({
+      user: currentUser,
+      immediate: true,
+      flush: false,
+    });
+  }
+
+  const restoreResult = await restoreSessionsFromLocalVault({
+    scheduleSync: true,
+    immediate: false,
+  }).catch(() => ({ restored: false }));
+
+  if (options?.flush !== false && (restoreResult?.restored || hasPendingSessionSyncForId())) {
+    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  }
+
+  return Boolean(restoreResult?.restored);
 }
 
 function clearSessionSyncTimer() {
@@ -8167,7 +8396,8 @@ async function hydrateRelationalSessions(currentUser) {
       return session;
     })
     .filter(Boolean);
-  const localSessions = getSessions();
+  await restoreSessionsFromLocalVault({ scheduleSync: false }).catch(() => ({ restored: false }));
+  const localSessions = getRawStoredSessions();
   const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
   const mergedSessionById = new Map();
 
@@ -8195,6 +8425,9 @@ async function hydrateRelationalSessions(currentUser) {
 
   const mergedSessions = [...mergedSessionById.values()];
   saveLocalOnly(STORAGE_KEYS.sessions, mergedSessions);
+  if (shouldResyncMergedSessionState(localSessions, mappedSessions)) {
+    scheduleRecoveredSessionSync({ immediate: true });
+  }
 }
 
 function getSyncScopeForUser(user = null) {
@@ -9067,7 +9300,7 @@ function mergeSessionSnapshots(localSession, remoteSession) {
 
 function mergeHydratedSessionsWithLocal(remotePayload) {
   const remoteSessions = Array.isArray(remotePayload) ? remotePayload : [];
-  const localSessions = getSessions();
+  const localSessions = getRawStoredSessions();
   const localSessionById = new Map(localSessions.map((session) => [String(session?.id || ""), session]));
   const mergedSessionById = new Map();
 
@@ -9229,9 +9462,13 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
     }
     try {
       let payload = sanitizeUserScopedPayload(storageKey, selectedRow.payload);
+      let shouldResyncSessionsAfterHydration = false;
       const hasPendingWrite = candidates.some((candidate) => supabaseSync.pendingWrites.has(candidate));
       if (storageKey === STORAGE_KEYS.sessions) {
-        payload = mergeHydratedSessionsWithLocal(payload);
+        const remoteSessions = Array.isArray(payload) ? payload : [];
+        const localSessionsBefore = getRawStoredSessions();
+        payload = mergeHydratedSessionsWithLocal(remoteSessions);
+        shouldResyncSessionsAfterHydration = shouldResyncMergedSessionState(localSessionsBefore, remoteSessions);
       } else if (storageKey === STORAGE_KEYS.users) {
         payload = mergeHydratedUsersWithLocal(payload);
       } else if (
@@ -9256,6 +9493,9 @@ async function hydrateSupabaseSyncKeys(storageKeys, scope = "") {
         }
       }
       writeStorageKey(storageKey, payload);
+      if (storageKey === STORAGE_KEYS.sessions && shouldResyncSessionsAfterHydration) {
+        scheduleRecoveredSessionSync({ immediate: true });
+      }
       if (
         storageKey === STORAGE_KEYS.curriculum
         || storageKey === STORAGE_KEYS.courseTopics
@@ -14578,6 +14818,9 @@ async function hydrateStudentSessionsFromCloud(user = null) {
   if (!currentUser || currentUser.role !== "student") {
     return false;
   }
+  await protectLocalSessionStateBeforeCloudRead(currentUser, {
+    flush: !shouldDeferSessionHydrationOnActiveRoute(currentUser),
+  });
   if (shouldDeferSessionHydrationOnActiveRoute(currentUser)) {
     return false;
   }
@@ -15942,6 +16185,9 @@ async function refreshStudentDataFromSupabaseState(user) {
   if (!scope) {
     return false;
   }
+  await protectLocalSessionStateBeforeCloudRead(user, {
+    flush: !shouldDeferSessionHydrationOnActiveRoute(user),
+  });
 
   if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
     const bootstrap = await initSupabaseSync().catch(() => ({ enabled: false }));
@@ -16004,6 +16250,9 @@ async function refreshStudentDataSnapshot(user, options = {}) {
   const shouldPreserveOnboardingDraft = isStudentOnboardingRoute(routeBefore, user);
   state.studentDataRefreshing = true;
   try {
+    await protectLocalSessionStateBeforeCloudRead(user, {
+      flush: !shouldDeferSessionHydrationOnActiveRoute(user),
+    });
     const ready = await ensureRelationalSyncReady({ force });
     if (!ready) {
       const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user);
@@ -30860,6 +31109,9 @@ function archiveEnrollmentResetSessionsInList(sessions, userOrId, options = {}) 
       return;
     }
     const status = String(session?.status || "").trim();
+    if (status === "in_progress" && options?.archiveInProgress !== true) {
+      return;
+    }
     if (status !== "in_progress" && (!includeCompleted || status !== "completed")) {
       return;
     }
@@ -30887,7 +31139,10 @@ function archiveOutOfScopeSessionsForCurrentEnrollment(sessions, usersOverride =
       return;
     }
     const status = String(session?.status || "").trim();
-    if (status !== "in_progress" && status !== "completed") {
+    if (status === "in_progress") {
+      return;
+    }
+    if (status !== "completed") {
       return;
     }
     if (String(session?.archivedReason || "").trim() === "enrollment_change") {
@@ -30930,6 +31185,15 @@ function restoreSessionsArchivedByEnrollmentChange(sessions, usersOverride = nul
     }
 
     if (previousStatus !== "in_progress" && previousStatus !== "completed") {
+      return;
+    }
+
+    if (previousStatus === "in_progress") {
+      session.status = previousStatus;
+      delete session.previousStatus;
+      delete session.archivedAt;
+      delete session.archivedReason;
+      changed = true;
       return;
     }
 
@@ -33998,7 +34262,10 @@ function isSessionWithinUserAcademicTerm(session, user, questionMetaById = null)
 
   const sessionTerm = getSessionAcademicTerm(session, questionMetaById);
   if (sessionTerm.year === null || sessionTerm.semester === null) {
-    return false;
+    // Do not hide/rescind sessions while question or course metadata is still
+    // hydrating. Only archive when we can prove the session belongs to a
+    // different academic term.
+    return true;
   }
   return sessionTerm.year === targetYear && sessionTerm.semester === targetSemester;
 }
@@ -35384,6 +35651,9 @@ function writeStorageKey(key, value) {
   } catch (error) {
     console.warn(`Could not serialize storage key "${key}".`, error);
     return;
+  }
+  if (key === STORAGE_KEYS.sessions) {
+    scheduleSessionVaultPersist(value);
   }
 
   const persistTransientStorageOnly = ({ includeSessionStorage = true, rememberQuotaOverflow = false } = {}) => {
