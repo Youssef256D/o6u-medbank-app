@@ -156,6 +156,7 @@ const AUTH_SIGNIN_TIMEOUT_MS = 12000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
 const ROUTE_TRANSITION_MS = 420;
+const USE_NATIVE_VIEW_TRANSITIONS = false;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UUID_IN_BATCH_SIZE = 20;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
@@ -14169,7 +14170,7 @@ function navigate(route, extras = {}) {
       to: targetRoute,
     });
   }
-  const canUseViewTransition = typeof document.startViewTransition === "function";
+  const canUseViewTransition = USE_NATIVE_VIEW_TRANSITIONS && typeof document.startViewTransition === "function";
   const shouldUseViewTransition = canUseViewTransition && targetRoute !== state.route;
 
   const applyNavigation = () => {
