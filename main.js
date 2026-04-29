@@ -3324,16 +3324,27 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
         ? authUser.user_metadata.assignedCourses
         : (fallbackUser?.assignedCourses || [])),
   );
+  const metadataYear = normalizeAcademicYearOrNull(
+    authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
+  );
+  const metadataSemester = normalizeAcademicSemesterOrNull(
+    authUser?.user_metadata?.academic_semester ?? authUser?.user_metadata?.academicSemester,
+  );
+  const fallbackYear = normalizeAcademicYearOrNull(fallbackUser?.academicYear);
+  const fallbackSemester = normalizeAcademicSemesterOrNull(fallbackUser?.academicSemester);
   const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
   const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
   const role = isForcedAdminEmail(email) ? "admin" : "student";
+  const studentYear = role === "student" ? (metadataYear ?? fallbackYear) : null;
+  const studentSemester = role === "student" ? (metadataSemester ?? fallbackSemester) : null;
   const canPreserveFallbackApproval = role !== "admin"
     && fallbackUser?.isApproved === true
     && hasCompleteStudentProfile({
       role: "student",
       phone: normalizedPhone,
-      academicYear: null,
-      academicSemester: null,
+      academicYear: studentYear,
+      academicSemester: studentSemester,
+      assignedCourses: metadataCourses,
     });
   const approved = role === "admin"
     ? true
@@ -3343,8 +3354,8 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
         : shouldAutoApproveStudentAccess({
           role: "student",
           phone: normalizedPhone,
-          academicYear: null,
-          academicSemester: null,
+          academicYear: studentYear,
+          academicSemester: studentSemester,
           assignedCourses: metadataCourses,
         })
     );
@@ -3356,6 +3367,8 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
     phone: normalizedPhone || null,
     role,
     approved,
+    academic_year: studentYear,
+    academic_semester: studentSemester,
     auth_provider: normalizeAuthProvider(
       getAuthProviderFromAuthUser(authUser)
       || fallbackUser?.authProvider
@@ -3456,6 +3469,19 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     }
   }
   const normalizedEmail = String(profile.email || authUser.email || localUser?.email || "").trim().toLowerCase();
+  const metadataEnrollmentYear = normalizeAcademicYearOrNull(
+    authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
+  );
+  const metadataEnrollmentSemester = normalizeAcademicSemesterOrNull(
+    authUser?.user_metadata?.academic_semester ?? authUser?.user_metadata?.academicSemester,
+  );
+  const metadataAssignedCourses = sanitizeCourseAssignments(
+    Array.isArray(authUser?.user_metadata?.assigned_courses)
+      ? authUser.user_metadata.assigned_courses
+      : (Array.isArray(authUser?.user_metadata?.assignedCourses)
+        ? authUser.user_metadata.assignedCourses
+        : []),
+  );
   const fallbackEnrollmentYear = normalizeAcademicYearOrNull(localUser?.academicYear);
   const fallbackEnrollmentSemester = normalizeAcademicSemesterOrNull(localUser?.academicSemester);
   const fallbackAssignedCourses = sanitizeCourseAssignments(localUser?.assignedCourses || []);
@@ -3485,15 +3511,15 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   let year = role === "student"
     ? (
       shouldPreferRelationalEnrollmentTerm
-        ? (relationalEnrollmentYear ?? profileYear ?? fallbackEnrollmentYear)
-        : (profileYear ?? relationalEnrollmentYear ?? fallbackEnrollmentYear)
+        ? (relationalEnrollmentYear ?? profileYear ?? fallbackEnrollmentYear ?? metadataEnrollmentYear)
+        : (profileYear ?? relationalEnrollmentYear ?? fallbackEnrollmentYear ?? metadataEnrollmentYear)
     )
     : null;
   let semester = role === "student"
     ? (
       shouldPreferRelationalEnrollmentTerm
-        ? (relationalEnrollmentSemester ?? profileSemester ?? fallbackEnrollmentSemester)
-        : (profileSemester ?? relationalEnrollmentSemester ?? fallbackEnrollmentSemester)
+        ? (relationalEnrollmentSemester ?? profileSemester ?? fallbackEnrollmentSemester ?? metadataEnrollmentSemester)
+        : (profileSemester ?? relationalEnrollmentSemester ?? fallbackEnrollmentSemester ?? metadataEnrollmentSemester)
     )
     : null;
   const serverTermCourses = role === "student" && year !== null && semester !== null
@@ -3503,7 +3529,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     ? (
       relationalAssignedCourses.length
         ? relationalAssignedCourses
-        : (fallbackAssignedCourses.length ? fallbackAssignedCourses : serverTermCourses)
+        : (fallbackAssignedCourses.length
+          ? fallbackAssignedCourses
+          : (metadataAssignedCourses.length ? metadataAssignedCourses : serverTermCourses))
     )
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   if (role === "student") {
@@ -4140,6 +4168,43 @@ function shouldAutoApproveStudentAccess(user) {
   return hasCompleteStudentApprovalProfile(user);
 }
 
+function buildStudentEnrollmentAuthMetadata(user = {}, options = {}) {
+  const source = user && typeof user === "object" ? user : {};
+  const year = normalizeAcademicYearOrNull(source.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(source.academicSemester);
+  const courses = sanitizeCourseAssignments(source.assignedCourses || []);
+  const phone = String(source.phone || "").trim();
+  const name = String(source.name || source.full_name || "").trim();
+  const authProvider = normalizeAuthProvider(source.authProvider || options.authProvider || "");
+  const metadata = {
+    ...(name ? { full_name: name } : {}),
+    ...(phone ? { phone, phone_number: phone } : {}),
+    ...(year !== null ? { academic_year: String(year), academicYear: String(year) } : {}),
+    ...(semester !== null ? { academic_semester: String(semester), academicSemester: String(semester) } : {}),
+    ...(courses.length ? { assigned_courses: courses, assignedCourses: courses } : {}),
+    ...(authProvider ? { auth_provider: authProvider } : {}),
+  };
+  return Object.keys(metadata).length ? metadata : null;
+}
+
+async function syncCurrentAuthUserEnrollmentMetadata(authClient, user) {
+  if (!authClient?.auth || !user || user.role !== "student") {
+    return false;
+  }
+  const metadata = buildStudentEnrollmentAuthMetadata(user);
+  if (!metadata) {
+    return false;
+  }
+  const { error } = await queueSupabaseAuthRequest(
+    authClient,
+    () => authClient.auth.updateUser({ data: metadata }),
+  );
+  if (error) {
+    throw error;
+  }
+  return true;
+}
+
 function parseTimestampMs(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -4548,6 +4613,19 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const hasExplicitAcademicYear = Object.prototype.hasOwnProperty.call(profileOverrides, "academicYear");
   const hasExplicitAcademicSemester = Object.prototype.hasOwnProperty.call(profileOverrides, "academicSemester");
   const hasExplicitAssignedCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "assignedCourses");
+  const metadataAcademicYear = normalizeAcademicYearOrNull(
+    authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
+  );
+  const metadataAcademicSemester = normalizeAcademicSemesterOrNull(
+    authUser?.user_metadata?.academic_semester ?? authUser?.user_metadata?.academicSemester,
+  );
+  const metadataAssignedCourses = sanitizeCourseAssignments(
+    Array.isArray(authUser?.user_metadata?.assigned_courses)
+      ? authUser.user_metadata.assigned_courses
+      : (Array.isArray(authUser?.user_metadata?.assignedCourses)
+        ? authUser.user_metadata.assignedCourses
+        : []),
+  );
 
   // Supabase auth events can arrive before the relational profile/enrollment
   // refresh finishes. Preserve the current enrollment snapshot unless this
@@ -4555,10 +4633,10 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   // can look like an enrollment change and suspend the active test mid-session.
   const nextYearInput = hasExplicitAcademicYear
     ? profileOverrides.academicYear
-    : (previous?.academicYear ?? null);
+    : (previous?.academicYear ?? metadataAcademicYear ?? null);
   const nextSemesterInput = hasExplicitAcademicSemester
     ? profileOverrides.academicSemester
-    : (previous?.academicSemester ?? null);
+    : (previous?.academicSemester ?? metadataAcademicSemester ?? null);
   const nextYear = nextRole === "student" ? normalizeAcademicYearOrNull(nextYearInput) : null;
   const nextSemester = nextRole === "student" ? normalizeAcademicSemesterOrNull(nextSemesterInput) : null;
 
@@ -4568,7 +4646,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
       ? profileOverrides.assignedCourses
       : null;
     const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
-    const requestedCourses = overrideCourses ?? previousCourses;
+    const requestedCourses = overrideCourses ?? (previousCourses.length ? previousCourses : metadataAssignedCourses);
     if (nextYear !== null && nextSemester !== null) {
       const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
       nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
@@ -6704,7 +6782,12 @@ function purgeDeletedUserLocalState(target = {}) {
 }
 
 async function flushPendingAdminActionQueue(options = {}) {
-  const queuedActions = getPendingAdminActionQueue();
+  let queuedActions = getPendingAdminActionQueue();
+  const prunedQueuedActions = discardStalePendingAccessSyncActions(queuedActions);
+  if (prunedQueuedActions.length !== queuedActions.length) {
+    queuedActions = prunedQueuedActions;
+    savePendingAdminActionQueue(queuedActions);
+  }
   if (!queuedActions.length) {
     adminActionRuntime.lastFailureAt = 0;
     adminActionRuntime.lastFailureMessage = "";
@@ -18021,6 +18104,12 @@ function wireAuth(mode) {
           });
           save(STORAGE_KEYS.currentUserId, users[idx].id);
           await syncUsersBackupState(users).catch(() => { });
+          const metadataAuthClient = getSupabaseAuthClient();
+          if (metadataAuthClient) {
+            await syncCurrentAuthUserEnrollmentMetadata(metadataAuthClient, users[idx]).catch((metadataError) => {
+              console.warn("Could not update Google signup enrollment metadata.", metadataError?.message || metadataError);
+            });
+          }
           await ensureRelationalSyncReady().catch(() => { });
           if (nextApproved && !wasApproved) {
             const profileId = getUserProfileId(users[idx]);
@@ -18102,11 +18191,15 @@ function wireAuth(mode) {
             email,
             password,
             options: {
-              data: {
-                full_name: name,
+              data: buildStudentEnrollmentAuthMetadata({
+                name,
                 phone: normalizedPhone,
-                phone_number: normalizedPhone,
-              },
+                role: "student",
+                academicYear,
+                academicSemester,
+                assignedCourses: selectedCourses,
+                authProvider: "email",
+              }),
             },
           }));
           if (error) {
@@ -18620,6 +18713,12 @@ function wireCompleteProfile() {
       });
       save(STORAGE_KEYS.currentUserId, users[idx].id);
       await syncUsersBackupState(users).catch(() => { });
+      const metadataAuthClient = getSupabaseAuthClient();
+      if (metadataAuthClient) {
+        await syncCurrentAuthUserEnrollmentMetadata(metadataAuthClient, users[idx]).catch((metadataError) => {
+          console.warn("Could not update completed profile enrollment metadata.", metadataError?.message || metadataError);
+        });
+      }
       await ensureRelationalSyncReady().catch(() => { });
       if (nextApproved && !wasApproved) {
         const profileId = getUserProfileId(users[idx]);
@@ -18671,14 +18770,14 @@ function renderNotifications() {
       const bodyHtml = escapeHtml(notification.body || "").replaceAll("\n", "<br />");
       return `
         <article class="card notification-card ${isRead ? "is-read" : "is-unread"}" data-notification-id="${escapeHtml(notification.id)}">
-          <div class="flex-between">
-            <h3 style="margin: 0;">${escapeHtml(notification.title || "Notification")}</h3>
+          <div class="notification-card-head">
+            <h3 class="notification-card-title">${escapeHtml(notification.title || "Notification")}</h3>
             <span class="badge ${isRead ? "neutral" : "good"}">${isRead ? "Read" : "New"}</span>
           </div>
           <p class="notification-card-body">${bodyHtml || "-"}</p>
           ${isRead
           ? ""
-          : `<div class="stack" style="margin-top: 0.55rem;">
+          : `<div class="notification-card-actions">
                   <button class="btn ghost admin-btn-sm" type="button" data-action="notification-mark-read" data-notification-id="${escapeHtml(notification.id)}">Mark as read</button>
                 </div>`
         }
@@ -18688,22 +18787,23 @@ function renderNotifications() {
     .join("");
 
   return `
-    <section class="panel" id="student-notifications-section">
-      <div class="flex-between">
+    <section class="panel notifications-page-panel" id="student-notifications-section">
+      <button class="btn ghost notifications-back-btn" type="button" data-nav="dashboard">&lt; Back</button>
+      <div class="notifications-page-head">
         <div>
           <p class="kicker">Updates</p>
           <h2 class="title">Notifications</h2>
           <p class="subtle">Messages from admin will appear here.</p>
         </div>
-        <div class="stack" style="align-items: flex-end;">
-          <p class="subtle" style="margin: 0;">Unread: <b>${unreadCount}</b></p>
-          <button class="btn ghost" type="button" data-action="notifications-mark-all-read" ${unreadCount ? "" : "disabled"}>
+        <div class="notifications-page-actions">
+          <p class="subtle notifications-unread-count">Unread: <b>${unreadCount}</b></p>
+          <button class="btn ghost notifications-mark-all-btn" type="button" data-action="notifications-mark-all-read" ${unreadCount ? "" : "disabled"}>
             Mark all read
           </button>
         </div>
       </div>
-      <p class="subtle">Live updates are enabled. ${escapeHtml(getStudentDataSyncStatusText())}</p>
-      <div class="notifications-list" style="margin-top: 0.85rem;">
+      <p class="subtle notifications-sync-note">Live updates are enabled. ${escapeHtml(getStudentDataSyncStatusText())}</p>
+      <div class="notifications-list">
         ${listMarkup || `<article class="card"><p class="subtle" style="margin:0;">No notifications yet.</p></article>`}
       </div>
     </section>
@@ -28636,6 +28736,72 @@ function clearPendingAdminActionsForTarget(action) {
   return true;
 }
 
+function clearPendingAccessSyncActionsForTargets(targetAuthIds) {
+  const ids = new Set(
+    (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuidValue(entry)),
+  );
+  if (!ids.size) {
+    return false;
+  }
+  const existingQueue = getPendingAdminActionQueue();
+  const nextQueue = existingQueue.filter((entry) => {
+    if (entry.type !== "set-access") {
+      return true;
+    }
+    return !ids.has(String(entry.targetAuthId || "").trim())
+      && !ids.has(String(entry.targetProfileId || "").trim());
+  });
+  if (nextQueue.length === existingQueue.length) {
+    return false;
+  }
+  savePendingAdminActionQueue(nextQueue);
+  return true;
+}
+
+function discardStalePendingAccessSyncActions(actions, users = null) {
+  const queuedActions = normalizePendingAdminActionQueue(actions);
+  if (!queuedActions.some((entry) => entry.type === "set-access")) {
+    return queuedActions;
+  }
+  const usersList = Array.isArray(users) ? users : getUsers();
+  const userByLookupKey = new Map();
+  usersList.forEach((user) => {
+    [
+      user?.id,
+      user?.supabaseAuthId,
+      getUserProfileId(user),
+      String(user?.email || "").trim().toLowerCase(),
+    ].forEach((key) => {
+      const normalizedKey = String(key || "").trim().toLowerCase();
+      if (normalizedKey && !userByLookupKey.has(normalizedKey)) {
+        userByLookupKey.set(normalizedKey, user);
+      }
+    });
+  });
+
+  return queuedActions.filter((entry) => {
+    if (entry.type !== "set-access") {
+      return true;
+    }
+    const matchingUser = [
+      entry.targetAuthId,
+      entry.targetProfileId,
+      entry.targetLocalUserId,
+      entry.email,
+    ]
+      .map((key) => String(key || "").trim().toLowerCase())
+      .filter(Boolean)
+      .map((key) => userByLookupKey.get(key))
+      .find(Boolean);
+    if (!matchingUser) {
+      return true;
+    }
+    return isUserAccessApproved(matchingUser) === Boolean(entry.approved);
+  });
+}
+
 function queuePendingAccessSyncActions(targetAuthIds, approved, usersByProfileId = new Map()) {
   const ids = [...new Set(
     (Array.isArray(targetAuthIds) ? targetAuthIds : [targetAuthIds])
@@ -28699,6 +28865,10 @@ async function syncSupabaseAuthAccessForTargets(targetAuthIds, approved, options
     (Array.isArray(result?.failedIds) ? result.failedIds : ids.filter((entry) => !updatedIds.includes(entry) && !notFoundIds.includes(entry)))
       .filter((entry) => ids.includes(entry)),
   )];
+  const handledIds = [...new Set([...updatedIds, ...notFoundIds])];
+  if (handledIds.length) {
+    clearPendingAccessSyncActionsForTargets(handledIds);
+  }
   const queuedIds = queueFailures && failedIds.length
     ? queuePendingAccessSyncActions(failedIds, approved, usersByProfileId)
     : [];
