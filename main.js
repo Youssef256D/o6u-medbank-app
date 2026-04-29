@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.02").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.05").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -138,11 +138,11 @@ const ACTIVITY_REPORT_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const SUPABASE_BOOTSTRAP_RETRY_MS = 500;
 const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 12000;
-const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
+const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = 6000;
 const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 25000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
 const SUPABASE_BACKUP_WARNING_THROTTLE_MS = 60000;
-const SUPABASE_SESSION_TIMEOUT_MS = 15000;
+const SUPABASE_SESSION_TIMEOUT_MS = 30000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 12000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
 const SUPABASE_SIGNED_OUT_RECOVERY_DELAY_MS = 600;
@@ -152,9 +152,9 @@ const SUPABASE_SESSION_RECOVERY_SLOW_RETRY_MS = 30000;
 const ADMIN_REQUEST_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
 const ADMIN_ACCESS_SYNC_BATCH_SIZE = 50;
 const ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS = Math.max(ADMIN_REQUEST_TIMEOUT_MS, 20000);
-const AUTH_SIGNIN_TIMEOUT_MS = 12000;
+const AUTH_SIGNIN_TIMEOUT_MS = 35000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
-const PROFILE_LOOKUP_TIMEOUT_MS = 3000;
+const PROFILE_LOOKUP_TIMEOUT_MS = 12000;
 const ROUTE_TRANSITION_MS = 420;
 const USE_NATIVE_VIEW_TRANSITIONS = false;
 const RELATIONAL_IN_BATCH_SIZE = 200;
@@ -168,7 +168,7 @@ const QUESTION_RELATIONAL_BATCH_SIZE = 100;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
-const SUPABASE_AUTH_FETCH_TIMEOUT_MS = SUPABASE_SESSION_TIMEOUT_MS + 1000;
+const SUPABASE_AUTH_FETCH_TIMEOUT_MS = SUPABASE_SESSION_TIMEOUT_MS + 5000;
 const SUPABASE_CLIENT_FETCH_TIMEOUT_MS = Math.max(QUESTION_RELATIONAL_TIMEOUT_MS, 35000);
 const SESSION_BROWSER_STORAGE_PARSE_CHAR_LIMIT = 3_000_000;
 const SESSION_BROWSER_STORAGE_RECENT_SNAPSHOT_LIMIT = 25;
@@ -753,6 +753,9 @@ let backgroundSyncInFlight = false;
 let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
+let supabaseSyncInitPromise = null;
+let supabaseSyncBootstrapRetryHandle = null;
+let supabaseSyncBootstrapRetries = 0;
 let supabaseAuthStateUnsubscribe = null;
 const supabaseAuthStateRuntime = {
   chain: Promise.resolve(),
@@ -2212,6 +2215,41 @@ function clearSupabaseBootstrapRetry() {
   }
 }
 
+function clearSupabaseSyncBootstrapRetry() {
+  if (supabaseSyncBootstrapRetryHandle) {
+    window.clearInterval(supabaseSyncBootstrapRetryHandle);
+    supabaseSyncBootstrapRetryHandle = null;
+  }
+  supabaseSyncBootstrapRetries = 0;
+}
+
+function scheduleSupabaseSyncBootstrapRetry() {
+  if (supabaseSyncBootstrapRetryHandle || !SUPABASE_CONFIG.enabled || supabaseSync.enabled || isBrowserOffline()) {
+    return;
+  }
+
+  supabaseSyncBootstrapRetries = 0;
+  supabaseSyncBootstrapRetryHandle = window.setInterval(() => {
+    if (supabaseSyncBootstrapRetries >= SUPABASE_BOOTSTRAP_RETRY_LIMIT || supabaseSync.enabled || isBrowserOffline()) {
+      clearSupabaseSyncBootstrapRetry();
+      return;
+    }
+    supabaseSyncBootstrapRetries += 1;
+    initSupabaseSync()
+      .then((syncBootstrap) => {
+        if (!syncBootstrap?.enabled) {
+          return;
+        }
+        clearSupabaseSyncBootstrapRetry();
+        if (!syncBootstrap.hadRemoteData) {
+          scheduleFullSupabaseSync();
+        }
+        render();
+      })
+      .catch(() => { });
+  }, Math.max(SUPABASE_BOOTSTRAP_RETRY_MS, SUPABASE_STORAGE_SHAPE_TIMEOUT_MS));
+}
+
 function shouldAttemptSupabaseReconnect(user = null) {
   const currentUser = user || getCurrentUser();
   return Boolean(
@@ -2529,6 +2567,9 @@ function getOrCreateSupabaseBrowserClient() {
       autoRefreshToken: true,
       detectSessionInUrl: false,
     },
+    db: {
+      retry: false,
+    },
     global: {
       fetch: createSupabaseFetchWithTimeout(),
     },
@@ -2553,6 +2594,16 @@ function isSupabaseAuthRestorePending(user = null, route = state.route) {
 }
 
 async function initSupabaseSync() {
+  if (supabaseSyncInitPromise) {
+    return supabaseSyncInitPromise;
+  }
+  supabaseSyncInitPromise = initSupabaseSyncNow().finally(() => {
+    supabaseSyncInitPromise = null;
+  });
+  return supabaseSyncInitPromise;
+}
+
+async function initSupabaseSyncNow() {
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     return { enabled: false, hadRemoteData: false };
   }
@@ -2572,18 +2623,38 @@ async function initSupabaseSync() {
     supabaseSync.tableName = syncShape.tableName;
     supabaseSync.storageKeyColumn = syncShape.storageKeyColumn;
     supabaseSync.enabled = true;
+    clearSupabaseSyncBootstrapRetry();
 
     const syncResult = await hydrateSupabaseSyncKeys(GLOBAL_SYNC_BOOTSTRAP_KEYS);
     if (syncResult?.error) {
       const error = syncResult.error;
-      console.warn("Supabase sync unavailable. Falling back to local storage only.", error.message);
       supabaseSync.enabled = false;
+      if (isLikelyTransientSupabaseError(error)) {
+        supabaseSync.lastFailureAt = Date.now();
+        supabaseSync.lastFailureMessage = "Temporary Supabase sync issue. Changes stay local until the next reconnect.";
+        supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+        scheduleSyncStatusUiRefresh();
+        scheduleSupabaseSyncBootstrapRetry();
+        console.info("Supabase sync bootstrap deferred. Using local storage until Supabase responds again.", error?.message || error);
+      } else {
+        console.warn("Supabase sync unavailable. Falling back to local storage only.", error.message);
+      }
       return { enabled: false, hadRemoteData: false };
     }
 
     return { enabled: true, hadRemoteData: Boolean(syncResult?.hadRemoteData) };
   } catch (error) {
-    console.warn("Supabase client bootstrap failed. Using local storage only.", error);
+    supabaseSync.enabled = false;
+    if (isLikelyTransientSupabaseError(error)) {
+      supabaseSync.lastFailureAt = Date.now();
+      supabaseSync.lastFailureMessage = "Temporary Supabase sync issue. Changes stay local until the next reconnect.";
+      supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
+      scheduleSyncStatusUiRefresh();
+      scheduleSupabaseSyncBootstrapRetry();
+      console.info("Supabase sync bootstrap deferred. Using local storage until Supabase responds again.", error?.message || error);
+    } else {
+      console.warn("Supabase client bootstrap failed. Using local storage only.", error);
+    }
     return { enabled: false, hadRemoteData: false };
   }
 }
@@ -3357,8 +3428,77 @@ function runWithTimeoutResult(promise, timeoutMs, timeoutMessage) {
   });
 }
 
+function runSupabaseQueryWithAbortTimeout(createQuery, timeoutMs, timeoutMessage) {
+  const safeTimeoutMs = Math.max(1, Number(timeoutMs) || 1);
+  const fallback = {
+    data: null,
+    error: {
+      code: "TIMEOUT",
+      message: timeoutMessage,
+    },
+  };
+  if (typeof createQuery !== "function") {
+    return Promise.resolve(fallback);
+  }
+
+  let timeoutId = null;
+  let controller = null;
+  if (typeof AbortController !== "undefined") {
+    controller = new AbortController();
+  }
+
+  const queryPromise = Promise.resolve()
+    .then(() => {
+      let query = createQuery(controller?.signal || null);
+      if (controller?.signal && query && typeof query.abortSignal === "function") {
+        query = query.abortSignal(controller.signal);
+      }
+      return query;
+    })
+    .catch((error) => ({
+      data: null,
+      error,
+    }));
+
+  return Promise.race([
+    queryPromise,
+    new Promise((resolve) => {
+      timeoutId = window.setTimeout(() => {
+        if (controller) {
+          controller.abort();
+        }
+        resolve(fallback);
+      }, safeTimeoutMs);
+    }),
+  ]).finally(() => {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+}
+
 function isTimeoutResultError(error) {
   return String(error?.code || "").trim().toUpperCase() === "TIMEOUT";
+}
+
+function isLikelyTransientSupabaseError(error) {
+  if (!error) {
+    return false;
+  }
+  if (isTimeoutResultError(error) || isLikelyNetworkFetchError(error)) {
+    return true;
+  }
+  const rawStatus = String(error?.status || error?.statusCode || error?.code || "").trim();
+  if (["408", "409", "429", "500", "502", "503", "504"].includes(rawStatus)) {
+    return true;
+  }
+  const message = getErrorMessage(error, "").toLowerCase();
+  return message.includes("service unavailable")
+    || message.includes("temporarily unavailable")
+    || message.includes("gateway timeout")
+    || message.includes("request timeout")
+    || message.includes("rate limit")
+    || message.includes("too many requests");
 }
 
 function queueSupabaseAuthRequest(authClient, requestFactory, options = {}) {
@@ -4935,14 +5075,22 @@ function migrateLocalUserReferences(previousUserId, nextUserId) {
 }
 
 async function detectSupabaseStorageShape(client) {
-  const probeCandidate = async (candidate) => runWithTimeoutResult(
-    client
+  const runProbe = (candidate) => runSupabaseQueryWithAbortTimeout(
+    () => client
       .from(candidate.tableName)
       .select(candidate.storageKeyColumn)
       .limit(1),
     SUPABASE_STORAGE_SHAPE_TIMEOUT_MS,
     "Supabase storage check timed out.",
   );
+  const probeCandidate = async (candidate) => {
+    let result = await runProbe(candidate);
+    if (result?.error && !isMissingRelationError(result.error) && isLikelyTransientSupabaseError(result.error)) {
+      await yieldToBrowser(350);
+      result = await runProbe(candidate);
+    }
+    return result;
+  };
 
   const primaryCandidate = { tableName: "app_state", storageKeyColumn: "storage_key" };
   const primaryProbe = await probeCandidate(primaryCandidate);
@@ -8108,7 +8256,8 @@ async function hydrateRelationalQuestions() {
   });
 
   let needsChoiceRepairSync = false;
-  const skippedMalformedQuestionIds = [];
+  let hasUnresolvedChoicePlaceholders = false;
+  const preservedMissingChoiceQuestionIds = [];
   const mappedQuestions = (questionRows || []).map((question) => {
     const externalId = String(question.external_id || question.id || "").trim();
     const existingQuestion = localQuestionByExternalId[externalId] || localQuestionByDbId[String(question.id || "").trim()] || null;
@@ -8137,10 +8286,11 @@ async function hydrateRelationalQuestions() {
     const remoteCorrect = rawChoices
       .filter((choice) => Boolean(choice.is_correct))
       .map((choice) => String(choice.choice_label || "").toUpperCase());
-    const choices = resolvedChoices;
+    let choices = resolvedChoices;
     if (choices.length < 2) {
-      skippedMalformedQuestionIds.push(externalId || String(question.id || ""));
-      return null;
+      preservedMissingChoiceQuestionIds.push(externalId || String(question.id || ""));
+      choices = buildMissingQuestionChoicePlaceholders();
+      hasUnresolvedChoicePlaceholders = true;
     }
     const correct = resolveQuestionCorrectAnswers(
       remoteCorrect,
@@ -8180,10 +8330,10 @@ async function hydrateRelationalQuestions() {
       explanationImage: explanationImageFromDb || String(existingQuestion?.explanationImage || "").trim(),
       status: toRelationalQuestionStatus(question.status),
     };
-  }).filter(Boolean);
+  });
 
-  if (skippedMalformedQuestionIds.length) {
-    const warningQuestionIds = skippedMalformedQuestionIds
+  if (preservedMissingChoiceQuestionIds.length) {
+    const warningQuestionIds = preservedMissingChoiceQuestionIds
       .map((id) => String(id || "").trim())
       .filter(Boolean)
       .sort();
@@ -8191,7 +8341,7 @@ async function hydrateRelationalQuestions() {
     if (relationalSync.malformedQuestionHydrationWarningSignature !== warningSignature) {
       relationalSync.malformedQuestionHydrationWarningSignature = warningSignature;
       console.warn(
-        `Skipped ${skippedMalformedQuestionIds.length} malformed question(s) with missing choices during hydration. This warning will repeat only if the affected rows change.`,
+        `Preserved ${preservedMissingChoiceQuestionIds.length} question(s) whose answer choices did not hydrate. They remain in the question list but are excluded from test generation until choices sync. This warning will repeat only if the affected rows change.`,
       );
     }
   } else {
@@ -8237,14 +8387,18 @@ async function hydrateRelationalQuestions() {
       .map((question) => String(question?.id || "").trim())
       .filter((id) => isUuidValue(id)),
   );
-  const preservedLocalDraftQuestions = currentUser?.role === "admin"
+  const pendingQuestionDeletionIds = new Set(getPendingQuestionDeletions());
+  const preservedLocalQuestions = currentUser?.role === "admin"
     ? localQuestionsBefore.filter((question) => {
       const externalId = String(question?.id || "").trim();
       const dbId = String(question?.dbId || "").trim();
       if (!String(question?.stem || "").trim()) {
         return false;
       }
-      if (toRelationalQuestionStatus(question?.status) !== "draft") {
+      if (toRelationalQuestionStatus(question?.status) === "archived") {
+        return false;
+      }
+      if (externalId && pendingQuestionDeletionIds.has(externalId)) {
         return false;
       }
       if (externalId && remoteExternalIdSet.has(externalId)) {
@@ -8256,8 +8410,8 @@ async function hydrateRelationalQuestions() {
       return true;
     })
     : [];
-  const mergedMappedQuestions = preservedLocalDraftQuestions.length
-    ? [...mappedQuestions, ...preservedLocalDraftQuestions]
+  const mergedMappedQuestions = preservedLocalQuestions.length
+    ? [...mappedQuestions, ...preservedLocalQuestions]
     : mappedQuestions;
   mergedMappedQuestions.sort((a, b) => {
     if (questionColumnSupport.sortOrder) {
@@ -8312,7 +8466,7 @@ async function hydrateRelationalQuestions() {
       }),
     );
     const choiceSignature = buildQuestionChoiceSyncSignatureFromQuestion(question, question.dbId);
-    if (choiceSignature) {
+    if (choiceSignature && !hasOnlyQuestionChoicePlaceholders(question?.choices)) {
       relationalSync.questionChoiceSignaturesByExternalId.set(externalId, choiceSignature);
     }
   });
@@ -8325,8 +8479,10 @@ async function hydrateRelationalQuestions() {
     ? getQuestions()
     : normalizedMappedQuestions;
   if (currentUser?.role === "admin") {
-    scheduleSupabaseWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
-    if (topicRepairResult.questionsChanged) {
+    if (!hasUnresolvedChoicePlaceholders) {
+      scheduleSupabaseWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
+    }
+    if (topicRepairResult.questionsChanged && !hasUnresolvedChoicePlaceholders) {
       scheduleRelationalWrite(STORAGE_KEYS.questions, repairedQuestionsSnapshot);
     }
     if (topicRepairResult.topicsChanged) {
@@ -11444,10 +11600,23 @@ function normalizeQuestionChoiceEntries(choices) {
     .filter(Boolean);
 }
 
+function buildMissingQuestionChoicePlaceholders() {
+  return QUESTION_CHOICE_LABELS.slice(0, 4).map((label) => ({
+    id: label,
+    text: `Option ${label}`,
+  }));
+}
+
 function isQuestionChoicePlaceholder(choice) {
   const label = normalizeQuestionChoiceLabel(choice?.id);
   const text = String(choice?.text || "").trim().toLowerCase();
   return Boolean(label) && text === `option ${label.toLowerCase()}`;
+}
+
+function hasOnlyQuestionChoicePlaceholders(choices) {
+  const normalizedChoices = normalizeQuestionChoiceEntries(choices);
+  return normalizedChoices.length > 0
+    && normalizedChoices.every((choice) => isQuestionChoicePlaceholder(choice));
 }
 
 function shouldPreferExistingQuestionChoices(remoteChoices, existingChoices) {
@@ -11570,6 +11739,9 @@ function buildQuestionChoiceSyncSignatureFromQuestion(question, mappedDbId = "")
   if (normalizedChoices.length < 2) {
     return "";
   }
+  if (normalizedChoices.every((choice) => isQuestionChoicePlaceholder(choice))) {
+    return "";
+  }
   const normalizedCorrect = resolveQuestionCorrectAnswers(question?.correct, [], normalizedChoices);
   const correctSet = new Set(normalizedCorrect);
   const rows = normalizedChoices.map((choice) => ({
@@ -11599,7 +11771,7 @@ function buildQuestionChoiceSyncPlan(sourceQuestions, idMap = {}) {
     seenQuestionIds.add(mappedDbId);
 
     const normalizedChoices = normalizeQuestionChoiceEntries(question?.choices);
-    if (normalizedChoices.length < 2) {
+    if (normalizedChoices.length < 2 || normalizedChoices.every((choice) => isQuestionChoicePlaceholder(choice))) {
       skippedQuestionIds.push(externalId || mappedDbId);
       return;
     }
