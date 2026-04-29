@@ -35,8 +35,16 @@
   box-sizing: border-box;
 }
 
+html {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
+  width: 100%;
+  max-width: 100%;
   min-height: 100vh;
   font-family: var(--font-ui);
   font-size: 16px;
@@ -7348,13 +7356,20 @@ html body :is(.title,
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
-    gap: 0.46rem;
-    padding: max(0.58rem, env(safe-area-inset-top)) 0.7rem 0.58rem;
+    justify-items: stretch;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: hidden;
+    overflow-x: clip;
+    padding: max(0.62rem, env(safe-area-inset-top)) 0.78rem 0.68rem;
   }
 
   .brand-wrap,
   .topbar.admin-only-header .brand-wrap {
     grid-column: 1 / -1;
+    grid-row: 1;
     width: 100%;
     min-width: 0;
     justify-content: center;
@@ -7367,7 +7382,7 @@ html body :is(.title,
     text-overflow: ellipsis;
     white-space: nowrap;
     text-align: center;
-    font-size: clamp(1.55rem, 7vw, 1.95rem);
+    font-size: clamp(1.42rem, 7vw, 1.9rem);
   }
 
   .brand-wrap .pill {
@@ -7377,26 +7392,35 @@ html body :is(.title,
   .auth-actions,
   .topbar.admin-only-header .auth-actions {
     grid-column: 1 / -1;
-    order: 2;
+    grid-row: 2;
     width: 100%;
-    max-width: 360px;
+    max-width: 380px;
+    min-width: 0;
     margin: 0 auto;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+    display: flex;
     align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
     gap: 0.38rem;
   }
 
+  #auth-actions:has(button[data-nav="login"]) {
+    display: flex;
+  }
+
   .auth-actions .btn,
-  .auth-actions button:not(.theme-toggle-btn):not(.notification-bell-btn):not(.user-menu-button),
+  .auth-actions button:not(.theme-toggle-btn):not(.notification-bell-btn):not(.user-menu-trigger),
   .auth-actions .cloud-sync-pill {
-    width: 100%;
+    flex: 1 1 126px;
+    width: auto;
+    min-width: 0;
     justify-content: center;
   }
 
   .auth-actions .theme-toggle-btn,
   .auth-actions .notification-bell-btn,
-  .auth-actions .user-menu-button {
+  .auth-actions .user-menu-trigger {
+    flex: 0 0 42px;
     width: 42px;
     min-width: 42px;
     height: 42px;
@@ -7404,10 +7428,31 @@ html body :is(.title,
     padding: 0;
   }
 
-  .auth-actions button:not(.theme-toggle-btn):not(.notification-bell-btn):not(.user-menu-button):not(.btn) {
+  .auth-actions .notification-menu,
+  .auth-actions .user-menu {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  #auth-actions:has(button[data-nav="login"]) .theme-toggle-btn {
+    flex: 0 0 42px;
+  }
+
+  .auth-actions button:not(.theme-toggle-btn):not(.notification-bell-btn):not(.user-menu-trigger):not(.btn) {
     min-height: 42px;
     border: 1px solid rgba(16, 42, 67, 0.1);
     background: rgba(255, 255, 255, 0.58);
+  }
+
+  #auth-actions button[data-nav="login"] {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  #auth-actions .btn[data-nav="signup"] {
+    grid-column: 2;
+    grid-row: 3;
   }
 
   .auth-actions .btn {
@@ -7423,8 +7468,11 @@ html body :is(.title,
   .top-nav,
   .topbar.admin-only-header .top-nav {
     grid-column: 1 / -1;
+    grid-row: 3;
     order: 3;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     justify-content: flex-start;
     gap: 0.38rem;
     overflow-x: auto;
@@ -7440,8 +7488,10 @@ html body :is(.title,
 
   #public-nav.top-nav {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    width: 100%;
     max-width: 380px;
+    min-width: 0;
     margin: 0 auto;
     overflow: visible;
     padding: 0;
@@ -7458,6 +7508,18 @@ html body :is(.title,
     font-size: 0.86rem;
   }
 
+  #public-nav.top-nav button {
+    grid-column: span 2;
+  }
+
+  #public-nav.top-nav button:nth-child(4) {
+    grid-column: 2 / span 2;
+  }
+
+  #public-nav.top-nav button:nth-child(5) {
+    grid-column: 4 / span 2;
+  }
+
   #private-nav.top-nav button,
   .topbar.admin-only-header .top-nav button {
     width: auto;
@@ -7466,9 +7528,26 @@ html body :is(.title,
 
   .app-shell,
   .app-shell.is-admin {
-    width: min(100vw - 0.72rem, 640px);
+    width: calc(100% - 0.72rem);
+    max-width: 640px;
     margin: 0.58rem auto calc(1rem + env(safe-area-inset-bottom));
     min-height: auto;
+  }
+
+  .app-shell,
+  .panel,
+  .card,
+  .grid-2,
+  .grid-3,
+  .grid-4,
+  .stats-grid,
+  .previous-tests-panel,
+  .previous-tests-summary-strip,
+  .previous-tests-filter-grid,
+  .previous-tests-table-wrap,
+  .table-wrap {
+    min-width: 0;
+    max-width: 100%;
   }
 
   .panel {
@@ -7489,6 +7568,28 @@ html body :is(.title,
 
   .subtle {
     font-size: 0.92rem;
+  }
+
+  .title,
+  .subtle,
+  .card,
+  .panel,
+  .previous-test-name,
+  .previous-test-meta-line,
+  .previous-test-chip-row {
+    overflow-wrap: anywhere;
+  }
+
+  .flex-between {
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .flex-between > *,
+  .flex-between .stack {
+    min-width: 0;
+    max-width: 100%;
   }
 
   .stack,
@@ -7662,7 +7763,7 @@ html body :is(.title,
 
   .admin-users-table-wrap,
   .previous-tests-table-wrap {
-    overflow: visible;
+    overflow: hidden;
   }
 
   .admin-users-table-wrap .admin-users-table,

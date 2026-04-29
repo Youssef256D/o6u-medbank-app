@@ -3553,7 +3553,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
-    : !isStudentProfileCompletionRequired({
+    : resolvedApproval === true || !isStudentProfileCompletionRequired({
       role: "student",
       phone: resolvedPhone,
       academicYear: year,
@@ -7452,6 +7452,17 @@ async function hydrateRelationalProfiles(currentUser) {
       semester = repairedEnrollment.academicSemester;
       assignedCourses = repairedEnrollment.assignedCourses;
     }
+    const serverApproved = role === "admin" || Boolean(profile.approved);
+    const resolvedProfileCompleted = role !== "student"
+      ? true
+      : serverApproved || !isStudentProfileCompletionRequired({
+        role: "student",
+        phone: resolvedPhone,
+        academicYear: year,
+        academicSemester: semester,
+        assignedCourses,
+        authProvider: normalizeAuthProvider(profile.auth_provider || existing?.authProvider),
+      });
     return {
       id: profile.id,
       name: String(profile.full_name || "").trim() || existing?.name || "Student",
@@ -7460,15 +7471,9 @@ async function hydrateRelationalProfiles(currentUser) {
       phone: resolvedPhone,
       role,
       verified: true,
-      isApproved: preferLocalOverDb && existing && typeof existing.isApproved === "boolean"
-        ? existing.isApproved
-        : Boolean(profile.approved),
-      approvedAt: (preferLocalOverDb && existing && existing.isApproved)
-        ? (existing.approvedAt || profile.created_at || nowISO())
-        : (profile.approved ? (existing?.approvedAt || profile.created_at || nowISO()) : null),
-      approvedBy: (preferLocalOverDb && existing && existing.isApproved)
-        ? (existing.approvedBy || null)
-        : (existing?.approvedBy || null),
+      isApproved: serverApproved,
+      approvedAt: serverApproved ? (existing?.approvedAt || profile.created_at || nowISO()) : null,
+      approvedBy: serverApproved ? (existing?.approvedBy || "admin") : null,
       assignedCourses,
       academicYear: year,
       academicSemester: semester,
@@ -7476,7 +7481,9 @@ async function hydrateRelationalProfiles(currentUser) {
       authAccessKnownActive: typeof existing?.authAccessKnownActive === "boolean"
         ? existing.authAccessKnownActive
         : undefined,
-      profileCompleted: typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : role !== "student",
+      profileCompleted: resolvedProfileCompleted
+        ? true
+        : (typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : false),
       createdAt: existing?.createdAt || profile.created_at || nowISO(),
       supabaseAuthId: profile.id,
       identityAliases: normalizeUserIdentityAliasList([
@@ -13216,56 +13223,73 @@ function seedData() {
 
   const allCourses = CURRICULUM_COURSE_LIST;
 
-  if (!load(STORAGE_KEYS.users, null)) {
-    const users = [
-      {
-        id: "u_admin",
-        name: "O6U Admin",
-        email: DEMO_ADMIN_EMAIL,
-        password: "admin123",
-        phone: "",
-        role: "admin",
-        verified: true,
-        isApproved: true,
-        approvedAt: nowISO(),
-        approvedBy: "system",
-        assignedCourses: [...allCourses],
-        academicYear: null,
-        academicSemester: null,
-        createdAt: nowISO(),
-        identityAliases: ["u_admin"],
-      },
-      {
-        id: "u_student",
-        name: "O6U Demo Student",
-        email: DEMO_STUDENT_EMAIL,
-        password: "student123",
-        phone: "+201000000000",
-        role: "student",
-        verified: true,
-        isApproved: true,
-        approvedAt: nowISO(),
-        approvedBy: "system",
-        assignedCourses: getCurriculumCourses(1, 1),
-        academicYear: 1,
-        academicSemester: 1,
-        createdAt: nowISO(),
-        identityAliases: ["u_student"],
-      },
-    ];
+  const savedUsers = load(STORAGE_KEYS.users, null);
+  if (!savedUsers) {
+    const users = SUPABASE_CONFIG.enabled
+      ? []
+      : [
+        {
+          id: "u_admin",
+          name: "O6U Admin",
+          email: DEMO_ADMIN_EMAIL,
+          password: "admin123",
+          phone: "",
+          role: "admin",
+          verified: true,
+          isApproved: true,
+          approvedAt: nowISO(),
+          approvedBy: "system",
+          assignedCourses: [...allCourses],
+          academicYear: null,
+          academicSemester: null,
+          createdAt: nowISO(),
+          identityAliases: ["u_admin"],
+        },
+        {
+          id: "u_student",
+          name: "O6U Demo Student",
+          email: DEMO_STUDENT_EMAIL,
+          password: "student123",
+          phone: "+201000000000",
+          role: "student",
+          verified: true,
+          isApproved: true,
+          approvedAt: nowISO(),
+          approvedBy: "system",
+          assignedCourses: getCurriculumCourses(1, 1),
+          academicYear: 1,
+          academicSemester: 1,
+          createdAt: nowISO(),
+          identityAliases: ["u_student"],
+        },
+      ];
     save(STORAGE_KEYS.users, users);
   } else {
-    const users = getUsers();
+    let users = getUsers();
     let changed = false;
+    if (SUPABASE_CONFIG.enabled) {
+      const liveUsers = users.filter((user) => {
+        const id = String(user?.id || "").trim();
+        const email = String(user?.email || "").trim().toLowerCase();
+        return id !== "u_admin"
+          && id !== "u_student"
+          && email !== DEMO_ADMIN_EMAIL
+          && email !== DEMO_STUDENT_EMAIL;
+      });
+      if (liveUsers.length !== users.length) {
+        users = liveUsers;
+        changed = true;
+      }
+    }
     users.forEach((user) => {
-      if (user.id === "u_admin") {
+      if (!SUPABASE_CONFIG.enabled && user.id === "u_admin") {
         if (user.email !== DEMO_ADMIN_EMAIL || user.name !== "O6U Admin") {
           user.email = DEMO_ADMIN_EMAIL;
           user.name = "O6U Admin";
           changed = true;
         }
       }
-      if (user.id === "u_student") {
+      if (!SUPABASE_CONFIG.enabled && user.id === "u_student") {
         if (user.email !== DEMO_STUDENT_EMAIL || user.name !== "O6U Demo Student") {
           user.email = DEMO_STUDENT_EMAIL;
           user.name = "O6U Demo Student";
@@ -17111,9 +17135,14 @@ function syncTopbar() {
 }
 
 function markActiveNav() {
-  document.querySelectorAll(".top-nav [data-nav]").forEach((button) => {
+  document.querySelectorAll(".top-nav [data-nav], #auth-actions [data-nav='login'], #auth-actions [data-nav='signup']").forEach((button) => {
     const isActive = button.getAttribute("data-nav") === state.route;
     button.classList.toggle("is-active", isActive);
+    if (isActive) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
   });
 }
 
@@ -26581,11 +26610,16 @@ function wireAdmin() {
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
         didEnrollmentTermChange = previousYear !== year || previousSemester !== semester;
-        if (!hasCompleteStudentApprovalProfile(users[idx])) {
+        const hasCompleteApprovalProfile = hasCompleteStudentApprovalProfile(users[idx]);
+        if (!hasCompleteApprovalProfile && previousApproved) {
+          toast("Approved students need a valid phone number, year, semester, and course selection before saving. Add the missing details or suspend the account first.");
+          return false;
+        }
+        if (!hasCompleteApprovalProfile) {
           users[idx].isApproved = false;
           users[idx].approvedAt = null;
           users[idx].approvedBy = null;
-        } else if (isAutoApproveStudentAccessEnabled()) {
+        } else if (!previousApproved && isAutoApproveStudentAccessEnabled()) {
           users[idx].isApproved = true;
           users[idx].approvedAt = users[idx].approvedAt || nowISO();
           users[idx].approvedBy = users[idx].approvedBy || AUTO_APPROVAL_ACTOR;
