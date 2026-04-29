@@ -707,6 +707,7 @@ const relationalSync = {
   knownProfileIds: new Set(),
   questionRowSignaturesByExternalId: new Map(),
   questionChoiceSignaturesByExternalId: new Map(),
+  malformedQuestionHydrationWarningSignature: "",
   blockedStorageKeys: new Set(),
   flushTimer: null,
   flushing: false,
@@ -6155,6 +6156,7 @@ function resetRelationalSyncState() {
   relationalSync.lastRejectedWriteMeta.clear();
   relationalSync.questionRowSignaturesByExternalId.clear();
   relationalSync.questionChoiceSignaturesByExternalId.clear();
+  relationalSync.malformedQuestionHydrationWarningSignature = "";
   relationalSync.blockedStorageKeys.clear();
   relationalSync.flushing = false;
   relationalSync.lastQueuedAt = 0;
@@ -8099,9 +8101,19 @@ async function hydrateRelationalQuestions() {
   }).filter(Boolean);
 
   if (skippedMalformedQuestionIds.length) {
-    console.warn(
-      `Skipped ${skippedMalformedQuestionIds.length} malformed question(s) with missing choices during hydration.`,
-    );
+    const warningQuestionIds = skippedMalformedQuestionIds
+      .map((id) => String(id || "").trim())
+      .filter(Boolean)
+      .sort();
+    const warningSignature = getSyncPayloadSignature(warningQuestionIds);
+    if (relationalSync.malformedQuestionHydrationWarningSignature !== warningSignature) {
+      relationalSync.malformedQuestionHydrationWarningSignature = warningSignature;
+      console.warn(
+        `Skipped ${skippedMalformedQuestionIds.length} malformed question(s) with missing choices during hydration. This warning will repeat only if the affected rows change.`,
+      );
+    }
+  } else {
+    relationalSync.malformedQuestionHydrationWarningSignature = "";
   }
 
   mappedQuestions.sort((a, b) => {
@@ -12215,12 +12227,9 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
       const curriculumCourses = enrollmentYear !== null && enrollmentSemester !== null
         ? getCurriculumCourses(enrollmentYear, enrollmentSemester)
         : [];
-      const scopedAssignedCourses = curriculumCourses.length
-        ? sanitizeCourseAssignments((student.assignedCourses || []).filter((course) => curriculumCourses.includes(course)))
+      const selectedCourses = curriculumCourses.length
+        ? curriculumCourses
         : sanitizeCourseAssignments(student.assignedCourses || []);
-      const selectedCourses = scopedAssignedCourses.length
-        ? scopedAssignedCourses
-        : sanitizeCourseAssignments(curriculumCourses.length ? curriculumCourses : (student.assignedCourses || []));
       const desiredCourseIds = new Set(
         selectedCourses
           .map((courseName) => {
@@ -33992,13 +34001,10 @@ function normalizeStudentEnrollmentProfile(user) {
 
   const semesterCourses = getCurriculumCourses(year, semester);
   if (semesterCourses.length) {
-    const scopedAssignedCourses = sanitizeCourseAssignments(
-      normalizedAssigned.filter((course) => semesterCourses.includes(course)),
-    );
     return {
       academicYear: year,
       academicSemester: semester,
-      assignedCourses: scopedAssignedCourses.length ? scopedAssignedCourses : [...semesterCourses],
+      assignedCourses: [...semesterCourses],
     };
   }
 
@@ -34030,8 +34036,7 @@ function getAvailableCoursesForUser(user) {
       : [];
     const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
     if (byEnrollment.length) {
-      const scopedAssigned = assigned.filter((course) => byEnrollment.includes(course));
-      return scopedAssigned.length ? scopedAssigned : byEnrollment;
+      return byEnrollment;
     }
     if (hasSupabaseManagedIdentity(user)) {
       return [];
