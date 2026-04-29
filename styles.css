@@ -7357,13 +7357,13 @@ html body :is(.title,
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     justify-items: stretch;
-    gap: 0.5rem;
+    gap: 0.62rem;
     width: 100%;
     max-width: 100%;
     min-width: 0;
     overflow-x: hidden;
     overflow-x: clip;
-    padding: max(0.62rem, env(safe-area-inset-top)) 0.78rem 0.68rem;
+    padding: max(1.25rem, env(safe-area-inset-top)) 0.78rem 0.84rem;
   }
 
   .brand-wrap,
@@ -7382,7 +7382,8 @@ html body :is(.title,
     text-overflow: ellipsis;
     white-space: nowrap;
     text-align: center;
-    font-size: clamp(1.42rem, 7vw, 1.9rem);
+    font-size: clamp(2rem, 9vw, 2.55rem);
+    line-height: 1.08;
   }
 
   .brand-wrap .pill {
@@ -7401,7 +7402,7 @@ html body :is(.title,
     align-items: center;
     justify-content: center;
     flex-wrap: wrap;
-    gap: 0.38rem;
+    gap: 0.54rem;
   }
 
   #auth-actions:has(button[data-nav="login"]) {
@@ -7420,11 +7421,11 @@ html body :is(.title,
   .auth-actions .theme-toggle-btn,
   .auth-actions .notification-bell-btn,
   .auth-actions .user-menu-trigger {
-    flex: 0 0 42px;
-    width: 42px;
-    min-width: 42px;
-    height: 42px;
-    min-height: 42px;
+    flex: 0 0 48px;
+    width: 48px;
+    min-width: 48px;
+    height: 48px;
+    min-height: 48px;
     padding: 0;
   }
 
@@ -7436,7 +7437,7 @@ html body :is(.title,
   }
 
   #auth-actions:has(button[data-nav="login"]) .theme-toggle-btn {
-    flex: 0 0 42px;
+    flex: 0 0 48px;
   }
 
   .auth-actions button:not(.theme-toggle-btn):not(.notification-bell-btn):not(.user-menu-trigger):not(.btn) {
@@ -7474,12 +7475,15 @@ html body :is(.title,
     max-width: 100%;
     min-width: 0;
     justify-content: flex-start;
-    gap: 0.38rem;
+    gap: 0.18rem;
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scroll-snap-type: x proximity;
-    padding: 0 0 0.24rem;
+    padding: 0.04rem 0 0.24rem;
     scrollbar-width: none;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
   }
 
   .top-nav::-webkit-scrollbar {
@@ -7504,8 +7508,8 @@ html body :is(.title,
     width: 100%;
     white-space: nowrap;
     border-radius: 999px;
-    padding: 0.52rem 0.28rem;
-    font-size: 0.86rem;
+    padding: 0.48rem 0.58rem;
+    font-size: 1rem;
   }
 
   #public-nav.top-nav button {
@@ -7524,6 +7528,20 @@ html body :is(.title,
   .topbar.admin-only-header .top-nav button {
     width: auto;
     min-width: max-content;
+  }
+
+  #private-nav.top-nav {
+    justify-content: flex-start;
+  }
+
+  #private-nav.top-nav button {
+    background: transparent;
+    color: var(--ink);
+  }
+
+  #private-nav.top-nav button.is-active {
+    background: var(--brand-soft);
+    color: var(--brand-strong);
   }
 
   .app-shell,
