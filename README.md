@@ -89,7 +89,7 @@ In Supabase Dashboard:
    - Google: enable Google provider and set authorized redirect/client settings in Supabase.
 2. Authentication -> URL Configuration:
    - Site URL: your deployed URL
-   - Redirect URLs: add your deployed URL and `http://localhost:5500` (or your local dev URL)
+   - Redirect URLs: add your deployed URL, `http://localhost:5500` (or your local dev URL), and the mobile deep link `o6umedbank://auth/callback`
 3. Enable leaked-password protection (recommended for production).
 4. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
 

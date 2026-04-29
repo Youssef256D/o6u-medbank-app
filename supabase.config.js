@@ -12,6 +12,12 @@ window.__SUPABASE_CONFIG = {
   serverApiBaseUrl: "",
   // Optional override for OAuth callbacks; keep this aligned with Supabase Auth redirect URLs.
   authRedirectUrl: "https://youssef256d.github.io/o6u-medbank-app/",
+  // Native mobile deep link. Add this exact value in Supabase:
+  // Authentication -> URL Configuration -> Redirect URLs
+  mobileAuthRedirectUrl: "o6umedbank://auth/callback",
+  // Set true in the native wrapper before main.js loads if the mobile app is
+  // served from the web URL but should still use the native callback scheme.
+  forceMobileAuthRedirect: false,
   // Optional storage bucket for uploaded question images.
   questionImageBucket: "question-images",
 };

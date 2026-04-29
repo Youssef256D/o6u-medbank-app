@@ -170,8 +170,9 @@ const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
 const SESSION_BROWSER_STORAGE_PARSE_CHAR_LIMIT = 3_000_000;
 const SESSION_BROWSER_STORAGE_RECENT_SNAPSHOT_LIMIT = 25;
-const ADMIN_USER_RENDER_LIMIT = 300;
-const ADMIN_QUESTION_RENDER_LIMIT = 400;
+const ADMIN_USER_RENDER_LIMIT = 80;
+const ADMIN_QUESTION_RENDER_LIMIT = 220;
+const ADMIN_BULK_UI_YIELD_EVERY = 50;
 const PREVIOUS_TEST_ANALYSIS_LIMIT = 240;
 const PREVIOUS_TEST_RENDER_LIMIT = 120;
 const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
@@ -303,6 +304,7 @@ const state = {
   adminDataLastSyncAt: 0,
   adminDataSyncError: "",
   adminForceRefreshRunning: false,
+  adminApproveAllPendingRunning: false,
   adminCourseQuestionCountCache: null,
   adminCourseQuestionCountCacheRevision: 0,
   questionsRevision: 0,
@@ -573,6 +575,8 @@ const SUPABASE_CONFIG = {
   enabled: window.__SUPABASE_CONFIG?.enabled !== false,
   serverApiBaseUrl: window.__SUPABASE_CONFIG?.serverApiBaseUrl || "",
   authRedirectUrl: window.__SUPABASE_CONFIG?.authRedirectUrl || "",
+  mobileAuthRedirectUrl: window.__SUPABASE_CONFIG?.mobileAuthRedirectUrl || "",
+  forceMobileAuthRedirect: window.__SUPABASE_CONFIG?.forceMobileAuthRedirect === true,
   questionImageBucket: window.__SUPABASE_CONFIG?.questionImageBucket || "question-images",
 };
 
@@ -7315,7 +7319,11 @@ async function hydrateRelationalState(user) {
   if (!hasPendingUserWrites) {
     await hydrateRelationalProfiles(current);
   }
-  if (!hasPendingQuestionWrites) {
+  const activeAdminPage = String(state.adminPage || "").trim();
+  const shouldHydrateQuestionRows = current?.role !== "admin"
+    || activeAdminPage === "questions"
+    || activeAdminPage === "bulk-import";
+  if (!hasPendingQuestionWrites && shouldHydrateQuestionRows) {
     await hydrateRelationalQuestions();
   }
   if (!hasPendingNotificationWrites) {
@@ -10719,6 +10727,10 @@ function splitIntoBatches(items, batchSize) {
     batches.push(source.slice(index, index + size));
   }
   return batches;
+}
+
+function yieldToBrowser(delayMs = 0) {
+  return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(delayMs) || 0)));
 }
 
 // Fire-and-forget sync: kicks off background sync without blocking the caller.
@@ -16744,7 +16756,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
   }
   const force = Boolean(options?.force);
   const surfaceErrors = options?.surfaceErrors !== false;
-  const includeHeavyData = options?.includeHeavyData !== false;
+  const includeHeavyData = options?.includeHeavyData === true;
   if (!force && !shouldRefreshAdminData(user)) {
     return true;
   }
@@ -16789,13 +16801,16 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions)
       || relationalSync.flushing
       || isQuestionSyncBusy();
-    const shouldHydrateQuestions = (force || !hasPendingQuestionWrites) && (
-      includeHeavyData
-      || state.adminPage === "questions"
-      || state.adminPage === "bulk-import"
-      || !adminQuestionsLastHydratedAt
-      || (Date.now() - adminQuestionsLastHydratedAt) > ADMIN_QUESTION_BACKGROUND_REFRESH_MS
-    );
+    const activeAdminPage = String(state.adminPage || "").trim();
+    const adminPageNeedsQuestionHydration = activeAdminPage === "questions" || activeAdminPage === "bulk-import";
+    const shouldHydrateQuestions = (force || !hasPendingQuestionWrites)
+      && !hasPendingQuestionWrites
+      && (includeHeavyData || adminPageNeedsQuestionHydration)
+      && (
+        force
+        || !adminQuestionsLastHydratedAt
+        || (Date.now() - adminQuestionsLastHydratedAt) > ADMIN_QUESTION_BACKGROUND_REFRESH_MS
+      );
 
     if (!hasPendingCourseWrites) {
       await hydrateRelationalCoursesAndTopics();
@@ -17586,18 +17601,45 @@ function wireContact() {
   });
 }
 
-function getAuthRedirectToUrl() {
-  const configured = String(SUPABASE_CONFIG.authRedirectUrl || "").trim();
+function normalizeConfiguredAuthRedirectUrl(rawUrl) {
+  const configured = String(rawUrl || "").trim();
   if (configured) {
     try {
       const configuredUrl = new URL(configured, window.location.origin);
       configuredUrl.search = "";
       configuredUrl.hash = "";
-      configuredUrl.pathname = configuredUrl.pathname.replace(/\/index\.html$/i, "/");
+      if (/^https?:$/i.test(configuredUrl.protocol)) {
+        configuredUrl.pathname = configuredUrl.pathname.replace(/\/index\.html$/i, "/");
+      }
       return configuredUrl.toString();
     } catch (error) {
       console.warn("Invalid Supabase auth redirect URL override.", error?.message || error);
     }
+  }
+  return "";
+}
+
+function shouldUseMobileAuthRedirect() {
+  if (SUPABASE_CONFIG.forceMobileAuthRedirect || window.__O6U_MEDBANK_MOBILE_APP__ === true) {
+    return true;
+  }
+  if (window.Capacitor?.isNativePlatform?.() || window.cordova || window.ReactNativeWebView) {
+    return true;
+  }
+  return /^(capacitor|ionic|file):$/i.test(window.location.protocol);
+}
+
+function getAuthRedirectToUrl() {
+  if (shouldUseMobileAuthRedirect()) {
+    const mobileRedirect = normalizeConfiguredAuthRedirectUrl(SUPABASE_CONFIG.mobileAuthRedirectUrl);
+    if (mobileRedirect) {
+      return mobileRedirect;
+    }
+  }
+
+  const configured = normalizeConfiguredAuthRedirectUrl(SUPABASE_CONFIG.authRedirectUrl);
+  if (configured) {
+    return configured;
   }
 
   if (!/^https?:$/i.test(window.location.protocol)) {
@@ -18353,10 +18395,12 @@ function wireAuth(mode) {
           assignedCourses: selectedCourses,
         });
         if (authClient) {
+          const emailRedirectTo = getAuthRedirectToUrl();
           const { data: authData, error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signUp({
             email,
             password,
             options: {
+              emailRedirectTo,
               data: buildStudentEnrollmentAuthMetadata({
                 name,
                 phone: normalizedPhone,
@@ -22913,7 +22957,7 @@ function patchAdminUsersPendingSummaryUi() {
     pendingBadge.innerHTML = `Pending: <b>${pendingCount}</b>`;
   }
   const approveAllButton = usersSection.querySelector("[data-action='approve-all-pending']");
-  if (approveAllButton && !state.adminUserBulkActionRunning) {
+  if (approveAllButton && !state.adminUserBulkActionRunning && !state.adminApproveAllPendingRunning) {
     approveAllButton.disabled = !pendingCount;
   }
   return true;
@@ -23165,6 +23209,7 @@ function renderAdmin() {
     const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
     const addUserDraft = normalizeAdminAddUserDraft(state.adminAddUserDraft);
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
+    const approveAllPendingRunning = Boolean(state.adminApproveAllPendingRunning);
     const accountRows = renderedUsers
       .map((account) => {
         const enrollmentView = getAdminUserEnrollmentViewModel(account);
@@ -23287,7 +23332,9 @@ function renderAdmin() {
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.6rem;">
             <div style="display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end;">
               <span class="badge ${pendingCount ? 'bad' : 'good'}" data-admin-pending-count style="font-size: 0.8rem; padding: 0.3rem 0.7rem;">Pending: <b>${pendingCount}</b></span>
-              <button class="btn" type="button" data-action="approve-all-pending" ${pendingCount ? "" : "disabled"}>Approve all pending</button>
+              <button class="btn ${approveAllPendingRunning ? "is-loading" : ""}" type="button" data-action="approve-all-pending" ${pendingCount && !approveAllPendingRunning ? "" : "disabled"}>
+                ${approveAllPendingRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Approving...</span>` : "Approve all pending"}
+              </button>
             </div>
             <label class="toggle-switch-label" style="margin: 0;">
               <input id="admin-auto-approval-toggle" type="checkbox" class="toggle-switch-input" ${autoApprovalEnabled ? "checked" : ""} />
@@ -23387,7 +23434,7 @@ function renderAdmin() {
               type="checkbox"
               name="selectAllUsersVisible"
               data-action="admin-select-all-users"
-              aria-label="Select all users in this filtered list"
+              aria-label="Select all users currently shown"
               data-indeterminate="${partiallyVisibleSelected ? "true" : "false"}"
               ${allVisibleSelected ? "checked" : ""}
               ${bulkDeactivateRunning || !visibleSelectableUserIds.length ? "disabled" : ""}
@@ -23406,7 +23453,7 @@ function renderAdmin() {
           </div>
         </div>
         ${hiddenFilteredUserCount
-        ? `<p class="subtle" style="margin: 0.7rem 0 0;">Showing the first ${ADMIN_USER_RENDER_LIMIT} matching users to keep the page responsive. Narrow the search or filters to edit users beyond this set.</p>`
+        ? `<p class="subtle" style="margin: 0.7rem 0 0;">Showing the first ${ADMIN_USER_RENDER_LIMIT} matching users to keep this screen responsive. Use search, year, or semester filters to edit users beyond this set.</p>`
         : ""
       }
 
@@ -26247,22 +26294,13 @@ function wireAdmin() {
   });
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
-    const current = getCurrentUser();
-    let users = getUsers();
-    const pendingUserIds = users
-      .filter((entry) => entry.role === "student" && !isUserAccessApproved(entry))
-      .map((entry) => String(entry.id || "").trim())
-      .filter(Boolean);
-    const syncedPendingRows = await syncEnrollmentRowsForUserIds(pendingUserIds, { batchFlush: true });
-    if (!syncedPendingRows) {
+    if (state.adminApproveAllPendingRunning) {
       return;
     }
-
-    users = getUsers();
-    const pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
-    const eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentApprovalProfile(entry));
-    const eligiblePendingUserIdSet = new Set(eligiblePendingUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
-    const pendingProfileIds = eligiblePendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
+    const current = getCurrentUser();
+    let users = getUsers();
+    let pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
+    let eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentApprovalProfile(entry));
 
     if (!pendingUsers.length) {
       toast("No pending requests found.");
@@ -26272,61 +26310,105 @@ function wireAdmin() {
       toast("Pending users must complete phone number, year, semester, and course selection before approval.");
       return;
     }
-
-    const dbResult = await updateRelationalProfileApproval(pendingProfileIds, true);
-    if (pendingProfileIds.length && !dbResult.ok) {
-      toast(`Database update failed. ${dbResult.message}`);
+    if (!window.confirm(`Approve ${eligiblePendingUsers.length} complete pending account(s)?`)) {
       return;
     }
 
+    state.adminApproveAllPendingRunning = true;
+    state.skipNextRouteAnimation = true;
+    render();
+    await yieldToBrowser();
+
+    try {
+      const pendingUserIds = pendingUsers
+        .map((entry) => String(entry.id || "").trim())
+        .filter(Boolean);
+      const syncedPendingRows = await syncEnrollmentRowsForUserIds(pendingUserIds, { batchFlush: true });
+      if (!syncedPendingRows) {
+        return;
+      }
+
+      await yieldToBrowser();
+
+      users = getUsers();
+      pendingUsers = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry));
+      eligiblePendingUsers = pendingUsers.filter((entry) => hasCompleteStudentApprovalProfile(entry));
+      const eligiblePendingUserIdSet = new Set(eligiblePendingUsers.map((entry) => String(entry.id || "").trim()).filter(Boolean));
+      const pendingProfileIds = eligiblePendingUsers.map((entry) => getUserProfileId(entry)).filter((id) => isUuidValue(id));
+
+      if (!eligiblePendingUsers.length) {
+        toast("Pending users must complete phone number, year, semester, and course selection before approval.");
+        return;
+      }
+
+      const dbResult = await updateRelationalProfileApproval(pendingProfileIds, true);
+      if (pendingProfileIds.length && !dbResult.ok) {
+        toast(`Database update failed. ${dbResult.message}`);
+        return;
+      }
+
+      await yieldToBrowser();
       const approvedProfileIds = new Set(dbResult.updatedIds || []);
       const skippedProfileIds = new Set(dbResult.skippedIds || []);
       let approvedCount = 0;
       let skippedCount = 0;
-      users.forEach((entry) => {
-      const entryId = String(entry.id || "").trim();
-      if (
-        entry.role !== "student"
-        || isUserAccessApproved(entry)
-        || !eligiblePendingUserIdSet.has(entryId)
-      ) {
+      for (let index = 0; index < users.length; index += 1) {
+        if (index > 0 && index % ADMIN_BULK_UI_YIELD_EVERY === 0) {
+          await yieldToBrowser();
+        }
+        const entry = users[index];
+        const entryId = String(entry.id || "").trim();
+        if (
+          entry.role !== "student"
+          || isUserAccessApproved(entry)
+          || !eligiblePendingUserIdSet.has(entryId)
+        ) {
+          continue;
+        }
+        const authId = getUserProfileId(entry);
+        if (isUuidValue(authId)) {
+          if (!approvedProfileIds.has(authId)) {
+            if (skippedProfileIds.has(authId)) {
+              skippedCount += 1;
+            }
+            continue;
+          }
+        }
+        entry.isApproved = true;
+        entry.approvedAt = nowISO();
+        entry.approvedBy = current?.email || "admin";
+        entry.authAccessKnownActive = false;
+        approvedCount += 1;
+      }
+      if (!approvedCount) {
+        toast("Database update failed. No pending users were updated.");
         return;
       }
-      const authId = getUserProfileId(entry);
-      if (isUuidValue(authId)) {
-        if (!approvedProfileIds.has(authId)) {
-          if (skippedProfileIds.has(authId)) {
-            skippedCount += 1;
-          }
-          return;
-        }
-      }
-      entry.isApproved = true;
-      entry.approvedAt = nowISO();
-      entry.approvedBy = current?.email || "admin";
-      entry.authAccessKnownActive = false;
-      approvedCount += 1;
-    });
-    if (!approvedCount) {
-      toast("Database update failed. No pending users were updated.");
-      return;
-    }
 
-    save(STORAGE_KEYS.users, users, {
-      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
-      profileSyncIds: [...approvedProfileIds],
-    });
-    render();
-    const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
-      users,
-      user: current,
-    });
-    toast(
-      (skippedCount
-        ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped.`
-        : `${approvedCount} pending account(s) approved.`)
-        + describeAuthAccessSyncOutcome(authAccessSyncResult),
-    );
+      save(STORAGE_KEYS.users, users, {
+        userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+        profileSyncIds: [...approvedProfileIds],
+      });
+      state.skipNextRouteAnimation = true;
+      render();
+      await yieldToBrowser();
+      const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
+        users,
+        user: current,
+      });
+      toast(
+        (skippedCount
+          ? `${approvedCount} pending account(s) approved. ${skippedCount} skipped.`
+          : `${approvedCount} pending account(s) approved.`)
+          + describeAuthAccessSyncOutcome(authAccessSyncResult),
+      );
+    } finally {
+      state.adminApproveAllPendingRunning = false;
+      if (state.route === "admin" && state.adminPage === "users") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    }
   });
 
   const adminUsersSection = document.getElementById("admin-users-section");
