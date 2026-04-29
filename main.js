@@ -166,6 +166,13 @@ const QUESTION_RELATIONAL_PAGE_SIZE = 250;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
+const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
+const SESSION_BROWSER_STORAGE_PARSE_CHAR_LIMIT = 3_000_000;
+const SESSION_BROWSER_STORAGE_RECENT_SNAPSHOT_LIMIT = 25;
+const ADMIN_USER_RENDER_LIMIT = 300;
+const ADMIN_QUESTION_RENDER_LIMIT = 400;
+const PREVIOUS_TEST_ANALYSIS_LIMIT = 240;
+const PREVIOUS_TEST_RENDER_LIMIT = 120;
 const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000);
 const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
 const ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS = 60000;
@@ -4969,7 +4976,26 @@ function openSessionVaultDb() {
 }
 
 function getRawStoredSessions() {
-  const rawSessions = load(STORAGE_KEYS.sessions, []);
+  const raw = readStorageKey(STORAGE_KEYS.sessions);
+  if (!raw) {
+    return [];
+  }
+  if (
+    typeof raw === "string"
+    && raw.length > SESSION_BROWSER_STORAGE_PARSE_CHAR_LIMIT
+    && !inMemoryStorage.has(STORAGE_KEYS.sessions)
+    && canUseSessionVault()
+  ) {
+    warnLargeSessionStorageFallback();
+    return [];
+  }
+
+  let rawSessions = [];
+  try {
+    rawSessions = JSON.parse(raw);
+  } catch {
+    rawSessions = [];
+  }
   return Array.isArray(rawSessions) ? rawSessions.filter(isRecordObject) : [];
 }
 
@@ -4977,6 +5003,145 @@ function normalizeSessionVaultList(value) {
   return (Array.isArray(value) ? value : [])
     .filter(isRecordObject)
     .filter((session) => String(session?.id || "").trim());
+}
+
+function getSessionStorageSortMs(session) {
+  const candidates = [session?.updatedAt, session?.completedAt, session?.createdAt];
+  for (const candidate of candidates) {
+    const ms = new Date(candidate || "").getTime();
+    if (Number.isFinite(ms)) {
+      return ms;
+    }
+  }
+  return 0;
+}
+
+function stripLargeInlineImageValue(value) {
+  const raw = String(value || "").trim();
+  return isInlineImageDataUrl(raw) ? "" : raw;
+}
+
+function compactQuestionSnapshotForBrowserStorage(snapshot) {
+  if (!isRecordObject(snapshot)) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    questionImage: stripLargeInlineImageValue(snapshot.questionImage),
+    explanationImage: stripLargeInlineImageValue(snapshot.explanationImage),
+  };
+}
+
+function hasTextHighlightEntries(store) {
+  if (!isRecordObject(store)) {
+    return false;
+  }
+  return Boolean(
+    (isRecordObject(store.lines) && Object.keys(store.lines).length)
+    || (isRecordObject(store.choices) && Object.keys(store.choices).length)
+  );
+}
+
+function compactSessionResponseForBrowserStorage(response) {
+  const source = isRecordObject(response) ? response : {};
+  const compact = {};
+  const selected = Array.isArray(source.selected)
+    ? source.selected.map((entry) => normalizeQuestionChoiceLabel(entry)).filter(Boolean)
+    : [];
+  const struck = Array.isArray(source.struck)
+    ? source.struck.map((entry) => normalizeQuestionChoiceLabel(entry)).filter(Boolean)
+    : [];
+  const highlightedLines = Array.isArray(source.highlightedLines)
+    ? source.highlightedLines
+      .map((entry) => Math.floor(Number(entry)))
+      .filter((entry) => Number.isFinite(entry) && entry >= 0)
+    : [];
+  const notes = String(source.notes || "");
+  const timeSpentSec = Math.max(0, Number(source.timeSpentSec || 0) || 0);
+
+  if (selected.length) compact.selected = [...new Set(selected)];
+  if (Boolean(source.submitted)) compact.submitted = true;
+  if (Boolean(source.flagged)) compact.flagged = true;
+  if (struck.length) compact.struck = [...new Set(struck)];
+  if (notes) compact.notes = notes;
+  if (timeSpentSec) compact.timeSpentSec = timeSpentSec;
+  if (highlightedLines.length) compact.highlightedLines = [...new Set(highlightedLines)];
+  if (isRecordObject(source.highlightedLineColors) && Object.keys(source.highlightedLineColors).length) {
+    compact.highlightedLineColors = source.highlightedLineColors;
+  }
+  if (isRecordObject(source.highlightedChoices) && Object.keys(source.highlightedChoices).length) {
+    compact.highlightedChoices = source.highlightedChoices;
+  }
+  if (hasTextHighlightEntries(source.textHighlights)) {
+    compact.textHighlights = source.textHighlights;
+  }
+  return compact;
+}
+
+function compactSessionResponsesForBrowserStorage(responses) {
+  if (!isRecordObject(responses)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(responses)
+      .map(([questionId, response]) => [questionId, compactSessionResponseForBrowserStorage(response)])
+      .filter(([questionId]) => String(questionId || "").trim()),
+  );
+}
+
+function compactSessionForBrowserStorage(session, options = {}) {
+  if (!isRecordObject(session)) {
+    return session;
+  }
+  const compact = deepClone(session);
+  const status = String(compact.status || "").trim();
+  const keepSnapshots = Boolean(options?.keepSnapshots) || status === "in_progress";
+  compact.responses = compactSessionResponsesForBrowserStorage(compact.responses);
+  if (!isRecordObject(compact.questionSnapshots)) {
+    compact.questionSnapshots = {};
+    return compact;
+  }
+  if (!keepSnapshots) {
+    compact.questionSnapshots = {};
+    compact.snapshotsCompacted = true;
+    return compact;
+  }
+  compact.questionSnapshots = Object.fromEntries(
+    Object.entries(compact.questionSnapshots)
+      .map(([key, snapshot]) => [key, compactQuestionSnapshotForBrowserStorage(snapshot)])
+      .filter(([key]) => String(key || "").trim()),
+  );
+  return compact;
+}
+
+function compactSessionsForBrowserStorage(sessionsPayload, options = {}) {
+  const sessions = normalizeSessionVaultList(sessionsPayload);
+  if (!sessions.length) {
+    return [];
+  }
+  const recentSnapshotLimit = Math.max(0, Number(options?.recentSnapshotLimit ?? SESSION_BROWSER_STORAGE_RECENT_SNAPSHOT_LIMIT) || 0);
+
+  const pinnedSessionIds = new Set([
+    String(state.sessionId || "").trim(),
+    String(state.reviewSessionId || "").trim(),
+    readPersistedActiveSessionId(),
+  ].filter(Boolean));
+  const recentCompletedSnapshotIds = new Set(
+    sessions
+      .filter((session) => String(session?.status || "").trim() === "completed")
+      .slice()
+      .sort((a, b) => getSessionStorageSortMs(b) - getSessionStorageSortMs(a))
+      .slice(0, recentSnapshotLimit)
+      .map((session) => String(session?.id || "").trim())
+      .filter(Boolean),
+  );
+
+  return sessions.map((session) => {
+    const sessionId = String(session?.id || "").trim();
+    return compactSessionForBrowserStorage(session, {
+      keepSnapshots: pinnedSessionIds.has(sessionId) || recentCompletedSnapshotIds.has(sessionId),
+    });
+  });
 }
 
 async function readSessionsFromLocalVault() {
@@ -19211,7 +19376,9 @@ function renderPreviousTestsSection(userOrId) {
   }
 
   const questionStore = getQuestionStore();
-  const records = completed.map((session) => buildPreviousTestRecord(session, questionStore, questionMetaById));
+  const completedForAnalysis = completed.slice(0, PREVIOUS_TEST_ANALYSIS_LIMIT);
+  const hiddenCompletedAnalysisCount = Math.max(0, completed.length - completedForAnalysis.length);
+  const records = completedForAnalysis.map((session) => buildPreviousTestRecord(session, questionStore, questionMetaById));
   const filters = getPreviousTestFilters();
   const dateCountMap = getCountMap(records.map((record) => record.dateKey));
   const courseCountMap = getCountMap(records.flatMap((record) => record.courses));
@@ -19262,8 +19429,10 @@ function renderPreviousTestsSection(userOrId) {
   ].filter(Boolean).join(" • ");
   const hasActivePreviousTestFilters = Boolean(activeFilterText);
 
-  const rows = filteredRecords.length
-    ? filteredRecords
+  const renderedRecords = filteredRecords.slice(0, PREVIOUS_TEST_RENDER_LIMIT);
+  const hiddenFilteredRecordCount = Math.max(0, filteredRecords.length - renderedRecords.length);
+  const rows = renderedRecords.length
+    ? renderedRecords
       .map((record) => {
         const { session, summary } = record;
       return `
@@ -19324,10 +19493,14 @@ function renderPreviousTestsSection(userOrId) {
 
       <div class="previous-tests-summary-strip" aria-label="Previous tests summary">
         <span><b>${filteredRecords.length}</b><small>shown</small></span>
-        <span><b>${records.length}</b><small>total</small></span>
+        <span><b>${records.length}</b><small>recent total</small></span>
         <span><b>${filteredQuestionCount}</b><small>questions</small></span>
         <span><b>${filteredAccuracy}%</b><small>accuracy</small></span>
       </div>
+      ${hiddenCompletedAnalysisCount || hiddenFilteredRecordCount
+      ? `<p class="subtle" style="margin: 0.75rem 0 0;">Showing recent test history in batches for stability${hiddenCompletedAnalysisCount ? `; ${hiddenCompletedAnalysisCount} older completed test(s) are kept in cloud/local history` : ""}${hiddenFilteredRecordCount ? `; narrow filters to see the ${hiddenFilteredRecordCount} hidden matching row(s)` : ""}.</p>`
+      : ""
+    }
 
       <div class="previous-tests-filter-grid">
         <label>
@@ -22968,7 +23141,9 @@ function renderAdmin() {
       year: userFilterYear,
       semester: userFilterSemester,
     }));
-    const visibleSelectableUserIds = filteredUsers
+    const renderedUsers = filteredUsers.slice(0, ADMIN_USER_RENDER_LIMIT);
+    const hiddenFilteredUserCount = Math.max(0, filteredUsers.length - renderedUsers.length);
+    const visibleSelectableUserIds = renderedUsers
       .filter((account) => canBulkSelectAdminUser(account, user))
       .map((account) => String(account.id || "").trim())
       .filter(Boolean);
@@ -22989,7 +23164,7 @@ function renderAdmin() {
     const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
     const addUserDraft = normalizeAdminAddUserDraft(state.adminAddUserDraft);
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
-    const accountRows = filteredUsers
+    const accountRows = renderedUsers
       .map((account) => {
         const enrollmentView = getAdminUserEnrollmentViewModel(account);
         const displayAccount = enrollmentView.account || account;
@@ -23218,7 +23393,7 @@ function renderAdmin() {
             />
             <span>Select all in this view</span>
           </label>
-          <p class="admin-question-selection-count">Selected: <b>${selectedUserCount}</b> • Showing <b>${filteredUsers.length}</b> of ${users.length}</p>
+          <p class="admin-question-selection-count">Selected: <b>${selectedUserCount}</b> • Showing <b>${renderedUsers.length}</b> of ${filteredUsers.length} filtered (${users.length} total)</p>
           <div class="stack">
             <button class="btn admin-btn-sm ${bulkDeactivateRunning && state.adminBulkActionType === "approve" ? "is-loading" : ""}" type="button" data-action="admin-bulk-approve-users" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>
               ${bulkDeactivateRunning && state.adminBulkActionType === "approve" ? `<span class="inline-loader" aria-hidden="true"></span><span>Approving...</span>` : "Approve selected"}
@@ -23229,6 +23404,10 @@ function renderAdmin() {
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-user-selection" ${bulkDeactivateRunning || !selectedUserCount ? "disabled" : ""}>Clear selection</button>
           </div>
         </div>
+        ${hiddenFilteredUserCount
+        ? `<p class="subtle" style="margin: 0.7rem 0 0;">Showing the first ${ADMIN_USER_RENDER_LIMIT} matching users to keep the page responsive. Narrow the search or filters to edit users beyond this set.</p>`
+        : ""
+      }
 
         <div class="table-wrap admin-users-table-wrap" style="margin-top: 0.9rem;">
           <table class="admin-users-table">
@@ -23513,7 +23692,9 @@ function renderAdmin() {
     }
     const questionOpsLocked = questionSaveRunning || Boolean(questionDeleteQid) || bulkActionRunning;
     const courseQuestions = questionView.filteredQuestions;
-    const visibleQuestionIds = courseQuestions
+    const renderedCourseQuestions = courseQuestions.slice(0, ADMIN_QUESTION_RENDER_LIMIT);
+    const hiddenFilteredQuestionCount = Math.max(0, courseQuestions.length - renderedCourseQuestions.length);
+    const visibleQuestionIds = renderedCourseQuestions
       .map((question) => String(question.id || "").trim())
       .filter(Boolean);
     const visibleQuestionIdSet = new Set(visibleQuestionIds);
@@ -23535,7 +23716,7 @@ function renderAdmin() {
     const isBulkDrafting = bulkActionRunning && bulkActionType === "draft";
     const isBulkPublishing = bulkActionRunning && bulkActionType === "publish";
     const isBulkDeleting = bulkActionRunning && bulkActionType === "delete";
-    const questionRows = courseQuestions
+    const questionRows = renderedCourseQuestions
       .map((question, idx) => {
         const questionId = String(question.id || "").trim();
         const isDeleting = questionDeleteQid === questionId;
@@ -23671,6 +23852,10 @@ function renderAdmin() {
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-selection" ${questionOpsLocked || !selectedQuestionCount ? "disabled" : ""}>Clear selection</button>
           </div>
         </div>
+        ${hiddenFilteredQuestionCount
+        ? `<p class="subtle" style="margin: 0.7rem 0 0;">Showing the first ${ADMIN_QUESTION_RENDER_LIMIT} questions in this filter to keep editing responsive. Choose a topic to narrow the list.</p>`
+        : ""
+      }
         <p class="subtle admin-question-reorder-hint">Drag and drop rows to reorder. On touch devices, swipe up/down on a row to move it.</p>
         <div class="table-wrap" style="margin-top: 0.9rem;">
           <table>
@@ -35826,6 +36011,16 @@ function load(key, fallback) {
   if (!raw) {
     return fallback;
   }
+  if (
+    key === STORAGE_KEYS.sessions
+    && typeof raw === "string"
+    && raw.length > SESSION_BROWSER_STORAGE_PARSE_CHAR_LIMIT
+    && !inMemoryStorage.has(key)
+    && canUseSessionVault()
+  ) {
+    warnLargeSessionStorageFallback();
+    return fallback;
+  }
 
   try {
     const parsed = JSON.parse(raw);
@@ -35861,6 +36056,9 @@ function save(key, value, options = {}) {
 }
 
 function readStorageKey(key) {
+  if (key === STORAGE_KEYS.sessions && inMemoryStorage.has(key)) {
+    return inMemoryStorage.get(key) ?? null;
+  }
   try {
     const localValue = localStorage.getItem(key);
     if (localValue != null) {
@@ -35906,11 +36104,32 @@ function writeStorageKey(key, value) {
   if (key === STORAGE_KEYS.sessions) {
     scheduleSessionVaultPersist(value);
   }
+  let browserSerialized = serialized;
+  let keepFullValueInMemory = false;
+  if (
+    key === STORAGE_KEYS.sessions
+    && typeof serialized === "string"
+    && serialized.length >= LARGE_SESSION_STORAGE_CHAR_LIMIT
+  ) {
+    warnLargeSessionStorageFallback();
+    try {
+      let compactSerialized = JSON.stringify(compactSessionsForBrowserStorage(value));
+      if (compactSerialized.length >= LARGE_SESSION_STORAGE_CHAR_LIMIT) {
+        compactSerialized = JSON.stringify(compactSessionsForBrowserStorage(value, { recentSnapshotLimit: 0 }));
+      }
+      if (compactSerialized && compactSerialized.length < serialized.length) {
+        browserSerialized = compactSerialized;
+        keepFullValueInMemory = true;
+      }
+    } catch (error) {
+      console.warn("Could not compact session storage payload.", error?.message || error);
+    }
+  }
 
   const persistTransientStorageOnly = ({ includeSessionStorage = true, rememberQuotaOverflow = false } = {}) => {
     inMemoryStorage.set(key, serialized);
     if (includeSessionStorage) {
-      writeSessionStorageKey(key, serialized);
+      writeSessionStorageKey(key, browserSerialized);
     } else {
       removeSessionStorageKey(key);
     }
@@ -35940,7 +36159,7 @@ function writeStorageKey(key, value) {
   if (
     isSilentStorageQuotaFallbackKey(key)
     && Number.isFinite(knownQuotaOverflowThreshold)
-    && serialized.length >= knownQuotaOverflowThreshold
+    && browserSerialized.length >= knownQuotaOverflowThreshold
   ) {
     warnStorageQuotaFallbackForKey(key);
     persistTransientStorageOnly({
@@ -35951,9 +36170,13 @@ function writeStorageKey(key, value) {
   }
 
   try {
-    localStorage.setItem(key, serialized);
-    writeSessionStorageKey(key, serialized);
-    inMemoryStorage.delete(key);
+    localStorage.setItem(key, browserSerialized);
+    writeSessionStorageKey(key, browserSerialized);
+    if (keepFullValueInMemory) {
+      inMemoryStorage.set(key, serialized);
+    } else {
+      inMemoryStorage.delete(key);
+    }
     storageQuotaRetryThresholds.delete(key);
   } catch (error) {
     if (isSilentStorageQuotaFallbackKey(key) && isStorageQuotaExceededError(error)) {
@@ -35965,7 +36188,7 @@ function writeStorageKey(key, value) {
       return;
     }
     warnStorageFallback(error);
-    writeSessionStorageKey(key, serialized);
+    writeSessionStorageKey(key, browserSerialized);
     inMemoryStorage.set(key, serialized);
   }
   bumpQuestionsRevisionForStorageKey(key);
