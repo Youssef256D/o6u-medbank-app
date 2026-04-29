@@ -3,9 +3,29 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
 const ACCESS_UPDATE_CONCURRENCY = 12;
+const PROFILE_APPROVAL_UPDATE_BATCH_SIZE = 100;
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(String(value || "").trim());
+}
+
+function uniqueUuidList(values: unknown): string[] {
+  const entries = Array.isArray(values) ? values : [values];
+  return [...new Set(
+    entries
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuid(entry)),
+  )];
+}
+
+function splitIntoBatches<T>(values: T[], batchSize: number): T[][] {
+  const entries = Array.isArray(values) ? values : [];
+  const size = Math.max(1, Number(batchSize) || 1);
+  const batches: T[][] = [];
+  for (let index = 0; index < entries.length; index += size) {
+    batches.push(entries.slice(index, index + size));
+  }
+  return batches;
 }
 
 function parseAllowedOrigins(): string[] {
@@ -124,6 +144,83 @@ async function applyAuthAccessUpdatesInParallel(
   };
 }
 
+async function updateProfileApproval(
+  adminClient: ReturnType<typeof createClient>,
+  targetProfileIds: string[],
+  approved: boolean,
+): Promise<{
+  updatedIds: string[];
+  missingIds: string[];
+  failedIds: string[];
+  firstFailureMessage: string;
+}> {
+  const targetIds = uniqueUuidList(targetProfileIds);
+  const updatedIds: string[] = [];
+  const missingIds: string[] = [];
+  const failedIds: string[] = [];
+  let firstFailureMessage = "";
+
+  const applyBatch = async (idBatch: string[]): Promise<void> => {
+    if (!idBatch.length) {
+      return;
+    }
+
+    const { data, error } = await adminClient
+      .from("profiles")
+      .update({ approved: Boolean(approved) })
+      .in("id", idBatch)
+      .select("id,approved");
+
+    if (error) {
+      if (idBatch.length > 1) {
+        const midpoint = Math.ceil(idBatch.length / 2);
+        await applyBatch(idBatch.slice(0, midpoint));
+        await applyBatch(idBatch.slice(midpoint));
+        return;
+      }
+      failedIds.push(idBatch[0]);
+      if (!firstFailureMessage) {
+        firstFailureMessage = String(error.message || "").trim() || "Could not update profile approval.";
+      }
+      return;
+    }
+
+    const returnedIds = new Set<string>();
+    (Array.isArray(data) ? data : []).forEach((row) => {
+      const id = String(row?.id || "").trim();
+      if (!isUuid(id)) {
+        return;
+      }
+      returnedIds.add(id);
+      if (Boolean(row?.approved) === Boolean(approved)) {
+        updatedIds.push(id);
+        return;
+      }
+      failedIds.push(id);
+      if (!firstFailureMessage) {
+        firstFailureMessage = "Profile approval verification failed.";
+      }
+    });
+
+    idBatch.forEach((id) => {
+      if (!returnedIds.has(id)) {
+        missingIds.push(id);
+      }
+    });
+  };
+
+  for (const batch of splitIntoBatches(targetIds, PROFILE_APPROVAL_UPDATE_BATCH_SIZE)) {
+    await applyBatch(batch);
+  }
+
+  return {
+    updatedIds: uniqueUuidList(updatedIds),
+    missingIds: uniqueUuidList(missingIds),
+    failedIds: uniqueUuidList(failedIds),
+    firstFailureMessage,
+  };
+}
+
 Deno.serve(async (req) => {
   const requestOrigin = String(req.headers.get("origin") || "").trim();
 
@@ -198,15 +295,43 @@ Deno.serve(async (req) => {
     return jsonResponse(403, { ok: false, error: "Only admin users can update account access." }, requestOrigin);
   }
 
+  const profileUpdate = await updateProfileApproval(adminClient, targetAuthIds, approved);
+  const profileUpdatedIdSet = new Set(profileUpdate.updatedIds || []);
+  const profileMissingIdSet = new Set(profileUpdate.missingIds || []);
+  const blockedProfileIdSet = new Set([
+    ...(profileUpdate.failedIds || []),
+    ...(approved ? (profileUpdate.missingIds || []) : []),
+  ]);
+  const authTargetIds = targetAuthIds.filter((id) => !blockedProfileIdSet.has(id));
   const {
-    updatedIds,
-    notFoundIds,
-    failedIds,
+    updatedIds: authUpdatedIds,
+    notFoundIds: authNotFoundIds,
+    failedIds: authFailedIds,
     firstFailureMessage,
-  } = await applyAuthAccessUpdatesInParallel(adminClient, targetAuthIds, approved);
+  } = authTargetIds.length
+    ? await applyAuthAccessUpdatesInParallel(adminClient, authTargetIds, approved)
+    : { updatedIds: [], notFoundIds: [], failedIds: [], firstFailureMessage: "" };
+
+  const profileSucceededForAccess = (id: string): boolean => (
+    profileUpdatedIdSet.has(id) || (!approved && profileMissingIdSet.has(id))
+  );
+  const updatedIds = authUpdatedIds.filter((id) => profileSucceededForAccess(id));
+  const notFoundIds = authNotFoundIds.filter((id) => profileSucceededForAccess(id));
+  const failedIds = [...new Set([
+    ...(profileUpdate.failedIds || []),
+    ...(approved ? (profileUpdate.missingIds || []) : []),
+    ...authFailedIds,
+  ])];
 
   if (!failedIds.length) {
-    return jsonResponse(200, { ok: true, updatedIds, notFoundIds, failedIds: [] }, requestOrigin);
+    return jsonResponse(200, {
+      ok: true,
+      updatedIds,
+      notFoundIds,
+      failedIds: [],
+      profileUpdatedIds: profileUpdate.updatedIds || [],
+      profileMissingIds: profileUpdate.missingIds || [],
+    }, requestOrigin);
   }
 
   return jsonResponse(
@@ -216,7 +341,9 @@ Deno.serve(async (req) => {
       updatedIds,
       notFoundIds,
       failedIds,
-      error: firstFailureMessage || `${failedIds.length} account(s) could not be updated.`,
+      profileUpdatedIds: profileUpdate.updatedIds || [],
+      profileMissingIds: profileUpdate.missingIds || [],
+      error: profileUpdate.firstFailureMessage || firstFailureMessage || `${failedIds.length} account(s) could not be updated.`,
     },
     requestOrigin,
   );

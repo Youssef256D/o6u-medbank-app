@@ -3,6 +3,7 @@
 const MAX_BODY_BYTES = 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
+const PROFILE_APPROVAL_UPDATE_BATCH_SIZE = 100;
 
 // Simple in-memory rate limiter: max requests per IP within a sliding window.
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
@@ -106,6 +107,24 @@ function parseBearerToken(req) {
 
 function isUuid(value) {
   return UUID_PATTERN.test(String(value || "").trim());
+}
+
+function uniqueUuidList(values) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => isUuid(entry)),
+  )];
+}
+
+function splitIntoBatches(values, batchSize) {
+  const entries = Array.isArray(values) ? values : [];
+  const size = Math.max(1, Number(batchSize) || 1);
+  const batches = [];
+  for (let index = 0; index < entries.length; index += size) {
+    batches.push(entries.slice(index, index + size));
+  }
+  return batches;
 }
 
 function readRawBody(req) {
@@ -266,6 +285,103 @@ async function updateAuthUserAccess(env, targetAuthId, approved) {
   };
 }
 
+async function patchProfileApprovalBatch(env, targetProfileIds, approved) {
+  const ids = uniqueUuidList(targetProfileIds);
+  if (!ids.length) {
+    return { ok: true, rows: [], error: "" };
+  }
+  const idFilter = ids.map((id) => encodeURIComponent(id)).join(",");
+  const response = await fetch(
+    `${env.supabaseUrl}/rest/v1/profiles?id=in.(${idFilter})&select=id,approved`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: env.serviceRoleKey,
+        Authorization: `Bearer ${env.serviceRoleKey}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ approved: Boolean(approved) }),
+    },
+  );
+  const payload = await readJsonSafe(response);
+  if (!response.ok) {
+    const errorMessage = String(payload?.message || payload?.error || payload?.msg || "").trim();
+    return {
+      ok: false,
+      rows: [],
+      error: errorMessage || `Failed to update profile approval (${response.status}).`,
+    };
+  }
+  return {
+    ok: true,
+    rows: Array.isArray(payload) ? payload : [],
+    error: "",
+  };
+}
+
+async function updateProfileApproval(env, targetProfileIds, approved) {
+  const targetIds = uniqueUuidList(targetProfileIds);
+  const updatedIds = [];
+  const missingIds = [];
+  const failedIds = [];
+  let firstFailureMessage = "";
+
+  const applyBatch = async (idBatch) => {
+    if (!idBatch.length) {
+      return;
+    }
+    const result = await patchProfileApprovalBatch(env, idBatch, approved);
+    if (!result.ok) {
+      if (idBatch.length > 1) {
+        const midpoint = Math.ceil(idBatch.length / 2);
+        await applyBatch(idBatch.slice(0, midpoint));
+        await applyBatch(idBatch.slice(midpoint));
+        return;
+      }
+      failedIds.push(idBatch[0]);
+      if (!firstFailureMessage) {
+        firstFailureMessage = result.error || "Could not update profile approval.";
+      }
+      return;
+    }
+
+    const returnedIds = new Set();
+    (Array.isArray(result.rows) ? result.rows : []).forEach((row) => {
+      const id = String(row?.id || "").trim();
+      if (!isUuid(id)) {
+        return;
+      }
+      returnedIds.add(id);
+      if (Boolean(row?.approved) === Boolean(approved)) {
+        updatedIds.push(id);
+        return;
+      }
+      failedIds.push(id);
+      if (!firstFailureMessage) {
+        firstFailureMessage = "Profile approval verification failed.";
+      }
+    });
+
+    idBatch.forEach((id) => {
+      if (!returnedIds.has(id)) {
+        missingIds.push(id);
+      }
+    });
+  };
+
+  for (const batch of splitIntoBatches(targetIds, PROFILE_APPROVAL_UPDATE_BATCH_SIZE)) {
+    await applyBatch(batch);
+  }
+
+  return {
+    updatedIds: uniqueUuidList(updatedIds),
+    missingIds: uniqueUuidList(missingIds),
+    failedIds: uniqueUuidList(failedIds),
+    firstFailureMessage,
+  };
+}
+
 module.exports = {
   applyCorsHeaders,
   deleteAuthUser,
@@ -278,5 +394,6 @@ module.exports = {
   parseBearerToken,
   parseJsonBody,
   updateAuthUserAccess,
+  updateProfileApproval,
   updateAuthUserPassword,
 };

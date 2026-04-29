@@ -26126,7 +26126,10 @@ function wireAdmin() {
       return;
     }
 
-    save(STORAGE_KEYS.users, users);
+    save(STORAGE_KEYS.users, users, {
+      userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+      profileSyncIds: [...approvedProfileIds],
+    });
     render();
     const authAccessSyncResult = await syncAdminAccessChangeNow([...approvedProfileIds], true, {
       users,
@@ -26405,6 +26408,13 @@ function wireAdmin() {
             state.skipNextRouteAnimation = true;
             render();
           }
+        }
+
+        if (approvedProfileIds.size) {
+          save(STORAGE_KEYS.users, getUsers(), {
+            userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+            profileSyncIds: [...approvedProfileIds],
+          });
         }
 
         const confirmedApprovedIds = [...approvedProfileIds];
@@ -27143,7 +27153,10 @@ function wireAdmin() {
         users[idx].approvedAt = nextApproved ? nowISO() : null;
         users[idx].approvedBy = nextApproved ? current?.email || "admin" : null;
         users[idx].authAccessKnownActive = false;
-        save(STORAGE_KEYS.users, users);
+        save(STORAGE_KEYS.users, users, {
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+          profileSyncIds: isUuidValue(targetProfileId) ? [targetProfileId] : [],
+        });
         state.adminDataLastSyncAt = Date.now();
         patchAdminUserRowUi(row, users[idx], current);
         toast(

@@ -11,6 +11,7 @@ const {
   parseBearerToken,
   parseJsonBody,
   updateAuthUserAccess,
+  updateProfileApproval,
 } = require("./_supabase");
 
 const ACCESS_UPDATE_CONCURRENCY = 12;
@@ -145,15 +146,43 @@ module.exports = async (req, res) => {
     return;
   }
 
+  const profileUpdate = await updateProfileApproval(env, targetAuthIds, approved);
+  const profileUpdatedIdSet = new Set(profileUpdate.updatedIds || []);
+  const profileMissingIdSet = new Set(profileUpdate.missingIds || []);
+  const blockedProfileIdSet = new Set([
+    ...(profileUpdate.failedIds || []),
+    ...(approved ? (profileUpdate.missingIds || []) : []),
+  ]);
+  const authTargetIds = targetAuthIds.filter((id) => !blockedProfileIdSet.has(id));
   const {
-    updatedIds,
-    notFoundIds,
-    failedIds,
+    updatedIds: authUpdatedIds,
+    notFoundIds: authNotFoundIds,
+    failedIds: authFailedIds,
     firstFailureMessage,
-  } = await applyAuthAccessUpdatesInParallel(env, targetAuthIds, approved);
+  } = authTargetIds.length
+    ? await applyAuthAccessUpdatesInParallel(env, authTargetIds, approved)
+    : { updatedIds: [], notFoundIds: [], failedIds: [], firstFailureMessage: "" };
+
+  const profileSucceededForAccess = (id) => (
+    profileUpdatedIdSet.has(id) || (!approved && profileMissingIdSet.has(id))
+  );
+  const updatedIds = authUpdatedIds.filter((id) => profileSucceededForAccess(id));
+  const notFoundIds = authNotFoundIds.filter((id) => profileSucceededForAccess(id));
+  const failedIds = [...new Set([
+    ...(profileUpdate.failedIds || []),
+    ...(approved ? (profileUpdate.missingIds || []) : []),
+    ...authFailedIds,
+  ])];
 
   if (!failedIds.length) {
-    json(res, 200, { ok: true, updatedIds, notFoundIds, failedIds: [] });
+    json(res, 200, {
+      ok: true,
+      updatedIds,
+      notFoundIds,
+      failedIds: [],
+      profileUpdatedIds: profileUpdate.updatedIds || [],
+      profileMissingIds: profileUpdate.missingIds || [],
+    });
     return;
   }
 
@@ -162,7 +191,9 @@ module.exports = async (req, res) => {
     updatedIds,
     notFoundIds,
     failedIds,
-    error: firstFailureMessage || `${failedIds.length} account(s) could not be updated.`,
+    profileUpdatedIds: profileUpdate.updatedIds || [],
+    profileMissingIds: profileUpdate.missingIds || [],
+    error: profileUpdate.firstFailureMessage || firstFailureMessage || `${failedIds.length} account(s) could not be updated.`,
   };
   json(res, updatedIds.length || notFoundIds.length ? 200 : 500, payload);
 };
