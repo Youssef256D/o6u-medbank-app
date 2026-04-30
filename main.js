@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.06").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.09").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -117,6 +117,7 @@ const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 500;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 2500;
 const STUDENT_ACCESS_POLL_MS = 6000;
+const STUDENT_ACCESS_LOG_THROTTLE_MS = 60000;
 const ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS = 60000;
 const AUTO_STUDENT_REFRESH_SIGNAL_COOLDOWN_MS = 500;
 const STUDENT_REFRESH_REALTIME_CHANNEL_NAME = "student-refresh-live";
@@ -157,6 +158,7 @@ const ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS = Math.max(ADMIN_REQUEST_TIMEOU
 const AUTH_SIGNIN_TIMEOUT_MS = 35000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 12000;
+const STUDENT_AUTH_CATALOG_PRIME_TIMEOUT_MS = 4500;
 const ROUTE_TRANSITION_MS = 420;
 const USE_NATIVE_VIEW_TRANSITIONS = false;
 const RELATIONAL_IN_BATCH_SIZE = 200;
@@ -574,6 +576,7 @@ let adminApprovedAccessRepairSignature = "";
 let adminApprovedAccessRepairCompletedSignature = "";
 let adminApprovedAccessRepairAttemptedAt = 0;
 let adminBackupRestoreLastCheckedAt = 0;
+const studentAccessIssueLogTimes = new Map();
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -654,6 +657,9 @@ const SUPABASE_BACKUP_SYNC_KEY_SET = new Set([
   ...LEGACY_SUPABASE_STATE_SYNC_KEYS,
   ...RELATIONAL_BACKUP_SYNC_KEYS,
 ]);
+const SUPABASE_BACKUP_LOCAL_ONLY_KEYS = new Set([
+  STORAGE_KEYS.systemLogs,
+]);
 const LEGACY_SUPABASE_STATE_GLOBAL_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => !USER_SCOPED_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_USER_SCOPED_KEYS = LEGACY_SUPABASE_STATE_SYNC_KEYS.filter((key) => USER_SCOPED_SYNC_KEY_SET.has(key));
 const RELATIONAL_COMBINED_COURSE_SYNC_MARKER = "__relational_combined_course_topic_sync__";
@@ -671,7 +677,6 @@ const AUTO_STUDENT_REFRESH_SYNC_KEYS = new Set([
   STORAGE_KEYS.questions,
   STORAGE_KEYS.curriculum,
   STORAGE_KEYS.courseTopics,
-  STORAGE_KEYS.users,
 ]);
 
 const supabaseSync = {
@@ -3243,7 +3248,7 @@ async function initSupabaseAuth() {
         }
       }
     }
-    if (!sessionResult?.error && !sessionResult?.data?.session?.user) {
+    if (!sessionResult?.error && sessionResult?.data?.session && !sessionResult.data.session.user) {
       const refreshedSessionResult = await runSupabaseAuthRequestWithTimeout(
         supabaseAuth.client,
         () => supabaseAuth.client.auth.refreshSession().catch(() => null),
@@ -3669,6 +3674,75 @@ async function bootstrapRelationalProfileFromAuth(authUser, fallbackUser = null)
   return profileResult.data;
 }
 
+async function triggerRelationalEnrollmentRepairFromProfile(profileOrRow) {
+  const client = getRelationalClient();
+  const profile = profileOrRow && typeof profileOrRow === "object" ? profileOrRow : null;
+  const profileId = String(profile?.id || "").trim();
+  const year = normalizeAcademicYearOrNull(profile?.academic_year ?? profile?.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(profile?.academic_semester ?? profile?.academicSemester);
+  if (!client || !isUuidValue(profileId) || year === null || semester === null) {
+    return false;
+  }
+
+  const { error } = await runWithTimeoutResult(
+    client
+      .from("profiles")
+      .update({
+        academic_year: year,
+        academic_semester: semester,
+      })
+      .eq("id", profileId),
+    SUPABASE_QUERY_TIMEOUT_MS,
+    "Enrollment repair trigger timed out.",
+  );
+  if (error) {
+    console.warn("Could not trigger enrollment repair from profile.", error?.message || error);
+    return false;
+  }
+  return true;
+}
+
+function shouldRepairEnrollmentRowsFromProfile(profile, enrollmentSnapshot, profileId) {
+  const role = String(profile?.role || "student") === "admin" ? "admin" : "student";
+  if (role !== "student") {
+    return false;
+  }
+  const year = normalizeAcademicYearOrNull(profile?.academic_year);
+  const semester = normalizeAcademicSemesterOrNull(profile?.academic_semester);
+  if (!isUuidValue(profileId) || year === null || semester === null) {
+    return false;
+  }
+  const courses = sanitizeCourseAssignments(enrollmentSnapshot?.coursesByUser?.[profileId] || []);
+  const diagnostics = enrollmentSnapshot?.diagnosticsByUser?.[profileId] || {};
+  const enrolledTerm = enrollmentSnapshot?.termByUser?.[profileId] || null;
+  const enrolledYear = normalizeAcademicYearOrNull(enrolledTerm?.year);
+  const enrolledSemester = normalizeAcademicSemesterOrNull(enrolledTerm?.semester);
+  const hasNoActiveEnrollment = courses.length === 0;
+  const hasInactiveOnly = Number(diagnostics.rawEnrollmentCount || 0) > 0 && Number(diagnostics.activeEnrollmentCount || 0) === 0;
+  const hasTermMismatch = (
+    enrolledYear !== null
+    && enrolledSemester !== null
+    && (enrolledYear !== year || enrolledSemester !== semester)
+  );
+  return hasNoActiveEnrollment || hasInactiveOnly || hasTermMismatch || Boolean(diagnostics.mixedTerms);
+}
+
+async function repairRelationalEnrollmentRowsForProfileRows(profileRows = []) {
+  const rows = Array.isArray(profileRows) ? profileRows : [];
+  let repairedAny = false;
+  for (const row of rows) {
+    const role = String(row?.role || "student") === "admin" ? "admin" : "student";
+    const year = normalizeAcademicYearOrNull(row?.academic_year);
+    const semester = normalizeAcademicSemesterOrNull(row?.academic_semester);
+    if (role !== "student" || year === null || semester === null || !isUuidValue(String(row?.id || "").trim())) {
+      continue;
+    }
+    const repaired = await triggerRelationalEnrollmentRepairFromProfile(row);
+    repairedAny = repairedAny || repaired;
+  }
+  return repairedAny;
+}
+
 async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = null) {
   if (!authUser?.id) {
     return { user: fallbackUser, approvalChecked: false };
@@ -3707,20 +3781,34 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const authProvider = normalizeAuthProvider(profileAuthProvider || localUser?.authProvider || getAuthProviderFromAuthUser(authUser));
   let relationalAssignedCourses = [];
   let relationalEnrollmentTerm = null;
-  if (role === "student" && isUuidValue(authUser.id)) {
+  let enrollmentSnapshot = null;
+  let enrollmentFetchFailed = false;
+  const shouldFetchEnrollmentRows = role === "student" && isUuidValue(authUser.id);
+  const readEnrollmentSnapshot = async () => {
+    const snapshot = await fetchEnrollmentCourseMapForUsers([authUser.id]);
+    relationalAssignedCourses = sanitizeCourseAssignments(snapshot?.coursesByUser?.[authUser.id] || []);
+    const resolvedEnrollmentTerm = snapshot?.termByUser?.[authUser.id] || null;
+    relationalEnrollmentTerm = resolvedEnrollmentTerm
+      ? {
+        year: normalizeAcademicYearOrNull(resolvedEnrollmentTerm.year),
+        semester: normalizeAcademicSemesterOrNull(resolvedEnrollmentTerm.semester),
+      }
+      : null;
+    return snapshot;
+  };
+  if (shouldFetchEnrollmentRows) {
     try {
-      const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers([authUser.id]);
-      relationalAssignedCourses = sanitizeCourseAssignments(enrollmentSnapshot?.coursesByUser?.[authUser.id] || []);
-      const resolvedEnrollmentTerm = enrollmentSnapshot?.termByUser?.[authUser.id] || null;
-      if (resolvedEnrollmentTerm) {
-        relationalEnrollmentTerm = {
-          year: normalizeAcademicYearOrNull(resolvedEnrollmentTerm.year),
-          semester: normalizeAcademicSemesterOrNull(resolvedEnrollmentTerm.semester),
-        };
+      enrollmentSnapshot = await readEnrollmentSnapshot();
+      if (shouldRepairEnrollmentRowsFromProfile(profile, enrollmentSnapshot, authUser.id)) {
+        const repaired = await triggerRelationalEnrollmentRepairFromProfile(profile);
+        if (repaired) {
+          enrollmentSnapshot = await readEnrollmentSnapshot();
+        }
       }
     } catch (error) {
       if (!isMissingRelationError(error)) {
         console.warn("Could not hydrate enrollment rows for current profile.", error?.message || error);
+        enrollmentFetchFailed = true;
       }
     }
   }
@@ -3756,19 +3844,22 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const resolvedPhone = normalizedProfilePhone || normalizedFallbackPhone || normalizedMetadataPhone;
   const relationalEnrollmentYear = normalizeAcademicYearOrNull(relationalEnrollmentTerm?.year);
   const relationalEnrollmentSemester = normalizeAcademicSemesterOrNull(relationalEnrollmentTerm?.semester);
-  const hasProfileEnrollmentTerm = profileYear !== null && profileSemester !== null;
+  const hasActiveEnrollmentRows = role === "student" && relationalAssignedCourses.length > 0;
+  const canUseProfileEnrollmentTerm = role === "student" && profileYear !== null && profileSemester !== null;
   let year = role === "student"
     ? (
-      hasProfileEnrollmentTerm
-        ? profileYear
-        : (relationalEnrollmentYear ?? fallbackEnrollmentYear ?? metadataEnrollmentYear)
+      relationalEnrollmentYear
+        ?? (canUseProfileEnrollmentTerm ? profileYear : null)
+        ?? fallbackEnrollmentYear
+        ?? metadataEnrollmentYear
     )
     : null;
   let semester = role === "student"
     ? (
-      hasProfileEnrollmentTerm
-        ? profileSemester
-        : (relationalEnrollmentSemester ?? fallbackEnrollmentSemester ?? metadataEnrollmentSemester)
+      relationalEnrollmentSemester
+        ?? (canUseProfileEnrollmentTerm ? profileSemester : null)
+        ?? fallbackEnrollmentSemester
+        ?? metadataEnrollmentSemester
     )
     : null;
   const serverTermCourses = role === "student" && year !== null && semester !== null
@@ -3776,10 +3867,10 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     : [];
   let resolvedAssignedCourses = role === "student"
     ? (
-      serverTermCourses.length
-        ? serverTermCourses
-        : relationalAssignedCourses.length
+      relationalAssignedCourses.length
         ? relationalAssignedCourses
+        : serverTermCourses.length
+        ? serverTermCourses
         : (fallbackAssignedCourses.length
           ? fallbackAssignedCourses
           : metadataAssignedCourses)
@@ -3794,6 +3885,38 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     year = normalizedEnrollment.academicYear;
     semester = normalizedEnrollment.academicSemester;
     resolvedAssignedCourses = normalizedEnrollment.assignedCourses;
+  }
+  let studentAccessIssue = null;
+  if (role === "student") {
+    const diagnostics = enrollmentSnapshot?.diagnosticsByUser?.[authUser.id] || {};
+    const rawEnrollmentCount = Number(diagnostics.rawEnrollmentCount || 0);
+    const activeEnrollmentCount = Number(diagnostics.activeEnrollmentCount || 0);
+    const profileTermDetails = { profileYear, profileSemester, year, semester };
+    if (enrollmentFetchFailed) {
+      studentAccessIssue = createStudentAccessIssue(
+        "enrollment_query_failed",
+        "Course access could not be verified from Supabase. Refresh the page; if it stays blocked, contact an admin.",
+        profileTermDetails,
+      );
+    } else if (rawEnrollmentCount > 0 && activeEnrollmentCount === 0) {
+      studentAccessIssue = createStudentAccessIssue(
+        "inactive_enrollment",
+        "Your enrollment points to inactive or unavailable courses. Ask an admin to check your semester assignment.",
+        { ...profileTermDetails, rawEnrollmentCount, activeEnrollmentCount },
+      );
+    } else if (Boolean(diagnostics.mixedTerms)) {
+      studentAccessIssue = createStudentAccessIssue(
+        "mixed_enrollment_terms",
+        "Your database enrollment contains courses from more than one semester. Ask an admin to save your year and semester again.",
+        { ...profileTermDetails, rawEnrollmentCount, activeEnrollmentCount },
+      );
+    } else if (profileApproved === true && canUseProfileEnrollmentTerm && !hasActiveEnrollmentRows) {
+      studentAccessIssue = createStudentAccessIssue(
+        "missing_enrollment",
+        "Your account is approved, but no active course enrollment is linked in the database. Ask an admin to save your year and semester again.",
+        { ...profileTermDetails, rawEnrollmentCount, activeEnrollmentCount },
+      );
+    }
   }
   const autoApprovalFallback = shouldAutoApproveStudentAccess({
     role,
@@ -3866,9 +3989,11 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     authAccessKnownActive: true,
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || localUser?.verified || false),
     profileCompleted: nextProfileCompleted,
+    studentAccessIssue,
   }, {
     persistLocalOnly: true,
   });
+  recordStudentAccessIssue(studentAccessIssue, updatedUser, { surface: "profile-refresh" });
 
   const shouldBackfillProfilePhone = role === "student"
     && normalizedProfilePhone !== resolvedPhone
@@ -3883,7 +4008,8 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       && normalizeAcademicSemesterOrNull(updatedUser?.academicSemester) !== null
     )
     || (
-      relationalAssignedCourses.length === 0
+      shouldFetchEnrollmentRows
+      && relationalAssignedCourses.length === 0
       && sanitizeCourseAssignments(updatedUser?.assignedCourses || []).length > 0
     )
   );
@@ -4092,6 +4218,101 @@ function validateAndNormalizePhoneNumber(rawPhone) {
   };
 }
 
+function createStudentAccessIssue(code, message, details = {}) {
+  const normalizedCode = String(code || "").trim() || "access_unavailable";
+  const normalizedMessage = String(message || "").trim() || "Course access could not be verified.";
+  return {
+    code: normalizedCode,
+    message: normalizedMessage,
+    details: details && typeof details === "object" && !Array.isArray(details) ? details : {},
+    checkedAt: nowISO(),
+  };
+}
+
+function normalizeStudentAccessIssue(issue) {
+  if (!issue || typeof issue !== "object" || Array.isArray(issue)) {
+    return null;
+  }
+  const code = String(issue.code || "").trim();
+  const message = String(issue.message || "").trim();
+  if (!code || !message) {
+    return null;
+  }
+  return {
+    code,
+    message,
+    details: issue.details && typeof issue.details === "object" && !Array.isArray(issue.details) ? issue.details : {},
+    checkedAt: String(issue.checkedAt || nowISO()).trim(),
+  };
+}
+
+function recordStudentAccessIssue(issue, user = null, context = {}) {
+  const normalizedIssue = normalizeStudentAccessIssue(issue);
+  if (!normalizedIssue) {
+    return;
+  }
+  const profileId = String(getUserProfileId(user) || user?.id || "").trim();
+  const contextKey = String(context?.surface || context?.route || state.route || "student-access").trim();
+  const signature = `${profileId || "unknown"}:${normalizedIssue.code}:${contextKey}`;
+  const nowMs = Date.now();
+  const lastAt = Number(studentAccessIssueLogTimes.get(signature) || 0);
+  if (lastAt && nowMs - lastAt < STUDENT_ACCESS_LOG_THROTTLE_MS) {
+    return;
+  }
+  studentAccessIssueLogTimes.set(signature, nowMs);
+  console.warn("Student access issue:", {
+    code: normalizedIssue.code,
+    message: normalizedIssue.message,
+    userId: String(user?.id || "").trim(),
+    profileId,
+    email: String(user?.email || "").trim().toLowerCase(),
+    route: String(state.route || "").trim(),
+    context,
+    details: normalizedIssue.details,
+  });
+}
+
+function getStudentAccessIssue(user, context = {}) {
+  if (!user || user.role !== "student") {
+    return null;
+  }
+  if (user.isApproved === false) {
+    return createStudentAccessIssue(
+      "not_approved",
+      "Your account is still pending admin approval.",
+    );
+  }
+  if (!hasCompleteStudentProfile(user)) {
+    return createStudentAccessIssue(
+      "profile_incomplete",
+      "Your account profile is incomplete. Add your phone number, year, and semester before opening course content.",
+    );
+  }
+  const year = normalizeAcademicYearOrNull(user.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
+  if (year === null || semester === null) {
+    return createStudentAccessIssue(
+      "missing_enrollment_term",
+      "Your account is approved, but no valid academic year and semester are linked to it.",
+    );
+  }
+  const storedIssue = normalizeStudentAccessIssue(user.studentAccessIssue);
+  if (storedIssue) {
+    return storedIssue;
+  }
+  const availableCourses = Array.isArray(context?.availableCourses)
+    ? context.availableCourses
+    : getAvailableCoursesForUser(user);
+  if (!availableCourses.length) {
+    return createStudentAccessIssue(
+      "missing_enrollment",
+      "Your account is approved, but no active course enrollment is linked in the database. Ask an admin to save your year and semester again.",
+      { year, semester },
+    );
+  }
+  return null;
+}
+
 function hasCompleteStudentProfile(user) {
   if (!user) {
     return false;
@@ -4110,6 +4331,11 @@ function hasSelectedStudentCourses(user) {
     return false;
   }
   if (user.role !== "student") {
+    return true;
+  }
+  const year = normalizeAcademicYearOrNull(user.academicYear);
+  const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
+  if (year !== null && semester !== null && getCurriculumCourses(year, semester).length > 0) {
     return true;
   }
   return sanitizeCourseAssignments(user.assignedCourses || []).length > 0;
@@ -4864,6 +5090,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const hasExplicitAcademicYear = Object.prototype.hasOwnProperty.call(profileOverrides, "academicYear");
   const hasExplicitAcademicSemester = Object.prototype.hasOwnProperty.call(profileOverrides, "academicSemester");
   const hasExplicitAssignedCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "assignedCourses");
+  const hasExplicitStudentAccessIssue = Object.prototype.hasOwnProperty.call(profileOverrides, "studentAccessIssue");
   const metadataAcademicYear = normalizeAcademicYearOrNull(
     authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
   );
@@ -4982,6 +5209,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
       ? profileOverrides.authAccessKnownActive
       : true,
     profileCompleted: nextProfileCompleted,
+    studentAccessIssue: hasExplicitStudentAccessIssue
+      ? normalizeStudentAccessIssue(profileOverrides.studentAccessIssue)
+      : normalizeStudentAccessIssue(previous?.studentAccessIssue),
     identityAliases: normalizeUserIdentityAliasList([
       ...getStoredUserIdentityAliases(previous),
       previous?.id,
@@ -5763,28 +5993,76 @@ function scheduleStudentBootRefresh(user = null, options = {}) {
   return studentBootRefreshPromise;
 }
 
-async function ensureFreshStudentDataAfterAuth(user, options = {}) {
+async function primeStudentCourseCatalogAfterAuth(user = null) {
   const currentUser = user || getCurrentUser();
   const profileId = String(getUserProfileId(currentUser) || "").trim();
   if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
     return false;
   }
 
-  resetStudentLoginRefreshState(currentUser);
+  const ready = await ensureRelationalSyncReady().catch(() => false);
+  if (ready) {
+    const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
+      || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
+      || relationalSync.flushing;
+    if (hasPendingCourseWrites) {
+      return false;
+    }
+    const hydrated = await hydrateRelationalCoursesAndTopics().catch((error) => {
+      console.warn("Could not prime student course catalog after auth.", error?.message || error);
+      return false;
+    });
+    if (hydrated !== false) {
+      syncUsersWithCurriculum();
+      return true;
+    }
+  }
+
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    await initSupabaseSync().catch(() => ({ enabled: false }));
+  }
+  if (!supabaseSync.enabled || !supabaseSync.client || !supabaseSync.tableName || !supabaseSync.storageKeyColumn) {
+    return false;
+  }
+
+  const result = await hydrateSupabaseSyncKeys([
+    STORAGE_KEYS.curriculum,
+    STORAGE_KEYS.courseTopics,
+    STORAGE_KEYS.courseTopicGroups,
+    STORAGE_KEYS.courseNotebookLinks,
+  ]).catch((error) => ({ error }));
+  if (result?.error) {
+    return false;
+  }
+  rehydrateCourseCatalogConfigFromStorage();
+  syncUsersWithCurriculum();
+  return Boolean(result?.hadRemoteData);
+}
+
+async function runStudentPostAuthDataWarmup(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    return false;
+  }
+
+  const reason = String(options?.reason || "auth refresh").trim() || "auth refresh";
   const refreshed = await scheduleStudentBootRefresh(currentUser, {
     rerender: false,
-    reason: String(options?.reason || "auth refresh").trim() || "auth refresh",
+    reason,
   }).catch(() => false);
 
+  const latestUserAfterContent = getCurrentUser() || currentUser;
   try {
-    await hydrateUserScopedSupabaseState(currentUser);
+    await hydrateUserScopedSupabaseState(latestUserAfterContent);
   } catch (hydrateError) {
     console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
   }
 
+  const latestUser = getCurrentUser() || latestUserAfterContent;
   const completedLocalSessions = getCompletedSessionsForRelationalHistorySync()
-    .filter((session) => doesSessionBelongToUser(session, currentUser));
-  if (completedLocalSessions.length && hasActiveSupabaseSessionForUser(currentUser)) {
+    .filter((session) => doesSessionBelongToUser(session, latestUser));
+  if (completedLocalSessions.length && hasActiveSupabaseSessionForUser(latestUser)) {
     relationalSync.blockedStorageKeys.delete(STORAGE_KEYS.sessions);
     sessionSyncRuntime.dirty = true;
     await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
@@ -5793,6 +6071,30 @@ async function ensureFreshStudentDataAfterAuth(user, options = {}) {
   }
 
   return refreshed;
+}
+
+async function ensureFreshStudentDataAfterAuth(user, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    return false;
+  }
+
+  resetStudentLoginRefreshState(currentUser);
+  const primeResult = await runWithTimeoutResult(
+    primeStudentCourseCatalogAfterAuth(currentUser),
+    STUDENT_AUTH_CATALOG_PRIME_TIMEOUT_MS,
+    "Student course catalog prime timed out.",
+  );
+  if (primeResult?.error && !isTimeoutResultError(primeResult.error)) {
+    console.warn("Student course catalog prime failed.", primeResult.error?.message || primeResult.error);
+  }
+
+  runStudentPostAuthDataWarmup(getCurrentUser() || currentUser, options).catch((warmupError) => {
+    console.warn("Student post-auth warmup failed.", warmupError?.message || warmupError);
+  });
+
+  return !primeResult?.error && primeResult?.data !== false;
 }
 
 function schedulePostAuthDataWarmup(user) {
@@ -6561,6 +6863,18 @@ function canWriteStudentEnrollmentProfileToRelational(scope) {
   );
 }
 
+function canWriteCourseEnrollmentRowsToRelational(scope, actorUser = null) {
+  const normalizedScope = normalizeRelationalUserSyncScope(scope);
+  const actor = actorUser || getCurrentUser();
+  return (
+    normalizedScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN
+    || (
+      normalizedScope === USER_RELATIONAL_SYNC_SCOPE_SERVER_BACKFILL
+      && actor?.role === "admin"
+    )
+  );
+}
+
 function canWriteAdminManagedProfileFieldsToRelational(scope) {
   return normalizeRelationalUserSyncScope(scope) === USER_RELATIONAL_SYNC_SCOPE_ADMIN;
 }
@@ -6970,6 +7284,7 @@ async function updateRelationalProfileApproval(profileIds, approved) {
   const ineligibleIds = [];
   const enrolledProfileIdSet = new Set();
   if (targetApproved && targetIds.length) {
+    await repairRelationalEnrollmentRowsForProfileRows(targetIds.map((id) => existingRowsById.get(id)).filter(Boolean));
     for (const idBatch of splitIntoBatches(targetIds, RELATIONAL_IN_BATCH_SIZE)) {
       const { data, error: enrollmentError } = await runWithTimeoutResult(
         client
@@ -7656,7 +7971,9 @@ async function hydrateRelationalCoursesAndTopics() {
     const existingLocalTopics = Array.isArray(COURSE_TOPIC_OVERRIDES[courseName]) && COURSE_TOPIC_OVERRIDES[courseName].length
       ? COURSE_TOPIC_OVERRIDES[courseName]
       : ["Clinical Applications"];
-    courseTopicOverrides[courseName] = topicsForCourse.length ? topicsForCourse : existingLocalTopics;
+    const existingTopics = courseTopicOverrides[courseName] || [];
+    const nextTopics = topicsForCourse.length ? topicsForCourse : existingLocalTopics;
+    courseTopicOverrides[courseName] = normalizeCourseTopicList([...existingTopics, ...nextTopics], courseName);
   });
 
   // Merge any locally-pending topic additions that haven't synced yet.
@@ -7685,6 +8002,7 @@ async function hydrateRelationalCoursesAndTopics() {
   saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM, { audit: false });
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES, { audit: false });
   saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS, { audit: false });
+  syncUsersWithCurriculum();
   const currentUser = getCurrentUser();
   if (currentUser?.role === "admin") {
     scheduleSupabaseWrite(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
@@ -7697,12 +8015,24 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
   const client = getRelationalClient();
   const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map((id) => String(id || "").trim()).filter(isUuidValue))];
   if (!client || !ids.length) {
-    return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {} };
+    return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {}, diagnosticsByUser: {} };
   }
 
   try {
     const enrollmentMap = Object.fromEntries(ids.map((id) => [id, []]));
     const latestAssignedAtByUser = Object.fromEntries(ids.map((id) => [id, ""]));
+    const diagnosticsByUser = Object.fromEntries(
+      ids.map((id) => [
+        id,
+        {
+          rawEnrollmentCount: 0,
+          activeEnrollmentCount: 0,
+          inactiveEnrollmentCount: 0,
+          missingCourseCount: 0,
+          mixedTerms: false,
+        },
+      ]),
+    );
     const termStateByUser = Object.fromEntries(
       ids.map((id) => [
         id,
@@ -7735,7 +8065,7 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
 
     const courseIds = [...new Set(enrollmentRows.map((row) => String(row?.course_id || "").trim()).filter(isUuidValue))];
     if (!courseIds.length) {
-      return { coursesByUser: enrollmentMap, termByUser: {}, latestAssignedAtByUser };
+      return { coursesByUser: enrollmentMap, termByUser: {}, latestAssignedAtByUser, diagnosticsByUser };
     }
 
     const courseRowsResult = await fetchRowsPaged((from, to) => (
@@ -7769,9 +8099,19 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
     enrollmentRows.forEach((row) => {
       const userId = String(row?.user_id || "").trim();
       const courseId = String(row?.course_id || "").trim();
+      const diagnostics = diagnosticsByUser[userId];
+      if (diagnostics) {
+        diagnostics.rawEnrollmentCount += 1;
+      }
       const courseMeta = courseMetaById[courseId];
       if (!isUuidValue(userId) || !courseMeta?.courseName) {
+        if (diagnostics) {
+          diagnostics.missingCourseCount += 1;
+        }
         return;
+      }
+      if (diagnostics) {
+        diagnostics.activeEnrollmentCount += 1;
       }
       const assignedAt = String(row?.assigned_at || "").trim();
       const previousAssignedAt = String(latestAssignedAtByUser[userId] || "").trim();
@@ -7794,8 +8134,18 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
         }
         if (termState.year !== courseMeta.year || termState.semester !== courseMeta.semester) {
           termState.mixedTerms = true;
+          if (diagnostics) {
+            diagnostics.mixedTerms = true;
+          }
         }
       }
+    });
+
+    Object.values(diagnosticsByUser).forEach((diagnostics) => {
+      diagnostics.inactiveEnrollmentCount = Math.max(
+        0,
+        Number(diagnostics.rawEnrollmentCount || 0) - Number(diagnostics.activeEnrollmentCount || 0),
+      );
     });
 
     const termByUser = {};
@@ -7813,10 +8163,11 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       coursesByUser: enrollmentMap,
       termByUser,
       latestAssignedAtByUser,
+      diagnosticsByUser,
     };
   } catch (error) {
     if (isMissingRelationError(error)) {
-      return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {} };
+      return { coursesByUser: {}, termByUser: {}, latestAssignedAtByUser: {}, diagnosticsByUser: {} };
     }
     throw error;
   }
@@ -7869,10 +8220,12 @@ async function hydrateRelationalProfiles(currentUser) {
 
   let enrollmentCourseMap = {};
   let enrollmentTermMap = {};
+  let enrollmentDiagnosticsMap = {};
   try {
     const enrollmentSnapshot = await fetchEnrollmentCourseMapForUsers(profileRows.map((profile) => profile.id));
     enrollmentCourseMap = enrollmentSnapshot?.coursesByUser || {};
     enrollmentTermMap = enrollmentSnapshot?.termByUser || {};
+    enrollmentDiagnosticsMap = enrollmentSnapshot?.diagnosticsByUser || {};
   } catch (enrollmentError) {
     console.warn("Could not hydrate enrollment course mappings.", enrollmentError?.message || enrollmentError);
   }
@@ -7927,8 +8280,12 @@ async function hydrateRelationalProfiles(currentUser) {
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
-    // Admin-managed profile year/semester is server-authoritative for hydrated
-    // students. Enrollment rows are a derived cache and may briefly be stale.
+    const enrollmentDiagnostics = enrollmentDiagnosticsMap[profile.id] || {};
+    const rawEnrollmentCount = Number(enrollmentDiagnostics.rawEnrollmentCount || 0);
+    const activeEnrollmentCount = Number(enrollmentDiagnostics.activeEnrollmentCount || 0);
+    const hasActiveEnrollmentRows = role !== "student" || enrolledCourses.length > 0;
+    // Profile year/semester remains the admin-managed source of truth, while
+    // enrollment rows are the database access index used by RLS.
     const hasProfileEnrollmentTerm = profileYear !== null && profileSemester !== null;
     let year = role === "student"
       ? (hasProfileEnrollmentTerm ? profileYear : enrolledYear)
@@ -7954,9 +8311,42 @@ async function hydrateRelationalProfiles(currentUser) {
       });
       year = repairedEnrollment.academicYear;
       semester = repairedEnrollment.academicSemester;
-      assignedCourses = repairedEnrollment.assignedCourses;
+        assignedCourses = repairedEnrollment.assignedCourses;
     }
-    const serverApproved = role === "admin" || Boolean(profile.approved);
+    let studentAccessIssue = null;
+    if (role === "student" && Boolean(profile.approved)) {
+      if (!hasCompleteStudentProfile({
+        role: "student",
+        phone: resolvedPhone,
+        academicYear: year,
+        academicSemester: semester,
+      })) {
+        studentAccessIssue = createStudentAccessIssue(
+          "profile_incomplete",
+          "This approved student is missing phone, year, or semester details in the database.",
+          { profileId: profile.id, year, semester },
+        );
+      } else if (rawEnrollmentCount > 0 && activeEnrollmentCount === 0) {
+        studentAccessIssue = createStudentAccessIssue(
+          "inactive_enrollment",
+          "This approved student's enrollment points to inactive or unavailable courses.",
+          { profileId: profile.id, rawEnrollmentCount, activeEnrollmentCount },
+        );
+      } else if (Boolean(enrollmentDiagnostics.mixedTerms)) {
+        studentAccessIssue = createStudentAccessIssue(
+          "mixed_enrollment_terms",
+          "This approved student's enrollment contains courses from more than one semester.",
+          { profileId: profile.id, rawEnrollmentCount, activeEnrollmentCount },
+        );
+      } else if (!hasActiveEnrollmentRows) {
+        studentAccessIssue = createStudentAccessIssue(
+          "missing_enrollment",
+          "This approved student has no active database enrollment rows.",
+          { profileId: profile.id, year, semester, rawEnrollmentCount, activeEnrollmentCount },
+        );
+      }
+    }
+    const serverApproved = role === "admin" || (Boolean(profile.approved) && !studentAccessIssue);
     const resolvedProfileCompleted = role !== "student"
       ? true
       : serverApproved || !isStudentProfileCompletionRequired({
@@ -7985,6 +8375,7 @@ async function hydrateRelationalProfiles(currentUser) {
       authAccessKnownActive: typeof existing?.authAccessKnownActive === "boolean"
         ? existing.authAccessKnownActive
         : undefined,
+      studentAccessIssue,
       profileCompleted: resolvedProfileCompleted
         ? true
         : (typeof existing?.profileCompleted === "boolean" ? existing.profileCompleted : false),
@@ -9013,7 +9404,8 @@ function isLegacySupabaseStateSyncKey(storageKey) {
 }
 
 function isSupabaseBackupSyncKey(storageKey) {
-  return SUPABASE_BACKUP_SYNC_KEY_SET.has(storageKey);
+  return SUPABASE_BACKUP_SYNC_KEY_SET.has(storageKey)
+    && !SUPABASE_BACKUP_LOCAL_ONLY_KEYS.has(storageKey);
 }
 
 function buildRemoteSyncKey(storageKey, scope = "") {
@@ -10511,7 +10903,31 @@ function recordSupabaseBackupFailureAndScheduleRetry() {
   }
 }
 
+function pruneInactiveSupabaseBackupWrites() {
+  if (!supabaseSync.pendingWrites.size) {
+    return false;
+  }
+
+  let removedAny = false;
+  for (const [remoteStorageKey, pending] of supabaseSync.pendingWrites.entries()) {
+    const fallbackStorageKey = String(remoteStorageKey || "").split(":").pop() || "";
+    const storageKey = String(pending?.storageKey || fallbackStorageKey || "").trim();
+    if (isSupabaseBackupSyncKey(storageKey)) {
+      continue;
+    }
+    supabaseSync.pendingWrites.delete(remoteStorageKey);
+    supabaseSync.inFlightPayloadSignatures.delete(remoteStorageKey);
+    removedAny = true;
+  }
+
+  if (removedAny) {
+    scheduleSyncStatusUiRefresh();
+  }
+  return removedAny;
+}
+
 async function flushSupabaseWrites() {
+  pruneInactiveSupabaseBackupWrites();
   if (
     !supabaseSync.enabled ||
     !supabaseSync.client ||
@@ -10553,7 +10969,10 @@ async function flushSupabaseWrites() {
     rows.forEach((row) => {
       const remoteStorageKey = row[supabaseSync.storageKeyColumn];
       if (remoteStorageKey) {
-        const storageKey = String(remoteStorageKey).split(":").slice(-1)[0] || "";
+        const storageKey = String(remoteStorageKey).split(":").pop() || "";
+        if (!isSupabaseBackupSyncKey(storageKey)) {
+          return;
+        }
         supabaseSync.pendingWrites.set(remoteStorageKey, {
           storageKey,
           payload: row.payload,
@@ -10891,6 +11310,7 @@ async function flushRelationalWrites(options = {}) {
 
 async function flushPendingSyncNow(options = {}) {
   const throwOnRelationalFailure = options?.throwOnRelationalFailure !== false;
+  const flushSupabaseBackups = options?.flushSupabaseBackups !== false;
   clearSessionSyncTimer();
   queueSessionStateForCloud();
   // If session is still dirty (relational sync not ready), schedule a retry so it eventually syncs.
@@ -10916,7 +11336,7 @@ async function flushPendingSyncNow(options = {}) {
       relationalError = error instanceof Error ? error : new Error(getErrorMessage(error, "Relational sync failed."));
     }
   }
-  if (supabaseSync.pendingWrites.size) {
+  if (flushSupabaseBackups && supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
   }
   if (getPendingAdminActionQueue().length) {
@@ -10926,7 +11346,7 @@ async function flushPendingSyncNow(options = {}) {
   // relational flush (e.g. student refresh signals, backup writes).
   // Without this second pass, these items linger as "pending" until the
   // next scheduled timer, causing the count to bounce.
-  if (supabaseSync.pendingWrites.size) {
+  if (flushSupabaseBackups && supabaseSync.pendingWrites.size) {
     await flushSupabaseWrites();
   }
   await flushPendingNotificationReadSync().catch(() => { });
@@ -10935,7 +11355,7 @@ async function flushPendingSyncNow(options = {}) {
   // This ensures the status indicator returns to green ("Synced") immediately
   // instead of showing a lingering "Cloud retrying" or "Pending" state.
   const allSynced = !relationalSync.pendingWrites.size
-    && !supabaseSync.pendingWrites.size
+    && (!flushSupabaseBackups || !supabaseSync.pendingWrites.size)
     && !getPendingAdminActionQueue().length
     && !sessionSyncRuntime.dirty;
   if (allSynced) {
@@ -10987,6 +11407,20 @@ function flushPendingSyncInBackground(options = {}) {
     ...options,
   }).catch((error) => {
     console.warn("Background sync failed.", error?.message || error);
+  });
+}
+
+async function flushAdminUserAccountSyncNow(options = {}) {
+  return flushPendingSyncNow({
+    flushSupabaseBackups: false,
+    ...options,
+  });
+}
+
+function flushAdminUserAccountSyncInBackground(options = {}) {
+  flushPendingSyncInBackground({
+    flushSupabaseBackups: false,
+    ...options,
   });
 }
 
@@ -12413,7 +12847,7 @@ async function syncUserCourseEnrollmentsToRelational(usersPayload, options = {})
   if (relationalSync.enrollmentWriteAccessDenied) {
     return;
   }
-  if (!canWriteStudentEnrollmentProfileToRelational(userSyncScope)) {
+  if (!canWriteCourseEnrollmentRowsToRelational(userSyncScope)) {
     return;
   }
 
@@ -12666,6 +13100,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   const allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
 
   const courseRowsByName = {};
+  const courseRowsListByName = {};
   const courseRowsByCompositeKey = {};
   (allCourses || []).forEach((course) => {
     const compositeKey = `${course.course_name}::${course.academic_year}::${course.academic_semester}`;
@@ -12675,21 +13110,32 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     if (!courseRowsByName[course.course_name] || course.is_active) {
       courseRowsByName[course.course_name] = course;
     }
+    if (course?.is_active) {
+      const courseName = String(course.course_name || "").trim();
+      if (courseName) {
+        if (!courseRowsListByName[courseName]) {
+          courseRowsListByName[courseName] = [];
+        }
+        courseRowsListByName[courseName].push(course);
+      }
+    }
   });
 
   const desiredTopicRows = [];
   Object.entries(topicsByCourseName || {}).forEach(([courseName, topics]) => {
-    const course = courseRowsByName[courseName];
-    if (!course) {
+    const matchingCourses = courseRowsListByName[courseName] || (courseRowsByName[courseName] ? [courseRowsByName[courseName]] : []);
+    if (!matchingCourses.length) {
       return;
     }
     const normalized = normalizeCourseTopicList(topics, courseName);
-    normalized.forEach((topicName, index) => {
-      desiredTopicRows.push({
-        course_id: course.id,
-        topic_name: topicName,
-        sort_order: index + 1,
-        is_active: true,
+    matchingCourses.forEach((course) => {
+      normalized.forEach((topicName, index) => {
+        desiredTopicRows.push({
+          course_id: course.id,
+          topic_name: topicName,
+          sort_order: index + 1,
+          is_active: true,
+        });
       });
     });
   });
@@ -16766,6 +17212,9 @@ function shouldRefreshStudentData(user) {
   if (isPostAuthDataWarmupActive(user)) {
     return false;
   }
+  if (studentBootRefreshPromise) {
+    return false;
+  }
   if (state.studentDataRefreshing) {
     return false;
   }
@@ -18274,7 +18723,9 @@ function wireAuth(mode) {
             if (await shouldForceRefreshForUpdates(user)) {
               return;
             }
-            resetStudentLoginRefreshState(user);
+            if (!(user.role === "student" && hasSupabaseManagedIdentity(user))) {
+              resetStudentLoginRefreshState(user);
+            }
             navigate(user.role === "admin" ? "admin" : "dashboard");
             toast(`Welcome back, ${user.name}.`);
             return;
@@ -20125,14 +20576,48 @@ function getSessionTopicSummary(session) {
   return formatTopicFilterSummary(topics);
 }
 
+function getCreateTestEmptyTopicMessage(user, course, questions = []) {
+  const selectedCourse = String(course || "").trim();
+  const availableCourses = getAvailableCoursesForUser(user);
+  if (user?.role === "student" && selectedCourse && !availableCourses.includes(selectedCourse)) {
+    return "This course is not part of your active enrollment. Ask an admin to check your year and semester.";
+  }
+  const configuredTopics = (QBANK_COURSE_TOPICS[selectedCourse] || []).filter((topic) => !isRemovedTopicName(topic));
+  if (!configuredTopics.length) {
+    return "Your enrollment is active, but this course has no active topics configured yet. Ask an admin to check the course setup.";
+  }
+  const hasPublishedQuestionsForCourse = (questions || []).some((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    return meta.course === selectedCourse;
+  });
+  if (!hasPublishedQuestionsForCourse) {
+    return "This course is active for your enrollment, but no published questions are available yet.";
+  }
+  return "No published topics are available for this course yet.";
+}
+
 function renderCreateTest() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
+  const accessIssue = getStudentAccessIssue(user, { availableCourses });
+  if (accessIssue) {
+    recordStudentAccessIssue(accessIssue, user, { surface: "create-test" });
+    return `
+      <section class="panel">
+        <h2 class="title">Course Access Needs Attention</h2>
+        <p class="subtle">${escapeHtml(accessIssue.message)}</p>
+        <div class="stack">
+          <button class="btn" data-nav="dashboard">Back to dashboard</button>
+          <button class="btn ghost" data-nav="profile">View profile</button>
+        </div>
+      </section>
+    `;
+  }
   if (!availableCourses.length) {
     return `
       <section class="panel">
         <h2 class="title">Create a Test</h2>
-        <p class="subtle">No O6U course is assigned to this account yet. Contact an admin.</p>
+        <p class="subtle">No active course enrollment is linked to this account. Ask an admin to save your year and semester again.</p>
       </section>
     `;
   }
@@ -20163,7 +20648,11 @@ function renderCreateTest() {
     selectedTopicSource = "";
     state.qbankFilters.topicSource = "";
   }
-  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { topicSource: selectedTopicSource });
+  const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, {
+    topicSource: selectedTopicSource,
+    includeConfigured: true,
+  });
+  const emptyTopicMessage = getCreateTestEmptyTopicMessage(user, selectedCourse, questions);
   const topicOptions = topicSections.flatMap((section) => section.topics || []);
   const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
@@ -20206,6 +20695,9 @@ function renderCreateTest() {
   const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
   const inProgressName = inProgress ? getSessionDisplayName(inProgress) : "";
   const inProgressTopicSummary = inProgress ? getSessionTopicSummary(inProgress) : "";
+  const noMatchingQuestionsNotice = selectedTopics.length && !sourceFiltered.length
+    ? "The selected topics are visible, but no published questions match this setup yet."
+    : "";
 
   return `
     <section class="panel">
@@ -20319,7 +20811,7 @@ function renderCreateTest() {
                   </div>
                 `}
             `
-      : '<p class="subtle create-test-topic-empty">No published topics are available for this course yet.</p>'}
+      : `<p class="subtle create-test-topic-empty">${escapeHtml(emptyTopicMessage)}</p>`}
         </div>
       </div>
     </section>
@@ -20369,6 +20861,7 @@ function renderCreateTest() {
         </label>
 
         <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        ${noMatchingQuestionsNotice ? `<p class="subtle">${escapeHtml(noMatchingQuestionsNotice)}</p>` : ""}
         <div class="stack">
           <button type="submit" class="btn" ${canStartTest ? "" : "disabled"}>Start test</button>
         </div>
@@ -20437,7 +20930,10 @@ function wireCreateTest() {
       selectedTopicSource = "";
       state.qbankFilters.topicSource = "";
     }
-    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, { topicSource: selectedTopicSource });
+    const topicSections = getAvailableTopicSectionsForCourse(selectedCourse, questions, {
+      topicSource: selectedTopicSource,
+      includeConfigured: true,
+    });
     const topicOptions = topicSections.flatMap((section) => section.topics || []);
     const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
@@ -26549,7 +27045,7 @@ function wireAdmin() {
     resetAdminAddUserDraft();
     state.adminAddUserPanelOpen = false;
     try {
-      await flushPendingSyncNow();
+      await flushAdminUserAccountSyncNow();
       toast("User added.");
       render();
     } catch (syncError) {
@@ -27308,10 +27804,10 @@ function wireAdmin() {
         patchAdminUserRowUi(row, users[idx], getCurrentUser());
       }
       if (syncNow) {
-        await flushPendingSyncNow();
+        await flushAdminUserAccountSyncNow();
       } else if (!deferSyncFlush) {
         // Keep ordinary row edits non-blocking unless a follow-up action needs cloud state immediately.
-        flushPendingSyncInBackground();
+        flushAdminUserAccountSyncInBackground();
       }
       if (!suppressSuccessToast && mode === "manual") {
         toast(archivedSessionIds.length
@@ -27440,7 +27936,7 @@ function wireAdmin() {
 
     if (batchFlush) {
       try {
-        await flushPendingSyncNow();
+        await flushAdminUserAccountSyncNow();
       } catch (error) {
         toast(`Could not save user details: ${getErrorMessage(error, "Save failed.")}`);
         return false;
@@ -27568,7 +28064,7 @@ function wireAdmin() {
 
         users[idx].password = nextPassword;
         save(STORAGE_KEYS.users, users);
-        await flushPendingSyncNow();
+        await flushAdminUserAccountSyncNow();
         toast(`Password updated for ${target.email}.`);
       } catch (error) {
         toast(getErrorMessage(error, "Could not update password for this user."));
@@ -27645,7 +28141,7 @@ function wireAdmin() {
       });
       clearAdminUserEnrollmentDraft(userId);
       try {
-        await flushPendingSyncNow();
+        await flushAdminUserAccountSyncNow();
         toast(archivedSessionIds.length
           ? "User role updated. Previous exams were archived and analytics reset."
           : "User role updated.");
@@ -27840,7 +28336,7 @@ function wireAdmin() {
       clearAdminUserEnrollmentDraft(userId);
 
       try {
-        await flushPendingSyncNow({ throwOnRelationalFailure: !queuedDelete });
+        await flushAdminUserAccountSyncNow({ throwOnRelationalFailure: !queuedDelete });
         toast(
           queuedDelete
             ? "User deletion is pending cloud cleanup. The account is hidden locally until Supabase confirms removal."
@@ -29528,7 +30024,7 @@ async function syncAdminAccessChangeNow(targetAuthIds, approved, options = {}) {
     }
   }
 
-  await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+  await flushAdminUserAccountSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
   return authAccessResult;
 }
 
@@ -33779,7 +34275,9 @@ function getAvailableTopicSectionsForCourse(course, questions = [], options = {}
     }];
   }
 
-  const topics = getAvailableTopicsForCourse(course, questions);
+  const topics = getAvailableTopicsForCourse(course, questions, {
+    includeConfigured: Boolean(options?.includeConfigured),
+  });
   if (!topics.length) {
     return [];
   }
@@ -34383,10 +34881,12 @@ function getAvailableCoursesForUser(user) {
     if (byEnrollment.length) {
       return byEnrollment;
     }
-    if (hasSupabaseManagedIdentity(user)) {
-      return [];
+    if (assigned.length && year !== null && semester !== null) {
+      return assigned;
     }
-    if (assigned.length) return assigned;
+    if (!hasSupabaseManagedIdentity(user) && assigned.length) {
+      return assigned;
+    }
     return [];
   }
   const assigned = sanitizeCourseAssignments(user.assignedCourses || []);
