@@ -105,6 +105,7 @@ const RELATIONAL_RETRY_FLUSH_MS = 800;
 const SUPABASE_FLUSH_DEBOUNCE_MS = 80;
 const SUPABASE_RETRY_FLUSH_MS = 1200;
 const SESSION_SYNC_FLUSH_MS = 600;
+const SESSION_BROWSER_PERSIST_THROTTLE_MS = 10000;
 const ADMIN_DATA_REFRESH_MS = 15000;
 const BACKGROUND_SYNC_INTERVAL_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
@@ -159,6 +160,8 @@ const ROUTE_TRANSITION_MS = 420;
 const USE_NATIVE_VIEW_TRANSITIONS = false;
 const RELATIONAL_IN_BATCH_SIZE = 200;
 const RELATIONAL_UUID_IN_BATCH_SIZE = 20;
+const ENROLLMENT_USER_FETCH_BATCH_SIZE = 100;
+const ENROLLMENT_USER_FETCH_CONCURRENCY = 4;
 const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
@@ -881,6 +884,8 @@ const sessionStoreRuntime = {
   byId: new Map(),
   visibleSignature: null,
   visibleList: [],
+  persistTimer: null,
+  lastPersistedAt: 0,
 };
 
 const SYSTEM_LOG_MAX_ENTRIES = 2500;
@@ -7554,21 +7559,24 @@ async function hydrateRelationalState(user) {
     || sessionSyncRuntime.flushing;
 
   // Avoid overwriting unsynced local edits per storage key while still allowing safe keys to hydrate.
+  const baseHydrationTasks = [];
   if (!hasPendingCourseWrites) {
-    await hydrateRelationalCoursesAndTopics();
+    baseHydrationTasks.push(hydrateRelationalCoursesAndTopics());
   }
   if (!hasPendingUserWrites) {
-    await hydrateRelationalProfiles(current);
+    baseHydrationTasks.push(hydrateRelationalProfiles(current));
   }
+  if (!hasPendingNotificationWrites) {
+    baseHydrationTasks.push(hydrateRelationalNotifications(current));
+  }
+  await Promise.all(baseHydrationTasks);
+
   const activeAdminPage = String(state.adminPage || "").trim();
   const shouldHydrateQuestionRows = current?.role !== "admin"
     || activeAdminPage === "questions"
     || activeAdminPage === "bulk-import";
   if (!hasPendingQuestionWrites && shouldHydrateQuestionRows) {
     await hydrateRelationalQuestions();
-  }
-  if (!hasPendingNotificationWrites) {
-    await hydrateRelationalNotifications(current);
   }
   if (!hasPendingSessionWrites) {
     await hydrateRelationalSessions(current);
@@ -7705,16 +7713,21 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       ]),
     );
     const enrollmentRows = [];
-    for (const idBatch of splitIntoBatches(ids, RELATIONAL_UUID_IN_BATCH_SIZE)) {
-      const { data, error } = await client
-        .from("user_course_enrollments")
-        .select("user_id,course_id,assigned_at")
-        .in("user_id", idBatch);
-      if (error) {
-        throw error;
-      }
-      if (Array.isArray(data) && data.length) {
-        enrollmentRows.push(...data);
+    const idBatches = splitIntoBatches(ids, ENROLLMENT_USER_FETCH_BATCH_SIZE);
+    for (const batchGroup of splitIntoBatches(idBatches, ENROLLMENT_USER_FETCH_CONCURRENCY)) {
+      const batchResults = await Promise.all(batchGroup.map((idBatch) => (
+        client
+          .from("user_course_enrollments")
+          .select("user_id,course_id,assigned_at")
+          .in("user_id", idBatch)
+      )));
+      for (const { data, error } of batchResults) {
+        if (error) {
+          throw error;
+        }
+        if (Array.isArray(data) && data.length) {
+          enrollmentRows.push(...data);
+        }
       }
     }
 
@@ -7723,19 +7736,19 @@ async function fetchEnrollmentCourseMapForUsers(userIds) {
       return { coursesByUser: enrollmentMap, termByUser: {}, latestAssignedAtByUser };
     }
 
-    const courseRows = [];
-    for (const courseBatch of splitIntoBatches(courseIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
-      const { data, error } = await client
+    const courseRowsResult = await fetchRowsPaged((from, to) => (
+      client
         .from("courses")
         .select("id,course_name,is_active,academic_year,academic_semester")
-        .in("id", courseBatch);
-      if (error) {
-        throw error;
-      }
-      if (Array.isArray(data) && data.length) {
-        courseRows.push(...data);
-      }
+        .eq("is_active", true)
+        .range(from, to)
+    ));
+    if (courseRowsResult.error) {
+      throw courseRowsResult.error;
     }
+    const requestedCourseIds = new Set(courseIds);
+    const courseRows = (Array.isArray(courseRowsResult.data) ? courseRowsResult.data : [])
+      .filter((course) => requestedCourseIds.has(String(course?.id || "").trim()));
 
     const courseMetaById = Object.fromEntries(
       courseRows
@@ -16992,6 +17005,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
   const force = Boolean(options?.force);
   const surfaceErrors = options?.surfaceErrors !== false;
   const includeHeavyData = options?.includeHeavyData === true;
+  const deferBackupRestore = options?.deferBackupRestore === true;
   if (!force && !shouldRefreshAdminData(user)) {
     return true;
   }
@@ -17047,28 +17061,47 @@ async function refreshAdminDataSnapshot(user, options = {}) {
         || (Date.now() - adminQuestionsLastHydratedAt) > ADMIN_QUESTION_BACKGROUND_REFRESH_MS
       );
 
+    const hydrateTasks = [];
     if (!hasPendingCourseWrites) {
-      await hydrateRelationalCoursesAndTopics();
+      hydrateTasks.push(hydrateRelationalCoursesAndTopics());
     }
     if (!hasPendingUserWrites) {
-      await hydrateRelationalProfiles(user);
+      hydrateTasks.push(hydrateRelationalProfiles(user));
     }
+    hydrateTasks.push(hydrateRelationalNotifications(user));
+    hydrateTasks.push(hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false })));
+    await Promise.all(hydrateTasks);
+
     if (shouldHydrateQuestions) {
       await hydrateRelationalQuestions();
       adminQuestionsLastHydratedAt = Date.now();
     }
-    const backupRestoreResult = await restoreAdminContentFromSupabaseBackupIfNeeded({
+
+    let backupRestoreMessage = "";
+    const runBackupRestoreCheck = () => restoreAdminContentFromSupabaseBackupIfNeeded({
       user,
       force,
     }).catch((error) => {
       console.warn("Admin backup restore check failed.", error?.message || error);
       return { restored: false, restoredKeys: [] };
     });
-    const backupRestoreMessage = backupRestoreResult?.restored
-      ? `Recovered missing ${backupRestoreResult.restoredKeys.length > 1 ? "content items" : "content item"} from cloud backup.`
-      : "";
-    await hydrateRelationalNotifications(user);
-    await hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false }));
+    if (deferBackupRestore) {
+      runBackupRestoreCheck().then((backupRestoreResult) => {
+        if (!backupRestoreResult?.restored || getCurrentUser()?.role !== "admin") {
+          return;
+        }
+        state.adminDataSyncError = `Recovered missing ${backupRestoreResult.restoredKeys.length > 1 ? "content items" : "content item"} from cloud backup.`;
+        if (state.route === "admin") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      });
+    } else {
+      const backupRestoreResult = await runBackupRestoreCheck();
+      backupRestoreMessage = backupRestoreResult?.restored
+        ? `Recovered missing ${backupRestoreResult.restoredKeys.length > 1 ? "content items" : "content item"} from cloud backup.`
+        : "";
+    }
     if (state.adminPage === "activity" || !state.adminPresenceLastSyncAt) {
       await refreshAdminPresenceSnapshot({ force: true, silent: true });
     }
@@ -17354,6 +17387,7 @@ function render() {
           refreshAdminDataSnapshot(user, {
             force: !state.adminDataLastSyncAt,
             surfaceErrors: !state.adminDataLastSyncAt,
+            deferBackupRestore: initialAdminHydration,
           }).then((ok) => {
             if (!ok || state.route !== "admin" || String(state.adminPage || "").trim() !== adminPageBeforeRefresh) {
               return;
@@ -30541,11 +30575,54 @@ function getQuestions() {
 }
 
 function resetSessionStoreRuntime() {
+  clearSessionStorePersistTimer();
   sessionStoreRuntime.initialized = false;
   sessionStoreRuntime.list = [];
   sessionStoreRuntime.byId = new Map();
   sessionStoreRuntime.visibleSignature = null;
   sessionStoreRuntime.visibleList = [];
+}
+
+function invalidateSessionStoreVisibleCache() {
+  sessionStoreRuntime.visibleSignature = null;
+  sessionStoreRuntime.visibleList = [];
+}
+
+function clearSessionStorePersistTimer() {
+  if (sessionStoreRuntime.persistTimer) {
+    window.clearTimeout(sessionStoreRuntime.persistTimer);
+    sessionStoreRuntime.persistTimer = null;
+  }
+}
+
+function persistSessionStoreSnapshot(options = {}) {
+  clearSessionStorePersistTimer();
+  const store = getSessionStore();
+  sessionStoreRuntime.lastPersistedAt = Date.now();
+  save(STORAGE_KEYS.sessions, store.list.slice(), options?.saveOptions || options || {});
+}
+
+function scheduleSessionStorePersist(options = {}) {
+  const immediate = options?.immediate === true;
+  const now = Date.now();
+  if (immediate || !sessionStoreRuntime.lastPersistedAt) {
+    persistSessionStoreSnapshot(options);
+    return;
+  }
+
+  const elapsed = now - Number(sessionStoreRuntime.lastPersistedAt || 0);
+  if (elapsed >= SESSION_BROWSER_PERSIST_THROTTLE_MS) {
+    persistSessionStoreSnapshot(options);
+    return;
+  }
+
+  if (sessionStoreRuntime.persistTimer) {
+    return;
+  }
+  sessionStoreRuntime.persistTimer = window.setTimeout(() => {
+    sessionStoreRuntime.persistTimer = null;
+    persistSessionStoreSnapshot();
+  }, Math.max(250, SESSION_BROWSER_PERSIST_THROTTLE_MS - elapsed));
 }
 
 function buildPendingDeletedLocalUserSignature(targets = null) {
@@ -32636,14 +32713,22 @@ function getSessionById(sessionId) {
 }
 
 function upsertSession(updated, options = {}) {
-  const sessions = getSessions();
-  const idx = sessions.findIndex((session) => session.id === updated.id);
-  if (idx >= 0) {
-    sessions[idx] = updated;
-  } else {
-    sessions.push(updated);
+  const normalizedId = String(updated?.id || "").trim();
+  if (!normalizedId) {
+    return;
   }
-  save(STORAGE_KEYS.sessions, sessions, options);
+  const store = getSessionStore();
+  const idx = store.list.findIndex((session) => String(session?.id || "").trim() === normalizedId);
+  if (idx >= 0) {
+    store.list[idx] = updated;
+  } else {
+    store.list.push(updated);
+  }
+  store.byId.set(normalizedId, updated);
+  invalidateSessionStoreVisibleCache();
+  invalidateAnalyticsCacheForStorageKey(STORAGE_KEYS.sessions);
+  scheduleSessionStateSync(options);
+  scheduleSessionStorePersist(options);
 }
 
 function getFilterOptions(questions) {
@@ -36430,7 +36515,68 @@ function bumpQuestionsRevisionForStorageKey(key) {
 }
 
 function writeStorageKey(key, value) {
-  invalidateCollectionRuntimeForStorageKey(key);
+  if (key !== STORAGE_KEYS.sessions) {
+    invalidateCollectionRuntimeForStorageKey(key);
+  }
+  if (key === STORAGE_KEYS.sessions) {
+    scheduleSessionVaultPersist(value);
+    let browserSerialized = "[]";
+    try {
+      browserSerialized = JSON.stringify(compactSessionsForBrowserStorage(value));
+    } catch (error) {
+      console.warn("Could not serialize compact session storage payload.", error?.message || error);
+      return;
+    }
+    if (Array.isArray(value)) {
+      sessionStoreRuntime.initialized = true;
+      sessionStoreRuntime.list = value;
+      sessionStoreRuntime.byId = new Map(value.map((session) => [String(session?.id || "").trim(), session]));
+      invalidateSessionStoreVisibleCache();
+      invalidateAnalyticsCacheForStorageKey(STORAGE_KEYS.sessions);
+    }
+
+    const persistTransientSessionStorageOnly = ({ rememberQuotaOverflow = false } = {}) => {
+      inMemoryStorage.delete(key);
+      writeSessionStorageKey(key, browserSerialized);
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // Ignore when persistent storage is blocked.
+      }
+      if (rememberQuotaOverflow) {
+        storageQuotaRetryThresholds.set(key, browserSerialized.length);
+      }
+      bumpQuestionsRevisionForStorageKey(key);
+    };
+
+    const knownQuotaOverflowThreshold = Number(storageQuotaRetryThresholds.get(key));
+    if (
+      Number.isFinite(knownQuotaOverflowThreshold)
+      && browserSerialized.length >= knownQuotaOverflowThreshold
+    ) {
+      warnLargeSessionStorageFallback();
+      persistTransientSessionStorageOnly({ rememberQuotaOverflow: true });
+      return;
+    }
+
+    try {
+      localStorage.setItem(key, browserSerialized);
+      writeSessionStorageKey(key, browserSerialized);
+      inMemoryStorage.delete(key);
+      storageQuotaRetryThresholds.delete(key);
+    } catch (error) {
+      if (isStorageQuotaExceededError(error)) {
+        warnLargeSessionStorageFallback();
+        persistTransientSessionStorageOnly({ rememberQuotaOverflow: true });
+        return;
+      }
+      warnStorageFallback(error);
+      writeSessionStorageKey(key, browserSerialized);
+    }
+    bumpQuestionsRevisionForStorageKey(key);
+    return;
+  }
+
   let serialized = null;
   try {
     serialized = JSON.stringify(value);
@@ -36438,30 +36584,7 @@ function writeStorageKey(key, value) {
     console.warn(`Could not serialize storage key "${key}".`, error);
     return;
   }
-  if (key === STORAGE_KEYS.sessions) {
-    scheduleSessionVaultPersist(value);
-  }
   let browserSerialized = serialized;
-  let keepFullValueInMemory = false;
-  if (
-    key === STORAGE_KEYS.sessions
-    && typeof serialized === "string"
-    && serialized.length >= LARGE_SESSION_STORAGE_CHAR_LIMIT
-  ) {
-    warnLargeSessionStorageFallback();
-    try {
-      let compactSerialized = JSON.stringify(compactSessionsForBrowserStorage(value));
-      if (compactSerialized.length >= LARGE_SESSION_STORAGE_CHAR_LIMIT) {
-        compactSerialized = JSON.stringify(compactSessionsForBrowserStorage(value, { recentSnapshotLimit: 0 }));
-      }
-      if (compactSerialized && compactSerialized.length < serialized.length) {
-        browserSerialized = compactSerialized;
-        keepFullValueInMemory = true;
-      }
-    } catch (error) {
-      console.warn("Could not compact session storage payload.", error?.message || error);
-    }
-  }
 
   const persistTransientStorageOnly = ({ includeSessionStorage = true, rememberQuotaOverflow = false } = {}) => {
     inMemoryStorage.set(key, serialized);
@@ -36509,11 +36632,7 @@ function writeStorageKey(key, value) {
   try {
     localStorage.setItem(key, browserSerialized);
     writeSessionStorageKey(key, browserSerialized);
-    if (keepFullValueInMemory) {
-      inMemoryStorage.set(key, serialized);
-    } else {
-      inMemoryStorage.delete(key);
-    }
+    inMemoryStorage.delete(key);
     storageQuotaRetryThresholds.delete(key);
   } catch (error) {
     if (isSilentStorageQuotaFallbackKey(key) && isStorageQuotaExceededError(error)) {
