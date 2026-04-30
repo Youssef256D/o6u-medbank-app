@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.05").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.06").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -104,6 +104,7 @@ const RELATIONAL_FLUSH_DEBOUNCE_MS = 80;
 const RELATIONAL_RETRY_FLUSH_MS = 800;
 const SUPABASE_FLUSH_DEBOUNCE_MS = 80;
 const SUPABASE_RETRY_FLUSH_MS = 1200;
+const SUPABASE_BACKUP_RETRY_MAX_MS = 60000;
 const SESSION_SYNC_FLUSH_MS = 600;
 const SESSION_BROWSER_PERSIST_THROTTLE_MS = 10000;
 const ADMIN_DATA_REFRESH_MS = 15000;
@@ -142,7 +143,7 @@ const SUPABASE_QUERY_TIMEOUT_MS = 12000;
 const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = 6000;
 const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 25000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
-const SUPABASE_BACKUP_WARNING_THROTTLE_MS = 60000;
+const SUPABASE_BACKUP_WARNING_THROTTLE_MS = 5 * 60 * 1000;
 const SUPABASE_SESSION_TIMEOUT_MS = 30000;
 const SUPABASE_SIGNED_OUT_RECOVERY_TIMEOUT_MS = 12000;
 const SUPABASE_SIGNED_OUT_RECOVERY_ATTEMPTS = 5;
@@ -689,6 +690,7 @@ const supabaseSync = {
   lastFailureMessage: "",
   lastWarningAt: 0,
   lastWarningMessage: "",
+  failureCount: 0,
   retryAt: 0,
 };
 
@@ -10485,6 +10487,30 @@ function warnSupabaseBackupSyncIssue(errorOrMessage, fallbackMessage = "Cloud ba
   supabaseSync.lastWarningMessage = normalizedMessage;
 }
 
+function getSupabaseBackupRetryDelayMs() {
+  const failureCount = Math.max(1, Number(supabaseSync.failureCount || 0));
+  const exponent = Math.min(failureCount - 1, 6);
+  const delayMs = Math.min(
+    SUPABASE_BACKUP_RETRY_MAX_MS,
+    SUPABASE_RETRY_FLUSH_MS * (2 ** exponent),
+  );
+  const jitterMs = Math.round(delayMs * 0.15 * Math.random());
+  return delayMs + jitterMs;
+}
+
+function recordSupabaseBackupFailureAndScheduleRetry() {
+  supabaseSync.failureCount = Math.min(Number(supabaseSync.failureCount || 0) + 1, 20);
+  const retryDelayMs = getSupabaseBackupRetryDelayMs();
+  supabaseSync.retryAt = Date.now() + retryDelayMs;
+  if (!supabaseSync.flushTimer) {
+    supabaseSync.flushTimer = window.setTimeout(() => {
+      flushSupabaseWrites().catch((flushError) => {
+        console.warn("Supabase retry failed.", flushError);
+      });
+    }, retryDelayMs);
+  }
+}
+
 async function flushSupabaseWrites() {
   if (
     !supabaseSync.enabled ||
@@ -10502,12 +10528,7 @@ async function flushSupabaseWrites() {
     clearSupabaseFlushTimer();
     supabaseSync.lastFailureAt = Date.now();
     supabaseSync.lastFailureMessage = "You are offline. Cloud backup sync is queued.";
-    supabaseSync.retryAt = Date.now() + SUPABASE_RETRY_FLUSH_MS;
-    supabaseSync.flushTimer = window.setTimeout(() => {
-      flushSupabaseWrites().catch((flushError) => {
-        console.warn("Supabase retry failed.", flushError);
-      });
-    }, SUPABASE_RETRY_FLUSH_MS);
+    recordSupabaseBackupFailureAndScheduleRetry();
     scheduleSyncStatusUiRefresh();
     return;
   }
@@ -10555,19 +10576,13 @@ async function flushSupabaseWrites() {
       supabaseSync.lastFailureMessage = isNonRetryable
         ? ""
         : normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
-      supabaseSync.retryAt = isNonRetryable ? 0 : Date.now() + SUPABASE_RETRY_FLUSH_MS;
       if (isNonRetryable) {
         supabaseSync.writeAccessDenied = true;
+        supabaseSync.retryAt = 0;
         return;
       }
       restoreRowsToPending();
-      if (!supabaseSync.flushTimer) {
-        supabaseSync.flushTimer = window.setTimeout(() => {
-          flushSupabaseWrites().catch((flushError) => {
-            console.warn("Supabase retry failed.", flushError);
-          });
-        }, SUPABASE_RETRY_FLUSH_MS);
-      }
+      recordSupabaseBackupFailureAndScheduleRetry();
       return;
     }
     supabaseSync.lastSuccessAt = Date.now();
@@ -10575,6 +10590,7 @@ async function flushSupabaseWrites() {
     supabaseSync.lastFailureMessage = "";
     supabaseSync.lastWarningAt = 0;
     supabaseSync.lastWarningMessage = "";
+    supabaseSync.failureCount = 0;
     supabaseSync.retryAt = 0;
     supabaseSync.writeAccessDenied = false;
     rows.forEach((row) => {
@@ -10595,19 +10611,13 @@ async function flushSupabaseWrites() {
     supabaseSync.lastFailureMessage = isNonRetryable
       ? ""
       : normalizeCloudSyncFailureMessage(error, "Cloud backup sync failed.");
-    supabaseSync.retryAt = isNonRetryable ? 0 : Date.now() + SUPABASE_RETRY_FLUSH_MS;
     if (isNonRetryable) {
       supabaseSync.writeAccessDenied = true;
+      supabaseSync.retryAt = 0;
       return;
     }
     restoreRowsToPending();
-    if (!supabaseSync.flushTimer) {
-      supabaseSync.flushTimer = window.setTimeout(() => {
-        flushSupabaseWrites().catch((flushError) => {
-          console.warn("Supabase retry failed.", flushError);
-        });
-      }, SUPABASE_RETRY_FLUSH_MS);
-    }
+    recordSupabaseBackupFailureAndScheduleRetry();
   } finally {
     supabaseSync.inFlightPayloadSignatures.clear();
     supabaseSync.flushing = false;
@@ -10633,6 +10643,7 @@ function resetSupabaseSyncRuntimeState() {
   supabaseSync.lastFailureMessage = "";
   supabaseSync.lastWarningAt = 0;
   supabaseSync.lastWarningMessage = "";
+  supabaseSync.failureCount = 0;
   supabaseSync.retryAt = 0;
   clearSupabaseFlushTimer();
   scheduleSyncStatusUiRefresh();
