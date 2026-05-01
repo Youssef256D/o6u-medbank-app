@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-04-30.09").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-02.01").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -581,6 +581,7 @@ const studentApprovalRevalidationRuntime = {
   profileId: "",
   promise: null,
 };
+const studentQuestionAvailabilityLogTimes = new Map();
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -20774,12 +20775,69 @@ function getCreateTestEmptyTopicMessage(user, course, questions = []) {
   }
   const hasPublishedQuestionsForCourse = (questions || []).some((question) => {
     const meta = getQbankCourseTopicMeta(question);
-    return meta.course === selectedCourse;
+    return doCourseNamesMatch(meta.course, selectedCourse);
   });
   if (!hasPublishedQuestionsForCourse) {
     return "This course is active for your enrollment, but no published questions are available yet.";
   }
   return "No published topics are available for this course yet.";
+}
+
+function recordCreateTestZeroQuestionDiagnostic(user, context = {}) {
+  const profileId = String(getCurrentSessionProfileId(user) || getUserProfileId(user) || user?.id || "").trim();
+  const course = String(context?.course || "").trim();
+  const selectedTopics = Array.isArray(context?.selectedTopics) ? context.selectedTopics : [];
+  const signature = `${profileId || "unknown"}:${course}:${selectedTopics.map((topic) => normalizeTopicLookupKey(topic) || topic).join("|")}:${context?.source || ""}`;
+  const nowMs = Date.now();
+  const lastAt = Number(studentQuestionAvailabilityLogTimes.get(signature) || 0);
+  if (lastAt && nowMs - lastAt < STUDENT_ACCESS_LOG_THROTTLE_MS) {
+    return;
+  }
+  studentQuestionAvailabilityLogTimes.set(signature, nowMs);
+
+  const allQuestions = getQuestions();
+  const publishedUsableQuestions = Array.isArray(context?.questions) ? context.questions : getPublishedQuestionsForUser(user);
+  const rawPublishedForCourse = allQuestions.filter((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    return question?.status === "published" && doCourseNamesMatch(meta.course, course);
+  });
+  const usableForCourse = publishedUsableQuestions.filter((question) => doCourseNamesMatch(getQbankCourseTopicMeta(question).course, course));
+  const topicMatches = selectedTopics.map((topic) => ({
+    topic,
+    publishedUsableCount: usableForCourse.filter((question) => doTopicNamesMatch(getQbankCourseTopicMeta(question).topic, topic)).length,
+    rawPublishedCount: rawPublishedForCourse.filter((question) => doTopicNamesMatch(getQbankCourseTopicMeta(question).topic, topic)).length,
+  }));
+  const reason = (() => {
+    if (context?.accessIssue?.code) return context.accessIssue.code;
+    if (!isUserAccessApproved(user)) return "not_approved";
+    if (!profileId) return "missing_profile";
+    if (!Array.isArray(context?.availableCourses) || !context.availableCourses.length) return "missing_enrollment";
+    if (!publishedUsableQuestions.length && allQuestions.some((question) => question?.status === "published")) return "query_or_rls_or_usability_failure";
+    if (!rawPublishedForCourse.length) return "no_published_questions_for_course";
+    if (!usableForCourse.length) return "course_questions_unusable_or_enrollment_filtered";
+    if (selectedTopics.length && topicMatches.every((entry) => entry.publishedUsableCount === 0)) return "topic_mismatch";
+    if (Array.isArray(context?.courseTopicFiltered) && context.courseTopicFiltered.length && !context?.sourceFiltered?.length) return "source_filter_empty";
+    return "unknown_zero_question_state";
+  })();
+
+  console.warn("Create-test zero-question diagnostic:", {
+    reason,
+    userId: String(user?.id || "").trim(),
+    profileId,
+    email: String(user?.email || "").trim().toLowerCase(),
+    course,
+    source: String(context?.source || "").trim(),
+    selectedTopics,
+    availableCourses: Array.isArray(context?.availableCourses) ? context.availableCourses : [],
+    topicOptions: Array.isArray(context?.topicOptions) ? context.topicOptions : [],
+    totalLocalQuestions: allQuestions.length,
+    totalPublishedUsableQuestions: publishedUsableQuestions.length,
+    rawPublishedForCourse: rawPublishedForCourse.length,
+    usableForCourse: usableForCourse.length,
+    courseTopicFiltered: Array.isArray(context?.courseTopicFiltered) ? context.courseTopicFiltered.length : 0,
+    sourceFiltered: Array.isArray(context?.sourceFiltered) ? context.sourceFiltered.length : 0,
+    topicMatches,
+  });
 }
 
 function renderCreateTest() {
@@ -20844,9 +20902,9 @@ function renderCreateTest() {
   let selectedTopicSource = String(state.qbankFilters.topicSource || "").trim();
   if (hasTopicSources) {
     if (!topicSourceOptions.some((option) => option.value === selectedTopicSource)) {
-      const selectedTopicKeys = new Set((state.qbankFilters.topics || []).map((topic) => String(topic || "").trim().toLowerCase()).filter(Boolean));
+      const selectedTopicKeys = new Set((state.qbankFilters.topics || []).map((topic) => normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()).filter(Boolean));
       const inferredSource = selectedTopicKeys.size
-        ? topicSourceOptions.find((option) => option.topics.some((topic) => selectedTopicKeys.has(String(topic || "").trim().toLowerCase())))
+        ? topicSourceOptions.find((option) => option.topics.some((topic) => selectedTopicKeys.has(normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase())))
         : null;
       selectedTopicSource = inferredSource?.value || "";
       state.qbankFilters.topicSource = selectedTopicSource;
@@ -20861,7 +20919,9 @@ function renderCreateTest() {
   });
   const emptyTopicMessage = getCreateTestEmptyTopicMessage(user, selectedCourse, questions);
   const topicOptions = topicSections.flatMap((section) => section.topics || []);
-  const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
+  const selectedTopics = (state.qbankFilters.topics || [])
+    .map((topic) => findMatchingTopicNameInList(topicOptions, topic) || String(topic || "").trim())
+    .filter((topic) => topic && topicOptions.some((option) => doTopicNamesMatch(option, topic)));
   if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
     state.qbankFilters.topics = selectedTopics;
   }
@@ -20897,11 +20957,28 @@ function renderCreateTest() {
     incorrect: "Wrong only",
     flagged: "Flagged only",
   };
-  const sourceFiltered = applySourceFilter(filtered, state.createTestSource, user.id);
+  let sourceFiltered = applySourceFilter(filtered, state.createTestSource, user.id);
+  if (filtered.length && !sourceFiltered.length && state.createTestSource !== "all") {
+    state.createTestSource = "all";
+    sourceFiltered = filtered;
+  }
   const defaultQuestionCount = Math.max(0, Math.min(500, sourceFiltered.length || 0));
   const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
   const inProgressName = inProgress ? getSessionDisplayName(inProgress) : "";
   const inProgressTopicSummary = inProgress ? getSessionTopicSummary(inProgress) : "";
+  if (selectedTopics.length && !sourceFiltered.length) {
+    recordCreateTestZeroQuestionDiagnostic(user, {
+      course: selectedCourse,
+      selectedTopics,
+      availableCourses,
+      topicOptions,
+      questions,
+      courseTopicFiltered: filtered,
+      sourceFiltered,
+      source: state.createTestSource,
+      accessIssue,
+    });
+  }
   const noMatchingQuestionsNotice = selectedTopics.length && !sourceFiltered.length
     ? "The selected topics are visible, but no published questions match this setup yet."
     : "";
@@ -21142,7 +21219,9 @@ function wireCreateTest() {
       includeConfigured: true,
     });
     const topicOptions = topicSections.flatMap((section) => section.topics || []);
-    const selectedTopics = (state.qbankFilters.topics || []).filter((topic) => topicOptions.includes(topic));
+    const selectedTopics = (state.qbankFilters.topics || [])
+      .map((topic) => findMatchingTopicNameInList(topicOptions, topic) || String(topic || "").trim())
+      .filter((topic) => topic && topicOptions.some((option) => doTopicNamesMatch(option, topic)));
     if (selectedTopics.length !== (state.qbankFilters.topics || []).length) {
       state.qbankFilters.topics = selectedTopics;
     }
@@ -21173,7 +21252,14 @@ function wireCreateTest() {
       incorrect: "Wrong only",
       flagged: "Flagged only",
     };
-    const filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
+    let filtered = applySourceFilter(filteredByCourseTopic, state.createTestSource, user.id);
+    if (filteredByCourseTopic.length && !filtered.length && state.createTestSource !== "all") {
+      state.createTestSource = "all";
+      filtered = filteredByCourseTopic;
+      if (sourceSelect) {
+        sourceSelect.value = "all";
+      }
+    }
     syncTopicSelectionUi();
     if (summaryEl) {
       summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
@@ -21269,7 +21355,7 @@ function wireCreateTest() {
     const data = new FormData(blockForm);
 
     const mode = String(data.get("mode") || "tutor");
-    const source = String(data.get("source") || state.createTestSource || "all");
+	    let source = String(data.get("source") || state.createTestSource || "all");
     state.createTestSource = source;
     const requestedTestNameRaw = String(data.get("testName") || state.createTestNameDraft || "");
     const requestedTestName = normalizeSessionName(requestedTestNameRaw);
@@ -21293,10 +21379,17 @@ function wireCreateTest() {
       toast("Choose at least one topic.");
       return;
     }
-    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
-      strictEmptyTopics: true,
-    });
-    pool = applySourceFilter(pool, source, user.id);
+	    let pool = applyQbankFilters(getPublishedQuestionsForUser(user), state.qbankFilters, {
+	      strictEmptyTopics: true,
+	    });
+	    const allMatchingPool = pool;
+	    pool = applySourceFilter(pool, source, user.id);
+	    if (allMatchingPool.length && !pool.length && source !== "all") {
+	      state.createTestSource = "all";
+	      source = "all";
+	      pool = allMatchingPool;
+	      toast("No questions matched that source filter, so all matching questions were used.");
+	    }
     const fallbackCount = Math.max(0, Math.min(500, pool.length || 0));
     const requestedCount = Math.floor(Number(data.get("count")));
     const count = Math.min(
@@ -33509,14 +33602,14 @@ function applyQbankFilters(questions, filters, options = {}) {
       };
     })
     .filter((question) => {
-      if (selectedCourse && question.qbankCourse !== selectedCourse) {
+      if (selectedCourse && !doCourseNamesMatch(question.qbankCourse, selectedCourse)) {
         return false;
       }
-      if (selectedTopics.length && !selectedTopics.includes(question.qbankTopic)) {
+      if (selectedTopics.length && !selectedTopics.some((topic) => doTopicNamesMatch(topic, question.qbankTopic))) {
         return false;
       }
       if (!selectedTopics.length) {
-        if (singleTopic && question.qbankTopic !== singleTopic) {
+        if (singleTopic && !doTopicNamesMatch(question.qbankTopic, singleTopic)) {
           return false;
         }
         if (strictEmptyTopics) {
@@ -33536,10 +33629,10 @@ function getAvailableTopicsForCourse(course, questions = [], options = {}) {
 
   (questions || []).forEach((question) => {
     const meta = getQbankCourseTopicMeta(question);
-    if (meta.course !== course || !meta.topic || isRemovedTopicName(meta.topic)) {
+    if (!doCourseNamesMatch(meta.course, course) || !meta.topic || isRemovedTopicName(meta.topic)) {
       return;
     }
-    const key = meta.topic.toLowerCase();
+    const key = normalizeTopicLookupKey(meta.topic) || meta.topic.toLowerCase();
     if (seen.has(key)) {
       return;
     }
@@ -33548,12 +33641,12 @@ function getAvailableTopicsForCourse(course, questions = [], options = {}) {
   });
 
   // Student topic filters default to published topics, but allow configured topics when needed.
-  const questionTopicKeys = new Set(questionTopics.map((topic) => String(topic || "").trim().toLowerCase()));
-  const configuredTopicKeys = new Set(configuredTopics.map((topic) => String(topic || "").trim().toLowerCase()));
+  const questionTopicKeys = new Set(questionTopics.map((topic) => normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
+  const configuredTopicKeys = new Set(configuredTopics.map((topic) => normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
   const orderedConfigured = includeConfigured
     ? configuredTopics
-    : configuredTopics.filter((topic) => questionTopicKeys.has(String(topic || "").trim().toLowerCase()));
-  const extraTopics = questionTopics.filter((topic) => !configuredTopicKeys.has(String(topic || "").trim().toLowerCase()));
+    : configuredTopics.filter((topic) => questionTopicKeys.has(normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
+  const extraTopics = questionTopics.filter((topic) => !configuredTopicKeys.has(normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
   return [...orderedConfigured, ...extraTopics];
 }
 
@@ -34432,7 +34525,7 @@ function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
     return [];
   }
   const topicMap = new Map(
-    availableTopics.map((topic) => [String(topic || "").trim().toLowerCase(), topic]),
+    availableTopics.map((topic) => [normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase(), topic]),
   );
   const groups = getCourseTopicGroups(course);
   return Object.entries(groups)
@@ -34444,11 +34537,11 @@ function getAvailableTopicSourceOptionsForCourse(course, questions = []) {
         if (!rawTopic || isRemovedTopicName(rawTopic)) {
           return;
         }
-        const canonicalTopic = topicMap.get(rawTopic.toLowerCase()) || rawTopic;
+        const canonicalTopic = topicMap.get(normalizeTopicLookupKey(rawTopic) || rawTopic.toLowerCase()) || rawTopic;
         if (!canonicalTopic) {
           return;
         }
-        const canonicalKey = String(canonicalTopic || "").trim().toLowerCase();
+        const canonicalKey = normalizeTopicLookupKey(canonicalTopic) || String(canonicalTopic || "").trim().toLowerCase();
         if (seen.has(canonicalKey)) {
           return;
         }
@@ -34558,12 +34651,55 @@ function normalizeCourseLookupKey(courseName) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeTopicLookupKey(topicName) {
+  return String(topicName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
 function extractCourseCodeKey(courseName) {
   const match = String(courseName || "").match(/\(([A-Za-z]{2,10}\s*\d{2,4})\)/);
   if (!match || !match[1]) {
     return "";
   }
   return match[1].toLowerCase().replace(/\s+/g, "");
+}
+
+function doCourseNamesMatch(leftCourse, rightCourse) {
+  const left = String(leftCourse || "").trim();
+  const right = String(rightCourse || "").trim();
+  if (!left || !right) {
+    return false;
+  }
+  if (left === right || left.toLowerCase() === right.toLowerCase()) {
+    return true;
+  }
+  const leftCode = extractCourseCodeKey(left);
+  const rightCode = extractCourseCodeKey(right);
+  if (leftCode && rightCode && leftCode === rightCode) {
+    return true;
+  }
+  const leftLookup = normalizeCourseLookupKey(left);
+  const rightLookup = normalizeCourseLookupKey(right);
+  return Boolean(leftLookup && rightLookup && leftLookup === rightLookup);
+}
+
+function doTopicNamesMatch(leftTopic, rightTopic) {
+  const left = String(leftTopic || "").trim();
+  const right = String(rightTopic || "").trim();
+  if (!left || !right) {
+    return false;
+  }
+  if (left === right || left.toLowerCase() === right.toLowerCase()) {
+    return true;
+  }
+  const leftLookup = normalizeTopicLookupKey(left);
+  const rightLookup = normalizeTopicLookupKey(right);
+  return Boolean(leftLookup && rightLookup && leftLookup === rightLookup);
 }
 
 function getCourseTopicRecoveryProfileKey(courseName) {
@@ -34625,10 +34761,14 @@ function normalizeTopicKey(topicName) {
 
 function findMatchingTopicNameInList(topicList, requestedTopic) {
   const requestedKey = normalizeTopicKey(requestedTopic);
+  const requestedLookupKey = normalizeTopicLookupKey(requestedTopic);
   if (!requestedKey) {
     return "";
   }
-  return (Array.isArray(topicList) ? topicList : []).find((topic) => normalizeTopicKey(topic) === requestedKey) || "";
+  return (Array.isArray(topicList) ? topicList : []).find((topic) => (
+    normalizeTopicKey(topic) === requestedKey
+    || (requestedLookupKey && normalizeTopicLookupKey(topic) === requestedLookupKey)
+  )) || "";
 }
 
 function getCourseTopicRecoverySeed(courseName) {
@@ -35112,7 +35252,10 @@ function getPublishedQuestionsForUser(user) {
   if (!availableCourses.size) {
     return user?.role === "student" ? [] : publishedQuestions;
   }
-  return publishedQuestions.filter((question) => availableCourses.has(question.qbankCourse));
+  const availableCourseList = [...availableCourses];
+  return publishedQuestions.filter((question) => (
+    availableCourseList.some((course) => doCourseNamesMatch(question.qbankCourse, course))
+  ));
 }
 
 function setSelectOptions(selectEl, options, includeAll = false) {
