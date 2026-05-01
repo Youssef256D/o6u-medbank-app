@@ -577,6 +577,10 @@ let adminApprovedAccessRepairCompletedSignature = "";
 let adminApprovedAccessRepairAttemptedAt = 0;
 let adminBackupRestoreLastCheckedAt = 0;
 const studentAccessIssueLogTimes = new Map();
+const studentApprovalRevalidationRuntime = {
+  profileId: "",
+  promise: null,
+};
 
 const SUPABASE_CONFIG = {
   url: window.__SUPABASE_CONFIG?.url || "",
@@ -3053,6 +3057,15 @@ async function handleSupabaseAuthStateChange(event, session) {
       return;
     }
     if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
+      if (canRevalidateApprovedStudentAccess(localUser)) {
+        await revalidateApprovedStudentAccess(localUser, {
+          rerender: false,
+          refreshSnapshot: true,
+        }).catch(() => false);
+        localUser = getCurrentUser() || localUser;
+      }
+    }
+    if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
       setGoogleOAuthPendingState(false);
       removeStorageKey(STORAGE_KEYS.currentUserId);
       if (event !== "SIGNED_OUT") {
@@ -3317,6 +3330,15 @@ async function initSupabaseAuth() {
           render();
         }
         return;
+      }
+      if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
+        if (canRevalidateApprovedStudentAccess(localUser)) {
+          await revalidateApprovedStudentAccess(localUser, {
+            rerender: false,
+            refreshSnapshot: true,
+          }).catch(() => false);
+          localUser = getCurrentUser() || localUser;
+        }
       }
       if (profileSync.approvalChecked && localUser && !isUserAccessApproved(localUser)) {
         setGoogleOAuthPendingState(false);
@@ -4272,6 +4294,144 @@ function recordStudentAccessIssue(issue, user = null, context = {}) {
   });
 }
 
+function canRevalidateApprovedStudentAccess(user = null, issue = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  const profileId = String(getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "").trim();
+  if (
+    !isUuidValue(profileId)
+    || !hasSupabaseManagedIdentity(currentUser)
+    || !hasActiveSupabaseSessionForUser(currentUser)
+    || !getRelationalClient()
+  ) {
+    return false;
+  }
+  const normalizedIssue = normalizeStudentAccessIssue(issue || currentUser.studentAccessIssue);
+  return currentUser.isApproved === false || normalizedIssue?.code === "not_approved";
+}
+
+function isApprovedStudentAccessRevalidationInFlight(user = null) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "").trim();
+  return Boolean(
+    studentApprovalRevalidationRuntime.promise
+    && profileId
+    && studentApprovalRevalidationRuntime.profileId === profileId,
+  );
+}
+
+async function revalidateApprovedStudentAccess(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "").trim();
+  if (!canRevalidateApprovedStudentAccess(currentUser) || !profileId) {
+    return false;
+  }
+  if (
+    studentApprovalRevalidationRuntime.promise
+    && studentApprovalRevalidationRuntime.profileId === profileId
+  ) {
+    return studentApprovalRevalidationRuntime.promise;
+  }
+
+  studentApprovalRevalidationRuntime.profileId = profileId;
+  studentApprovalRevalidationRuntime.promise = Promise.resolve().then(async () => {
+    const latestUser = getCurrentUser() || currentUser;
+    const client = getRelationalClient();
+    if (!latestUser || latestUser.role !== "student" || !client) {
+      return false;
+    }
+
+    const { data, error } = await runWithTimeoutResult(
+      client
+        .from("profiles")
+        .select("id,full_name,email,phone,role,approved,academic_year,academic_semester,auth_provider,created_at,updated_at")
+        .eq("id", profileId)
+        .maybeSingle(),
+      PROFILE_LOOKUP_TIMEOUT_MS,
+      "Profile approval recheck timed out.",
+    );
+    if (error || !data || data.approved !== true) {
+      return false;
+    }
+
+    const authUserStub = {
+      id: profileId,
+      email: String(data.email || latestUser.email || "").trim().toLowerCase(),
+      user_metadata: {},
+      app_metadata: {},
+      identities: [],
+      email_confirmed_at: latestUser.verified ? nowISO() : "",
+    };
+    const refreshed = await refreshLocalUserFromRelationalProfile(authUserStub, latestUser).catch(() => null);
+    let resolvedUser = refreshed?.user || null;
+    if (!resolvedUser || resolvedUser.isApproved === false) {
+      const users = getUsers();
+      const index = users.findIndex((entry) => getStoredUserIdentityAliases(entry).includes(profileId));
+      if (index < 0) {
+        return false;
+      }
+      const existing = users[index];
+      const normalizedPhone = String(data.phone || existing?.phone || "").trim();
+      const year = normalizeAcademicYearOrNull(data.academic_year ?? existing?.academicYear);
+      const semester = normalizeAcademicSemesterOrNull(data.academic_semester ?? existing?.academicSemester);
+      const normalizedEnrollment = normalizeStudentEnrollmentProfile({
+        academicYear: year,
+        academicSemester: semester,
+        assignedCourses: Array.isArray(existing?.assignedCourses) ? existing.assignedCourses : [],
+      });
+      const existingIssue = normalizeStudentAccessIssue(existing?.studentAccessIssue);
+      resolvedUser = {
+        ...existing,
+        name: String(data.full_name || existing?.name || "Student").trim() || "Student",
+        email: String(data.email || existing?.email || "").trim().toLowerCase() || existing?.email || "",
+        phone: normalizedPhone,
+        role: "student",
+        isApproved: true,
+        approvedAt: existing?.approvedAt || data.created_at || nowISO(),
+        approvedBy: existing?.approvedBy || "admin",
+        academicYear: normalizedEnrollment.academicYear,
+        academicSemester: normalizedEnrollment.academicSemester,
+        assignedCourses: normalizedEnrollment.assignedCourses,
+        authProvider: normalizeAuthProvider(data.auth_provider || existing?.authProvider),
+        profileCompleted: hasCompleteStudentProfile({
+          ...existing,
+          role: "student",
+          phone: normalizedPhone,
+          academicYear: normalizedEnrollment.academicYear,
+          academicSemester: normalizedEnrollment.academicSemester,
+        }) ? true : Boolean(existing?.profileCompleted),
+        studentAccessIssue: existingIssue?.code === "not_approved" ? null : existingIssue,
+      };
+      users[index] = resolvedUser;
+      saveLocalOnly(STORAGE_KEYS.users, users);
+      saveLocalOnly(STORAGE_KEYS.currentUserId, resolvedUser.id);
+    }
+
+    if (options?.rerender !== false && state.route !== "session" && state.route !== "review") {
+      state.skipNextRouteAnimation = true;
+      render();
+    }
+    if (options?.refreshSnapshot === true) {
+      refreshStudentDataSnapshot(resolvedUser, {
+        force: true,
+        rerender: options?.rerender !== false,
+      }).catch((refreshError) => {
+        console.warn("Approved student access refresh failed.", refreshError?.message || refreshError);
+      });
+    }
+    return Boolean(resolvedUser && resolvedUser.isApproved !== false);
+  }).finally(() => {
+    if (studentApprovalRevalidationRuntime.profileId === profileId) {
+      studentApprovalRevalidationRuntime.profileId = "";
+      studentApprovalRevalidationRuntime.promise = null;
+    }
+  });
+
+  return studentApprovalRevalidationRuntime.promise;
+}
+
 function getStudentAccessIssue(user, context = {}) {
   if (!user || user.role !== "student") {
     return null;
@@ -4298,6 +4458,9 @@ function getStudentAccessIssue(user, context = {}) {
   }
   const storedIssue = normalizeStudentAccessIssue(user.studentAccessIssue);
   if (storedIssue) {
+    if (storedIssue.code === "not_approved" && user.isApproved !== false) {
+      return null;
+    }
     return storedIssue;
   }
   const availableCourses = Array.isArray(context?.availableCourses)
@@ -5211,7 +5374,13 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
     profileCompleted: nextProfileCompleted,
     studentAccessIssue: hasExplicitStudentAccessIssue
       ? normalizeStudentAccessIssue(profileOverrides.studentAccessIssue)
-      : normalizeStudentAccessIssue(previous?.studentAccessIssue),
+      : (() => {
+        const previousIssue = normalizeStudentAccessIssue(previous?.studentAccessIssue);
+        if (nextIsApproved && previousIssue?.code === "not_approved") {
+          return null;
+        }
+        return previousIssue;
+      })(),
     identityAliases: normalizeUserIdentityAliasList([
       ...getStoredUserIdentityAliases(previous),
       previous?.id,
@@ -15285,6 +15454,14 @@ async function enforceCurrentStudentAccessStatus(user = null) {
     await logoutDueToAccessRevocation();
     return { checked: true, active: false, revoked: true };
   }
+  if (data.approved === true && canRevalidateApprovedStudentAccess(currentUser)) {
+    await revalidateApprovedStudentAccess(currentUser, {
+      rerender: state.route !== "session" && state.route !== "review",
+      refreshSnapshot: true,
+    }).catch((repairError) => {
+      console.warn("Approved student access revalidation failed.", repairError?.message || repairError);
+    });
+  }
   return { checked: true, active: true };
 }
 
@@ -18715,6 +18892,15 @@ function wireAuth(mode) {
               return;
             }
             if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
+              if (canRevalidateApprovedStudentAccess(user)) {
+                await revalidateApprovedStudentAccess(user, {
+                  rerender: false,
+                  refreshSnapshot: true,
+                }).catch(() => false);
+                user = getCurrentUser() || user;
+              }
+            }
+            if (profileSync.approvalChecked && !isUserAccessApproved(user)) {
               removeStorageKey(STORAGE_KEYS.currentUserId);
               await queueSupabaseAuthRequest(authClient, () => authClient.auth.signOut()).catch(() => { });
               toast("Your account is pending admin approval.");
@@ -20600,6 +20786,27 @@ function renderCreateTest() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
   const accessIssue = getStudentAccessIssue(user, { availableCourses });
+  const shouldRevalidateApprovedAccess = accessIssue?.code === "not_approved" && canRevalidateApprovedStudentAccess(user, accessIssue);
+  if (shouldRevalidateApprovedAccess) {
+    revalidateApprovedStudentAccess(user, {
+      rerender: true,
+      refreshSnapshot: true,
+    }).catch((error) => {
+      console.warn("Create-test approval revalidation failed.", error?.message || error);
+    });
+  }
+  if (shouldRevalidateApprovedAccess && isApprovedStudentAccessRevalidationInFlight(user)) {
+    return `
+      <section class="panel">
+        <h2 class="title">Checking Course Access</h2>
+        <p class="subtle">Syncing your latest approval status from the database. This should only take a moment.</p>
+        <div class="stack">
+          <button class="btn" data-nav="dashboard">Back to dashboard</button>
+          <button class="btn ghost" data-nav="profile">View profile</button>
+        </div>
+      </section>
+    `;
+  }
   if (accessIssue) {
     recordStudentAccessIssue(accessIssue, user, { surface: "create-test" });
     return `
