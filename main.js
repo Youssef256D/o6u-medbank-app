@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-02.01").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-02.02").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -18925,11 +18925,7 @@ function wireAuth(mode) {
             const canUseCachedFallback = canUseLocalPasswordFallback(localDemoUser)
               || shouldAllowSupabaseManagedLocalFallback(error);
             if (!canUseCachedFallback) {
-              toast(
-                isSupabaseAccessRevokedMessage(error)
-                  ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
-                  : (error?.message || "Supabase sign-in is required for this account. Check your credentials and try again."),
-              );
+              toast(getFriendlyAuthErrorMessage(error, "Supabase sign-in is required for this account. Check your credentials and try again."));
               return;
             }
             if (routeUserToProfileCompletion(localDemoUser)) {
@@ -18958,11 +18954,7 @@ function wireAuth(mode) {
             toast("This account uses Google sign-in. Use Continue with Google.");
             return;
           }
-          toast(
-            isSupabaseAccessRevokedMessage(error)
-              ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
-              : (isInvalidLoginCredentialsMessage(error) ? getInvalidLoginCredentialsMessage() : (error?.message || getInvalidLoginCredentialsMessage())),
-          );
+          toast(getFriendlyAuthErrorMessage(error, getInvalidLoginCredentialsMessage()));
           return;
         }
 
@@ -18991,11 +18983,7 @@ function wireAuth(mode) {
         navigate(user.role === "admin" ? "admin" : "dashboard");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
-        toast(
-          isSupabaseAccessRevokedMessage(error)
-            ? ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE
-            : (isInvalidLoginCredentialsMessage(error) ? getInvalidLoginCredentialsMessage() : (error?.message || "Login failed. Please try again.")),
-        );
+        toast(getFriendlyAuthErrorMessage(error, "Login failed. Please try again."));
       } finally {
         lockAuthForm(form, false);
       }
@@ -20840,6 +20828,27 @@ function recordCreateTestZeroQuestionDiagnostic(user, context = {}) {
   });
 }
 
+function getCreateTestStartHelpMessage(options = {}) {
+  const selectedTopics = Array.isArray(options.selectedTopics) ? options.selectedTopics : [];
+  const sourceFiltered = Array.isArray(options.sourceFiltered) ? options.sourceFiltered : [];
+  const hasTopicSources = Boolean(options.hasTopicSources);
+  const selectedTopicSource = String(options.selectedTopicSource || "").trim();
+  const topicOptions = Array.isArray(options.topicOptions) ? options.topicOptions : [];
+
+  if (hasTopicSources && !selectedTopicSource) {
+    return "Choose a source before starting a test.";
+  }
+  if (!selectedTopics.length) {
+    return topicOptions.length
+      ? "Select at least one topic to start a test."
+      : "Topics must be available before a test can start.";
+  }
+  if (!sourceFiltered.length) {
+    return "No published questions match this setup yet.";
+  }
+  return "";
+}
+
 function renderCreateTest() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
@@ -20982,6 +20991,13 @@ function renderCreateTest() {
   const noMatchingQuestionsNotice = selectedTopics.length && !sourceFiltered.length
     ? "The selected topics are visible, but no published questions match this setup yet."
     : "";
+  const startHelpMessage = getCreateTestStartHelpMessage({
+    selectedTopics,
+    sourceFiltered,
+    hasTopicSources,
+    selectedTopicSource,
+    topicOptions,
+  });
 
   return `
     <section class="panel">
@@ -21145,9 +21161,10 @@ function renderCreateTest() {
         </label>
 
         <small id="create-test-filter-summary">Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${sourceFiltered.length} questions)</small>
+        <small id="create-test-start-help" class="subtle create-test-start-help" aria-live="polite" ${startHelpMessage ? "" : "hidden"}>${escapeHtml(startHelpMessage)}</small>
         ${noMatchingQuestionsNotice ? `<p class="subtle">${escapeHtml(noMatchingQuestionsNotice)}</p>` : ""}
         <div class="stack">
-          <button type="submit" class="btn" ${canStartTest ? "" : "disabled"}>Start test</button>
+          <button type="submit" class="btn" aria-describedby="create-test-filter-summary create-test-start-help" ${canStartTest ? "" : "disabled"}>Start test</button>
         </div>
       </form>
     </section>
@@ -21163,6 +21180,7 @@ function wireCreateTest() {
   const selectAllTopicsBtn = appEl.querySelector("[data-action='create-test-select-all-topics']");
   const clearTopicsBtn = appEl.querySelector("[data-action='create-test-clear-topic-selection']");
   const summaryEl = document.getElementById("create-test-filter-summary");
+  const startHelpEl = document.getElementById("create-test-start-help");
   const blockForm = document.getElementById("create-test-block-form");
   const countInput = blockForm?.querySelector("input[name='count']");
   const nameInput = blockForm?.querySelector("input[name='testName']");
@@ -21263,6 +21281,17 @@ function wireCreateTest() {
     syncTopicSelectionUi();
     if (summaryEl) {
       summaryEl.innerHTML = `Current filter: <b>${escapeHtml(selectedCourse)}</b> • Source: <b>${escapeHtml(selectedSourceLabel)}</b> • ${escapeHtml(selectedTopicLabel)} • Question source: <b>${escapeHtml(sourceLabelMap[state.createTestSource])}</b> (${filtered.length} questions)`;
+    }
+    if (startHelpEl) {
+      const startHelpMessage = getCreateTestStartHelpMessage({
+        selectedTopics,
+        sourceFiltered: filtered,
+        hasTopicSources,
+        selectedTopicSource,
+        topicOptions,
+      });
+      startHelpEl.textContent = startHelpMessage;
+      startHelpEl.hidden = !startHelpMessage;
     }
     if (countInput) {
       const suggestedCount = Math.max(0, Math.min(500, filtered.length || 0));
@@ -22227,6 +22256,7 @@ function renderSession() {
               id="session-settings-drawer"
               class="exam-nav-settings-drawer ${state.sessionNavSettingsOpen ? "is-open" : ""}"
               aria-hidden="${state.sessionNavSettingsOpen ? "false" : "true"}"
+              ${state.sessionNavSettingsOpen ? "" : "inert"}
             >
               <div class="exam-nav-settings-drawer-head">
                 <h4>Block settings</h4>
@@ -31745,6 +31775,24 @@ function isInvalidLoginCredentialsMessage(errorOrMessage) {
 
 function getInvalidLoginCredentialsMessage() {
   return "User name or password is incorrect.";
+}
+
+function getFriendlyAuthErrorMessage(errorOrMessage, fallback = "Login failed. Please try again.") {
+  if (isSupabaseAccessRevokedMessage(errorOrMessage)) {
+    return ACCOUNT_DEACTIVATED_SUPPORT_MESSAGE;
+  }
+  if (isInvalidLoginCredentialsMessage(errorOrMessage)) {
+    return getInvalidLoginCredentialsMessage();
+  }
+  if (shouldAllowSupabaseManagedLocalFallback(errorOrMessage) || isLikelyTransientSupabaseError(errorOrMessage)) {
+    return "Supabase is temporarily unavailable. Check your internet connection and try again.";
+  }
+
+  const rawMessage = getErrorMessage(errorOrMessage, "").trim();
+  if (!rawMessage || rawMessage === "{}" || rawMessage === "[]") {
+    return fallback;
+  }
+  return rawMessage;
 }
 
 function normalizeApiBaseUrl(baseUrl) {
