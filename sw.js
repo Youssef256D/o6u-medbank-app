@@ -17,7 +17,6 @@ const PRECACHE_URLS = [
   "./manifest.webmanifest",
   "./robots.txt",
   "./sitemap.xml",
-  "./Assets/Fav%20icon.png",
   "./Assets/web%20Logo.png",
   "./Assets/branding/apple-touch-icon.png",
   "./Assets/branding/favicon-192x192.png",
