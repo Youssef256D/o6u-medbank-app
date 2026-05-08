@@ -296,6 +296,7 @@ const state = {
   analyticsCourse: "",
   sessionPanel: null,
   sessionNavSettingsOpen: false,
+  sessionNavCollapsed: false,
   sessionHighlightUndo: {},
   sessionPendingHighlightSelection: null,
   sessionMarkerEnabled: false,
@@ -22047,6 +22048,7 @@ function renderSession() {
   const correctChoiceIds = getNormalizedQuestionCorrectChoiceIds(question);
   const choiceType = correctChoiceIds.length > 1 ? "checkbox" : "radio";
   const isSubmitted = response.submitted;
+  const isLastQuestion = session.currentIndex >= total - 1;
   const hasAnswer = response.selected.length > 0;
   const isCorrect = isSubmittedResponseCorrect(question, response);
   const markText = isSubmitted && isCorrect ? "1.00" : "0.00";
@@ -22071,6 +22073,9 @@ function renderSession() {
   const currentCourse = mappedCourse || questionCourse;
   const askAiUrl = resolveAskAiNotebookUrlForQuestion(question);
   const hasAskAiLink = Boolean(askAiUrl);
+  const navCollapsed = Boolean(state.sessionNavCollapsed);
+  const answerAction = isSubmitted && isLastQuestion ? "submit-session" : (isSubmitted ? "next-question" : "submit-answer");
+  const answerActionLabel = isSubmitted && isLastQuestion ? "Finish and submit" : (isSubmitted ? "Next" : "Check");
 
   const sideRows = session.questionIds
     .map((qid, index) => {
@@ -22158,7 +22163,7 @@ function renderSession() {
     <section class="exam-shell-wrap">
       <div class="${shellClassNames}" style="${shellStyleAttr}">
         <section class="exam-main exam-main-simple">
-          <div class="exam-content exam-content-moodle">
+          <div class="exam-content exam-content-moodle ${navCollapsed ? "is-nav-collapsed" : ""}">
             <aside class="exam-question-meta exam-question-meta-moodle">
               <div class="exam-question-meta-primary">
                 <h3 class="exam-question-title-moodle"><span>Question</span> <b>${session.currentIndex + 1}</b></h3>
@@ -22217,34 +22222,56 @@ function renderSession() {
                 <div class="exam-answer-actions">
                   <button
                     class="btn exam-submit-btn"
-                    data-action="${isSubmitted ? "next-question" : "submit-answer"}"
-                  >${isSubmitted ? "Next" : "Check"}</button>
+                    data-action="${answerAction}"
+                  >${answerActionLabel}</button>
                 </div>
               </article>
               ${isSubmitted ? renderInlineExplanationPane(question, isCorrect) : ""}
             </section>
 
-            <aside class="exam-nav-panel">
+            <aside class="exam-nav-panel ${navCollapsed ? "is-collapsed" : ""}" aria-hidden="${navCollapsed ? "true" : "false"}" ${navCollapsed ? "inert" : ""}>
               <div class="exam-nav-panel-head">
                 <h3>Quiz navigation</h3>
-                <button
-                  type="button"
-                  class="exam-nav-settings-toggle ${state.sessionNavSettingsOpen ? "is-open" : ""}"
-                  data-action="toggle-nav-settings"
-                  aria-label="Open block settings"
-                  aria-expanded="${state.sessionNavSettingsOpen ? "true" : "false"}"
-                  aria-controls="session-settings-drawer"
-                  title="Block settings"
-                >
-                  <span class="bar" aria-hidden="true"></span>
-                  <span class="bar" aria-hidden="true"></span>
-                  <span class="bar" aria-hidden="true"></span>
-                </button>
+                <div class="exam-nav-head-actions">
+                  <button
+                    type="button"
+                    class="exam-nav-collapse-toggle"
+                    data-action="toggle-nav-collapse"
+                    aria-label="Hide quiz navigation"
+                    aria-expanded="true"
+                    title="Hide quiz navigation"
+                  >
+                    <span aria-hidden="true">›</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="exam-nav-settings-toggle ${state.sessionNavSettingsOpen ? "is-open" : ""}"
+                    data-action="toggle-nav-settings"
+                    aria-label="Open block settings"
+                    aria-expanded="${state.sessionNavSettingsOpen ? "true" : "false"}"
+                    aria-controls="session-settings-drawer"
+                    title="Block settings"
+                  >
+                    <span class="bar" aria-hidden="true"></span>
+                    <span class="bar" aria-hidden="true"></span>
+                    <span class="bar" aria-hidden="true"></span>
+                  </button>
+                </div>
               </div>
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
             </aside>
+            ${navCollapsed ? `<button
+              type="button"
+              class="exam-nav-edge-toggle is-visible"
+              data-action="toggle-nav-collapse"
+              aria-label="Show quiz navigation"
+              aria-expanded="false"
+              title="Show quiz navigation"
+            >
+              <span aria-hidden="true">‹</span>
+            </button>` : ""}
             <button
               type="button"
               class="exam-nav-settings-backdrop ${state.sessionNavSettingsOpen ? "is-open" : ""}"
@@ -22506,6 +22533,16 @@ async function handleSessionClick(event) {
 
   if (action === "toggle-nav-settings") {
     state.sessionNavSettingsOpen = !state.sessionNavSettingsOpen;
+    render();
+    return;
+  }
+
+  if (action === "toggle-nav-collapse") {
+    state.sessionNavCollapsed = !state.sessionNavCollapsed;
+    if (state.sessionNavCollapsed) {
+      state.sessionNavSettingsOpen = false;
+    }
+    persistSessionUiPreferences();
     render();
     return;
   }
@@ -23261,6 +23298,7 @@ function renderReview() {
   const reviewShellStyleAttr = `--exam-font-scale:${getSessionFontScaleCssValue()};`;
   const sessionName = getSessionDisplayName(selected);
   const sessionTestId = getSessionDisplayId(selected);
+  const navCollapsed = Boolean(state.sessionNavCollapsed);
 
   const sideRows = reviewedEntries
     .map((entry, index) => {
@@ -23334,7 +23372,7 @@ function renderReview() {
     <section class="exam-shell-wrap">
       <div class="${reviewShellClassNames}" style="${reviewShellStyleAttr}">
         <section class="exam-main exam-main-simple">
-          <div class="exam-content exam-content-moodle">
+          <div class="exam-content exam-content-moodle ${navCollapsed ? "is-nav-collapsed" : ""}">
             <aside class="exam-question-meta">
               <h3>Question <b>${state.reviewIndex + 1}</b></h3>
               <p class="exam-mark-line"><b>${escapeHtml(sessionName)}</b></p>
@@ -23390,12 +23428,34 @@ function renderReview() {
               ${renderReviewFeedbackPane(question, response, isCorrect)}
             </section>
 
-            <aside class="exam-nav-panel">
-              <h3>Quiz navigation</h3>
+            <aside class="exam-nav-panel ${navCollapsed ? "is-collapsed" : ""}" aria-hidden="${navCollapsed ? "true" : "false"}" ${navCollapsed ? "inert" : ""}>
+              <div class="exam-nav-panel-head">
+                <h3>Quiz navigation</h3>
+                <button
+                  type="button"
+                  class="exam-nav-collapse-toggle"
+                  data-action="toggle-review-nav-collapse"
+                  aria-label="Hide quiz navigation"
+                  aria-expanded="true"
+                  title="Hide quiz navigation"
+                >
+                  <span aria-hidden="true">›</span>
+                </button>
+              </div>
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="review-finish">Finish review</button>
               <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
             </aside>
+            ${navCollapsed ? `<button
+              type="button"
+              class="exam-nav-edge-toggle is-visible"
+              data-action="toggle-review-nav-collapse"
+              aria-label="Show quiz navigation"
+              aria-expanded="false"
+              title="Show quiz navigation"
+            >
+              <span aria-hidden="true">‹</span>
+            </button>` : ""}
           </div>
         </section>
       </div>
@@ -23437,6 +23497,13 @@ async function handleReviewClick(event) {
   if (action === "review-jump-question") {
     const index = Number(target.getAttribute("data-index") || 0);
     state.reviewIndex = Math.min(maxIndex, Math.max(0, index));
+    render();
+    return;
+  }
+
+  if (action === "toggle-review-nav-collapse") {
+    state.sessionNavCollapsed = !state.sessionNavCollapsed;
+    persistSessionUiPreferences();
     render();
     return;
   }
@@ -36354,6 +36421,7 @@ function hydrateSessionUiPreferences() {
   state.sessionHighContrast = Boolean(ui.sessionHighContrast);
   state.sessionMarkerEnabled = Boolean(ui.sessionMarkerEnabled);
   state.sessionHighlighterColor = normalizeSessionHighlightColor(ui.sessionHighlighterColor);
+  state.sessionNavCollapsed = Boolean(ui.sessionNavCollapsed);
   state.sessionNavSettingsOpen = false;
 }
 
@@ -36364,6 +36432,7 @@ function persistSessionUiPreferences() {
     sessionHighContrast: state.sessionHighContrast,
     sessionMarkerEnabled: state.sessionMarkerEnabled,
     sessionHighlighterColor: state.sessionHighlighterColor,
+    sessionNavCollapsed: state.sessionNavCollapsed,
   });
 }
 
