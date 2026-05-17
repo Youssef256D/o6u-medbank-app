@@ -18244,16 +18244,40 @@ function syncTopbar() {
   authActionsEl.classList.toggle("hidden", false);
 
   publicNavEl.classList.toggle("hidden", Boolean(user) || maintenanceRestricted);
-  privateNavEl.classList.toggle("hidden", !user || maintenanceRestricted);
-  adminLinkEl.classList.toggle("hidden", user?.role !== "admin");
-  privateNavEl.querySelectorAll("[data-nav]").forEach((button) => {
-    const route = button.getAttribute("data-nav");
+  if (user && !maintenanceRestricted) {
+    const currentRoute = state.route;
+    const isMcqRoute = ["dashboard", "create-test", "analytics", "qbank", "session", "review", "notifications", "profile"].includes(currentRoute);
+    const isCourseRoute = currentRoute === "courses";
+    const isAppLauncher = currentRoute === "app-launcher";
+    const adminBtn = privateNavEl.querySelector("#admin-link");
+    privateNavEl.innerHTML = ``;
     if (isAdmin) {
-      button.classList.toggle("hidden", route !== "admin");
-    } else {
-      button.classList.toggle("hidden", route === "admin");
+      privateNavEl.innerHTML = `<button data-nav="admin">Admin Dashboard</button>`;
+      privateNavEl.classList.remove("hidden");
+    } else if (isAppLauncher) {
+      privateNavEl.classList.add("hidden");
+    } else if (isMcqRoute) {
+      privateNavEl.innerHTML = `
+        <button data-nav="dashboard">Dashboard</button>
+        <button data-nav="create-test">Create a Test</button>
+        <button data-nav="analytics">Analytics</button>
+      `;
+      privateNavEl.classList.remove("hidden");
+    } else if (isCourseRoute) {
+      privateNavEl.innerHTML = `
+        <button data-nav="app-launcher">Dashboard</button>
+        <button data-nav="courses">Enrolled Courses</button>
+      `;
+      privateNavEl.classList.remove("hidden");
     }
-  });
+    if (adminBtn) {
+      privateNavEl.appendChild(adminBtn);
+      adminBtn.classList.toggle("hidden", user?.role !== "admin");
+    }
+  } else {
+    privateNavEl.innerHTML = ``;
+    privateNavEl.classList.add("hidden");
+  }
 
   if (!user && authRestorePending) {
     state.userMenuOpen = false;
