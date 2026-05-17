@@ -2166,6 +2166,12 @@ async function init() {
     return;
   }
   hydrateSessionUiPreferences();
+  if (load(ROUTE_STATE_ROUTE_LOCAL_KEY, "") === "dashboard") {
+    removeStorageKey(ROUTE_STATE_ROUTE_LOCAL_KEY);
+  }
+  if (readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) === "dashboard") {
+    removeSessionStorageKey(ROUTE_STATE_ROUTE_KEY);
+  }
   bindGlobalEvents();
   appendSystemLog("system.boot", "Application initialized.", { appVersion: APP_VERSION }, { force: true });
   syncGoogleOAuthLoadingUi();
