@@ -2077,11 +2077,11 @@ function resolveInitialRoute() {
     return hashRoute;
   }
   const persisted = String(readSessionStorageKey(ROUTE_STATE_ROUTE_KEY) || "").trim().toLowerCase();
-  if (KNOWN_ROUTES.has(persisted)) {
+  if (KNOWN_ROUTES.has(persisted) && persisted !== "dashboard") {
     return persisted;
   }
   const persistedLocal = String(load(ROUTE_STATE_ROUTE_LOCAL_KEY, "") || "").trim().toLowerCase();
-  if (KNOWN_ROUTES.has(persistedLocal)) {
+  if (KNOWN_ROUTES.has(persistedLocal) && persistedLocal !== "dashboard") {
     return persistedLocal;
   }
   const hinted = String(window.__APP_INITIAL_ROUTE__ || "").trim().toLowerCase();
@@ -3088,7 +3088,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       return;
     }
     if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
-      const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "dashboard");
+      const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "app-launcher");
       navigate(postAuthRoute);
       return;
     }
