@@ -64,6 +64,8 @@ const KNOWN_ROUTES = new Set([
   "reset-password",
   "complete-profile",
   "dashboard",
+  "app-launcher",
+  "courses",
   "notifications",
   "create-test",
   "qbank",
@@ -77,6 +79,8 @@ const KNOWN_ROUTES = new Set([
 const PRIVATE_ROUTE_SET = new Set([
   "complete-profile",
   "dashboard",
+  "app-launcher",
+  "courses",
   "notifications",
   "create-test",
   "qbank",
@@ -8517,7 +8521,7 @@ async function hydrateRelationalProfiles(currentUser) {
         );
       }
     }
-    const serverApproved = role === "admin" || (Boolean(profile.approved) && !studentAccessIssue);
+    const serverApproved = role === "admin" || Boolean(profile.approved);
     const resolvedProfileCompleted = role !== "student"
       ? true
       : serverApproved || !isStudentProfileCompletionRequired({
@@ -17865,7 +17869,7 @@ function render() {
   }
 
   if (state.route === "reset-password" && !passwordRecoveryPending) {
-    state.route = user ? (user.role === "admin" ? "admin" : "dashboard") : "forgot";
+    state.route = user ? (user.role === "admin" ? "admin" : "app-launcher") : "forgot";
   } else if (state.route !== "reset-password" && passwordRecoveryPending) {
     setPasswordRecoveryPendingState(false);
   }
@@ -17875,7 +17879,7 @@ function render() {
   }
 
   if (!passwordRecoveryPending && user && state.route === "complete-profile" && studentProfileCompletionRoute !== "complete-profile") {
-    state.route = user.role === "admin" ? "admin" : "dashboard";
+    state.route = user.role === "admin" ? "admin" : "app-launcher";
   }
 
   if (
@@ -17891,11 +17895,11 @@ function render() {
   }
 
   if (user && AUTH_ENTRY_ROUTE_SET.has(state.route) && !(state.route === "signup" && googleSignupOnboarding)) {
-    state.route = user.role === "admin" ? "admin" : "dashboard";
+    state.route = user.role === "admin" ? "admin" : "app-launcher";
   }
 
   if (!authRestorePending && state.route === "admin" && user?.role !== "admin") {
-    state.route = "dashboard";
+    state.route = "app-launcher";
     toast("Admin role required for this page.");
   }
 
@@ -17990,6 +17994,14 @@ function render() {
       case "complete-profile":
         appEl.innerHTML = renderCompleteProfile();
         wireCompleteProfile();
+        break;
+      case "app-launcher":
+        appEl.innerHTML = renderAppLauncher();
+        wireAppLauncher();
+        break;
+      case "courses":
+        appEl.innerHTML = renderCourses();
+        wireCourses();
         break;
       case "dashboard":
         appEl.innerHTML = renderDashboard();
@@ -18914,7 +18926,7 @@ function wireAuth(mode) {
             if (!(user.role === "student" && hasSupabaseManagedIdentity(user))) {
               resetStudentLoginRefreshState(user);
             }
-            navigate(user.role === "admin" ? "admin" : "dashboard");
+            navigate(user.role === "admin" ? "admin" : "app-launcher");
             toast(`Welcome back, ${user.name}.`);
             return;
           }
@@ -18941,7 +18953,7 @@ function wireAuth(mode) {
             if (await shouldForceRefreshForUpdates(localDemoUser)) {
               return;
             }
-            navigate(localDemoUser.role === "admin" ? "admin" : "dashboard");
+            navigate(localDemoUser.role === "admin" ? "admin" : "app-launcher");
             toast(
               shouldAllowSupabaseManagedLocalFallback(error)
                 ? `Supabase is unavailable. Signed in with local access for ${localDemoUser.name}.`
@@ -18981,7 +18993,7 @@ function wireAuth(mode) {
         if (await shouldForceRefreshForUpdates(user)) {
           return;
         }
-        navigate(user.role === "admin" ? "admin" : "dashboard");
+        navigate(user.role === "admin" ? "admin" : "app-launcher");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
         toast(getFriendlyAuthErrorMessage(error, "Login failed. Please try again."));
@@ -19229,7 +19241,18 @@ function wireAuth(mode) {
           if (nextApproved && !wasApproved) {
             const profileId = getUserProfileId(users[idx]);
             if (isUuidValue(profileId)) {
-              await updateRelationalProfileApproval([profileId], true).catch(() => { });
+              const approvalResult = await updateRelationalProfileApproval([profileId], true).catch(() => ({ ok: false }));
+              if (!approvalResult.ok) {
+                nextApproved = false;
+                users = getUsers();
+                idx = users.findIndex((entry) => entry.email.toLowerCase() === email);
+                if (idx >= 0) {
+                  users[idx].isApproved = false;
+                  users[idx].approvedAt = null;
+                  users[idx].approvedBy = null;
+                  saveLocalOnly(STORAGE_KEYS.users, users);
+                }
+              }
             }
           }
           await flushPendingSyncNow();
@@ -19238,7 +19261,7 @@ function wireAuth(mode) {
           if (nextApproved) {
             save(STORAGE_KEYS.currentUserId, users[idx].id);
             toast(wasApproved ? "Account details updated." : "Account created and approved. You can start now.");
-            navigate("dashboard");
+            navigate("app-launcher");
           } else {
             const authClient = getSupabaseAuthClient();
             if (authClient) {
@@ -19369,7 +19392,18 @@ function wireAuth(mode) {
           if (autoApproved) {
             const profileId = getUserProfileId(user);
             if (isUuidValue(profileId)) {
-              await updateRelationalProfileApproval([profileId], true).catch(() => { });
+              const approvalResult = await updateRelationalProfileApproval([profileId], true).catch(() => ({ ok: false }));
+              if (!approvalResult.ok) {
+                autoApproved = false;
+                const updatedUsers = getUsers();
+                const updatedIdx = updatedUsers.findIndex((entry) => entry.email.toLowerCase() === user.email);
+                if (updatedIdx >= 0) {
+                  updatedUsers[updatedIdx].isApproved = false;
+                  updatedUsers[updatedIdx].approvedAt = null;
+                  updatedUsers[updatedIdx].approvedBy = null;
+                  saveLocalOnly(STORAGE_KEYS.users, updatedUsers);
+                }
+              }
             }
           }
           await flushPendingSyncNow();
@@ -19379,7 +19413,7 @@ function wireAuth(mode) {
           }
           if (autoApproved && effectiveAuthData.session) {
             save(STORAGE_KEYS.currentUserId, user.id);
-            navigate(user.role === "admin" ? "admin" : "dashboard");
+            navigate(user.role === "admin" ? "admin" : "app-launcher");
             toast("Account created and approved. Welcome.");
             return;
           }
@@ -19412,7 +19446,7 @@ function wireAuth(mode) {
         });
         if (autoApproved) {
           save(STORAGE_KEYS.currentUserId, user.id);
-          navigate("dashboard");
+          navigate("app-launcher");
           toast("Account created and approved. Welcome.");
         } else {
           removeStorageKey(STORAGE_KEYS.currentUserId);
@@ -19840,7 +19874,18 @@ function wireCompleteProfile() {
       if (nextApproved && !wasApproved) {
         const profileId = getUserProfileId(users[idx]);
         if (isUuidValue(profileId)) {
-          await updateRelationalProfileApproval([profileId], true).catch(() => { });
+          const approvalResult = await updateRelationalProfileApproval([profileId], true).catch(() => ({ ok: false }));
+          if (!approvalResult.ok) {
+            nextApproved = false;
+            const updatedUsers = getUsers();
+            const updatedIdx = updatedUsers.findIndex((entry) => entry.email.toLowerCase() === users[idx].email);
+            if (updatedIdx >= 0) {
+              updatedUsers[updatedIdx].isApproved = false;
+              updatedUsers[updatedIdx].approvedAt = null;
+              updatedUsers[updatedIdx].approvedBy = null;
+              saveLocalOnly(STORAGE_KEYS.users, updatedUsers);
+            }
+          }
         }
       }
       await flushPendingSyncNow();
@@ -19849,7 +19894,7 @@ function wireCompleteProfile() {
       if (nextApproved) {
         save(STORAGE_KEYS.currentUserId, users[idx].id);
         toast(wasApproved ? "Profile updated." : "Profile submitted and approved. Welcome.");
-        navigate("dashboard");
+        navigate("app-launcher");
       } else {
         const authClient = getSupabaseAuthClient();
         if (authClient) {
@@ -20011,6 +20056,7 @@ function renderDashboard() {
 
   return `
     <section class="panel">
+      <button class="btn ghost" data-nav="app-launcher" style="margin-bottom: 0.5rem;">← Back to Apps</button>
       <p class="kicker">Welcome back</p>
       <div class="flex-between">
         <h2 class="title">Dr. ${escapeHtml(user.name)}'s Dashboard</h2>
@@ -23532,7 +23578,7 @@ async function handleReviewClick(event) {
       syncWarning = "Your finished block is still waiting for cloud sync. Keep this tab open and try Dashboard refresh again in a moment.";
     }
     state.reviewIndex = 0;
-    navigate("dashboard");
+    navigate("app-launcher");
     if (syncWarning) {
       toast(syncWarning);
       return;
@@ -37696,7 +37742,7 @@ async function loginAsDemo(email, password) {
     role: user.role,
     auth: "demo",
   }, { force: true });
-  navigate(user.role === "admin" ? "admin" : "dashboard");
+  navigate(user.role === "admin" ? "admin" : "app-launcher");
 }
 
 async function logout(options = {}) {
@@ -37937,6 +37983,55 @@ function renderBootstrapFallback() {
   } catch (fallbackError) {
     console.error("Fallback render failed:", fallbackError);
   }
+}
+
+function renderAppLauncher() {
+  const user = getCurrentUser();
+  return `
+    <section class="panel app-launcher-panel">
+      <p class="kicker">Welcome back</p>
+      <h2 class="title">Dr. ${escapeHtml(user?.name || "")}</h2>
+      <p class="subtle" style="margin-top: 0.25rem;">Choose an app to get started</p>
+      <div class="app-launcher-grid">
+        <button class="card app-launcher-card" data-nav="dashboard">
+          <div class="app-launcher-icon">📝</div>
+          <h3>MCQ Bank</h3>
+          <p>Practice questions, take tests, and track your progress</p>
+        </button>
+        <button class="card app-launcher-card" data-nav="courses">
+          <div class="app-launcher-icon">📚</div>
+          <h3>Courses</h3>
+          <p>Browse course materials and learning resources</p>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function wireAppLauncher() {
+}
+
+function renderCourses() {
+  return `
+    <section class="panel">
+      <button class="btn ghost" data-nav="app-launcher" style="margin-bottom: 0.5rem;">← Back to Apps</button>
+      <h2 class="title">Courses</h2>
+      <p class="subtle">Course features and materials coming soon.</p>
+      <div class="stack" style="margin-top: 1rem;">
+        <article class="card">
+          <h3>Course Materials</h3>
+          <p>Access lecture notes, assignments, and study guides organized by course.</p>
+        </article>
+        <article class="card">
+          <h3>Learning Resources</h3>
+          <p>Supplementary materials including video tutorials, articles, and practice exercises.</p>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function wireCourses() {
 }
 
 init().catch((error) => {

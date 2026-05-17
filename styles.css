@@ -8435,3 +8435,53 @@ html body :is(.title,
   }
 
 }
+
+.app-launcher-panel {
+  max-width: 40rem;
+  margin: 2rem auto;
+  text-align: center;
+}
+
+.app-launcher-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.app-launcher-card {
+  padding: 2rem 1.5rem;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.15s, box-shadow 0.15s;
+  border: 2px solid var(--border, #e0e0e0);
+  background: var(--card-bg, #fff);
+}
+
+.app-launcher-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.1);
+}
+
+.app-launcher-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.app-launcher-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+.app-launcher-card p {
+  margin: 0;
+  font-size: 0.875rem;
+  opacity: 0.75;
+}
+
+@media (max-width: 500px) {
+  .app-launcher-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+}
