@@ -2105,7 +2105,7 @@ function resolveInitialAdminPage() {
 
 function persistRouteState() {
   const route = String(state.route || "").trim().toLowerCase();
-  if (KNOWN_ROUTES.has(route)) {
+  if (KNOWN_ROUTES.has(route) && route !== "dashboard") {
     writeSessionStorageKey(ROUTE_STATE_ROUTE_KEY, route);
     saveLocalOnly(ROUTE_STATE_ROUTE_LOCAL_KEY, route);
   } else {
@@ -38037,20 +38037,10 @@ function wireAppLauncher() {
 
 function renderCourses() {
   return `
-    <section class="panel">
+    <section class="panel" style="max-width: 40rem; margin: 2rem auto; text-align: center;">
       <button class="btn ghost" data-nav="app-launcher" style="margin-bottom: 0.5rem;">← Back to Apps</button>
-      <h2 class="title">Courses</h2>
-      <p class="subtle">Course features and materials coming soon.</p>
-      <div class="stack" style="margin-top: 1rem;">
-        <article class="card">
-          <h3>Course Materials</h3>
-          <p>Access lecture notes, assignments, and study guides organized by course.</p>
-        </article>
-        <article class="card">
-          <h3>Learning Resources</h3>
-          <p>Supplementary materials including video tutorials, articles, and practice exercises.</p>
-        </article>
-      </div>
+      <h2 class="title" style="margin-top: 1rem;">Courses</h2>
+      <p class="subtle">Course content will be available soon.</p>
     </section>
   `;
 }
