@@ -3093,7 +3093,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       render();
       return;
     }
-    if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
+    if (["login", "signup", "forgot", "landing", "dashboard"].includes(state.route) && localUser) {
       const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "app-launcher");
       navigate(postAuthRoute);
       return;
@@ -17872,6 +17872,10 @@ function render() {
 
   if (!authRestorePending && PRIVATE_ROUTE_SET.has(state.route) && !user) {
     state.route = "login";
+  }
+
+  if (lastRenderedRoute === null && user?.role !== "admin" && state.route === "dashboard") {
+    state.route = "app-launcher";
   }
 
   if (state.route === "reset-password" && !passwordRecoveryPending) {
