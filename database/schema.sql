@@ -449,4 +449,114 @@ WHERE q.status = 'published'
   AND c.is_active = TRUE
   AND t.is_active = TRUE;
 
+-- ============================================================
+-- Courses Platform Tables
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS course_modules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  title VARCHAR(255) NOT NULL,
+  description TEXT DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS course_modules_course_sort_idx ON course_modules (course_id, sort_order, title);
+
+CREATE TABLE IF NOT EXISTS course_lessons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  module_id UUID NOT NULL REFERENCES course_modules(id) ON DELETE CASCADE,
+  title VARCHAR(255) NOT NULL,
+  description TEXT DEFAULT '',
+  content_type VARCHAR(50) NOT NULL DEFAULT 'video'
+    CHECK (content_type IN ('video', 'article', 'quiz', 'assignment', 'reading')),
+  content_url TEXT DEFAULT '',
+  duration_minutes INTEGER NOT NULL DEFAULT 0 CHECK (duration_minutes >= 0),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_free BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS course_lessons_module_sort_idx ON course_lessons (module_id, sort_order, title);
+
+CREATE TABLE IF NOT EXISTS lesson_videos (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lesson_id UUID NOT NULL REFERENCES course_lessons(id) ON DELETE CASCADE,
+  video_url TEXT NOT NULL,
+  video_type VARCHAR(20) NOT NULL DEFAULT 'youtube'
+    CHECK (video_type IN ('youtube', 'vimeo', 'mp4', 'hls', 'other')),
+  quality VARCHAR(10) DEFAULT '',
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS lesson_videos_lesson_primary_idx ON lesson_videos (lesson_id, is_primary DESC, sort_order);
+
+CREATE TABLE IF NOT EXISTS user_course_enrollments_courses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  progress_percent NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (progress_percent BETWEEN 0 AND 100),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  UNIQUE (user_id, course_id)
+);
+
+CREATE INDEX IF NOT EXISTS user_course_enrollments_courses_user_idx ON user_course_enrollments_courses (user_id, is_active);
+CREATE INDEX IF NOT EXISTS user_course_enrollments_courses_course_idx ON user_course_enrollments_courses (course_id);
+
+CREATE TABLE IF NOT EXISTS user_lesson_completions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lesson_id UUID NOT NULL REFERENCES course_lessons(id) ON DELETE CASCADE,
+  completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  time_spent_sec INTEGER NOT NULL DEFAULT 0 CHECK (time_spent_sec >= 0),
+  watch_percent NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (watch_percent BETWEEN 0 AND 100),
+  UNIQUE (user_id, lesson_id)
+);
+
+CREATE INDEX IF NOT EXISTS user_lesson_completions_user_idx ON user_lesson_completions (user_id, lesson_id);
+
+CREATE TABLE IF NOT EXISTS course_announcements (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  author_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+  is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS course_announcements_course_pinned_idx ON course_announcements (course_id, is_pinned DESC, created_at DESC);
+
+-- Triggers for courses platform tables
+DROP TRIGGER IF EXISTS trg_course_modules_updated_at ON course_modules;
+CREATE TRIGGER trg_course_modules_updated_at
+BEFORE UPDATE ON course_modules
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_course_lessons_updated_at ON course_lessons;
+CREATE TRIGGER trg_course_lessons_updated_at
+BEFORE UPDATE ON course_lessons
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_user_course_enrollments_courses_updated_at ON user_course_enrollments_courses;
+CREATE TRIGGER trg_user_course_enrollments_courses_updated_at
+BEFORE UPDATE ON user_course_enrollments_courses
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_course_announcements_updated_at ON course_announcements;
+CREATE TRIGGER trg_course_announcements_updated_at
+BEFORE UPDATE ON course_announcements
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 COMMIT;
