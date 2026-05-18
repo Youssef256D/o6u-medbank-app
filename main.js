@@ -92,7 +92,7 @@ const PRIVATE_ROUTE_SET = new Set([
   "admin",
 ]);
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
+const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
 let sessionVaultDbPromise = null;
@@ -14969,7 +14969,7 @@ function bindGlobalEvents() {
     if (action === "admin-top-tab") {
       const requestedTab = String(actionTarget?.getAttribute("data-tab") || "data").trim();
       state.route = "admin";
-      state.adminPage = requestedTab === "courses" ? "courses" : "dashboard";
+      state.adminPage = requestedTab === "courses" ? "course-platform" : "dashboard";
       state.adminQuestionModalOpen = false;
       state.adminSelectedQuestionIds = [];
       state.adminBulkActionRunning = false;
@@ -18328,10 +18328,10 @@ function syncTopbar() {
     const isAppLauncher = currentRoute === "app-launcher";
     privateNavEl.innerHTML = ``;
     if (isAdmin) {
-      const isCourseAdminPage = currentRoute === "admin" && String(state.adminPage || "").trim() === "courses";
+      const isCourseAdminPage = currentRoute === "admin" && String(state.adminPage || "").trim() === "course-platform";
       privateNavEl.innerHTML = `
         <button data-action="admin-top-tab" data-tab="data" class="${!isCourseAdminPage ? "is-active" : ""}">Current Data</button>
-        <button data-action="admin-top-tab" data-tab="courses" class="${isCourseAdminPage ? "is-active" : ""}">Manage Courses</button>
+        <button data-action="admin-top-tab" data-tab="courses" class="${isCourseAdminPage ? "is-active" : ""}">Manage Courses App</button>
       `;
       privateNavEl.classList.remove("hidden");
     } else if (isAppLauncher) {
@@ -24360,7 +24360,7 @@ function renderAdmin() {
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(state.adminPage)
+  const activeAdminPage = ["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(state.adminPage)
     ? state.adminPage
     : "dashboard";
   if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
@@ -24962,8 +24962,8 @@ function renderAdmin() {
       <section class="card admin-section" id="admin-courses-section">
         <div class="admin-courses-minimal-head">
           <div>
-            <h3 style="margin: 0;">Courses</h3>
-            <p class="subtle" style="margin: 0.22rem 0 0;">Year ${curriculumYear} • Semester ${curriculumSemester}</p>
+            <h3 style="margin: 0;">MCQ Courses</h3>
+            <p class="subtle" style="margin: 0.22rem 0 0;">MCQ Bank curriculum • Year ${curriculumYear} • Semester ${curriculumSemester}</p>
           </div>
           <form id="admin-curriculum-add-form" class="admin-courses-head-add-form" autocomplete="off">
             <label class="admin-courses-head-add-label">Add new course
@@ -25007,7 +25007,6 @@ function renderAdmin() {
               `}
             </div>
       </section>
-      ${adminRenderCourseBuilder(state.adminCourseBuilderCourseId)}
     `;
 
     adminGlobalOverlay = focusedCourseWorkspace && state.adminCourseTopicModalCourse
@@ -25032,6 +25031,10 @@ function renderAdmin() {
           </div>
         `
       : "";
+  }
+
+  if (activeAdminPage === "course-platform") {
+    pageContent = adminRenderCourseBuilder(state.adminCourseBuilderCourseId);
   }
 
   if (activeAdminPage === "questions") {
@@ -25878,6 +25881,7 @@ function renderAdmin() {
         <div class="admin-sidebar-nav">
           <button class="btn ghost ${activeAdminPage === "dashboard" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="dashboard">Dashboard</button>
           <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
+          <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">MCQ Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
           <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
           <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
@@ -26037,7 +26041,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(page)) {
+      if (!["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(page)) {
         return;
       }
       if (state.adminPage === page) {
@@ -39385,7 +39389,7 @@ async function adminResolveEnrollmentRequest(requestId, status) {
 function adminRenderCourseBuilder(courseId) {
   if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
     loadAdminCoursesPlatform().then((ok) => {
-      if (ok && state.route === "admin" && state.adminPage === "courses") {
+      if (ok && state.route === "admin" && state.adminPage === "course-platform") {
         state.skipNextRouteAnimation = true;
         render();
       }
@@ -39619,7 +39623,7 @@ function wireAdminCoursesPlatformBuilder() {
   if (!root) return;
   if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
     loadAdminCoursesPlatform().then((ok) => {
-      if (ok && state.route === "admin" && state.adminPage === "courses") {
+      if (ok && state.route === "admin" && state.adminPage === "course-platform") {
         state.skipNextRouteAnimation = true;
         render();
       }
