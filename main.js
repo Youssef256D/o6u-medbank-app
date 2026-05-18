@@ -290,6 +290,7 @@ const state = {
     topicSource: "",
   },
   coursesView: "home",
+  coursesHomeTab: "dashboard",
   coursesActiveCourseId: "",
   coursesActiveLessonId: "",
   coursesSearch: "",
@@ -14948,6 +14949,23 @@ function bindGlobalEvents() {
       return;
     }
 
+    if (action === "courses-home-tab") {
+      const requestedTab = String(actionTarget?.getAttribute("data-tab") || "dashboard").trim();
+      state.coursesHomeTab = ["dashboard", "enrolled", "suggestions"].includes(requestedTab) ? requestedTab : "dashboard";
+      state.coursesView = "home";
+      state.coursesActiveCourseId = "";
+      state.coursesActiveLessonId = "";
+      state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
+      if (state.route !== "courses") {
+        navigate("courses");
+      } else {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+      return;
+    }
+
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
       state.userMenuOpen = false;
@@ -18305,9 +18323,11 @@ function syncTopbar() {
       `;
       privateNavEl.classList.remove("hidden");
     } else if (isCourseRoute) {
+      const courseTab = String(state.coursesHomeTab || "dashboard").trim();
       privateNavEl.innerHTML = `
-        <button data-nav="app-launcher">Dashboard</button>
-        <button data-nav="courses">Enrolled Courses</button>
+        <button data-action="courses-home-tab" data-tab="dashboard" class="${courseTab === "dashboard" && state.coursesView === "home" ? "is-active" : ""}">Dashboard</button>
+        <button data-action="courses-home-tab" data-tab="enrolled" class="${courseTab === "enrolled" && state.coursesView === "home" ? "is-active" : ""}">Enrolled Courses</button>
+        <button data-action="courses-home-tab" data-tab="suggestions" class="${courseTab === "suggestions" && state.coursesView === "home" ? "is-active" : ""}">Course Suggestions</button>
       `;
       privateNavEl.classList.remove("hidden");
     }
@@ -38437,29 +38457,255 @@ function openCourseMcqPractice(courseId, options = {}) {
   navigate("create-test");
 }
 
-function renderCoursesHome() {
-  const query = String(state.coursesSearch || "").trim().toLowerCase();
-  const filter = String(state.coursesFilter || "all");
+function getCoursePlatformDecoratedRows() {
   const courses = Array.isArray(state.coursesCatalog) ? state.coursesCatalog : [];
-  const decorated = courses.map((course) => {
+  return courses.map((course) => {
     const enrollment = getCourseEnrollmentState(course);
     const progress = getCoursePlatformProgressPercent(course.id);
     const lessonCount = getCoursePlatformLessonsForCourse(course.id).length;
     return { course, enrollment, progress, lessonCount };
   });
-  const filtered = decorated
-    .filter(({ course, enrollment }) => {
-      if (query && !`${course.course_name || ""} ${course.description || ""} ${course.instructor_name || ""}`.toLowerCase().includes(query)) {
-        return false;
-      }
-      if (filter === "enrolled") return enrollment.isEnrolled;
-      if (filter === "open") return !enrollment.isEnrolled && enrollment.mode === "open";
-      if (filter === "request") return !enrollment.isEnrolled && enrollment.mode === "request";
-      return true;
+}
+
+function getCoursePlatformLastOpenedMs(courseId) {
+  const lessonIds = new Set(getCoursePlatformLessonsForCourse(courseId).map((lesson) => String(lesson?.id || "").trim()).filter(Boolean));
+  if (!lessonIds.size) return 0;
+  return Math.max(0, ...(state.coursesProgress || [])
+    .filter((row) => lessonIds.has(String(row?.lesson_id || "").trim()))
+    .map((row) => Date.parse(row?.last_opened_at || row?.updated_at || row?.created_at || "") || 0));
+}
+
+function matchesCoursePlatformQuery(row, query) {
+  if (!query) return true;
+  const { course } = row || {};
+  return `${course?.course_name || ""} ${course?.name || ""} ${course?.title || ""} ${course?.description || ""} ${course?.instructor_name || ""} ${course?.level || ""}`
+    .toLowerCase()
+    .includes(query);
+}
+
+function getCoursePlatformSuggestionRows(decorated) {
+  const currentUser = getCurrentUser();
+  const userYear = normalizeAcademicYearOrNull(currentUser?.academicYear ?? currentUser?.academic_year);
+  const userSemester = normalizeAcademicSemesterOrNull(currentUser?.academicSemester ?? currentUser?.academic_semester);
+  return decorated
+    .filter(({ enrollment }) => !enrollment.isEnrolled)
+    .sort((left, right) => {
+      const leftSameTerm = userYear !== null
+        && userSemester !== null
+        && normalizeAcademicYearOrNull(left.course?.academic_year) === userYear
+        && normalizeAcademicSemesterOrNull(left.course?.academic_semester) === userSemester;
+      const rightSameTerm = userYear !== null
+        && userSemester !== null
+        && normalizeAcademicYearOrNull(right.course?.academic_year) === userYear
+        && normalizeAcademicSemesterOrNull(right.course?.academic_semester) === userSemester;
+      if (leftSameTerm !== rightSameTerm) return leftSameTerm ? -1 : 1;
+      const modeRank = (entry) => entry.enrollment.mode === "open" ? 0 : entry.enrollment.mode === "request" ? 1 : 2;
+      if (modeRank(left) !== modeRank(right)) return modeRank(left) - modeRank(right);
+      return String(getCoursePlatformCourseTitle(left.course)).localeCompare(String(getCoursePlatformCourseTitle(right.course)));
     });
+}
+
+function filterCoursePlatformRows(rows, tab, query, filter) {
+  return rows.filter((row) => {
+    if (!matchesCoursePlatformQuery(row, query)) return false;
+    if (tab === "enrolled") {
+      if (filter === "in-progress") return row.progress > 0 && row.progress < 100;
+      if (filter === "completed") return row.progress >= 100;
+      return row.enrollment.isEnrolled;
+    }
+    if (tab === "suggestions") {
+      if (filter === "open") return row.enrollment.mode === "open";
+      if (filter === "request") return row.enrollment.mode === "request";
+      return !row.enrollment.isEnrolled;
+    }
+    return true;
+  });
+}
+
+function renderCoursePlatformTabs(activeTab) {
+  const tabs = [
+    ["dashboard", "Dashboard"],
+    ["enrolled", "Enrolled Courses"],
+    ["suggestions", "Course Suggestions"],
+  ];
+  return `
+    <div class="courses-tabs" role="tablist" aria-label="Courses sections">
+      ${tabs.map(([tab, label]) => `
+        <button type="button" role="tab" aria-selected="${activeTab === tab ? "true" : "false"}" class="${activeTab === tab ? "is-active" : ""}" data-action="courses-home-tab" data-tab="${tab}">${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderCoursePlatformCard(row, options = {}) {
+  const { course, enrollment, progress, lessonCount } = row;
+  const title = getCoursePlatformCourseTitle(course);
+  const statusLabel = enrollment.isEnrolled
+    ? `${progress}% complete`
+    : enrollment.mode === "open"
+      ? "Open enrollment"
+      : enrollment.requestStatus
+        ? `Request ${enrollment.requestStatus}`
+        : "Request access";
+  const badge = String(options.badge || "").trim();
+  const actionLabel = enrollment.isEnrolled ? "Continue" : enrollment.mode === "open" ? "Enroll or view" : "View";
+  return `
+    <article class="card course-card ${badge ? "course-card-with-badge" : ""}">
+      ${badge ? `<span class="course-suggestion-badge">${escapeHtml(badge)}</span>` : ""}
+      <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
+      </button>
+      <div class="course-card-body">
+        <div class="course-card-meta">
+          <span>Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</span>
+          <span>${escapeHtml(statusLabel)}</span>
+        </div>
+        <h3>${escapeHtml(title)}</h3>
+        <p>${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
+        <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+        <div class="course-card-footer">
+          <small>${lessonCount} lesson${lessonCount === 1 ? "" : "s"}${course.estimated_duration ? ` • ${escapeHtml(course.estimated_duration)}` : ""}</small>
+          <button class="btn admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">${escapeHtml(actionLabel)}</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderCoursePlatformToolbar(activeTab, filter) {
+  const enrolledFilter = ["all", "in-progress", "completed"].includes(filter) ? filter : "all";
+  const suggestionFilter = ["all", "open", "request"].includes(filter) ? filter : "all";
+  return `
+    <div class="courses-toolbar">
+      <label class="courses-search">Search
+        <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
+      </label>
+      <label>Filter
+        <select id="courses-filter">
+          ${activeTab === "enrolled" ? `
+            <option value="all" ${enrolledFilter === "all" ? "selected" : ""}>All enrolled</option>
+            <option value="in-progress" ${enrolledFilter === "in-progress" ? "selected" : ""}>In progress</option>
+            <option value="completed" ${enrolledFilter === "completed" ? "selected" : ""}>Completed</option>
+          ` : `
+            <option value="all" ${suggestionFilter === "all" ? "selected" : ""}>All suggestions</option>
+            <option value="open" ${suggestionFilter === "open" ? "selected" : ""}>Open courses</option>
+            <option value="request" ${suggestionFilter === "request" ? "selected" : ""}>Request-only</option>
+          `}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
+function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
+  const totalLessons = enrolledRows.reduce((sum, row) => sum + row.lessonCount, 0);
+  const enrolledLessonIds = new Set(enrolledRows
+    .flatMap((row) => getCoursePlatformLessonsForCourse(row.course.id))
+    .map((lesson) => String(lesson?.id || "").trim())
+    .filter(Boolean));
+  const completedLessons = (state.coursesProgress || []).filter((row) => {
+    const lessonId = String(row?.lesson_id || "").trim();
+    return enrolledLessonIds.has(lessonId) && (String(row?.status || "").trim() === "completed" || Number(row?.progress_percent) >= 100);
+  }).length;
+  const averageProgress = enrolledRows.length
+    ? Math.round(enrolledRows.reduce((sum, row) => sum + Number(row.progress || 0), 0) / enrolledRows.length)
+    : 0;
+  const continueRow = [...enrolledRows]
+    .sort((left, right) => getCoursePlatformLastOpenedMs(right.course.id) - getCoursePlatformLastOpenedMs(left.course.id) || Number(right.progress || 0) - Number(left.progress || 0))[0] || null;
+  const continueLesson = continueRow ? getLastOpenedCourseLesson(continueRow.course.id) || getCoursePlatformLessonsForCourse(continueRow.course.id)[0] || null : null;
+  const visibleEnrolled = enrolledRows.slice(0, 3);
+  const visibleSuggestions = suggestionRows.slice(0, 3);
+
+  return `
+    <div class="courses-dashboard-grid">
+      <article class="card courses-dashboard-card courses-dashboard-main">
+        <div class="courses-section-head">
+          <div>
+            <p class="kicker">Student dashboard</p>
+            <h3>Today in Courses</h3>
+          </div>
+          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">View enrolled</button>
+        </div>
+        <div class="courses-dashboard-stats">
+          <span><b>${enrolledRows.length}</b><small>Enrolled courses</small></span>
+          <span><b>${averageProgress}%</b><small>Average progress</small></span>
+          <span><b>${Math.min(completedLessons, totalLessons)}/${totalLessons}</b><small>Lessons complete</small></span>
+          <span><b>${suggestionRows.length}</b><small>Suggested courses</small></span>
+        </div>
+      </article>
+
+      <article class="card courses-dashboard-card courses-continue-card">
+        <div class="courses-section-head">
+          <div>
+            <p class="kicker">Continue learning</p>
+            <h3>${continueRow ? escapeHtml(getCoursePlatformCourseTitle(continueRow.course)) : "No active course yet"}</h3>
+          </div>
+          ${continueRow ? `<span>${continueRow.progress}%</span>` : ""}
+        </div>
+        ${continueRow ? `
+          <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, continueRow.progress))}%;"></span></div>
+          <p class="subtle">${continueLesson ? `Last lesson: ${escapeHtml(continueLesson.title)}` : "Open the course to start the first lesson."}</p>
+          <button class="btn" type="button" data-action="${continueLesson ? "courses-open-lesson" : "courses-open-course"}" data-course-id="${escapeHtml(continueRow.course.id)}" ${continueLesson ? `data-lesson-id="${escapeHtml(continueLesson.id)}"` : ""}>Continue learning</button>
+        ` : `
+          <p class="subtle">Your enrolled courses will appear here once an admin assigns them or you enroll in an open course.</p>
+          <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
+        `}
+      </article>
+    </div>
+
+    <div class="courses-dashboard-lists">
+      <section class="courses-dashboard-list">
+        <div class="courses-section-head">
+          <div>
+            <p class="kicker">My learning</p>
+            <h3>Enrolled Courses</h3>
+          </div>
+          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">See all</button>
+        </div>
+        ${visibleEnrolled.length ? `<div class="courses-grid">${visibleEnrolled.map((row) => renderCoursePlatformCard(row)).join("")}</div>` : `<div class="card courses-empty"><h3>No enrolled courses yet</h3><p class="subtle">Open courses and admin-assigned courses will stay organized in this tab.</p></div>`}
+      </section>
+
+      <section class="courses-dashboard-list">
+        <div class="courses-section-head">
+          <div>
+            <p class="kicker">Recommended for you</p>
+            <h3>Course Suggestions</h3>
+          </div>
+          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="suggestions">See all</button>
+        </div>
+        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="card courses-empty"><h3>No suggestions available</h3><p class="subtle">New published courses will appear here when they match your learning path.</p></div>`}
+      </section>
+    </div>
+  `;
+}
+
+function renderCoursesListTab(activeTab, rows, filter) {
+  const label = activeTab === "enrolled" ? "enrolled courses" : "course suggestions";
+  return `
+    ${renderCoursePlatformToolbar(activeTab, filter)}
+    ${!state.coursesLoading && !state.coursesError && !rows.length ? `<div class="card courses-empty"><h3>No ${escapeHtml(label)} found</h3><p class="subtle">Try clearing the search or choose another filter.</p></div>` : ""}
+    <div class="courses-grid">
+      ${rows.map((row, index) => renderCoursePlatformCard(row, { badge: activeTab === "suggestions" && index < 2 ? "Suggested" : "" })).join("")}
+    </div>
+  `;
+}
+
+function renderCoursesHome() {
+  const activeTab = ["dashboard", "enrolled", "suggestions"].includes(String(state.coursesHomeTab || "").trim()) ? String(state.coursesHomeTab || "").trim() : "dashboard";
+  const query = String(state.coursesSearch || "").trim().toLowerCase();
+  const filter = String(state.coursesFilter || "all");
+  const decorated = getCoursePlatformDecoratedRows();
+  const enrolledRows = decorated.filter((entry) => entry.enrollment.isEnrolled);
+  const suggestionRows = getCoursePlatformSuggestionRows(decorated);
+  const filteredRows = activeTab === "enrolled"
+    ? filterCoursePlatformRows(enrolledRows, activeTab, query, filter)
+    : activeTab === "suggestions"
+      ? filterCoursePlatformRows(suggestionRows, activeTab, query, filter)
+      : [];
   const enrolledCount = decorated.filter((entry) => entry.enrollment.isEnrolled).length;
   const openCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "open").length;
   const requestCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "request").length;
+  const showInitialLoading = state.coursesLoading && !state.coursesLoadedAt;
 
   return `
     <section class="panel courses-shell">
@@ -38477,56 +38723,14 @@ function renderCoursesHome() {
         </div>
       </div>
 
-      <div class="courses-toolbar">
-        <label class="courses-search">Search
-          <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
-        </label>
-        <label>Filter
-          <select id="courses-filter">
-            <option value="all" ${filter === "all" ? "selected" : ""}>All visible</option>
-            <option value="enrolled" ${filter === "enrolled" ? "selected" : ""}>Enrolled</option>
-            <option value="open" ${filter === "open" ? "selected" : ""}>Open courses</option>
-            <option value="request" ${filter === "request" ? "selected" : ""}>Request-only</option>
-          </select>
-        </label>
-      </div>
+      ${renderCoursePlatformTabs(activeTab)}
 
-      ${state.coursesLoading && !state.coursesLoadedAt ? `<div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Loading courses...</p></div>` : ""}
+      ${showInitialLoading ? `<div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Loading courses...</p></div>` : ""}
       ${state.coursesError ? `<div class="card courses-error"><b>Courses error</b><p>${escapeHtml(state.coursesError)}</p><button class="btn ghost admin-btn-sm" type="button" data-action="courses-retry">Retry</button></div>` : ""}
-      ${!state.coursesLoading && !state.coursesError && !filtered.length ? `<div class="card courses-empty"><h3>No courses found</h3><p class="subtle">Try clearing the search or choose another filter.</p></div>` : ""}
-
-      <div class="courses-grid">
-        ${filtered.map(({ course, enrollment, progress, lessonCount }) => {
-          const title = getCoursePlatformCourseTitle(course);
-          const statusLabel = enrollment.isEnrolled
-            ? `${progress}% complete`
-            : enrollment.mode === "open"
-              ? "Open enrollment"
-              : enrollment.requestStatus
-                ? `Request ${enrollment.requestStatus}`
-                : "Request access";
-          return `
-            <article class="card course-card">
-              <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
-                <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
-              </button>
-              <div class="course-card-body">
-                <div class="course-card-meta">
-                  <span>Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</span>
-                  <span>${escapeHtml(statusLabel)}</span>
-                </div>
-                <h3>${escapeHtml(title)}</h3>
-                <p>${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
-                <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
-                <div class="course-card-footer">
-                  <small>${lessonCount} lesson${lessonCount === 1 ? "" : "s"}${course.estimated_duration ? ` • ${escapeHtml(course.estimated_duration)}` : ""}</small>
-                  <button class="btn admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">${enrollment.isEnrolled ? "Continue" : "View"}</button>
-                </div>
-              </div>
-            </article>
-          `;
-        }).join("")}
-      </div>
+      ${!state.coursesError && !showInitialLoading ? activeTab === "dashboard"
+        ? renderCoursesDashboardTab(enrolledRows, suggestionRows)
+        : renderCoursesListTab(activeTab, filteredRows, filter)
+      : ""}
     </section>
   `;
 }
