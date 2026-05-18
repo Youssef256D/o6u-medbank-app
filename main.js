@@ -24411,13 +24411,10 @@ function renderAdminDataSidebarNav(activeAdminPage) {
 
 function renderAdminCoursesPlatformSidebarNav(activeSection) {
   const items = [
-    ["overview", "Course Overview"],
-    ["builder", "Modules & Lessons"],
-    ["suggestions", "Suggestions"],
-    ["announcements", "Announcements"],
-    ["enrollments", "Enrollments"],
+    ["overview", "Course metadata"],
+    ["builder", "Add Module"],
+    ["announcements", "Announces"],
     ["requests", "Access Requests"],
-    ["preview", "Student Preview"],
   ];
   return items.map(([section, label]) => `
     <button class="btn ghost ${activeSection === section ? "is-active" : ""}" type="button" data-action="admin-course-platform-section" data-section="${escapeHtml(section)}">${escapeHtml(label)}</button>
