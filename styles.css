@@ -8538,6 +8538,21 @@ html body :is(.title,
   box-shadow: var(--shadow-soft);
 }
 
+.courses-dashboard-welcome {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.courses-dashboard-welcome h2,
+.courses-dashboard-welcome p {
+  margin-top: 0;
+}
+
 .courses-hero-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(90px, 1fr));
@@ -8608,7 +8623,7 @@ html body :is(.title,
 
 .courses-dashboard-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
   gap: 0.7rem;
 }
 
@@ -8712,6 +8727,30 @@ html body :is(.title,
   color: var(--muted);
 }
 
+.course-card-facts,
+.course-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.course-card-facts span {
+  padding: 0.22rem 0.48rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 0.78rem;
+}
+
+.course-suggestion-reason {
+  padding: 0.62rem 0.7rem;
+  border-left: 3px solid var(--brand);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
 .course-card-meta,
 .course-card-footer {
   display: flex;
@@ -8748,6 +8787,28 @@ html body :is(.title,
 
 .courses-error {
   border-color: rgba(196, 58, 58, 0.35);
+}
+
+.course-update-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.8rem;
+}
+
+.course-update-card {
+  display: grid;
+  gap: 0.35rem;
+  text-align: left;
+}
+
+.course-update-card p {
+  margin: 0;
+}
+
+.course-update-button {
+  width: 100%;
+  color: var(--ink);
+  cursor: pointer;
 }
 
 .course-detail-hero {
@@ -8847,6 +8908,13 @@ body.theme-dark .courses-tabs button.is-active,
 body.theme-comfort .courses-tabs button.is-active {
   color: #ffffff;
   background: rgba(255, 255, 255, 0.12);
+}
+
+body.theme-dark .course-card-facts span,
+body.theme-comfort .course-card-facts span,
+body.theme-dark .course-suggestion-reason,
+body.theme-comfort .course-suggestion-reason {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 body.theme-dark .course-suggestion-badge,
@@ -9004,6 +9072,7 @@ body.theme-comfort .course-suggestion-badge {
 }
 
 @media (max-width: 820px) {
+  .courses-dashboard-welcome,
   .courses-dashboard-grid,
   .course-detail-layout,
   .lesson-layout,

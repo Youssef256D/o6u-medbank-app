@@ -92,7 +92,10 @@ const PRIVATE_ROUTE_SET = new Set([
   "admin",
 ]);
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
-const KNOWN_ADMIN_PAGES = new Set(["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"]);
+const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"];
+const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
+const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "enrollments", "requests", "preview"]);
+const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_PAGE]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
 let sessionVaultDbPromise = null;
@@ -296,6 +299,9 @@ const state = {
   coursesActiveLessonId: "",
   coursesSearch: "",
   coursesFilter: "all",
+  coursesYearFilter: "",
+  coursesSemesterFilter: "",
+  coursesStatusFilter: "all",
   coursesLoading: false,
   coursesError: "",
   coursesLoadedAt: 0,
@@ -308,6 +314,7 @@ const state = {
   coursesLessons: [],
   coursesResources: [],
   coursesAnnouncements: [],
+  coursesSuggestions: [],
   adminCoursesPlatformLoading: false,
   adminCoursesPlatformError: "",
   adminCoursesPlatformLoadedAt: 0,
@@ -316,12 +323,14 @@ const state = {
   adminCoursesPlatformLessons: [],
   adminCoursesPlatformResources: [],
   adminCoursesPlatformAnnouncements: [],
+  adminCoursesPlatformSuggestions: [],
   adminCoursesPlatformRequests: [],
   adminCoursesPlatformEnrollments: [],
   adminCoursesPlatformTopics: [],
   adminCourseBuilderCourseId: "",
   adminCourseBuilderLessonId: "",
   adminCourseBuilderPreview: false,
+  adminCoursePlatformSection: "builder",
   createTestSource: "all",
   previousTestFilters: {
     dateKey: "",
@@ -14972,6 +14981,9 @@ function bindGlobalEvents() {
       const requestedTab = String(actionTarget?.getAttribute("data-tab") || "data").trim();
       state.route = "admin";
       state.adminPage = requestedTab === "courses" ? "course-platform" : "dashboard";
+      if (requestedTab === "courses") {
+        state.adminCoursePlatformSection = getAdminCoursePlatformSection();
+      }
       state.adminQuestionModalOpen = false;
       state.adminSelectedQuestionIds = [];
       state.adminBulkActionRunning = false;
@@ -24379,14 +24391,48 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   return true;
 }
 
+function renderAdminDataSidebarNav(activeAdminPage) {
+  const items = [
+    ["dashboard", "Dashboard"],
+    ["users", "Users"],
+    ["courses", "MCQ Courses"],
+    ["questions", "Questions"],
+    ["bulk-import", "Bulk Import"],
+    ["notifications", "Notifications"],
+    ["site-access", "Site Access"],
+    ["activity", "Activity"],
+    ["logs", "Logs"],
+  ];
+  return items.map(([page, label]) => `
+    <button class="btn ghost ${activeAdminPage === page ? "is-active" : ""}" type="button" data-action="admin-page" data-page="${escapeHtml(page)}">${escapeHtml(label)}</button>
+  `).join("");
+}
+
+function renderAdminCoursesPlatformSidebarNav(activeSection) {
+  const items = [
+    ["overview", "Course Overview"],
+    ["builder", "Modules & Lessons"],
+    ["suggestions", "Suggestions"],
+    ["announcements", "Announcements"],
+    ["enrollments", "Enrollments"],
+    ["requests", "Access Requests"],
+    ["preview", "Student Preview"],
+  ];
+  return items.map(([section, label]) => `
+    <button class="btn ghost ${activeSection === section ? "is-active" : ""}" type="button" data-action="admin-course-platform-section" data-section="${escapeHtml(section)}">${escapeHtml(label)}</button>
+  `).join("");
+}
+
 function renderAdmin() {
   const user = getCurrentUser();
   if (!user || user.role !== "admin") {
     return `<section class="panel"><p>Access denied.</p></section>`;
   }
-  const activeAdminPage = ["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(state.adminPage)
+  const activeAdminPage = KNOWN_ADMIN_PAGES.has(String(state.adminPage || "").trim())
     ? state.adminPage
     : "dashboard";
+  const isCoursesPlatformAdmin = activeAdminPage === ADMIN_COURSES_PLATFORM_PAGE;
+  const activeCoursePlatformSection = getAdminCoursePlatformSection();
   if (activeAdminPage === "users" || activeAdminPage === "courses" || activeAdminPage === "notifications") {
     syncUsersWithCurriculum();
   }
@@ -25900,18 +25946,12 @@ function renderAdmin() {
   return `
     <section class="panel admin-shell">
       <aside class="admin-sidebar card">
-        <h3 style="margin-top: 0;">Admin Panel</h3>
-        <p class="subtle">Manage the full O6U MedBank platform from one place.</p>
+        <h3 style="margin-top: 0;">${isCoursesPlatformAdmin ? "Courses App" : "Admin Panel"}</h3>
+        <p class="subtle">${isCoursesPlatformAdmin ? "Manage the learning website: lessons, suggestions, enrollments, requests, and announcements." : "Manage the full O6U MedBank platform from one place."}</p>
         <div class="admin-sidebar-nav">
-          <button class="btn ghost ${activeAdminPage === "dashboard" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="dashboard">Dashboard</button>
-          <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
-          <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">MCQ Courses</button>
-          <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
-          <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
-          <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
-          <button class="btn ghost ${activeAdminPage === "site-access" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="site-access">Site Access</button>
-          <button class="btn ghost ${activeAdminPage === "activity" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="activity">Activity</button>
-          <button class="btn ghost ${activeAdminPage === "logs" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="logs">Logs</button>
+          ${isCoursesPlatformAdmin
+            ? renderAdminCoursesPlatformSidebarNav(activeCoursePlatformSection)
+            : renderAdminDataSidebarNav(activeAdminPage)}
         </div>
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
@@ -26065,7 +26105,7 @@ function wireAdmin() {
   appEl.querySelectorAll("[data-action='admin-page']").forEach((button) => {
     button.addEventListener("click", () => {
       const page = button.getAttribute("data-page");
-      if (!["dashboard", "users", "courses", "course-platform", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"].includes(page)) {
+      if (!KNOWN_ADMIN_PAGES.has(String(page || "").trim())) {
         return;
       }
       if (state.adminPage === page) {
@@ -26110,6 +26150,27 @@ function wireAdmin() {
       } else {
         clearAdminPresencePolling();
       }
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='admin-course-platform-section']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const section = String(button.getAttribute("data-section") || "").trim();
+      if (!ADMIN_COURSES_PLATFORM_SECTIONS.has(section)) {
+        return;
+      }
+      state.adminPage = ADMIN_COURSES_PLATFORM_PAGE;
+      state.adminCoursePlatformSection = section;
+      state.adminCourseBuilderPreview = section === "preview";
+      state.adminQuestionModalOpen = false;
+      state.adminSelectedQuestionIds = [];
+      state.adminBulkActionRunning = false;
+      state.adminBulkActionType = "";
+      state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
       state.skipNextRouteAnimation = true;
       render();
     });
@@ -38125,6 +38186,7 @@ const COURSE_PLATFORM_TABLES = new Set([
   "student_lesson_progress",
   "course_announcements",
   "course_enrollment_requests",
+  "course_suggestions",
 ]);
 
 function normalizeCoursePlatformMode(value) {
@@ -38258,7 +38320,7 @@ async function loadStudentCoursesWithProgress(options = {}) {
   state.coursesLoading = true;
   state.coursesError = "";
   try {
-    const [courses, enrollments, requests, progress, lessons] = await Promise.all([
+    const [courses, enrollments, requests, progress, lessons, modules, announcements, suggestions] = await Promise.all([
       runRelationalQueryWithTimeout(
         client
           .from("courses")
@@ -38288,8 +38350,29 @@ async function loadStudentCoursesWithProgress(options = {}) {
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("course_lessons").select("id,course_id,module_id,is_published,position,title").order("position", { ascending: true }),
+        client.from("course_lessons").select("id,course_id,module_id,is_published,position,title,description,lesson_type,duration_seconds,linked_topic_id,created_at,updated_at").order("position", { ascending: true }),
         "Lesson summary query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(
+        client.from("course_modules").select("id,course_id,title,description,position,is_published,created_at,updated_at").order("position", { ascending: true }),
+        "Module summary query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(
+        client.from("course_announcements").select("id,course_id,title,body,is_published,created_at").order("created_at", { ascending: false }),
+        "Announcement summary query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(
+        client.from("course_suggestions").select("id,course_id,target_academic_year,target_semester,title,reason,priority,is_active,starts_at,ends_at,created_at,updated_at").order("priority", { ascending: false }).order("created_at", { ascending: false }),
+        "Course suggestions query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
@@ -38301,6 +38384,9 @@ async function loadStudentCoursesWithProgress(options = {}) {
     state.coursesRequests = Array.isArray(requests) ? requests : [];
     state.coursesProgress = Array.isArray(progress) ? progress : [];
     state.coursesLessons = Array.isArray(lessons) ? lessons : [];
+    state.coursesModules = Array.isArray(modules) ? modules : [];
+    state.coursesAnnouncements = Array.isArray(announcements) ? announcements : [];
+    state.coursesSuggestions = Array.isArray(suggestions) ? suggestions : [];
     state.coursesLoadedAt = Date.now();
     state.coursesLoading = false;
     return true;
@@ -38505,12 +38591,80 @@ function openCourseMcqPractice(courseId, options = {}) {
 
 function getCoursePlatformDecoratedRows() {
   const courses = Array.isArray(state.coursesCatalog) ? state.coursesCatalog : [];
-  return courses.map((course) => {
-    const enrollment = getCourseEnrollmentState(course);
-    const progress = getCoursePlatformProgressPercent(course.id);
-    const lessonCount = getCoursePlatformLessonsForCourse(course.id).length;
-    return { course, enrollment, progress, lessonCount };
+  return courses.map((course) => getCoursePlatformCourseModel(course));
+}
+
+function calculateCourseProgress(courseId, userId = getCurrentCoursePlatformUserId()) {
+  const targetCourseId = String(courseId || "").trim();
+  const targetUserId = String(userId || "").trim();
+  const lessons = getCoursePlatformLessonsForCourse(targetCourseId).filter((lesson) => lesson?.is_published !== false);
+  const progressRows = (state.coursesProgress || []).filter((row) => {
+    return String(row?.course_id || "").trim() === targetCourseId
+      && (!targetUserId || String(row?.user_id || "").trim() === targetUserId);
   });
+  const completedLessonIds = new Set(progressRows
+    .filter((row) => String(row?.status || "").trim() === "completed" || Number(row?.progress_percent) >= 100)
+    .map((row) => String(row?.lesson_id || "").trim())
+    .filter(Boolean));
+  const completedLessons = lessons.filter((lesson) => completedLessonIds.has(String(lesson?.id || "").trim())).length;
+  const progressPercent = lessons.length ? Math.round((completedLessons / lessons.length) * 100) : 0;
+  const touched = progressRows.some((row) => Number(row?.progress_percent) > 0 || String(row?.status || "").trim() !== "not_started");
+  const status = progressPercent >= 100 && lessons.length
+    ? "completed"
+    : touched
+      ? "in_progress"
+      : "not_started";
+  return {
+    completedLessons,
+    totalLessons: lessons.length,
+    progressPercent,
+    status,
+  };
+}
+
+function getCoursePlatformModuleForLesson(lesson) {
+  const moduleId = String(lesson?.module_id || "").trim();
+  return (state.coursesModules || []).find((module) => String(module?.id || "").trim() === moduleId) || null;
+}
+
+function getCoursePlatformCourseModel(course) {
+  const enrollment = getCourseEnrollmentState(course);
+  const lessons = getCoursePlatformLessonsForCourse(course.id);
+  const publishedLessons = lessons.filter((lesson) => lesson?.is_published !== false);
+  const modules = (state.coursesModules || []).filter((module) => String(module?.course_id || "").trim() === String(course?.id || "").trim());
+  const announcements = (state.coursesAnnouncements || []).filter((item) => String(item?.course_id || "").trim() === String(course?.id || "").trim());
+  const progressInfo = calculateCourseProgress(course.id);
+  const lastLesson = getLastOpenedCourseLesson(course.id) || null;
+  const lastModule = lastLesson ? getCoursePlatformModuleForLesson(lastLesson) : null;
+  const nowMs = Date.now();
+  const newWindowMs = 14 * 24 * 60 * 60 * 1000;
+  const newLessons = publishedLessons.filter((lesson) => {
+    const createdMs = parseSyncTimestampMs(lesson?.created_at || lesson?.updated_at);
+    return createdMs && nowMs - createdMs <= newWindowMs;
+  });
+  const newAnnouncements = announcements.filter((item) => {
+    const createdMs = parseSyncTimestampMs(item?.created_at);
+    return createdMs && nowMs - createdMs <= newWindowMs;
+  });
+  return {
+    course,
+    enrollment,
+    progress: progressInfo.progressPercent,
+    completedLessons: progressInfo.completedLessons,
+    lessonCount: progressInfo.totalLessons,
+    status: progressInfo.status,
+    modules,
+    moduleCount: modules.length,
+    lessons,
+    publishedLessons,
+    publishedLessonCount: publishedLessons.length,
+    announcements,
+    newLessons,
+    newAnnouncements,
+    lastLesson,
+    lastModule,
+    hasLinkedMcq: publishedLessons.some((lesson) => isUuidValue(lesson?.linked_topic_id)) || normalizeCoursePlatformType(course?.course_type) !== "lessons_only",
+  };
 }
 
 function getCoursePlatformLastOpenedMs(courseId) {
@@ -38530,39 +38684,42 @@ function matchesCoursePlatformQuery(row, query) {
 }
 
 function getCoursePlatformSuggestionRows(decorated) {
-  const currentUser = getCurrentUser();
-  const userYear = normalizeAcademicYearOrNull(currentUser?.academicYear ?? currentUser?.academic_year);
-  const userSemester = normalizeAcademicSemesterOrNull(currentUser?.academicSemester ?? currentUser?.academic_semester);
-  return decorated
-    .filter(({ enrollment }) => !enrollment.isEnrolled)
+  const rowsByCourseId = new Map((Array.isArray(decorated) ? decorated : []).map((row) => [String(row?.course?.id || "").trim(), row]));
+  const nowMs = Date.now();
+  return (state.coursesSuggestions || [])
+    .map((suggestion) => ({ suggestion, ...(rowsByCourseId.get(String(suggestion?.course_id || "").trim()) || {}) }))
+    .filter((row) => row.course && row.progress < 100)
+    .filter(({ suggestion }) => {
+      if (suggestion?.is_active === false) return false;
+      const startsMs = parseSyncTimestampMs(suggestion?.starts_at);
+      const endsMs = parseSyncTimestampMs(suggestion?.ends_at);
+      return (!startsMs || startsMs <= nowMs) && (!endsMs || endsMs >= nowMs);
+    })
     .sort((left, right) => {
-      const leftSameTerm = userYear !== null
-        && userSemester !== null
-        && normalizeAcademicYearOrNull(left.course?.academic_year) === userYear
-        && normalizeAcademicSemesterOrNull(left.course?.academic_semester) === userSemester;
-      const rightSameTerm = userYear !== null
-        && userSemester !== null
-        && normalizeAcademicYearOrNull(right.course?.academic_year) === userYear
-        && normalizeAcademicSemesterOrNull(right.course?.academic_semester) === userSemester;
-      if (leftSameTerm !== rightSameTerm) return leftSameTerm ? -1 : 1;
-      const modeRank = (entry) => entry.enrollment.mode === "open" ? 0 : entry.enrollment.mode === "request" ? 1 : 2;
-      if (modeRank(left) !== modeRank(right)) return modeRank(left) - modeRank(right);
+      const priorityDiff = (Number(right.suggestion?.priority) || 0) - (Number(left.suggestion?.priority) || 0);
+      if (priorityDiff) return priorityDiff;
       return String(getCoursePlatformCourseTitle(left.course)).localeCompare(String(getCoursePlatformCourseTitle(right.course)));
     });
 }
 
 function filterCoursePlatformRows(rows, tab, query, filter) {
+  const year = normalizeAcademicYearOrNull(state.coursesYearFilter);
+  const semester = normalizeAcademicSemesterOrNull(state.coursesSemesterFilter);
+  const status = String(state.coursesStatusFilter || "all").trim();
   return rows.filter((row) => {
     if (!matchesCoursePlatformQuery(row, query)) return false;
+    if (year !== null && normalizeAcademicYearOrNull(row.course?.academic_year) !== year) return false;
+    if (semester !== null && normalizeAcademicSemesterOrNull(row.course?.academic_semester) !== semester) return false;
     if (tab === "enrolled") {
-      if (filter === "in-progress") return row.progress > 0 && row.progress < 100;
-      if (filter === "completed") return row.progress >= 100;
-      return row.enrollment.isEnrolled;
+      if (!row.enrollment.isEnrolled) return false;
+      if (status !== "all") return row.status === status;
+      return true;
     }
     if (tab === "suggestions") {
       if (filter === "open") return row.enrollment.mode === "open";
       if (filter === "request") return row.enrollment.mode === "request";
-      return !row.enrollment.isEnrolled;
+      if (filter === "enrolled") return row.enrollment.isEnrolled;
+      return true;
     }
     return true;
   });
@@ -38584,8 +38741,9 @@ function renderCoursePlatformTabs(activeTab) {
 }
 
 function renderCoursePlatformCard(row, options = {}) {
-  const { course, enrollment, progress, lessonCount } = row;
+  const { course, enrollment, progress, lessonCount, moduleCount, completedLessons, lastLesson, status, newLessons, newAnnouncements } = row;
   const title = getCoursePlatformCourseTitle(course);
+  const isSuggestion = Boolean(options.suggestion);
   const statusLabel = enrollment.isEnrolled
     ? `${progress}% complete`
     : enrollment.mode === "open"
@@ -38594,7 +38752,16 @@ function renderCoursePlatformCard(row, options = {}) {
         ? `Request ${enrollment.requestStatus}`
         : "Request access";
   const badge = String(options.badge || "").trim();
-  const actionLabel = enrollment.isEnrolled ? "Continue" : enrollment.mode === "open" ? "Enroll or view" : "View";
+  const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : enrollment.mode === "open" ? "Enroll now" : enrollment.mode === "request" ? "Request access" : "View details";
+  const primaryAction = enrollment.isEnrolled
+    ? (lastLesson ? "courses-open-lesson" : "courses-open-course")
+    : enrollment.mode === "open"
+      ? "courses-enroll-open"
+      : enrollment.mode === "request"
+        ? "courses-request-access"
+        : "courses-open-course";
+  const statusText = status === "completed" ? "Completed" : status === "in_progress" ? "In progress" : "Not started";
+  const suggestionReason = String(row.suggestion?.reason || row.suggestion?.title || "").trim();
   return `
     <article class="card course-card ${badge ? "course-card-with-badge" : ""}">
       ${badge ? `<span class="course-suggestion-badge">${escapeHtml(badge)}</span>` : ""}
@@ -38608,10 +38775,28 @@ function renderCoursePlatformCard(row, options = {}) {
         </div>
         <h3>${escapeHtml(title)}</h3>
         <p>${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
+        ${isSuggestion ? `<p class="course-suggestion-reason">${escapeHtml(suggestionReason || "Recommended by your course admin.")}</p>` : ""}
+        <div class="course-card-facts">
+          <span>${escapeHtml(course.instructor_name || "Instructor TBA")}</span>
+          <span>${moduleCount || 0} module${moduleCount === 1 ? "" : "s"}</span>
+          <span>${completedLessons || 0}/${lessonCount || 0} lessons</span>
+          <span>${escapeHtml(statusText)}</span>
+        </div>
+        ${lastLesson ? `<small class="subtle">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
+        ${Number(newLessons?.length || 0) || Number(newAnnouncements?.length || 0) ? `
+          <div class="course-card-badges">
+            ${Number(newLessons?.length || 0) ? `<span class="badge good">${newLessons.length} new lesson${newLessons.length === 1 ? "" : "s"}</span>` : ""}
+            ${Number(newAnnouncements?.length || 0) ? `<span class="badge neutral">${newAnnouncements.length} new announcement${newAnnouncements.length === 1 ? "" : "s"}</span>` : ""}
+          </div>
+        ` : ""}
         <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
         <div class="course-card-footer">
           <small>${lessonCount} lesson${lessonCount === 1 ? "" : "s"}${course.estimated_duration ? ` • ${escapeHtml(course.estimated_duration)}` : ""}</small>
-          <button class="btn admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">${escapeHtml(actionLabel)}</button>
+          <div class="stack">
+            <button class="btn admin-btn-sm" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
+            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">View Course</button>` : ""}
+            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice MCQs</button>` : ""}
+          </div>
         </div>
       </div>
     </article>
@@ -38619,23 +38804,37 @@ function renderCoursePlatformCard(row, options = {}) {
 }
 
 function renderCoursePlatformToolbar(activeTab, filter) {
-  const enrolledFilter = ["all", "in-progress", "completed"].includes(filter) ? filter : "all";
-  const suggestionFilter = ["all", "open", "request"].includes(filter) ? filter : "all";
+  const suggestionFilter = ["all", "open", "request", "enrolled"].includes(filter) ? filter : "all";
   return `
     <div class="courses-toolbar">
       <label class="courses-search">Search
         <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
       </label>
-      <label>Filter
+      <label>Year
+        <select id="courses-year-filter">
+          <option value="" ${state.coursesYearFilter ? "" : "selected"}>All years</option>
+          ${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${String(state.coursesYearFilter) === String(year) ? "selected" : ""}>Year ${year}</option>`).join("")}
+        </select>
+      </label>
+      <label>Semester
+        <select id="courses-semester-filter">
+          <option value="" ${state.coursesSemesterFilter ? "" : "selected"}>All semesters</option>
+          <option value="1" ${String(state.coursesSemesterFilter) === "1" ? "selected" : ""}>Semester 1</option>
+          <option value="2" ${String(state.coursesSemesterFilter) === "2" ? "selected" : ""}>Semester 2</option>
+        </select>
+      </label>
+      <label>${activeTab === "enrolled" ? "Status" : "Enrollment"}
         <select id="courses-filter">
           ${activeTab === "enrolled" ? `
-            <option value="all" ${enrolledFilter === "all" ? "selected" : ""}>All enrolled</option>
-            <option value="in-progress" ${enrolledFilter === "in-progress" ? "selected" : ""}>In progress</option>
-            <option value="completed" ${enrolledFilter === "completed" ? "selected" : ""}>Completed</option>
+            <option value="all" ${state.coursesStatusFilter === "all" ? "selected" : ""}>All</option>
+            <option value="not_started" ${state.coursesStatusFilter === "not_started" ? "selected" : ""}>Not started</option>
+            <option value="in_progress" ${state.coursesStatusFilter === "in_progress" ? "selected" : ""}>In progress</option>
+            <option value="completed" ${state.coursesStatusFilter === "completed" ? "selected" : ""}>Completed</option>
           ` : `
             <option value="all" ${suggestionFilter === "all" ? "selected" : ""}>All suggestions</option>
             <option value="open" ${suggestionFilter === "open" ? "selected" : ""}>Open courses</option>
             <option value="request" ${suggestionFilter === "request" ? "selected" : ""}>Request-only</option>
+            <option value="enrolled" ${suggestionFilter === "enrolled" ? "selected" : ""}>Already enrolled</option>
           `}
         </select>
       </label>
@@ -38643,26 +38842,74 @@ function renderCoursePlatformToolbar(activeTab, filter) {
   `;
 }
 
-function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
+function loadContinueLearning(enrolledRows = loadStudentEnrolledCourses()) {
+  const enrolledCourseIds = new Set(enrolledRows.map((row) => String(row.course?.id || "").trim()));
+  const latestProgress = (state.coursesProgress || [])
+    .filter((row) => enrolledCourseIds.has(String(row?.course_id || "").trim()))
+    .sort((a, b) => parseSyncTimestampMs(b?.last_opened_at || b?.updated_at) - parseSyncTimestampMs(a?.last_opened_at || a?.updated_at))[0] || null;
+  if (!latestProgress) return null;
+  const lesson = (state.coursesLessons || []).find((entry) => String(entry?.id || "").trim() === String(latestProgress.lesson_id || "").trim()) || null;
+  const row = enrolledRows.find((entry) => String(entry.course?.id || "").trim() === String(latestProgress.course_id || "").trim()) || null;
+  if (!row || !lesson) return null;
+  return {
+    row,
+    course: row.course,
+    lesson,
+    module: getCoursePlatformModuleForLesson(lesson),
+    progressPercent: Math.max(0, Math.min(100, Math.round(Number(latestProgress.progress_percent) || row.progress || 0))),
+  };
+}
+
+function loadStudentEnrolledCourses() {
+  return getCoursePlatformDecoratedRows().filter((row) => row.enrollment.isEnrolled);
+}
+
+function loadSuggestedCourses() {
+  return getCoursePlatformSuggestionRows(getCoursePlatformDecoratedRows());
+}
+
+function loadCoursesDashboardData() {
+  const enrolledRows = loadStudentEnrolledCourses();
+  const suggestionRows = loadSuggestedCourses();
+  const completedLessons = enrolledRows.reduce((sum, row) => sum + row.completedLessons, 0);
   const totalLessons = enrolledRows.reduce((sum, row) => sum + row.lessonCount, 0);
-  const enrolledLessonIds = new Set(enrolledRows
-    .flatMap((row) => getCoursePlatformLessonsForCourse(row.course.id))
-    .map((lesson) => String(lesson?.id || "").trim())
-    .filter(Boolean));
-  const completedLessons = (state.coursesProgress || []).filter((row) => {
-    const lessonId = String(row?.lesson_id || "").trim();
-    return enrolledLessonIds.has(lessonId) && (String(row?.status || "").trim() === "completed" || Number(row?.progress_percent) >= 100);
-  }).length;
-  const averageProgress = enrolledRows.length
-    ? Math.round(enrolledRows.reduce((sum, row) => sum + Number(row.progress || 0), 0) / enrolledRows.length)
-    : 0;
-  const continueRow = [...enrolledRows]
-    .sort((left, right) => getCoursePlatformLastOpenedMs(right.course.id) - getCoursePlatformLastOpenedMs(left.course.id) || Number(right.progress || 0) - Number(left.progress || 0))[0] || null;
-  const continueLesson = continueRow ? getLastOpenedCourseLesson(continueRow.course.id) || getCoursePlatformLessonsForCourse(continueRow.course.id)[0] || null : null;
-  const visibleEnrolled = enrolledRows.slice(0, 3);
-  const visibleSuggestions = suggestionRows.slice(0, 3);
+  const overallProgress = totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0;
+  const announcements = enrolledRows.flatMap((row) => row.announcements || []);
+  const recentLessons = enrolledRows
+    .flatMap((row) => (row.publishedLessons || []).map((lesson) => ({ row, lesson, module: getCoursePlatformModuleForLesson(lesson) })))
+    .filter((entry) => parseSyncTimestampMs(entry.lesson?.created_at))
+    .sort((a, b) => parseSyncTimestampMs(b.lesson.created_at) - parseSyncTimestampMs(a.lesson.created_at))
+    .slice(0, 4);
+  return {
+    enrolledRows,
+    suggestionRows,
+    continueLearning: loadContinueLearning(enrolledRows),
+    completedLessons,
+    totalLessons,
+    overallProgress,
+    announcements: announcements.slice(0, 4),
+    newAnnouncementsCount: announcements.filter((item) => Date.now() - parseSyncTimestampMs(item?.created_at) <= 14 * 24 * 60 * 60 * 1000).length,
+    recentLessons,
+    quickMcqRows: enrolledRows.filter((row) => row.hasLinkedMcq).slice(0, 3),
+  };
+}
+
+function renderCoursesDashboard() {
+  const data = loadCoursesDashboardData();
+  const visibleEnrolled = data.enrolledRows.slice(0, 3);
+  const visibleSuggestions = data.suggestionRows.slice(0, 3);
+  const currentUser = getCurrentUser();
 
   return `
+    <section class="courses-dashboard-welcome">
+      <div>
+        <p class="kicker">O6U Courses</p>
+        <h2 class="title">Welcome back${currentUser?.name ? `, ${escapeHtml(currentUser.name.split(" ")[0])}` : ""}</h2>
+        <p class="subtle">Continue lessons, follow announcements, and jump into linked MCQ practice from one Courses dashboard.</p>
+      </div>
+      <button class="btn ghost admin-btn-sm" data-nav="app-launcher" type="button">Back to Apps</button>
+    </section>
+
     <div class="courses-dashboard-grid">
       <article class="card courses-dashboard-card courses-dashboard-main">
         <div class="courses-section-head">
@@ -38673,10 +38920,11 @@ function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
           <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">View enrolled</button>
         </div>
         <div class="courses-dashboard-stats">
-          <span><b>${enrolledRows.length}</b><small>Enrolled courses</small></span>
-          <span><b>${averageProgress}%</b><small>Average progress</small></span>
-          <span><b>${Math.min(completedLessons, totalLessons)}/${totalLessons}</b><small>Lessons complete</small></span>
-          <span><b>${suggestionRows.length}</b><small>Suggested courses</small></span>
+          <span><b>${data.enrolledRows.length}</b><small>Enrolled courses</small></span>
+          <span><b>${data.completedLessons}</b><small>Completed lessons</small></span>
+          <span><b>${data.overallProgress}%</b><small>Overall progress</small></span>
+          <span><b>${data.newAnnouncementsCount}</b><small>New announcements</small></span>
+          <span><b>${data.suggestionRows.length}</b><small>Suggested courses</small></span>
         </div>
       </article>
 
@@ -38684,16 +38932,16 @@ function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
         <div class="courses-section-head">
           <div>
             <p class="kicker">Continue learning</p>
-            <h3>${continueRow ? escapeHtml(getCoursePlatformCourseTitle(continueRow.course)) : "No active course yet"}</h3>
+            <h3>${data.continueLearning ? escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course)) : "Start your first course lesson."}</h3>
           </div>
-          ${continueRow ? `<span>${continueRow.progress}%</span>` : ""}
+          ${data.continueLearning ? `<span>${data.continueLearning.progressPercent}%</span>` : ""}
         </div>
-        ${continueRow ? `
-          <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, continueRow.progress))}%;"></span></div>
-          <p class="subtle">${continueLesson ? `Last lesson: ${escapeHtml(continueLesson.title)}` : "Open the course to start the first lesson."}</p>
-          <button class="btn" type="button" data-action="${continueLesson ? "courses-open-lesson" : "courses-open-course"}" data-course-id="${escapeHtml(continueRow.course.id)}" ${continueLesson ? `data-lesson-id="${escapeHtml(continueLesson.id)}"` : ""}>Continue learning</button>
+        ${data.continueLearning ? `
+          <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
+          <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
+          <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
         ` : `
-          <p class="subtle">Your enrolled courses will appear here once an admin assigns them or you enroll in an open course.</p>
+          <p class="subtle">Start your first course lesson.</p>
           <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
         `}
       </article>
@@ -38719,21 +38967,75 @@ function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
           </div>
           <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="suggestions">See all</button>
         </div>
-        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="card courses-empty"><h3>No suggestions available</h3><p class="subtle">New published courses will appear here when they match your learning path.</p></div>`}
+        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="card courses-empty"><h3>No suggestions available</h3><p class="subtle">New published courses will appear here when they match your learning path.</p></div>`}
       </section>
+
+      <section class="courses-dashboard-list">
+        <div class="courses-section-head">
+          <div>
+            <p class="kicker">Updates</p>
+            <h3>New Announcements</h3>
+          </div>
+        </div>
+        ${data.announcements.length ? `<div class="course-update-list">${data.announcements.map((item) => `<article class="card course-update-card"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></article>`).join("")}</div>` : `<div class="card courses-empty"><p class="subtle">No new announcements yet.</p></div>`}
+      </section>
+
+      ${data.recentLessons.length ? `
+        <section class="courses-dashboard-list">
+          <div class="courses-section-head">
+            <div>
+              <p class="kicker">Recently added</p>
+              <h3>Lessons</h3>
+            </div>
+          </div>
+          <div class="course-update-list">${data.recentLessons.map(({ row, lesson, module }) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(row.course.id)}" data-lesson-id="${escapeHtml(lesson.id)}"><b>${escapeHtml(lesson.title)}</b><p class="subtle">${escapeHtml(getCoursePlatformCourseTitle(row.course))}${module?.title ? ` • ${escapeHtml(module.title)}` : ""}</p></button>`).join("")}</div>
+        </section>
+      ` : ""}
+
+      ${data.quickMcqRows.length ? `
+        <section class="courses-dashboard-list">
+          <div class="courses-section-head">
+            <div>
+              <p class="kicker">Quick MCQ Practice</p>
+              <h3>Practice linked course topics</h3>
+            </div>
+          </div>
+          <div class="course-update-list">${data.quickMcqRows.map((row) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(row.course.id)}"><b>${escapeHtml(getCoursePlatformCourseTitle(row.course))}</b><p class="subtle">Create an MCQ block using the existing MCQ Bank flow.</p></button>`).join("")}</div>
+        </section>
+      ` : ""}
     </div>
   `;
 }
 
-function renderCoursesListTab(activeTab, rows, filter) {
-  const label = activeTab === "enrolled" ? "enrolled courses" : "course suggestions";
+function renderEnrolledCourses(courses) {
   return `
-    ${renderCoursePlatformToolbar(activeTab, filter)}
-    ${!state.coursesLoading && !state.coursesError && !rows.length ? `<div class="card courses-empty"><h3>No ${escapeHtml(label)} found</h3><p class="subtle">Try clearing the search or choose another filter.</p></div>` : ""}
+    ${renderCoursePlatformToolbar("enrolled", state.coursesFilter)}
+    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="card courses-empty"><h3>You are not enrolled in any courses yet.</h3><p class="subtle">Browse available courses or contact admin.</p></div>` : ""}
     <div class="courses-grid">
-      ${rows.map((row, index) => renderCoursePlatformCard(row, { badge: activeTab === "suggestions" && index < 2 ? "Suggested" : "" })).join("")}
+      ${courses.map((row) => renderCoursePlatformCard(row)).join("")}
     </div>
   `;
+}
+
+function renderSuggestedCourses(courses) {
+  return `
+    ${renderCoursePlatformToolbar("suggestions", state.coursesFilter)}
+    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="card courses-empty"><h3>No suggested courses yet</h3><p class="subtle">Suggestions appear here when an admin recommends courses for your academic year or semester.</p></div>` : ""}
+    <div class="courses-grid">
+      ${courses.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index < 2 ? "Suggested" : "" })).join("")}
+    </div>
+  `;
+}
+
+function renderCoursesDashboardTab(enrolledRows, suggestionRows) {
+  return renderCoursesDashboard(enrolledRows, suggestionRows);
+}
+
+function renderCoursesListTab(activeTab, rows, filter) {
+  if (activeTab === "enrolled") {
+    return renderEnrolledCourses(rows);
+  }
+  return renderSuggestedCourses(rows);
 }
 
 function renderCoursesHome() {
@@ -38748,27 +39050,10 @@ function renderCoursesHome() {
     : activeTab === "suggestions"
       ? filterCoursePlatformRows(suggestionRows, activeTab, query, filter)
       : [];
-  const enrolledCount = decorated.filter((entry) => entry.enrollment.isEnrolled).length;
-  const openCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "open").length;
-  const requestCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "request").length;
   const showInitialLoading = state.coursesLoading && !state.coursesLoadedAt;
 
   return `
     <section class="panel courses-shell">
-      <div class="courses-hero">
-        <div>
-          <button class="btn ghost admin-btn-sm" data-nav="app-launcher" type="button">Back to Apps</button>
-          <p class="kicker">O6U Courses</p>
-          <h2 class="title">Learning platform</h2>
-          <p class="subtle">Follow structured modules, keep lesson progress, and jump into linked MCQ practice when a topic is ready.</p>
-        </div>
-        <div class="courses-hero-stats">
-          <span><b>${enrolledCount}</b><small>Enrolled</small></span>
-          <span><b>${openCount}</b><small>Open</small></span>
-          <span><b>${requestCount}</b><small>Request access</small></span>
-        </div>
-      </div>
-
       ${renderCoursePlatformTabs(activeTab)}
 
       ${showInitialLoading ? `<div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Loading courses...</p></div>` : ""}
@@ -38962,7 +39247,22 @@ function wireCourses() {
     render();
   });
   document.getElementById("courses-filter")?.addEventListener("change", (event) => {
-    state.coursesFilter = String(event.target?.value || "all");
+    const activeTab = String(state.coursesHomeTab || "").trim();
+    if (activeTab === "enrolled") {
+      state.coursesStatusFilter = String(event.target?.value || "all");
+    } else {
+      state.coursesFilter = String(event.target?.value || "all");
+    }
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+  document.getElementById("courses-year-filter")?.addEventListener("change", (event) => {
+    state.coursesYearFilter = String(event.target?.value || "");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+  document.getElementById("courses-semester-filter")?.addEventListener("change", (event) => {
+    state.coursesSemesterFilter = String(event.target?.value || "");
     state.skipNextRouteAnimation = true;
     render();
   });
@@ -39004,6 +39304,9 @@ function wireCourses() {
       }
 
       if (action === "courses-open-lesson" && lessonId) {
+        if (courseId && String(state.coursesDetail?.id || "").trim() !== courseId) {
+          await loadCourseDetail(courseId);
+        }
         state.coursesView = "lesson";
         state.coursesActiveCourseId = courseId || state.coursesActiveCourseId;
         state.coursesActiveLessonId = lessonId;
@@ -39079,7 +39382,7 @@ async function loadAdminCoursesPlatform(options = {}) {
   state.adminCoursesPlatformLoading = true;
   state.adminCoursesPlatformError = "";
   try {
-    const [courses, modules, lessons, resources, announcements, requests, enrollments, topics] = await Promise.all([
+    const [courses, modules, lessons, resources, announcements, suggestions, requests, enrollments, topics] = await Promise.all([
       runRelationalQueryWithTimeout(
         client
           .from("courses")
@@ -39102,6 +39405,10 @@ async function loadAdminCoursesPlatform(options = {}) {
         throw error;
       }),
       runRelationalQueryWithTimeout(client.from("course_announcements").select("*").order("created_at", { ascending: false }), "Admin announcements query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("course_suggestions").select("*").order("priority", { ascending: false }).order("created_at", { ascending: false }), "Admin suggestions query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
@@ -39131,6 +39438,7 @@ async function loadAdminCoursesPlatform(options = {}) {
     state.adminCoursesPlatformLessons = Array.isArray(lessons) ? lessons : [];
     state.adminCoursesPlatformResources = Array.isArray(resources) ? resources : [];
     state.adminCoursesPlatformAnnouncements = Array.isArray(announcements) ? announcements : [];
+    state.adminCoursesPlatformSuggestions = Array.isArray(suggestions) ? suggestions : [];
     state.adminCoursesPlatformRequests = Array.isArray(requests) ? requests : [];
     state.adminCoursesPlatformEnrollments = Array.isArray(enrollments) ? enrollments : [];
     state.adminCoursesPlatformTopics = Array.isArray(topics) ? topics : [];
@@ -39169,6 +39477,9 @@ function getAdminCourseBuilderCourseRows(courseId = state.adminCourseBuilderCour
     .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
   const announcements = (state.adminCoursesPlatformAnnouncements || [])
     .filter((entry) => String(entry?.course_id || "").trim() === target);
+  const suggestions = (state.adminCoursesPlatformSuggestions || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(b?.priority) || 0) - (Number(a?.priority) || 0));
   const requests = (state.adminCoursesPlatformRequests || [])
     .filter((entry) => String(entry?.course_id || "").trim() === target);
   const enrollments = (state.adminCoursesPlatformEnrollments || [])
@@ -39176,7 +39487,7 @@ function getAdminCourseBuilderCourseRows(courseId = state.adminCourseBuilderCour
   const topics = (state.adminCoursesPlatformTopics || [])
     .filter((entry) => String(entry?.course_id || "").trim() === target)
     .sort((a, b) => String(a?.topic_name || "").localeCompare(String(b?.topic_name || "")));
-  return { modules, lessons, resources, announcements, requests, enrollments, topics };
+  return { modules, lessons, resources, announcements, suggestions, requests, enrollments, topics };
 }
 
 function getAdminCourseBuilderProfileLabel(userId) {
@@ -39362,6 +39673,68 @@ async function adminCreateAnnouncement(courseId, data) {
   return true;
 }
 
+function adminLoadCourseSuggestions(courseId) {
+  const target = String(courseId || "").trim();
+  return (state.adminCoursesPlatformSuggestions || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(b?.priority) || 0) - (Number(a?.priority) || 0));
+}
+
+function coerceCourseSuggestionPayload(courseId, data) {
+  const targetYear = normalizeAcademicYearOrNull(data.target_academic_year);
+  const targetSemester = normalizeAcademicSemesterOrNull(data.target_semester);
+  const startsAt = String(data.starts_at || "").trim();
+  const endsAt = String(data.ends_at || "").trim();
+  const showAsSuggested = Boolean(data.show_as_suggested);
+  return {
+    course_id: courseId,
+    target_academic_year: targetYear,
+    target_semester: targetSemester,
+    title: String(data.title || "").trim() || null,
+    reason: String(data.reason || "").trim() || null,
+    priority: Number(data.priority) || 0,
+    is_active: showAsSuggested && Boolean(data.is_active),
+    starts_at: startsAt ? startsAt : null,
+    ends_at: endsAt ? endsAt : null,
+    created_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
+    updated_at: nowISO(),
+  };
+}
+
+async function adminSaveCourseSuggestion(courseId, data) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  const suggestionId = String(data.suggestion_id || "").trim();
+  if (!client || !isUuidValue(targetCourseId)) throw new Error("Suggestion cannot be saved.");
+  const payload = coerceCourseSuggestionPayload(targetCourseId, data);
+  if (isUuidValue(suggestionId)) {
+    delete payload.created_by;
+    await runRelationalQueryWithTimeout(
+      client.from("course_suggestions").update(payload).eq("id", suggestionId),
+      "Course suggestion update timed out.",
+    );
+  } else {
+    await runRelationalQueryWithTimeout(
+      client.from("course_suggestions").insert(payload),
+      "Course suggestion create timed out.",
+    );
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminDeleteCourseSuggestion(suggestionId) {
+  const client = getCoursesPlatformClient();
+  const targetSuggestionId = String(suggestionId || "").trim();
+  if (!client || !isUuidValue(targetSuggestionId)) throw new Error("Suggestion cannot be deleted.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_suggestions").delete().eq("id", targetSuggestionId),
+    "Course suggestion delete timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
 async function adminBulkEnrollStudentsByTerm(courseId, year, semester) {
   const client = getCoursesPlatformClient();
   const adminId = getCurrentCoursePlatformUserId();
@@ -39412,6 +39785,69 @@ async function adminResolveEnrollmentRequest(requestId, status) {
   return true;
 }
 
+function formatDateTimeLocalValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (entry) => String(entry).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function adminRenderSuggestionSettings(courseId) {
+  const suggestions = adminLoadCourseSuggestions(courseId);
+  const activeSuggestion = suggestions[0] || null;
+  return `
+    <form id="admin-course-suggestion-form" class="course-builder-form">
+      <h4>Suggestion Settings</h4>
+      <input type="hidden" name="suggestion_id" value="${escapeHtml(activeSuggestion?.id || "")}" />
+      <label class="course-builder-check"><input type="checkbox" name="show_as_suggested" ${activeSuggestion ? "checked" : ""} /> Show as suggested course</label>
+      <div class="course-builder-grid">
+        <label>Target academic year
+          <select name="target_academic_year">
+            <option value="" ${activeSuggestion?.target_academic_year ? "" : "selected"}>All years</option>
+            ${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(activeSuggestion?.target_academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}
+          </select>
+        </label>
+        <label>Target semester
+          <select name="target_semester">
+            <option value="" ${activeSuggestion?.target_semester ? "" : "selected"}>All semesters</option>
+            <option value="1" ${Number(activeSuggestion?.target_semester) === 1 ? "selected" : ""}>Semester 1</option>
+            <option value="2" ${Number(activeSuggestion?.target_semester) === 2 ? "selected" : ""}>Semester 2</option>
+          </select>
+        </label>
+        <label>Suggested title<input name="title" value="${escapeHtml(activeSuggestion?.title || "")}" /></label>
+        <label>Priority<input name="priority" type="number" value="${escapeHtml(activeSuggestion?.priority || 0)}" /></label>
+        <label>Starts at<input name="starts_at" type="datetime-local" value="${escapeHtml(formatDateTimeLocalValue(activeSuggestion?.starts_at))}" /></label>
+        <label>Ends at<input name="ends_at" type="datetime-local" value="${escapeHtml(formatDateTimeLocalValue(activeSuggestion?.ends_at))}" /></label>
+        <label class="course-builder-check"><input type="checkbox" name="is_active" ${activeSuggestion?.is_active !== false ? "checked" : ""} /> Active</label>
+        <label class="course-builder-wide">Suggested reason<textarea name="reason" rows="3">${escapeHtml(activeSuggestion?.reason || "")}</textarea></label>
+      </div>
+      <div class="stack">
+        <button class="btn admin-btn-sm" type="submit">Save suggestion</button>
+        ${activeSuggestion ? `<button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-course-suggestion" data-suggestion-id="${escapeHtml(activeSuggestion.id)}">Delete suggestion</button>` : ""}
+      </div>
+      <div class="course-builder-list">
+        <h5>Active suggestions for this course</h5>
+        ${suggestions.length ? suggestions.map((suggestion) => `
+          <div class="course-request-row">
+            <span>
+              <b>${escapeHtml(suggestion.title || "Suggested course")}</b>
+              <small>${escapeHtml(suggestion.is_active ? "Active" : "Inactive")} • ${suggestion.target_academic_year ? `Year ${escapeHtml(suggestion.target_academic_year)}` : "All years"} • ${suggestion.target_semester ? `Semester ${escapeHtml(suggestion.target_semester)}` : "All semesters"} • Priority ${escapeHtml(suggestion.priority || 0)}</small>
+            </span>
+            <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-course-suggestion" data-suggestion-id="${escapeHtml(suggestion.id)}">Delete</button>
+          </div>
+        `).join("") : `<p class="subtle">No suggestions configured for this course.</p>`}
+      </div>
+    </form>
+  `;
+}
+
+function getAdminCoursePlatformSection() {
+  const section = String(state.adminCoursePlatformSection || "").trim();
+  return ADMIN_COURSES_PLATFORM_SECTIONS.has(section) ? section : "builder";
+}
+
 function adminRenderCourseBuilder(courseId) {
   if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
     loadAdminCoursesPlatform().then((ok) => {
@@ -39429,6 +39865,8 @@ function adminRenderCourseBuilder(courseId) {
   const selectedCourseId = String(selectedCourse?.id || "").trim();
   const rows = getAdminCourseBuilderCourseRows(selectedCourseId);
   const profileCount = rows.enrollments.length;
+  const activePlatformSection = getAdminCoursePlatformSection();
+  const showPlatformPreview = activePlatformSection === "preview" || Boolean(state.adminCourseBuilderPreview);
 
   return `
     <section class="card admin-section courses-admin-builder" id="admin-courses-platform-builder">
@@ -39439,7 +39877,7 @@ function adminRenderCourseBuilder(courseId) {
         </div>
         <div class="stack">
           <button class="btn ghost admin-btn-sm ${state.adminCoursesPlatformLoading ? "is-loading" : ""}" type="button" data-action="admin-courses-platform-refresh">${state.adminCoursesPlatformLoading ? "Refreshing..." : "Refresh platform"}</button>
-          <button class="btn ghost admin-btn-sm" type="button" data-action="admin-course-preview-toggle">${state.adminCourseBuilderPreview ? "Close preview" : "Preview as student"}</button>
+          <button class="btn ghost admin-btn-sm" type="button" data-action="admin-course-preview-toggle">${showPlatformPreview ? "Close preview" : "Preview as student"}</button>
         </div>
       </div>
 
@@ -39457,7 +39895,39 @@ function adminRenderCourseBuilder(courseId) {
           <span class="admin-course-meta-pill"><b>${profileCount}</b><small>Enrollments</small></span>
         </div>
 
-        ${state.adminCourseBuilderPreview ? `
+        ${activePlatformSection === "overview" ? `
+          <form id="admin-course-metadata-form" class="course-builder-form">
+            <h4>Course metadata</h4>
+            <div class="course-builder-grid">
+              <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
+              <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
+              <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
+              <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
+              <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
+              <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
+              <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
+              <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
+              <label>Enrollment mode
+                <select name="enrollment_mode">
+                  <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
+                  <option value="open" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "open" ? "selected" : ""}>Open</option>
+                  <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
+                </select>
+              </label>
+              <label>Course type
+                <select name="course_type">
+                  <option value="mcq_and_lessons" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_and_lessons" ? "selected" : ""}>MCQ and lessons</option>
+                  <option value="lessons_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "lessons_only" ? "selected" : ""}>Lessons only</option>
+                  <option value="mcq_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_only" ? "selected" : ""}>MCQ only</option>
+                </select>
+              </label>
+              <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
+            </div>
+            <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+          </form>
+        ` : ""}
+
+        ${showPlatformPreview ? `
           <div class="card course-builder-preview">
             <h3>${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}</h3>
             <p class="subtle">${escapeHtml(selectedCourse.description || "No course description yet.")}</p>
@@ -39472,37 +39942,9 @@ function adminRenderCourseBuilder(courseId) {
           </div>
         ` : ""}
 
-        <form id="admin-course-metadata-form" class="course-builder-form">
-          <h4>Course metadata</h4>
-          <div class="course-builder-grid">
-            <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
-            <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
-            <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
-            <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
-            <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
-            <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
-            <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
-            <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
-            <label>Enrollment mode
-              <select name="enrollment_mode">
-                <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
-                <option value="open" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "open" ? "selected" : ""}>Open</option>
-                <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
-              </select>
-            </label>
-            <label>Course type
-              <select name="course_type">
-                <option value="mcq_and_lessons" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_and_lessons" ? "selected" : ""}>MCQ and lessons</option>
-                <option value="lessons_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "lessons_only" ? "selected" : ""}>Lessons only</option>
-                <option value="mcq_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_only" ? "selected" : ""}>MCQ only</option>
-              </select>
-            </label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
-          </div>
-          <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
-        </form>
+        ${activePlatformSection === "suggestions" ? adminRenderSuggestionSettings(selectedCourseId) : ""}
 
-        <form id="admin-course-module-create-form" class="course-builder-form">
+        ${activePlatformSection === "builder" ? `<form id="admin-course-module-create-form" class="course-builder-form">
           <h4>Add module</h4>
           <div class="course-builder-grid compact">
             <label>Title<input name="title" required /></label>
@@ -39594,9 +40036,9 @@ function adminRenderCourseBuilder(courseId) {
               </article>
             `;
           }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
-        </div>
+        </div>` : ""}
 
-        <div class="course-builder-admin-grid">
+        ${activePlatformSection === "announcements" ? `
           <form id="admin-course-announcement-form" class="course-builder-form">
             <h4>Announcements</h4>
             <label>Title<input name="title" required /></label>
@@ -39605,7 +40047,9 @@ function adminRenderCourseBuilder(courseId) {
             <button class="btn admin-btn-sm" type="submit">Post announcement</button>
             <div class="course-builder-list">${rows.announcements.map((item) => `<p><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.is_published ? "Published" : "Draft")}</small></p>`).join("") || `<p class="subtle">No announcements yet.</p>`}</div>
           </form>
+        ` : ""}
 
+        ${activePlatformSection === "enrollments" ? `
           <form id="admin-course-bulk-enroll-form" class="course-builder-form">
             <h4>Enrollments</h4>
             <div class="course-builder-grid compact">
@@ -39615,7 +40059,9 @@ function adminRenderCourseBuilder(courseId) {
             <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
             <p class="subtle">${rows.enrollments.length} student enrollment row${rows.enrollments.length === 1 ? "" : "s"}.</p>
           </form>
+        ` : ""}
 
+        ${activePlatformSection === "requests" ? `
           <div class="course-builder-form">
             <h4>Access requests</h4>
             ${rows.requests.length ? rows.requests.map((request) => `
@@ -39626,7 +40072,7 @@ function adminRenderCourseBuilder(courseId) {
               </div>
             `).join("") : `<p class="subtle">No access requests.</p>`}
           </div>
-        </div>
+        ` : ""}
       `}
     </section>
   `;
@@ -39680,7 +40126,9 @@ function wireAdminCoursesPlatformBuilder() {
   });
 
   root.querySelector("[data-action='admin-course-preview-toggle']")?.addEventListener("click", () => {
-    state.adminCourseBuilderPreview = !state.adminCourseBuilderPreview;
+    const isPreviewOpen = getAdminCoursePlatformSection() === "preview" || Boolean(state.adminCourseBuilderPreview);
+    state.adminCourseBuilderPreview = !isPreviewOpen;
+    state.adminCoursePlatformSection = isPreviewOpen ? "builder" : "preview";
     state.skipNextRouteAnimation = true;
     render();
   });
@@ -39688,6 +40136,11 @@ function wireAdminCoursesPlatformBuilder() {
   root.querySelector("#admin-course-metadata-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
+  });
+
+  root.querySelector("#admin-course-suggestion-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAdminCourseAction("Course suggestion saved.", () => adminSaveCourseSuggestion(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
   });
 
   root.querySelector("#admin-course-module-create-form")?.addEventListener("submit", (event) => {
@@ -39758,6 +40211,10 @@ function wireAdminCoursesPlatformBuilder() {
       const resourceId = button.getAttribute("data-resource-id") || "";
       if (!window.confirm("Delete this resource?")) return;
       runAdminCourseAction("Resource deleted.", () => adminDeleteResource(resourceId));
+    } else if (action === "admin-delete-course-suggestion") {
+      const suggestionId = button.getAttribute("data-suggestion-id") || "";
+      if (!window.confirm("Delete this course suggestion?")) return;
+      runAdminCourseAction("Course suggestion deleted.", () => adminDeleteCourseSuggestion(suggestionId));
     } else if (action === "admin-approve-course-request") {
       runAdminCourseAction("Enrollment request approved.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "approved"));
     } else if (action === "admin-reject-course-request") {
