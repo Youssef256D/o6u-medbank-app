@@ -1,85 +1,33 @@
-# O6U MedBank SQL Database
+# O6U MedBank Hosted Database Notes
 
-This folder contains a real relational PostgreSQL database setup for the MCQ platform.
+The production database for this app is the hosted Supabase project. This folder keeps older SQL reference files, but the website runtime does not depend on a local PostgreSQL or local Supabase instance.
 
-## Files
+## Current Source Of Truth
 
-- `schema.sql`: full production-style schema (tables, constraints, indexes, triggers, views)
-- `seed.sql`: seed data for O6U users, curriculum courses, topics, enrollments, invites, and sample question data
-- `supabase_app_state.sql`: canonical lightweight sync table used by current frontend (`app_state` + `storage_key`)
-- `supabase_appstate_compat.sql`: compatibility migration for legacy setups that created `appstate` + `storagekey`
-- `supabase_full_setup.sql`: one-shot Supabase setup (schema + seed + sync compatibility)
-- `supabase_verify.sql`: post-setup verification queries for schema and sync write/read
-- `migrations/20260213_scale_app_state_keys_and_rls.sql`: introduces global/user-scoped app-state key strategy for scale
-- `migrations/20260213_optimize_app_state_rls_and_indexes.sql`: optimizes app-state RLS policies and removes duplicate index
-- `migrations/20260213_create_core_relational_tables.sql`: creates normalized core tables (`profiles`, `courses`, `topics`, `questions`, `tests`, `responses`) with RLS
-- `migrations/20260213_add_external_ids_and_fk_indexes.sql`: adds stable external IDs for `questions` and `test_blocks` plus supporting indexes
-- `migrations/20260213_add_user_presence_tracking.sql`: adds `user_presence` table + RLS for admin live activity tracking (online/solving)
-- `migrations/20260220_add_question_media_columns.sql`: adds `question_image_url` and `explanation_image_url` columns to `questions`
+- Hosted Supabase project: `https://fzjzjzdamehxbgikiskt.supabase.co`
+- Runtime config: `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
+- Active migrations: `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/migrations`
 
-## Quick start (PostgreSQL)
+## How To Apply Database Changes
 
-1. Create database:
+Use the Supabase migration files against the hosted project only:
 
 ```bash
-createdb o6umedbank
+supabase db push --dns-resolver https
 ```
 
-2. Apply schema:
+Do not use this folder to start a local database for student/admin usage. The deployed GitHub Pages site talks to hosted Supabase directly.
 
-```bash
-psql -d o6umedbank -f database/schema.sql
-```
+## Legacy Reference Files
 
-3. Seed data:
+These files remain as reference snapshots for older setup/history work:
 
-```bash
-psql -d o6umedbank -f database/seed.sql
-```
+- `schema.sql`
+- `seed.sql`
+- `supabase_app_state.sql`
+- `supabase_appstate_compat.sql`
+- `supabase_full_setup.sql`
+- `supabase_verify.sql`
+- `migrations/*.sql`
 
-## Demo seeded accounts
-
-- Admin email: `admin@o6umed.local` (password source in seed script: `admin123`)
-- Student email: `student@o6umed.local` (password source in seed script: `student123`)
-
-`seed.sql` stores hashed passwords using `pgcrypto` (`crypt(...)`).
-
-## Core entities included
-
-- Users and roles (`student`, `admin`)
-- Courses by academic year/semester
-- Course topics
-- Enrollment mapping (student -> courses)
-- Questions, answer choices, tags, and revisions
-- Test blocks/sessions, block items, and responses
-- Previous-test history snapshots (`test_history_entries`) for reliable completed-test recovery
-- Incorrect queue and flashcards
-- Bulk import jobs and import errors
-- Feedback and support messages
-- Invite codes
-
-## Notes
-
-- This SQL setup is real and normalized, but your current frontend still reads from `localStorage`.
-- Supabase sync bridge is now available for prototype persistence:
-  - run `schema.sql` (full website tables)
-  - run `seed.sql` (starter records)
-  - run `supabase_appstate_compat.sql` (normalizes `appstate/storagekey` to `app_state/storage_key` if needed)
-  - configure `supabase.config.js` with project URL and anon key
-- Next step to fully use normalized schema is wiring full API/auth flows and replacing local-storage style JSON blobs with table-level CRUD.
-
-## 2,000-user readiness checklist
-
-1. Keep `app_state` sync keys namespaced:
-   - global data: `g:<storage_key>`
-   - user data: `u:<auth.uid>:<storage_key>`
-2. Run migrations in this order:
-   - `20260213_scale_app_state_keys_and_rls.sql`
-   - `20260213_optimize_app_state_rls_and_indexes.sql`
-   - `20260213_create_core_relational_tables.sql`
-   - `20260213_add_external_ids_and_fk_indexes.sql`
-   - `20260213_add_user_presence_tracking.sql`
-3. Enable Supabase Auth leaked-password protection (dashboard warning currently active).
-4. Use authenticated sessions for user-scoped writes (`u:<uid>:...`) and keep anon writes limited to global keys only.
-5. Keep signup and email verification rate limits aligned with your expected bursts.
-6. Move long-term analytics/reporting to normalized tables (`test_blocks`, `test_responses`) to avoid oversized JSON payloads.
+Prefer the timestamped migrations in `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/migrations` for current database work.

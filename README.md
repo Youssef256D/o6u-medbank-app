@@ -1,15 +1,19 @@
-# O6U MedBank MVP Prototype
+# O6U MedBank
 
-A dependency-free browser MVP for October 6 University Faculty of Medicine MCQ practice workflows.
+O6U MedBank is a hosted browser app for October 6 University Faculty of Medicine students. The website is static on GitHub Pages, and the live hosted Supabase project is the single source of truth for auth, courses, questions, progress, enrollments, and admin data.
 
-## Run
+## Live App
 
-Open `/Users/youssefayoub/Documents/Apps/MCQs Website/index.html` in your browser.
+Open the deployed site:
+
+- `https://youssef256d.github.io/o6u-medbank-app/`
+
+The app does not need a local Supabase instance, local database, or your laptop to stay running. Once GitHub Pages and the hosted Supabase project are available, students and admins can use the app from the web.
 
 ## Included MVP flows
 
 - Public pages: Home, Features, Pricing, About, Contact + support form
-- Auth: Sign up, Login, Forgot password via Supabase Auth (with local demo fallback)
+- Auth: Sign up, Login, Forgot password via hosted Supabase Auth
 - Create a test: choose assigned course + topic, set count, mode (`timed`/`tutor`), source (`all`/`unused`/`incorrect`/`flagged`), and randomization
 - Attempt interface: select answers, flag, strike-through, notes, navigator, autosave, pause/resume timer
 - Review: score summary, per-question explanation, add to incorrect queue
@@ -17,38 +21,22 @@ Open `/Users/youssefayoub/Documents/Apps/MCQs Website/index.html` in your browse
 - Profile: update account/email/password and view incorrect queue size
 - Admin portal: assign courses to accounts, create/edit/delete/publish questions, and bulk import by course/topic
 
-## Demo accounts
-
-- Admin: `admin@o6umed.local` / `admin123`
-- Student: `student@o6umed.local` / `student123`
-
 ## Data/storage
 
-Current UI data is stored in browser `localStorage`.
+Hosted Supabase is the database for the project. Browser storage is only used for session state, route memory, theme preference, and offline/cache safety; it is not the source of truth.
 
-Keys used:
-
-- `mcq_users`
-- `mcq_current_user_id`
-- `mcq_questions`
-- `mcq_sessions`
-- `mcq_filter_presets`
-- `mcq_incorrect_queue`
-- `mcq_invites`
-- `mcq_curriculum`
-- `mcq_course_topics`
-
-Supabase sync is now wired in a simplified two-layer model:
+Supabase is wired through:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
-- table SQL: `/Users/youssefayoub/Documents/Apps/MCQs Website/database/supabase_app_state.sql`
-- compatibility SQL: `/Users/youssefayoub/Documents/Apps/MCQs Website/database/supabase_appstate_compat.sql`
+- hosted project URL: `https://fzjzjzdamehxbgikiskt.supabase.co`
+- browser-safe publishable key in `supabase.config.js`
+- SQL migrations in `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/migrations`
 
 Notes:
 
-- The frontend uses only `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
+- The frontend uses only the hosted Supabase URL + publishable/anon key.
 - Do not put `SUPABASE_SERVICE_ROLE_KEY` in frontend files.
-- Supabase Auth is used for sign up/login/reset email. Local demo users still work for quick testing.
+- Supabase Auth is used for sign up/login/reset email.
 - Primary sync path: relational tables (`profiles`, `courses`, `course_topics`, `questions`, `test_blocks`, etc.).
 - Legacy `app_state` sync path is now limited to non-relational settings/queues only (to avoid duplicate heavy writes and improve responsiveness).
 - Sync keys now support scale-safe namespacing:
@@ -57,28 +45,17 @@ Notes:
 
 ## Supabase connection method for this project
 
-This repo now follows the Supabase connection guidance by role:
+This repo now follows an online-only Supabase connection model:
 
 - Browser frontend (`index.html` + `bootstrap.js` + `main.js`):
   - use Supabase Data APIs through `supabase-js`
   - configured by `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase.config.js`
-  - required values: `SUPABASE_URL` and `SUPABASE_ANON_KEY`
+  - required values: hosted Supabase URL and publishable/anon key
   - do not use Postgres connection strings in the browser
 - Server-side admin endpoints (`/api/*.js` and `supabase/functions/*`):
   - current implementation uses Supabase Auth/Admin HTTP APIs with `SUPABASE_SERVICE_ROLE_KEY`
   - no direct Postgres socket connection is opened by the current code
-  - if you later add direct SQL from serverless functions, use the Supabase transaction pooler connection string and disable prepared statements in that client
-- SQL tools / migrations / database GUIs:
-  - use the direct connection string when your machine/network supports IPv6
-  - otherwise use the session pooler as the fallback for long-lived GUI or backend sessions
-
-Optional environment placeholders were added to `/Users/youssefayoub/Documents/Apps/MCQs Website/.env.example`:
-
-- `SUPABASE_DB_DIRECT_URL`
-- `SUPABASE_DB_SESSION_POOLER_URL`
-- `SUPABASE_DB_TRANSACTION_POOLER_URL`
-
-These are for tooling or future backend workers. The current frontend does not read them.
+- Schema changes are applied to the remote Supabase project through migrations; do not start or depend on local Supabase.
 
 ## Supabase Auth setup checklist
 
@@ -89,7 +66,7 @@ In Supabase Dashboard:
    - Google: enable Google provider and set authorized redirect/client settings in Supabase.
 2. Authentication -> URL Configuration:
    - Site URL: your deployed URL
-   - Redirect URLs: add your deployed URL, `http://localhost:5500` (or your local dev URL), and the mobile deep link `o6umedbank://auth/callback`
+   - Redirect URLs: add your deployed URL and the mobile deep link `o6umedbank://auth/callback`
 3. Enable leaked-password protection (recommended for production).
 4. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
 
@@ -98,21 +75,17 @@ In Supabase Dashboard:
 You still need to confirm these values in the Supabase project UI:
 
 1. Project dashboard -> `Connect`
-   - copy the project URL
-   - copy the browser-safe publishable/anon key
-   - copy the connection strings you actually need for tooling:
-     - Direct connection
-     - Session pooler
-     - Transaction pooler
+   - confirm the project URL
+   - confirm the browser-safe publishable/anon key
 2. Authentication -> `URL Configuration`
    - set `Site URL` to your deployed frontend URL
    - add all valid redirect URLs used by this app
 3. Authentication -> `Providers`
    - enable Email
    - enable Google only if you intend to keep Google sign-in active
-4. SQL Editor
-   - run `database/supabase_full_setup.sql` if the schema is not fully applied yet
-   - or run the listed migration/setup files in order
+4. Database migrations
+   - apply migrations to the hosted Supabase project only
+   - do not use local Supabase as part of the runtime or release flow
 5. Storage
    - create the `question-images` bucket if you want image upload to work
 6. Edge Functions or hosting UI
@@ -121,33 +94,22 @@ You still need to confirm these values in the Supabase project UI:
      - `ALLOWED_ORIGIN`
    - if you host your own `/api` backend instead, set the same server env vars there
 
-Recommended connection selection for your project UI choices:
+Recommended connection selection:
 
-- Use `Project URL` + `publishable/anon key` for this website frontend
-- Use `Transaction pooler` only if you later add direct SQL inside serverless functions
-- Use `Session pooler` for long-lived IPv4-only app servers
-- Use `Direct connection` for SQL tools, migrations, pg_dump, and database GUIs when IPv6 works
+- Use the hosted `Project URL` + publishable/anon key for this website frontend.
+- Use the hosted Supabase Dashboard/CLI remote connection for migrations.
+- Do not run local Supabase for production or student/admin usage.
 
 ## Publish to web
 
 This project is static (`index.html` + `main.js` + `styles.css`), so GitHub Pages works.
 
-### Safe pre-release workflow (recommended)
+### Release workflow
 
-Use this to test everything before users see it:
-
-1. Test locally first:
-
-```bash
-cd "/Users/youssefayoub/Documents/Apps/MCQs Website"
-python3 -m http.server 4173
-```
-
-Open `http://localhost:4173` and verify the full flow as admin + student.
-
-2. Push your branch. The `Validate Changes` GitHub Action now runs automatically on every push/PR.
-3. Production is now manual-only. Nothing is published to GitHub Pages on push.
-4. When you approve the result, run the workflow `Deploy GitHub Pages (Manual)` and deploy `main`.
+1. Push to `main`.
+2. The `Validate Changes` GitHub Action runs automatically.
+3. GitHub Pages deploys the static app from the repository.
+4. The deployed app talks directly to the hosted Supabase project.
 
 Quick GitHub Pages steps:
 
@@ -188,12 +150,7 @@ Frontend config:
 - For same-origin deploys with functions (for example, Vercel static + functions together), set it to `"/api"`.
 - If frontend and API are on different domains, set a full URL (for example, `https://your-api.vercel.app/api`).
 
-Local smoke run:
-
-```bash
-cp .env.example .env
-vercel dev
-```
+For GitHub Pages-only deploys, `serverApiBaseUrl` can stay empty and the app will use Supabase Edge Functions fallback.
 
 ### Supabase Edge Function fallback (no separate `/api` backend)
 
@@ -202,7 +159,7 @@ You can deploy these Edge Functions and keep `serverApiBaseUrl` empty:
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
 
-Deploy:
+Deploy to the hosted Supabase project:
 
 ```bash
 supabase functions deploy admin-delete-user
@@ -222,55 +179,23 @@ How it works with this app:
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
 
-## Real SQL database (added)
+## Hosted SQL database
 
-A real PostgreSQL schema and seed setup is now included:
+The real PostgreSQL schema lives in hosted Supabase. Keep database changes in migrations:
 
-- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/schema.sql`
-- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/seed.sql`
-- `/Users/youssefayoub/Documents/Apps/MCQs Website/database/README.md`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/migrations`
 
-Quick run:
+Apply migrations to the hosted project only:
 
 ```bash
-createdb o6umedbank
-psql -d o6umedbank -f database/schema.sql
-psql -d o6umedbank -f database/seed.sql
+supabase db push --dns-resolver https
 ```
 
-Supabase SQL editor run order:
-
-```sql
--- 1) Full website tables
---    run file: database/schema.sql
-
--- 2) Seed starter data
---    run file: database/seed.sql
-
--- 3) Sync table compatibility (handles appstate/storagekey and app_state/storage_key)
---    run file: database/supabase_appstate_compat.sql
-```
-
-Or run one file:
-
-```sql
--- run file: database/supabase_full_setup.sql
-```
-
-Then verify:
-
-```sql
--- run file: database/supabase_verify.sql
-```
+No local Postgres database is required for the website to run.
 
 ## Notes
 
-This is still mostly a frontend prototype UI. SQL database files are production-style; server API wiring has started and should be expanded for other admin/data writes.
-
-1. Replace localStorage with a real backend + database.
-2. Add secure auth (hashed passwords, email verification, reset tokens).
-3. Add media upload/storage, moderation workflow, and version history.
-4. Add server-side analytics aggregation and backup strategy.
+The production data path is hosted Supabase. Local browser storage remains only a cache/UX layer for route memory, theme, and offline-safe pending writes.
 
 ## 2,000-user hardening (completed in this repo)
 
