@@ -14966,6 +14966,24 @@ function bindGlobalEvents() {
       return;
     }
 
+    if (action === "admin-top-tab") {
+      const requestedTab = String(actionTarget?.getAttribute("data-tab") || "data").trim();
+      state.route = "admin";
+      state.adminPage = requestedTab === "courses" ? "courses" : "dashboard";
+      state.adminQuestionModalOpen = false;
+      state.adminSelectedQuestionIds = [];
+      state.adminBulkActionRunning = false;
+      state.adminBulkActionType = "";
+      state.adminCourseTopicModalCourse = "";
+      state.adminCourseTopicGroupCreateModalOpen = false;
+      state.adminCourseTopicInlineCreateOpen = false;
+      state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
       state.userMenuOpen = false;
@@ -18308,10 +18326,13 @@ function syncTopbar() {
     const isMcqRoute = ["dashboard", "create-test", "analytics", "qbank", "session", "review", "notifications", "profile"].includes(currentRoute);
     const isCourseRoute = currentRoute === "courses";
     const isAppLauncher = currentRoute === "app-launcher";
-    const adminBtn = privateNavEl.querySelector("#admin-link");
     privateNavEl.innerHTML = ``;
     if (isAdmin) {
-      privateNavEl.innerHTML = `<button data-nav="admin">Admin Dashboard</button>`;
+      const isCourseAdminPage = currentRoute === "admin" && String(state.adminPage || "").trim() === "courses";
+      privateNavEl.innerHTML = `
+        <button data-action="admin-top-tab" data-tab="data" class="${!isCourseAdminPage ? "is-active" : ""}">Current Data</button>
+        <button data-action="admin-top-tab" data-tab="courses" class="${isCourseAdminPage ? "is-active" : ""}">Manage Courses</button>
+      `;
       privateNavEl.classList.remove("hidden");
     } else if (isAppLauncher) {
       privateNavEl.classList.add("hidden");
@@ -18330,10 +18351,6 @@ function syncTopbar() {
         <button data-action="courses-home-tab" data-tab="suggestions" class="${courseTab === "suggestions" && state.coursesView === "home" ? "is-active" : ""}">Course Suggestions</button>
       `;
       privateNavEl.classList.remove("hidden");
-    }
-    if (adminBtn) {
-      privateNavEl.appendChild(adminBtn);
-      adminBtn.classList.toggle("hidden", user?.role !== "admin");
     }
   } else {
     privateNavEl.innerHTML = ``;
@@ -25861,7 +25878,6 @@ function renderAdmin() {
         <div class="admin-sidebar-nav">
           <button class="btn ghost ${activeAdminPage === "dashboard" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="dashboard">Dashboard</button>
           <button class="btn ghost ${activeAdminPage === "users" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="users">Users</button>
-          <button class="btn ghost ${activeAdminPage === "courses" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="courses">Courses</button>
           <button class="btn ghost ${activeAdminPage === "questions" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="questions">Questions</button>
           <button class="btn ghost ${activeAdminPage === "bulk-import" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="bulk-import">Bulk Import</button>
           <button class="btn ghost ${activeAdminPage === "notifications" ? "is-active" : ""}" type="button" data-action="admin-page" data-page="notifications">Notifications</button>
