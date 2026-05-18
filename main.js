@@ -18355,8 +18355,8 @@ function syncTopbar() {
     if (isAdmin) {
       const isCourseAdminPage = currentRoute === "admin" && String(state.adminPage || "").trim() === "course-platform";
       privateNavEl.innerHTML = `
-        <button data-action="admin-top-tab" data-tab="data" class="${!isCourseAdminPage ? "is-active" : ""}">Current Data</button>
-        <button data-action="admin-top-tab" data-tab="courses" class="${isCourseAdminPage ? "is-active" : ""}">Manage Courses App</button>
+        <button data-action="admin-top-tab" data-tab="data" class="${!isCourseAdminPage ? "is-active" : ""}">Questions</button>
+        <button data-action="admin-top-tab" data-tab="courses" class="${isCourseAdminPage ? "is-active" : ""}">Courses</button>
       `;
       privateNavEl.classList.remove("hidden");
     } else if (isAppLauncher) {
