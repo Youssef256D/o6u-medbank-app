@@ -289,6 +289,37 @@ const state = {
     topics: [],
     topicSource: "",
   },
+  coursesView: "home",
+  coursesActiveCourseId: "",
+  coursesActiveLessonId: "",
+  coursesSearch: "",
+  coursesFilter: "all",
+  coursesLoading: false,
+  coursesError: "",
+  coursesLoadedAt: 0,
+  coursesCatalog: [],
+  coursesEnrollments: [],
+  coursesRequests: [],
+  coursesProgress: [],
+  coursesDetail: null,
+  coursesModules: [],
+  coursesLessons: [],
+  coursesResources: [],
+  coursesAnnouncements: [],
+  adminCoursesPlatformLoading: false,
+  adminCoursesPlatformError: "",
+  adminCoursesPlatformLoadedAt: 0,
+  adminCoursesPlatformCourses: [],
+  adminCoursesPlatformModules: [],
+  adminCoursesPlatformLessons: [],
+  adminCoursesPlatformResources: [],
+  adminCoursesPlatformAnnouncements: [],
+  adminCoursesPlatformRequests: [],
+  adminCoursesPlatformEnrollments: [],
+  adminCoursesPlatformTopics: [],
+  adminCourseBuilderCourseId: "",
+  adminCourseBuilderLessonId: "",
+  adminCourseBuilderPreview: false,
   createTestSource: "all",
   previousTestFilters: {
     dateKey: "",
@@ -24939,6 +24970,7 @@ function renderAdmin() {
               `}
             </div>
       </section>
+      ${adminRenderCourseBuilder(state.adminCourseBuilderCourseId)}
     `;
 
     adminGlobalOverlay = focusedCourseWorkspace && state.adminCourseTopicModalCourse
@@ -27416,6 +27448,7 @@ function wireAdmin() {
     root.addEventListener("click", handleAdminCourseAction);
     root.addEventListener("keydown", handleAdminCourseKeydown);
   });
+  wireAdminCoursesPlatformBuilder();
 
   const addUserDisclosure = document.getElementById("admin-add-user-disclosure");
   addUserDisclosure?.addEventListener("toggle", () => {
@@ -38019,6 +38052,1470 @@ function renderBootstrapFallback() {
   }
 }
 
+const COURSE_PLATFORM_TABLES = new Set([
+  "course_modules",
+  "course_lessons",
+  "course_resources",
+  "student_lesson_progress",
+  "course_announcements",
+  "course_enrollment_requests",
+]);
+
+function normalizeCoursePlatformMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "open" || normalized === "request") {
+    return normalized;
+  }
+  return "assigned";
+}
+
+function normalizeCoursePlatformType(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "mcq_only" || normalized === "lessons_only") {
+    return normalized;
+  }
+  return "mcq_and_lessons";
+}
+
+function getCoursesPlatformClient() {
+  return getRelationalClient();
+}
+
+function getCurrentCoursePlatformUserId() {
+  const user = getCurrentUser();
+  return String(getUserProfileId(user) || "").trim();
+}
+
+function getCoursePlatformCourseTitle(course) {
+  return String(course?.course_name || course?.title || "Course").trim() || "Course";
+}
+
+function getCoursePlatformCoverUrl(course) {
+  const entered = String(course?.cover_image_url || "").trim();
+  if (/^https?:\/\//i.test(entered) || entered.startsWith("Assets/")) {
+    return entered;
+  }
+  return "Assets/branding/web-logo-hero.png";
+}
+
+function formatCourseDurationLabel(seconds, fallback = "") {
+  const safeSeconds = Math.max(0, Number(seconds) || 0);
+  if (!safeSeconds) {
+    return String(fallback || "").trim();
+  }
+  const minutes = Math.ceil(safeSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
+function getCourseEnrollmentState(course, enrollments = state.coursesEnrollments, requests = state.coursesRequests) {
+  const courseId = String(course?.id || course || "").trim();
+  const isEnrolled = (Array.isArray(enrollments) ? enrollments : []).some((row) => String(row?.course_id || "").trim() === courseId);
+  const request = (Array.isArray(requests) ? requests : []).find((row) => String(row?.course_id || "").trim() === courseId) || null;
+  return {
+    isEnrolled,
+    request,
+    requestStatus: String(request?.status || "").trim().toLowerCase(),
+    mode: normalizeCoursePlatformMode(course?.enrollment_mode),
+  };
+}
+
+function getCoursePlatformLessonsForCourse(courseId, lessons = state.coursesLessons) {
+  const target = String(courseId || "").trim();
+  return (Array.isArray(lessons) ? lessons : [])
+    .filter((lesson) => String(lesson?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
+}
+
+function getCoursePlatformProgressPercent(courseId, lessons = state.coursesLessons, progressRows = state.coursesProgress) {
+  const courseLessons = getCoursePlatformLessonsForCourse(courseId, lessons).filter((lesson) => lesson?.is_published !== false);
+  if (!courseLessons.length) {
+    return 0;
+  }
+  const completed = new Set(
+    (Array.isArray(progressRows) ? progressRows : [])
+      .filter((row) => String(row?.course_id || "").trim() === String(courseId || "").trim())
+      .filter((row) => String(row?.status || "").trim() === "completed" || Number(row?.progress_percent) >= 100)
+      .map((row) => String(row?.lesson_id || "").trim())
+      .filter(Boolean),
+  );
+  return Math.round((completed.size / courseLessons.length) * 100);
+}
+
+function getLastOpenedCourseLesson(courseId, lessons = state.coursesLessons, progressRows = state.coursesProgress) {
+  const lessonIds = new Set(getCoursePlatformLessonsForCourse(courseId, lessons).map((lesson) => String(lesson?.id || "").trim()));
+  const latest = (Array.isArray(progressRows) ? progressRows : [])
+    .filter((row) => lessonIds.has(String(row?.lesson_id || "").trim()))
+    .sort((a, b) => parseSyncTimestampMs(b?.last_opened_at) - parseSyncTimestampMs(a?.last_opened_at))[0];
+  if (!latest) {
+    return null;
+  }
+  return getCoursePlatformLessonsForCourse(courseId, lessons).find((lesson) => String(lesson?.id || "").trim() === String(latest.lesson_id || "").trim()) || null;
+}
+
+function getCoursePlatformTopicById(topicId) {
+  const target = String(topicId || "").trim();
+  if (!target) return null;
+  return [...(state.coursesTopics || []), ...(state.adminCoursesPlatformTopics || [])]
+    .find((topic) => String(topic?.id || "").trim() === target) || null;
+}
+
+function buildCoursePlatformTopicLabel(topicId) {
+  const topic = getCoursePlatformTopicById(topicId);
+  return String(topic?.topic_name || "").trim();
+}
+
+function setCoursesPlatformError(error, fallback = "Courses could not be loaded.") {
+  const message = getErrorMessage(error, fallback);
+  state.coursesError = message;
+  if (isMissingRelationError(error)) {
+    state.coursesError = "Courses platform tables are not available yet. Run the latest Supabase migration first.";
+  }
+}
+
+async function loadStudentCoursesWithProgress(options = {}) {
+  const user = getCurrentUser();
+  const userId = String(getUserProfileId(user) || "").trim();
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(userId)) {
+    state.coursesLoading = false;
+    state.coursesError = "Sign in with your student account to load courses.";
+    return false;
+  }
+  if (state.coursesLoading && !options.force) {
+    return false;
+  }
+  state.coursesLoading = true;
+  state.coursesError = "";
+  try {
+    const [courses, enrollments, requests, progress, lessons] = await Promise.all([
+      runRelationalQueryWithTimeout(
+        client
+          .from("courses")
+          .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+          .eq("is_active", true)
+          .order("academic_year", { ascending: true })
+          .order("academic_semester", { ascending: true })
+          .order("course_name", { ascending: true }),
+        "Courses query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("user_course_enrollments").select("user_id,course_id,assigned_at").eq("user_id", userId),
+        "Enrollment query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("course_enrollment_requests").select("id,user_id,course_id,status,created_at,updated_at").eq("user_id", userId),
+        "Enrollment request query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(
+        client.from("student_lesson_progress").select("id,user_id,course_id,lesson_id,status,progress_percent,watched_seconds,completed_at,last_opened_at,updated_at").eq("user_id", userId),
+        "Lesson progress query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(
+        client.from("course_lessons").select("id,course_id,module_id,is_published,position,title").order("position", { ascending: true }),
+        "Lesson summary query timed out.",
+      ).catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+    ]);
+
+    state.coursesCatalog = (Array.isArray(courses) ? courses : []).filter((course) => course?.is_published !== false || getCourseEnrollmentState(course, enrollments, requests).isEnrolled);
+    state.coursesEnrollments = Array.isArray(enrollments) ? enrollments : [];
+    state.coursesRequests = Array.isArray(requests) ? requests : [];
+    state.coursesProgress = Array.isArray(progress) ? progress : [];
+    state.coursesLessons = Array.isArray(lessons) ? lessons : [];
+    state.coursesLoadedAt = Date.now();
+    state.coursesLoading = false;
+    return true;
+  } catch (error) {
+    console.warn("Could not load courses platform.", error?.message || error);
+    setCoursesPlatformError(error);
+    state.coursesLoading = false;
+    return false;
+  }
+}
+
+async function loadCourseModulesAndLessons(courseId) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(targetCourseId)) {
+    return false;
+  }
+  try {
+    const [modules, lessons, resources, announcements, topics] = await Promise.all([
+      runRelationalQueryWithTimeout(
+        client.from("course_modules").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        "Course modules query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("course_lessons").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        "Course lessons query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("course_resources").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        "Course resources query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("course_announcements").select("*").eq("course_id", targetCourseId).order("created_at", { ascending: false }),
+        "Course announcements query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("course_topics").select("id,course_id,topic_name").eq("course_id", targetCourseId).order("topic_name", { ascending: true }),
+        "Course topics query timed out.",
+      ).catch(() => []),
+    ]);
+    state.coursesModules = Array.isArray(modules) ? modules : [];
+    state.coursesLessons = Array.isArray(lessons) ? lessons : [];
+    state.coursesResources = Array.isArray(resources) ? resources : [];
+    state.coursesAnnouncements = Array.isArray(announcements) ? announcements : [];
+    state.coursesTopics = Array.isArray(topics) ? topics : [];
+    return true;
+  } catch (error) {
+    console.warn("Could not load course modules.", error?.message || error);
+    setCoursesPlatformError(error, "Course content could not be loaded.");
+    return false;
+  }
+}
+
+async function loadCourseDetail(courseId) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(targetCourseId)) {
+    state.coursesError = "Course could not be opened.";
+    return false;
+  }
+  state.coursesLoading = true;
+  state.coursesError = "";
+  try {
+    const course = await runRelationalQueryWithTimeout(
+      client
+        .from("courses")
+        .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+        .eq("id", targetCourseId)
+        .maybeSingle(),
+      "Course detail query timed out.",
+    );
+    if (!course) {
+      throw new Error("Course not found or you do not have access.");
+    }
+    state.coursesDetail = course;
+    await loadStudentCoursesWithProgress({ force: true });
+    await loadCourseModulesAndLessons(targetCourseId);
+    state.coursesDetail = course;
+    state.coursesActiveCourseId = targetCourseId;
+    state.coursesLoading = false;
+    return true;
+  } catch (error) {
+    console.warn("Could not load course detail.", error?.message || error);
+    setCoursesPlatformError(error, "Course could not be loaded.");
+    state.coursesLoading = false;
+    return false;
+  }
+}
+
+async function updateLessonProgress(lessonId, status = "in_progress", progressPercent = 0) {
+  const userId = getCurrentCoursePlatformUserId();
+  const client = getCoursesPlatformClient();
+  const targetLessonId = String(lessonId || "").trim();
+  const lesson = state.coursesLessons.find((entry) => String(entry?.id || "").trim() === targetLessonId);
+  if (!client || !isUuidValue(userId) || !lesson) {
+    toast("Lesson progress could not be saved.");
+    return false;
+  }
+  const existingProgress = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
+  const alreadyComplete = String(existingProgress?.status || "").trim() === "completed" || Number(existingProgress?.progress_percent) >= 100;
+  const normalizedStatus = alreadyComplete || String(status || "").trim() === "completed" ? "completed" : "in_progress";
+  const safeProgress = normalizedStatus === "completed"
+    ? 100
+    : Math.max(0, Math.min(99, Math.round(Number(progressPercent) || 0)));
+  const payload = {
+    user_id: userId,
+    course_id: lesson.course_id,
+    lesson_id: targetLessonId,
+    status: normalizedStatus,
+    progress_percent: safeProgress,
+    last_opened_at: nowISO(),
+    updated_at: nowISO(),
+    completed_at: normalizedStatus === "completed" ? (existingProgress?.completed_at || nowISO()) : null,
+  };
+  try {
+    await runRelationalQueryWithTimeout(
+      client.from("student_lesson_progress").upsert(payload, { onConflict: "user_id,lesson_id" }),
+      "Lesson progress update timed out.",
+    );
+    const existingIndex = state.coursesProgress.findIndex((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
+    if (existingIndex >= 0) {
+      state.coursesProgress[existingIndex] = { ...state.coursesProgress[existingIndex], ...payload };
+    } else {
+      state.coursesProgress.push(payload);
+    }
+    return true;
+  } catch (error) {
+    console.warn("Could not update lesson progress.", error?.message || error);
+    toast(getErrorMessage(error, "Lesson progress could not be saved."));
+    return false;
+  }
+}
+
+async function enrollInOpenCourse(courseId) {
+  const client = getCoursesPlatformClient();
+  const userId = getCurrentCoursePlatformUserId();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(userId) || !isUuidValue(targetCourseId)) {
+    toast("Course enrollment could not start.");
+    return false;
+  }
+  if (state.coursesEnrollments.some((row) => String(row?.course_id || "").trim() === targetCourseId)) {
+    toast("You are already enrolled in this course.");
+    return true;
+  }
+  try {
+    await runRelationalQueryWithTimeout(
+      client.from("user_course_enrollments").insert({ user_id: userId, course_id: targetCourseId }),
+      "Course enrollment timed out.",
+    );
+    toast("Course enrolled.");
+    await loadStudentCoursesWithProgress({ force: true });
+    return true;
+  } catch (error) {
+    console.warn("Could not enroll in course.", error?.message || error);
+    toast(getErrorMessage(error, "Could not enroll in this course."));
+    return false;
+  }
+}
+
+async function requestCourseEnrollment(courseId) {
+  const client = getCoursesPlatformClient();
+  const userId = getCurrentCoursePlatformUserId();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(userId) || !isUuidValue(targetCourseId)) {
+    toast("Access request could not be sent.");
+    return false;
+  }
+  const existing = state.coursesRequests.find((row) => String(row?.course_id || "").trim() === targetCourseId);
+  if (existing) {
+    toast(`Request is ${String(existing.status || "pending")}.`);
+    return true;
+  }
+  try {
+    await runRelationalQueryWithTimeout(
+      client.from("course_enrollment_requests").insert({ user_id: userId, course_id: targetCourseId, status: "pending" }),
+      "Course access request timed out.",
+    );
+    toast("Access request sent.");
+    await loadStudentCoursesWithProgress({ force: true });
+    return true;
+  } catch (error) {
+    console.warn("Could not request course enrollment.", error?.message || error);
+    toast(getErrorMessage(error, "Could not request access."));
+    return false;
+  }
+}
+
+function openCourseMcqPractice(courseId, options = {}) {
+  const course = state.coursesDetail?.id === courseId
+    ? state.coursesDetail
+    : (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(courseId || "").trim());
+  const courseName = getCoursePlatformCourseTitle(course);
+  const topicId = String(options?.topicId || "").trim();
+  const topicName = topicId ? buildCoursePlatformTopicLabel(topicId) : "";
+  state.qbankFilters.course = courseName;
+  state.qbankFilters.topics = topicName ? [topicName] : [];
+  state.qbankFilters.topicSource = "";
+  state.createTestSource = String(options?.source || "all") === "incorrect" ? "incorrect" : "all";
+  navigate("create-test");
+}
+
+function renderCoursesHome() {
+  const query = String(state.coursesSearch || "").trim().toLowerCase();
+  const filter = String(state.coursesFilter || "all");
+  const courses = Array.isArray(state.coursesCatalog) ? state.coursesCatalog : [];
+  const decorated = courses.map((course) => {
+    const enrollment = getCourseEnrollmentState(course);
+    const progress = getCoursePlatformProgressPercent(course.id);
+    const lessonCount = getCoursePlatformLessonsForCourse(course.id).length;
+    return { course, enrollment, progress, lessonCount };
+  });
+  const filtered = decorated
+    .filter(({ course, enrollment }) => {
+      if (query && !`${course.course_name || ""} ${course.description || ""} ${course.instructor_name || ""}`.toLowerCase().includes(query)) {
+        return false;
+      }
+      if (filter === "enrolled") return enrollment.isEnrolled;
+      if (filter === "open") return !enrollment.isEnrolled && enrollment.mode === "open";
+      if (filter === "request") return !enrollment.isEnrolled && enrollment.mode === "request";
+      return true;
+    });
+  const enrolledCount = decorated.filter((entry) => entry.enrollment.isEnrolled).length;
+  const openCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "open").length;
+  const requestCount = decorated.filter((entry) => !entry.enrollment.isEnrolled && entry.enrollment.mode === "request").length;
+
+  return `
+    <section class="panel courses-shell">
+      <div class="courses-hero">
+        <div>
+          <button class="btn ghost admin-btn-sm" data-nav="app-launcher" type="button">Back to Apps</button>
+          <p class="kicker">O6U Courses</p>
+          <h2 class="title">Learning platform</h2>
+          <p class="subtle">Follow structured modules, keep lesson progress, and jump into linked MCQ practice when a topic is ready.</p>
+        </div>
+        <div class="courses-hero-stats">
+          <span><b>${enrolledCount}</b><small>Enrolled</small></span>
+          <span><b>${openCount}</b><small>Open</small></span>
+          <span><b>${requestCount}</b><small>Request access</small></span>
+        </div>
+      </div>
+
+      <div class="courses-toolbar">
+        <label class="courses-search">Search
+          <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
+        </label>
+        <label>Filter
+          <select id="courses-filter">
+            <option value="all" ${filter === "all" ? "selected" : ""}>All visible</option>
+            <option value="enrolled" ${filter === "enrolled" ? "selected" : ""}>Enrolled</option>
+            <option value="open" ${filter === "open" ? "selected" : ""}>Open courses</option>
+            <option value="request" ${filter === "request" ? "selected" : ""}>Request-only</option>
+          </select>
+        </label>
+      </div>
+
+      ${state.coursesLoading && !state.coursesLoadedAt ? `<div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Loading courses...</p></div>` : ""}
+      ${state.coursesError ? `<div class="card courses-error"><b>Courses error</b><p>${escapeHtml(state.coursesError)}</p><button class="btn ghost admin-btn-sm" type="button" data-action="courses-retry">Retry</button></div>` : ""}
+      ${!state.coursesLoading && !state.coursesError && !filtered.length ? `<div class="card courses-empty"><h3>No courses found</h3><p class="subtle">Try clearing the search or choose another filter.</p></div>` : ""}
+
+      <div class="courses-grid">
+        ${filtered.map(({ course, enrollment, progress, lessonCount }) => {
+          const title = getCoursePlatformCourseTitle(course);
+          const statusLabel = enrollment.isEnrolled
+            ? `${progress}% complete`
+            : enrollment.mode === "open"
+              ? "Open enrollment"
+              : enrollment.requestStatus
+                ? `Request ${enrollment.requestStatus}`
+                : "Request access";
+          return `
+            <article class="card course-card">
+              <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
+                <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
+              </button>
+              <div class="course-card-body">
+                <div class="course-card-meta">
+                  <span>Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</span>
+                  <span>${escapeHtml(statusLabel)}</span>
+                </div>
+                <h3>${escapeHtml(title)}</h3>
+                <p>${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
+                <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+                <div class="course-card-footer">
+                  <small>${lessonCount} lesson${lessonCount === 1 ? "" : "s"}${course.estimated_duration ? ` • ${escapeHtml(course.estimated_duration)}` : ""}</small>
+                  <button class="btn admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">${enrollment.isEnrolled ? "Continue" : "View"}</button>
+                </div>
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCourseDetail(courseId) {
+  const course = state.coursesDetail || (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(courseId || "").trim());
+  if (!course && state.coursesLoading) {
+    return `<section class="panel courses-shell"><button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button><div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Opening course...</p></div></section>`;
+  }
+  if (!course) {
+    return `<section class="panel courses-shell"><button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button><div class="card courses-error"><b>Course unavailable</b><p>${escapeHtml(state.coursesError || "This course could not be opened.")}</p></div></section>`;
+  }
+  const modules = (state.coursesModules || []).filter((module) => String(module?.course_id || "").trim() === String(course.id || "").trim());
+  const lessons = getCoursePlatformLessonsForCourse(course.id);
+  const enrollment = getCourseEnrollmentState(course);
+  const progress = getCoursePlatformProgressPercent(course.id);
+  const lastLesson = getLastOpenedCourseLesson(course.id) || lessons[0] || null;
+  const canOpenLessons = enrollment.isEnrolled || enrollment.mode === "open";
+  return `
+    <section class="panel courses-shell">
+      <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button>
+      <div class="course-detail-hero">
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" />
+        <div class="course-detail-copy">
+          <p class="kicker">Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</p>
+          <h2 class="title">${escapeHtml(getCoursePlatformCourseTitle(course))}</h2>
+          <p class="subtle">${escapeHtml(course.description || "Course materials, lessons, announcements, and linked MCQ practice.")}</p>
+          <div class="course-detail-facts">
+            <span>${escapeHtml(course.instructor_name || "Instructor TBA")}</span>
+            <span>${escapeHtml(course.estimated_duration || "Self-paced")}</span>
+            <span>${progress}% complete</span>
+          </div>
+          <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+          <div class="stack">
+            ${enrollment.isEnrolled || enrollment.mode === "open"
+              ? `<button class="btn" type="button" data-action="${enrollment.isEnrolled ? "courses-open-lesson" : "courses-enroll-open"}" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>${enrollment.isEnrolled ? "Continue learning" : "Enroll in course"}</button>`
+              : enrollment.mode === "request"
+                ? `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request access"}</button>`
+                : ""
+            }
+            <button class="btn ghost" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice this course</button>
+            <button class="btn ghost" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Create MCQ block</button>
+            <button class="btn ghost" type="button" data-action="courses-review-weak" data-course-id="${escapeHtml(course.id)}">Review weak areas</button>
+          </div>
+        </div>
+      </div>
+
+      ${course.instructor_bio ? `<article class="card course-instructor"><h3>Instructor</h3><p><b>${escapeHtml(course.instructor_name || "Instructor")}</b></p><p class="subtle">${escapeHtml(course.instructor_bio)}</p></article>` : ""}
+
+      <div class="course-detail-layout">
+        <section class="course-modules">
+          <h3>Modules</h3>
+          ${!modules.length ? `<div class="card courses-empty"><p class="subtle">No published modules are available yet.</p></div>` : modules.map((module) => {
+            const moduleLessons = lessons.filter((lesson) => String(lesson?.module_id || "").trim() === String(module?.id || "").trim());
+            return `
+              <article class="card course-module-card">
+                <div class="course-module-head">
+                  <div>
+                    <h4>${escapeHtml(module.title)}</h4>
+                    ${module.description ? `<p class="subtle">${escapeHtml(module.description)}</p>` : ""}
+                  </div>
+                  <span>${moduleLessons.length} lesson${moduleLessons.length === 1 ? "" : "s"}</span>
+                </div>
+                <div class="course-lesson-list">
+                  ${moduleLessons.map((lesson) => {
+                    const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
+                    const done = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
+                    return `
+                      <button class="course-lesson-row" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" data-lesson-id="${escapeHtml(lesson.id)}" ${canOpenLessons || lesson.is_free_preview ? "" : "disabled"}>
+                        <span class="course-lesson-status ${done ? "is-complete" : ""}">${done ? "Done" : lesson.lesson_type || "Lesson"}</span>
+                        <span>${escapeHtml(lesson.title)}</span>
+                        <small>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds, lesson.is_free_preview ? "Preview" : ""))}</small>
+                      </button>
+                    `;
+                  }).join("") || `<p class="subtle">Lessons are coming soon.</p>`}
+                </div>
+              </article>
+            `;
+          }).join("")}
+        </section>
+
+        <aside class="course-side">
+          <article class="card">
+            <h3>Announcements</h3>
+            ${(state.coursesAnnouncements || []).length
+              ? state.coursesAnnouncements.map((item) => `<div class="course-announcement"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div>`).join("")
+              : `<p class="subtle">No announcements yet.</p>`
+            }
+          </article>
+        </aside>
+      </div>
+    </section>
+  `;
+}
+
+function renderLessonViewer(lessonId) {
+  const lesson = (state.coursesLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
+  const course = state.coursesDetail || (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(lesson?.course_id || "").trim());
+  if (!lesson) {
+    return `<section class="panel courses-shell"><button class="btn ghost admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(state.coursesActiveCourseId)}">Back to Course</button><div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Opening lesson...</p></div></section>`;
+  }
+  const lessons = getCoursePlatformLessonsForCourse(lesson.course_id);
+  const index = lessons.findIndex((entry) => String(entry?.id || "").trim() === String(lesson.id || "").trim());
+  const previous = index > 0 ? lessons[index - 1] : null;
+  const next = index >= 0 && index < lessons.length - 1 ? lessons[index + 1] : null;
+  const resources = (state.coursesResources || []).filter((resource) => String(resource?.lesson_id || "").trim() === String(lesson.id || "").trim());
+  const linkedTopicName = buildCoursePlatformTopicLabel(lesson.linked_topic_id);
+  const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
+  const isComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
+  const safeVideoUrl = /^https?:\/\//i.test(String(lesson.video_url || "").trim()) ? String(lesson.video_url || "").trim() : "";
+
+  return `
+    <section class="panel courses-shell lesson-shell">
+      <div class="lesson-topbar">
+        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(lesson.course_id)}">Back to Course</button>
+        <span>${escapeHtml(getCoursePlatformCourseTitle(course))}</span>
+      </div>
+      <div class="lesson-layout">
+        <article class="card lesson-viewer">
+          <div class="lesson-viewer-head">
+            <div>
+              <p class="kicker">${escapeHtml(lesson.lesson_type || "Lesson")}</p>
+              <h2>${escapeHtml(lesson.title)}</h2>
+              ${lesson.description ? `<p class="subtle">${escapeHtml(lesson.description)}</p>` : ""}
+            </div>
+            <button class="btn ${isComplete ? "ghost" : ""}" type="button" data-action="courses-complete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">${isComplete ? "Completed" : "Mark complete"}</button>
+          </div>
+          ${safeVideoUrl ? `<div class="lesson-video"><iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy"></iframe></div>` : ""}
+          ${lesson.content_html ? `<div class="lesson-content">${escapeHtml(lesson.content_html).replaceAll("\n", "<br />")}</div>` : `<p class="subtle">No text content has been added to this lesson yet.</p>`}
+          ${resources.length ? `
+            <div class="lesson-resources">
+              <h3>Resources</h3>
+              ${resources.map((resource) => {
+                const href = String(resource.external_url || resource.file_url || "").trim();
+                return `<a class="course-resource-link" href="${escapeHtml(/^https?:\/\//i.test(href) ? href : "#")}" target="_blank" rel="noopener">${escapeHtml(resource.title)}<small>${escapeHtml(resource.description || resource.resource_type || "")}</small></a>`;
+              }).join("")}
+            </div>
+          ` : ""}
+          ${linkedTopicName ? `
+            <div class="lesson-mcq-panel">
+              <h3>Linked MCQ topic</h3>
+              <p class="subtle">${escapeHtml(linkedTopicName)}</p>
+              <div class="stack">
+                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-topic" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Practice this topic</button>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-topic" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Create MCQ block from this topic</button>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-review-topic-incorrect" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Review incorrect questions from this topic</button>
+              </div>
+            </div>
+          ` : ""}
+        </article>
+        <aside class="card lesson-next">
+          <h3>Lesson navigation</h3>
+          <button class="btn ghost" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(previous?.id || "")}" ${previous ? "" : "disabled"}>Previous lesson</button>
+          <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(next?.id || "")}" ${next ? "" : "disabled"}>Next lesson</button>
+        </aside>
+      </div>
+    </section>
+  `;
+}
+
+function renderCourses() {
+  if (!state.coursesLoadedAt && !state.coursesLoading) {
+    loadStudentCoursesWithProgress().then((ok) => {
+      if (state.route === "courses" && ok) {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  if (state.coursesView === "detail") {
+    return renderCourseDetail(state.coursesActiveCourseId);
+  }
+  if (state.coursesView === "lesson") {
+    return renderLessonViewer(state.coursesActiveLessonId);
+  }
+  return renderCoursesHome();
+}
+
+function wireCourses() {
+  document.getElementById("courses-search")?.addEventListener("input", (event) => {
+    state.coursesSearch = String(event.target?.value || "");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+  document.getElementById("courses-filter")?.addEventListener("change", (event) => {
+    state.coursesFilter = String(event.target?.value || "all");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelector("[data-action='courses-retry']")?.addEventListener("click", async () => {
+    await loadStudentCoursesWithProgress({ force: true });
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelectorAll("[data-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.getAttribute("data-action");
+      const courseId = String(button.getAttribute("data-course-id") || state.coursesActiveCourseId || "").trim();
+      const lessonId = String(button.getAttribute("data-lesson-id") || "").trim();
+      const topicId = String(button.getAttribute("data-topic-id") || "").trim();
+
+      if (action === "courses-home") {
+        state.coursesView = "home";
+        state.coursesActiveCourseId = "";
+        state.coursesActiveLessonId = "";
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+
+      if (action === "courses-open-course" && courseId) {
+        state.coursesView = "detail";
+        state.coursesActiveCourseId = courseId;
+        state.coursesActiveLessonId = "";
+        state.skipNextRouteAnimation = true;
+        render();
+        const ok = await loadCourseDetail(courseId);
+        if (state.route === "courses" && ok) {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
+      }
+
+      if (action === "courses-open-lesson" && lessonId) {
+        state.coursesView = "lesson";
+        state.coursesActiveCourseId = courseId || state.coursesActiveCourseId;
+        state.coursesActiveLessonId = lessonId;
+        await updateLessonProgress(lessonId, "in_progress", 10);
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+
+      if (action === "courses-enroll-open" && courseId) {
+        const ok = await enrollInOpenCourse(courseId);
+        if (ok) {
+          await loadCourseDetail(courseId);
+          state.coursesView = lessonId ? "lesson" : "detail";
+          state.coursesActiveLessonId = lessonId || "";
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
+      }
+
+      if (action === "courses-request-access" && courseId) {
+        await requestCourseEnrollment(courseId);
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
+
+      if (action === "courses-complete-lesson" && lessonId) {
+        const ok = await updateLessonProgress(lessonId, "completed", 100);
+        if (ok) {
+          toast("Lesson marked complete.");
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+        return;
+      }
+
+      if (action === "courses-practice-course" && courseId) {
+        openCourseMcqPractice(courseId, { source: "all" });
+        return;
+      }
+
+      if (action === "courses-review-weak" && courseId) {
+        const course = state.coursesDetail || state.coursesCatalog.find((entry) => String(entry?.id || "").trim() === courseId);
+        state.analyticsCourse = getCoursePlatformCourseTitle(course);
+        navigate("analytics");
+        return;
+      }
+
+      if (action === "courses-practice-topic" && courseId && topicId) {
+        openCourseMcqPractice(courseId, { topicId, source: "all" });
+        return;
+      }
+
+      if (action === "courses-review-topic-incorrect" && courseId && topicId) {
+        openCourseMcqPractice(courseId, { topicId, source: "incorrect" });
+      }
+    });
+  });
+}
+
+async function loadAdminCoursesPlatform(options = {}) {
+  const client = getCoursesPlatformClient();
+  if (!client) {
+    state.adminCoursesPlatformError = "No active Supabase admin session.";
+    state.adminCoursesPlatformLoading = false;
+    return false;
+  }
+  if (state.adminCoursesPlatformLoading && !options.force) {
+    return false;
+  }
+  state.adminCoursesPlatformLoading = true;
+  state.adminCoursesPlatformError = "";
+  try {
+    const [courses, modules, lessons, resources, announcements, requests, enrollments, topics] = await Promise.all([
+      runRelationalQueryWithTimeout(
+        client
+          .from("courses")
+          .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+          .order("academic_year", { ascending: true })
+          .order("academic_semester", { ascending: true })
+          .order("course_name", { ascending: true }),
+        "Admin courses query timed out.",
+      ),
+      runRelationalQueryWithTimeout(client.from("course_modules").select("*").order("position", { ascending: true }), "Admin modules query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("course_lessons").select("*").order("position", { ascending: true }), "Admin lessons query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("course_resources").select("*").order("position", { ascending: true }), "Admin resources query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("course_announcements").select("*").order("created_at", { ascending: false }), "Admin announcements query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("course_enrollment_requests").select("*").order("created_at", { ascending: false }), "Admin requests query timed out.").catch((error) => {
+        if (isMissingRelationError(error)) return [];
+        throw error;
+      }),
+      runRelationalQueryWithTimeout(client.from("user_course_enrollments").select("user_id,course_id,assigned_at"), "Admin enrollment query timed out.").catch(() => []),
+      runRelationalQueryWithTimeout(client.from("course_topics").select("id,course_id,topic_name").order("topic_name", { ascending: true }), "Admin topic query timed out.").catch(() => []),
+    ]);
+
+    const userIds = [...new Set([
+      ...(Array.isArray(requests) ? requests : []).map((row) => String(row?.user_id || "").trim()),
+      ...(Array.isArray(enrollments) ? enrollments : []).map((row) => String(row?.user_id || "").trim()),
+    ].filter(isUuidValue))];
+    let profiles = [];
+    for (const batch of splitIntoBatches(userIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+      const rows = await runRelationalQueryWithTimeout(
+        client.from("profiles").select("id,full_name,email,academic_year,academic_semester,role,approved").in("id", batch),
+        "Enrollment profile query timed out.",
+      ).catch(() => []);
+      profiles.push(...(Array.isArray(rows) ? rows : []));
+    }
+
+    state.adminCoursesPlatformCourses = Array.isArray(courses) ? courses : [];
+    state.adminCoursesPlatformModules = Array.isArray(modules) ? modules : [];
+    state.adminCoursesPlatformLessons = Array.isArray(lessons) ? lessons : [];
+    state.adminCoursesPlatformResources = Array.isArray(resources) ? resources : [];
+    state.adminCoursesPlatformAnnouncements = Array.isArray(announcements) ? announcements : [];
+    state.adminCoursesPlatformRequests = Array.isArray(requests) ? requests : [];
+    state.adminCoursesPlatformEnrollments = Array.isArray(enrollments) ? enrollments : [];
+    state.adminCoursesPlatformTopics = Array.isArray(topics) ? topics : [];
+    state.adminCoursesPlatformProfiles = profiles;
+    state.adminCoursesPlatformLoadedAt = Date.now();
+    if (!state.adminCourseBuilderCourseId && state.adminCoursesPlatformCourses[0]?.id) {
+      state.adminCourseBuilderCourseId = state.adminCoursesPlatformCourses[0].id;
+    }
+    state.adminCoursesPlatformLoading = false;
+    return true;
+  } catch (error) {
+    console.warn("Could not load admin courses platform.", error?.message || error);
+    state.adminCoursesPlatformError = isMissingRelationError(error)
+      ? "Courses platform tables are missing. Run the latest Supabase migration."
+      : getErrorMessage(error, "Could not load Courses platform admin data.");
+    state.adminCoursesPlatformLoading = false;
+    return false;
+  }
+}
+
+function getAdminCourseBuilderCourse(courseId = state.adminCourseBuilderCourseId) {
+  const target = String(courseId || "").trim();
+  return (state.adminCoursesPlatformCourses || []).find((course) => String(course?.id || "").trim() === target) || null;
+}
+
+function getAdminCourseBuilderCourseRows(courseId = state.adminCourseBuilderCourseId) {
+  const target = String(courseId || "").trim();
+  const modules = (state.adminCoursesPlatformModules || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
+  const lessons = (state.adminCoursesPlatformLessons || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
+  const resources = (state.adminCoursesPlatformResources || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
+  const announcements = (state.adminCoursesPlatformAnnouncements || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target);
+  const requests = (state.adminCoursesPlatformRequests || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target);
+  const enrollments = (state.adminCoursesPlatformEnrollments || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target);
+  const topics = (state.adminCoursesPlatformTopics || [])
+    .filter((entry) => String(entry?.course_id || "").trim() === target)
+    .sort((a, b) => String(a?.topic_name || "").localeCompare(String(b?.topic_name || "")));
+  return { modules, lessons, resources, announcements, requests, enrollments, topics };
+}
+
+function getAdminCourseBuilderProfileLabel(userId) {
+  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  return profile
+    ? `${String(profile.full_name || profile.email || userId).trim()}${profile.email ? ` (${profile.email})` : ""}`
+    : String(userId || "Unknown student").trim();
+}
+
+function coerceAdminCourseMetadataPayload(data) {
+  return {
+    description: String(data.description || "").trim() || null,
+    cover_image_url: String(data.cover_image_url || "").trim() || null,
+    intro_video_url: String(data.intro_video_url || "").trim() || null,
+    instructor_name: String(data.instructor_name || "").trim() || null,
+    instructor_bio: String(data.instructor_bio || "").trim() || null,
+    level: String(data.level || "").trim() || null,
+    estimated_duration: String(data.estimated_duration || "").trim() || null,
+    is_published: Boolean(data.is_published),
+    enrollment_mode: normalizeCoursePlatformMode(data.enrollment_mode),
+    price: Math.max(0, Number(data.price) || 0),
+    course_type: normalizeCoursePlatformType(data.course_type),
+    updated_at: nowISO(),
+  };
+}
+
+async function adminSaveCourseMetadata(courseId, data) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(courseId)) throw new Error("Course metadata cannot be saved.");
+  await runRelationalQueryWithTimeout(
+    client.from("courses").update(coerceAdminCourseMetadataPayload(data)).eq("id", courseId),
+    "Course metadata save timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminCreateModule(courseId, data) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(courseId)) throw new Error("Module cannot be created.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_modules").insert({
+      course_id: courseId,
+      title: String(data.title || "").trim(),
+      description: String(data.description || "").trim() || null,
+      position: Number(data.position) || 0,
+      is_published: Boolean(data.is_published),
+    }),
+    "Module create timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminUpdateModule(moduleId, data) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be updated.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_modules").update({
+      title: String(data.title || "").trim(),
+      description: String(data.description || "").trim() || null,
+      position: Number(data.position) || 0,
+      is_published: Boolean(data.is_published),
+      updated_at: nowISO(),
+    }).eq("id", moduleId),
+    "Module update timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminDeleteModule(moduleId) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be deleted.");
+  await runRelationalQueryWithTimeout(client.from("course_modules").delete().eq("id", moduleId), "Module delete timed out.");
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminCreateLesson(courseId, moduleId, data) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(courseId) || !isUuidValue(moduleId)) throw new Error("Lesson cannot be created.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_lessons").insert({
+      course_id: courseId,
+      module_id: moduleId,
+      title: String(data.title || "").trim(),
+      description: String(data.description || "").trim() || null,
+      lesson_type: String(data.lesson_type || "video").trim() || "video",
+      video_url: String(data.video_url || "").trim() || null,
+      video_provider: String(data.video_provider || "").trim() || null,
+      duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
+      content_html: String(data.content_html || "").trim() || null,
+      position: Number(data.position) || 0,
+      is_free_preview: Boolean(data.is_free_preview),
+      is_published: Boolean(data.is_published),
+      linked_topic_id: isUuidValue(data.linked_topic_id) ? String(data.linked_topic_id).trim() : null,
+    }),
+    "Lesson create timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminUpdateLesson(lessonId, data) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be updated.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_lessons").update({
+      title: String(data.title || "").trim(),
+      description: String(data.description || "").trim() || null,
+      lesson_type: String(data.lesson_type || "video").trim() || "video",
+      video_url: String(data.video_url || "").trim() || null,
+      video_provider: String(data.video_provider || "").trim() || null,
+      duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
+      content_html: String(data.content_html || "").trim() || null,
+      position: Number(data.position) || 0,
+      is_free_preview: Boolean(data.is_free_preview),
+      is_published: Boolean(data.is_published),
+      linked_topic_id: isUuidValue(data.linked_topic_id) ? String(data.linked_topic_id).trim() : null,
+      updated_at: nowISO(),
+    }).eq("id", lessonId),
+    "Lesson update timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminDeleteLesson(lessonId) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be deleted.");
+  await runRelationalQueryWithTimeout(client.from("course_lessons").delete().eq("id", lessonId), "Lesson delete timed out.");
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminCreateResource(lessonId, data) {
+  const client = getCoursesPlatformClient();
+  const lesson = (state.adminCoursesPlatformLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
+  if (!client || !lesson) throw new Error("Resource cannot be created.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_resources").insert({
+      course_id: lesson.course_id,
+      module_id: lesson.module_id,
+      lesson_id: lesson.id,
+      title: String(data.title || "").trim(),
+      resource_type: String(data.resource_type || "file").trim() || "file",
+      file_url: String(data.file_url || "").trim() || null,
+      external_url: String(data.external_url || "").trim() || null,
+      description: String(data.description || "").trim() || null,
+      position: Number(data.position) || 0,
+      is_published: Boolean(data.is_published ?? true),
+    }),
+    "Resource create timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminDeleteResource(resourceId) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(resourceId)) throw new Error("Resource cannot be deleted.");
+  await runRelationalQueryWithTimeout(client.from("course_resources").delete().eq("id", resourceId), "Resource delete timed out.");
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminCreateAnnouncement(courseId, data) {
+  const client = getCoursesPlatformClient();
+  const userId = getCurrentCoursePlatformUserId();
+  if (!client || !isUuidValue(courseId)) throw new Error("Announcement cannot be created.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_announcements").insert({
+      course_id: courseId,
+      title: String(data.title || "").trim(),
+      body: String(data.body || "").trim(),
+      is_published: Boolean(data.is_published ?? true),
+      created_by: isUuidValue(userId) ? userId : null,
+    }),
+    "Announcement create timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminBulkEnrollStudentsByTerm(courseId, year, semester) {
+  const client = getCoursesPlatformClient();
+  const adminId = getCurrentCoursePlatformUserId();
+  if (!client || !isUuidValue(courseId)) throw new Error("Bulk enrollment cannot run.");
+  const students = await runRelationalQueryWithTimeout(
+    client
+      .from("profiles")
+      .select("id")
+      .eq("role", "student")
+      .eq("academic_year", sanitizeAcademicYear(year))
+      .eq("academic_semester", sanitizeAcademicSemester(semester)),
+    "Student lookup timed out.",
+  );
+  const rows = (Array.isArray(students) ? students : [])
+    .map((student) => String(student?.id || "").trim())
+    .filter(isUuidValue)
+    .map((userId) => ({
+      user_id: userId,
+      course_id: courseId,
+      assigned_by: isUuidValue(adminId) ? adminId : null,
+    }));
+  for (const batch of splitIntoBatches(rows, ENROLLMENT_SYNC_WRITE_BATCH_SIZE)) {
+    await runRelationalQueryWithTimeout(
+      client.from("user_course_enrollments").upsert(batch, { onConflict: "user_id,course_id", defaultToNull: false }),
+      "Bulk enrollment timed out.",
+    );
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return rows.length;
+}
+
+async function adminResolveEnrollmentRequest(requestId, status) {
+  const client = getCoursesPlatformClient();
+  const request = (state.adminCoursesPlatformRequests || []).find((entry) => String(entry?.id || "").trim() === String(requestId || "").trim());
+  const nextStatus = String(status || "").trim() === "approved" ? "approved" : "rejected";
+  if (!client || !request) throw new Error("Enrollment request cannot be updated.");
+  await runRelationalQueryWithTimeout(
+    client.from("course_enrollment_requests").update({ status: nextStatus, updated_at: nowISO() }).eq("id", request.id),
+    "Enrollment request update timed out.",
+  );
+  if (nextStatus === "approved") {
+    await runRelationalQueryWithTimeout(
+      client.from("user_course_enrollments").upsert({ user_id: request.user_id, course_id: request.course_id, assigned_by: getCurrentCoursePlatformUserId() || null }, { onConflict: "user_id,course_id", defaultToNull: false }),
+      "Approved enrollment sync timed out.",
+    );
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+function adminRenderCourseBuilder(courseId) {
+  if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
+    loadAdminCoursesPlatform().then((ok) => {
+      if (ok && state.route === "admin" && state.adminPage === "courses") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  const courses = state.adminCoursesPlatformCourses || [];
+  const selectedCourse = getAdminCourseBuilderCourse(courseId) || courses[0] || null;
+  if (selectedCourse && state.adminCourseBuilderCourseId !== selectedCourse.id) {
+    state.adminCourseBuilderCourseId = selectedCourse.id;
+  }
+  const selectedCourseId = String(selectedCourse?.id || "").trim();
+  const rows = getAdminCourseBuilderCourseRows(selectedCourseId);
+  const profileCount = rows.enrollments.length;
+
+  return `
+    <section class="card admin-section courses-admin-builder" id="admin-courses-platform-builder">
+      <div class="admin-courses-minimal-head">
+        <div>
+          <h3 style="margin: 0;">Courses learning platform</h3>
+          <p class="subtle" style="margin: 0.22rem 0 0;">Build modules, lessons, resources, announcements, and enrollments without changing MCQ question-bank tools.</p>
+        </div>
+        <div class="stack">
+          <button class="btn ghost admin-btn-sm ${state.adminCoursesPlatformLoading ? "is-loading" : ""}" type="button" data-action="admin-courses-platform-refresh">${state.adminCoursesPlatformLoading ? "Refreshing..." : "Refresh platform"}</button>
+          <button class="btn ghost admin-btn-sm" type="button" data-action="admin-course-preview-toggle">${state.adminCourseBuilderPreview ? "Close preview" : "Preview as student"}</button>
+        </div>
+      </div>
+
+      ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
+      ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
+      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No database courses found</h4><p class="subtle" style="margin: 0;">Save the curriculum to Supabase, then refresh this builder.</p></div>` : `
+        <div class="courses-builder-selector">
+          <label>Course
+            <select id="admin-course-builder-course-select">
+              ${courses.map((course) => `<option value="${escapeHtml(course.id)}" ${course.id === selectedCourseId ? "selected" : ""}>${escapeHtml(getCoursePlatformCourseTitle(course))} • Y${escapeHtml(course.academic_year)} S${escapeHtml(course.academic_semester)}</option>`).join("")}
+            </select>
+          </label>
+          <span class="admin-course-meta-pill"><b>${rows.modules.length}</b><small>Modules</small></span>
+          <span class="admin-course-meta-pill"><b>${rows.lessons.length}</b><small>Lessons</small></span>
+          <span class="admin-course-meta-pill"><b>${profileCount}</b><small>Enrollments</small></span>
+        </div>
+
+        ${state.adminCourseBuilderPreview ? `
+          <div class="card course-builder-preview">
+            <h3>${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}</h3>
+            <p class="subtle">${escapeHtml(selectedCourse.description || "No course description yet.")}</p>
+            ${rows.modules.map((module) => `
+              <section class="course-builder-preview-module">
+                <b>${escapeHtml(module.title)}</b>
+                <ul>
+                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `<li>${escapeHtml(lesson.title)}${lesson.linked_topic_id ? ` • MCQ: ${escapeHtml((rows.topics.find((topic) => topic.id === lesson.linked_topic_id) || {}).topic_name || "Linked topic")}` : ""}</li>`).join("") || "<li>No lessons yet</li>"}
+                </ul>
+              </section>
+            `).join("") || `<p class="subtle">No modules yet.</p>`}
+          </div>
+        ` : ""}
+
+        <form id="admin-course-metadata-form" class="course-builder-form">
+          <h4>Course metadata</h4>
+          <div class="course-builder-grid">
+            <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
+            <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
+            <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
+            <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
+            <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
+            <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
+            <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
+            <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
+            <label>Enrollment mode
+              <select name="enrollment_mode">
+                <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
+                <option value="open" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "open" ? "selected" : ""}>Open</option>
+                <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
+              </select>
+            </label>
+            <label>Course type
+              <select name="course_type">
+                <option value="mcq_and_lessons" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_and_lessons" ? "selected" : ""}>MCQ and lessons</option>
+                <option value="lessons_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "lessons_only" ? "selected" : ""}>Lessons only</option>
+                <option value="mcq_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_only" ? "selected" : ""}>MCQ only</option>
+              </select>
+            </label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
+          </div>
+          <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+        </form>
+
+        <form id="admin-course-module-create-form" class="course-builder-form">
+          <h4>Add module</h4>
+          <div class="course-builder-grid compact">
+            <label>Title<input name="title" required /></label>
+            <label>Description<input name="description" /></label>
+            <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+          </div>
+          <button class="btn admin-btn-sm" type="submit">Add module</button>
+        </form>
+
+        <div class="course-builder-modules">
+          ${rows.modules.map((module) => {
+            const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(module.id || ""));
+            return `
+              <article class="card course-builder-module" data-module-id="${escapeHtml(module.id)}">
+                <form class="course-builder-module-form" data-role="admin-module-form">
+                  <div class="course-builder-grid compact">
+                    <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
+                    <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
+                    <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
+                    <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
+                  </div>
+                  <div class="stack">
+                    <button class="btn ghost admin-btn-sm" type="submit">Save module</button>
+                    <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}">Delete module</button>
+                  </div>
+                </form>
+
+                <form class="course-builder-lesson-create-form" data-role="admin-lesson-create-form">
+                  <h5>Add lesson</h5>
+                  <div class="course-builder-grid">
+                    <label>Title<input name="title" required /></label>
+                    <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
+                    <label>Video URL<input name="video_url" /></label>
+                    <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
+                    <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
+                    <label>Linked topic<select name="linked_topic_id"><option value="">No linked topic</option>${rows.topics.map((topic) => `<option value="${escapeHtml(topic.id)}">${escapeHtml(topic.topic_name)}</option>`).join("")}</select></label>
+                    <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
+                    <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+                    <label class="course-builder-wide">Description<input name="description" /></label>
+                    <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
+                  </div>
+                  <button class="btn admin-btn-sm" type="submit">Add lesson</button>
+                </form>
+
+                <div class="course-builder-lessons">
+                  ${moduleLessons.map((lesson) => {
+                    const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
+                    return `
+                      <details class="course-builder-lesson" data-lesson-id="${escapeHtml(lesson.id)}">
+                        <summary>${escapeHtml(lesson.title)} ${lesson.is_published ? "• Published" : "• Draft"}</summary>
+                        <form data-role="admin-lesson-form">
+                          <div class="course-builder-grid">
+                            <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
+                            <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
+                            <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
+                            <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
+                            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
+                            <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
+                            <label>Linked topic<select name="linked_topic_id"><option value="">No linked topic</option>${rows.topics.map((topic) => `<option value="${escapeHtml(topic.id)}" ${lesson.linked_topic_id === topic.id ? "selected" : ""}>${escapeHtml(topic.topic_name)}</option>`).join("")}</select></label>
+                            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
+                            <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
+                            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
+                            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
+                          </div>
+                          <div class="stack">
+                            <button class="btn ghost admin-btn-sm" type="submit">Save lesson</button>
+                            <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">Delete lesson</button>
+                          </div>
+                        </form>
+                        <form data-role="admin-resource-create-form" class="course-builder-resource-form">
+                          <h5>Add resource</h5>
+                          <div class="course-builder-grid compact">
+                            <label>Title<input name="title" required /></label>
+                            <label>Type<input name="resource_type" value="file" /></label>
+                            <label>File URL<input name="file_url" /></label>
+                            <label>External URL<input name="external_url" /></label>
+                            <label>Description<input name="description" /></label>
+                            <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
+                            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+                          </div>
+                          <button class="btn ghost admin-btn-sm" type="submit">Add resource</button>
+                        </form>
+                        ${lessonResources.length ? `<div class="course-builder-resources">${lessonResources.map((resource) => `<span class="course-builder-resource">${escapeHtml(resource.title)} <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-resource" data-resource-id="${escapeHtml(resource.id)}">Delete</button></span>`).join("")}</div>` : ""}
+                      </details>
+                    `;
+                  }).join("") || `<p class="subtle">No lessons in this module yet.</p>`}
+                </div>
+              </article>
+            `;
+          }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
+        </div>
+
+        <div class="course-builder-admin-grid">
+          <form id="admin-course-announcement-form" class="course-builder-form">
+            <h4>Announcements</h4>
+            <label>Title<input name="title" required /></label>
+            <label>Body<textarea name="body" rows="3" required></textarea></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+            <button class="btn admin-btn-sm" type="submit">Post announcement</button>
+            <div class="course-builder-list">${rows.announcements.map((item) => `<p><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.is_published ? "Published" : "Draft")}</small></p>`).join("") || `<p class="subtle">No announcements yet.</p>`}</div>
+          </form>
+
+          <form id="admin-course-bulk-enroll-form" class="course-builder-form">
+            <h4>Enrollments</h4>
+            <div class="course-builder-grid compact">
+              <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+              <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+            </div>
+            <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
+            <p class="subtle">${rows.enrollments.length} student enrollment row${rows.enrollments.length === 1 ? "" : "s"}.</p>
+          </form>
+
+          <div class="course-builder-form">
+            <h4>Access requests</h4>
+            ${rows.requests.length ? rows.requests.map((request) => `
+              <div class="course-request-row">
+                <span>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}<small>${escapeHtml(request.status || "pending")}</small></span>
+                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
+                <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
+              </div>
+            `).join("") : `<p class="subtle">No access requests.</p>`}
+          </div>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function readFormDataObject(form) {
+  const data = new FormData(form);
+  const payload = {};
+  data.forEach((value, key) => {
+    payload[key] = value;
+  });
+  form.querySelectorAll("input[type='checkbox'][name]").forEach((input) => {
+    payload[input.name] = Boolean(input.checked);
+  });
+  return payload;
+}
+
+function wireAdminCoursesPlatformBuilder() {
+  const root = document.getElementById("admin-courses-platform-builder");
+  if (!root) return;
+  if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
+    loadAdminCoursesPlatform().then((ok) => {
+      if (ok && state.route === "admin" && state.adminPage === "courses") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+
+  root.querySelector("#admin-course-builder-course-select")?.addEventListener("change", (event) => {
+    state.adminCourseBuilderCourseId = String(event.target?.value || "");
+    state.adminCourseBuilderPreview = false;
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  const runAdminCourseAction = async (label, task) => {
+    try {
+      await task();
+      toast(label);
+      state.skipNextRouteAnimation = true;
+      render();
+    } catch (error) {
+      console.warn("Courses platform admin action failed.", error?.message || error);
+      toast(getErrorMessage(error, "Action failed."));
+    }
+  };
+
+  root.querySelector("[data-action='admin-courses-platform-refresh']")?.addEventListener("click", () => {
+    runAdminCourseAction("Courses platform refreshed.", () => loadAdminCoursesPlatform({ force: true }));
+  });
+
+  root.querySelector("[data-action='admin-course-preview-toggle']")?.addEventListener("click", () => {
+    state.adminCourseBuilderPreview = !state.adminCourseBuilderPreview;
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  root.querySelector("#admin-course-metadata-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
+  });
+
+  root.querySelector("#admin-course-module-create-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAdminCourseAction("Module created.", () => adminCreateModule(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
+  });
+
+  root.querySelectorAll("[data-role='admin-module-form']").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
+      runAdminCourseAction("Module updated.", () => adminUpdateModule(moduleId, readFormDataObject(form)));
+    });
+  });
+
+  root.querySelectorAll("[data-role='admin-lesson-create-form']").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
+      runAdminCourseAction("Lesson created.", () => adminCreateLesson(state.adminCourseBuilderCourseId, moduleId, readFormDataObject(form)));
+    });
+  });
+
+  root.querySelectorAll("[data-role='admin-lesson-form']").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
+      runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readFormDataObject(form)));
+    });
+  });
+
+  root.querySelectorAll("[data-role='admin-resource-create-form']").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
+      runAdminCourseAction("Resource added.", () => adminCreateResource(lessonId, readFormDataObject(form)));
+    });
+  });
+
+  root.querySelector("#admin-course-announcement-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAdminCourseAction("Announcement posted.", () => adminCreateAnnouncement(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
+  });
+
+  root.querySelector("#admin-course-bulk-enroll-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = readFormDataObject(event.currentTarget);
+    if (!window.confirm("Bulk enroll all matching students into this course?")) return;
+    runAdminCourseAction("Bulk enrollment completed.", async () => {
+      const count = await adminBulkEnrollStudentsByTerm(state.adminCourseBuilderCourseId, data.academic_year, data.academic_semester);
+      toast(`Bulk enrolled ${count} student${count === 1 ? "" : "s"}.`);
+    });
+  });
+
+  root.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button || !root.contains(button)) return;
+    const action = button.getAttribute("data-action");
+    if (action === "admin-delete-module") {
+      const moduleId = button.getAttribute("data-module-id") || "";
+      if (!window.confirm("Delete this module and its lessons?")) return;
+      runAdminCourseAction("Module deleted.", () => adminDeleteModule(moduleId));
+    } else if (action === "admin-delete-lesson") {
+      const lessonId = button.getAttribute("data-lesson-id") || "";
+      if (!window.confirm("Delete this lesson and its resources?")) return;
+      runAdminCourseAction("Lesson deleted.", () => adminDeleteLesson(lessonId));
+    } else if (action === "admin-delete-resource") {
+      const resourceId = button.getAttribute("data-resource-id") || "";
+      if (!window.confirm("Delete this resource?")) return;
+      runAdminCourseAction("Resource deleted.", () => adminDeleteResource(resourceId));
+    } else if (action === "admin-approve-course-request") {
+      runAdminCourseAction("Enrollment request approved.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "approved"));
+    } else if (action === "admin-reject-course-request") {
+      runAdminCourseAction("Enrollment request rejected.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "rejected"));
+    }
+  });
+}
+
 function renderAppLauncher() {
   const user = getCurrentUser();
   return `
@@ -38043,19 +39540,6 @@ function renderAppLauncher() {
 }
 
 function wireAppLauncher() {
-}
-
-function renderCourses() {
-  return `
-    <section class="panel" style="max-width: 40rem; margin: 2rem auto; text-align: center;">
-      <button class="btn ghost" data-nav="app-launcher" style="margin-bottom: 0.5rem;">← Back to Apps</button>
-      <h2 class="title" style="margin-top: 1rem;">Courses</h2>
-      <p class="subtle">Course content will be available soon.</p>
-    </section>
-  `;
-}
-
-function wireCourses() {
 }
 
 init().catch((error) => {

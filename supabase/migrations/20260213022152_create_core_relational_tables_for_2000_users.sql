@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS public.course_topics (
   CONSTRAINT course_topics_name_per_course_uniq UNIQUE (course_id, topic_name)
 );
 
+CREATE TABLE IF NOT EXISTS public.user_course_enrollments (
+  user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  course_id uuid NOT NULL REFERENCES public.courses(id) ON DELETE CASCADE,
+  assigned_by uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  assigned_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, course_id)
+);
+
 CREATE TABLE IF NOT EXISTS public.questions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   course_id uuid NOT NULL REFERENCES public.courses(id) ON DELETE RESTRICT,
@@ -124,6 +132,7 @@ CREATE TABLE IF NOT EXISTS public.test_responses (
 CREATE INDEX IF NOT EXISTS idx_profiles_role_approved ON public.profiles(role, approved);
 CREATE INDEX IF NOT EXISTS idx_courses_year_sem ON public.courses(academic_year, academic_semester);
 CREATE INDEX IF NOT EXISTS idx_course_topics_course_sort ON public.course_topics(course_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_user_course_enrollments_course ON public.user_course_enrollments(course_id);
 CREATE INDEX IF NOT EXISTS idx_questions_course_topic_status ON public.questions(course_id, topic_id, status);
 CREATE INDEX IF NOT EXISTS idx_test_blocks_user_status_updated ON public.test_blocks(user_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_test_block_items_question ON public.test_block_items(question_id);
