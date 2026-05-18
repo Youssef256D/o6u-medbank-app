@@ -291,6 +291,7 @@ const state = {
   },
   coursesView: "home",
   coursesHomeTab: "dashboard",
+  studentMcqBankEntered: false,
   coursesActiveCourseId: "",
   coursesActiveLessonId: "",
   coursesSearch: "",
@@ -3126,6 +3127,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       return;
     }
     if (["login", "signup", "forgot", "landing", "dashboard"].includes(state.route) && localUser) {
+      state.studentMcqBankEntered = false;
       const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "app-launcher");
       navigate(postAuthRoute);
       return;
@@ -14984,11 +14986,22 @@ function bindGlobalEvents() {
       return;
     }
 
+    if (action === "open-mcq-bank") {
+      state.studentMcqBankEntered = true;
+      state.userMenuOpen = false;
+      state.notificationMenuOpen = false;
+      navigate("dashboard");
+      return;
+    }
+
     const navTarget = event.target.closest("[data-nav]");
     if (navTarget) {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
       const route = navTarget.getAttribute("data-nav");
+      if (String(route || "").trim().toLowerCase() === "dashboard" && getCurrentUser()?.role === "student") {
+        state.studentMcqBankEntered = true;
+      }
       if (String(route || "").trim().toLowerCase() === "session") {
         const currentUser = getCurrentUser();
         const activeSession = currentUser ? getActiveSession(currentUser.id, state.sessionId) : null;
@@ -17941,7 +17954,7 @@ function render() {
     state.route = "login";
   }
 
-  if (lastRenderedRoute === null && user?.role !== "admin" && state.route === "dashboard") {
+  if (user?.role === "student" && state.route === "dashboard" && !state.studentMcqBankEntered) {
     state.route = "app-launcher";
   }
 
@@ -18335,7 +18348,12 @@ function syncTopbar() {
       `;
       privateNavEl.classList.remove("hidden");
     } else if (isAppLauncher) {
-      privateNavEl.classList.add("hidden");
+      privateNavEl.innerHTML = `
+        <button data-nav="app-launcher" class="is-active">Apps</button>
+        <button data-action="open-mcq-bank">MCQ Bank</button>
+        <button data-action="courses-home-tab" data-tab="dashboard">Courses</button>
+      `;
+      privateNavEl.classList.remove("hidden");
     } else if (isMcqRoute) {
       privateNavEl.innerHTML = `
         <button data-nav="dashboard">Dashboard</button>
@@ -19028,6 +19046,7 @@ function wireAuth(mode) {
             if (!(user.role === "student" && hasSupabaseManagedIdentity(user))) {
               resetStudentLoginRefreshState(user);
             }
+            state.studentMcqBankEntered = false;
             navigate(user.role === "admin" ? "admin" : "app-launcher");
             toast(`Welcome back, ${user.name}.`);
             return;
@@ -19055,6 +19074,7 @@ function wireAuth(mode) {
             if (await shouldForceRefreshForUpdates(localDemoUser)) {
               return;
             }
+            state.studentMcqBankEntered = false;
             navigate(localDemoUser.role === "admin" ? "admin" : "app-launcher");
             toast(
               shouldAllowSupabaseManagedLocalFallback(error)
@@ -19095,6 +19115,7 @@ function wireAuth(mode) {
         if (await shouldForceRefreshForUpdates(user)) {
           return;
         }
+        state.studentMcqBankEntered = false;
         navigate(user.role === "admin" ? "admin" : "app-launcher");
         toast(`Welcome back, ${user.name}.`);
       } catch (error) {
@@ -19362,6 +19383,7 @@ function wireAuth(mode) {
 
           if (nextApproved) {
             save(STORAGE_KEYS.currentUserId, users[idx].id);
+            state.studentMcqBankEntered = false;
             toast(wasApproved ? "Account details updated." : "Account created and approved. You can start now.");
             navigate("app-launcher");
           } else {
@@ -19515,6 +19537,7 @@ function wireAuth(mode) {
           }
           if (autoApproved && effectiveAuthData.session) {
             save(STORAGE_KEYS.currentUserId, user.id);
+            state.studentMcqBankEntered = false;
             navigate(user.role === "admin" ? "admin" : "app-launcher");
             toast("Account created and approved. Welcome.");
             return;
@@ -19548,6 +19571,7 @@ function wireAuth(mode) {
         });
         if (autoApproved) {
           save(STORAGE_KEYS.currentUserId, user.id);
+          state.studentMcqBankEntered = false;
           navigate("app-launcher");
           toast("Account created and approved. Welcome.");
         } else {
@@ -37844,6 +37868,7 @@ async function loginAsDemo(email, password) {
   if (await shouldForceRefreshForUpdates(user)) {
     return;
   }
+  state.studentMcqBankEntered = false;
   appendSystemLog("auth.login", `Logged in as ${user.email}`, {
     userId: user.id,
     role: user.role,
@@ -37919,6 +37944,7 @@ async function logout(options = {}) {
   state.adminUserEnrollmentSaving = {};
   state.userMenuOpen = false;
   state.notificationMenuOpen = false;
+  state.studentMcqBankEntered = false;
   state.sessionId = null;
   state.reviewSessionId = null;
   state.reviewIndex = 0;
@@ -39748,7 +39774,7 @@ function renderAppLauncher() {
       <h2 class="title">Dr. ${escapeHtml(user?.name || "")}</h2>
       <p class="subtle" style="margin-top: 0.25rem;">Choose an app to get started</p>
       <div class="app-launcher-grid">
-        <button class="card app-launcher-card" data-nav="dashboard">
+        <button class="card app-launcher-card" type="button" data-action="open-mcq-bank">
           <div class="app-launcher-icon">📝</div>
           <h3>MCQ Bank</h3>
           <p>Practice questions, take tests, and track your progress</p>
