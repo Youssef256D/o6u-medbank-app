@@ -38760,40 +38760,55 @@ function renderCoursePlatformCard(row, options = {}) {
         : "courses-open-course";
   const statusText = status === "completed" ? "Completed" : status === "in_progress" ? "In progress" : "Not started";
   const suggestionReason = String(row.suggestion?.reason || row.suggestion?.title || "").trim();
+  const hasNoContent = !lessonCount && !moduleCount;
+  const courseCode = String(course.course_code || course.code || "").trim();
   return `
-    <article class="card course-card ${badge ? "course-card-with-badge" : ""}">
+    <article class="card course-card ${badge ? "course-card-with-badge" : ""} ${hasNoContent ? "course-card-empty-content" : ""}">
       ${badge ? `<span class="course-suggestion-badge">${escapeHtml(badge)}</span>` : ""}
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
         <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
       </button>
       <div class="course-card-body">
-        <div class="course-card-meta">
-          <span>Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</span>
-          <span>${escapeHtml(statusLabel)}</span>
+        <div class="course-card-top">
+          <div class="course-card-badges-row">
+            <span class="course-card-badge course-card-badge-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
+            ${enrollment.isEnrolled ? `<span class="course-card-badge course-card-badge-status course-card-badge-${status}">${escapeHtml(statusText)}</span>` : `<span class="course-card-badge course-card-badge-${enrollment.mode}">${enrollment.mode === "open" ? "Open" : "Request-only"}</span>`}
+            ${courseCode ? `<span class="course-card-badge course-card-badge-code">${escapeHtml(courseCode)}</span>` : ""}
+          </div>
+          <h3>${escapeHtml(title)}</h3>
+          ${course.instructor_name ? `<span class="course-card-instructor">${escapeHtml(course.instructor_name)}</span>` : ""}
         </div>
-        <h3>${escapeHtml(title)}</h3>
-        <p>${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
+
+        <p class="course-card-desc">${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
         ${isSuggestion ? `<p class="course-suggestion-reason">${escapeHtml(suggestionReason || "Recommended by your course admin.")}</p>` : ""}
+
         <div class="course-card-facts">
-          <span>${escapeHtml(course.instructor_name || "Instructor TBA")}</span>
-          <span>${moduleCount || 0} module${moduleCount === 1 ? "" : "s"}</span>
-          <span>${completedLessons || 0}/${lessonCount || 0} lessons</span>
-          <span>${escapeHtml(statusText)}</span>
+          <span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            ${moduleCount || 0} module${moduleCount === 1 ? "" : "s"}
+          </span>
+          <span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg>
+            ${completedLessons || 0}/${lessonCount || 0} lessons
+          </span>
         </div>
-        ${lastLesson ? `<small class="subtle">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
+
+        ${hasNoContent ? `<div class="course-card-empty-note">Course content is being prepared.</div>` : `
+          <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+        `}
+
+        ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
         ${Number(newLessons?.length || 0) || Number(newAnnouncements?.length || 0) ? `
           <div class="course-card-badges">
             ${Number(newLessons?.length || 0) ? `<span class="badge good">${newLessons.length} new lesson${newLessons.length === 1 ? "" : "s"}</span>` : ""}
             ${Number(newAnnouncements?.length || 0) ? `<span class="badge neutral">${newAnnouncements.length} new announcement${newAnnouncements.length === 1 ? "" : "s"}</span>` : ""}
           </div>
         ` : ""}
-        <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+
         <div class="course-card-footer">
-          <small>${lessonCount} lesson${lessonCount === 1 ? "" : "s"}${course.estimated_duration ? ` • ${escapeHtml(course.estimated_duration)}` : ""}</small>
-          <div class="stack">
-            <button class="btn admin-btn-sm" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
-            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">View Course</button>` : ""}
-            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice MCQs</button>` : ""}
+          <div class="course-card-actions">
+            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm course-card-mcq-btn" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice MCQs</button>` : ""}
+            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
           </div>
         </div>
       </div>
@@ -38836,6 +38851,7 @@ function renderCoursePlatformToolbar(activeTab, filter) {
           `}
         </select>
       </label>
+      ${String(state.coursesSearch || "").trim() || String(state.coursesYearFilter || "").trim() || String(state.coursesSemesterFilter || "").trim() || (activeTab === "enrolled" ? state.coursesStatusFilter : suggestionFilter) !== "all" ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-clear-filters">Clear filters</button>` : ""}
     </div>
   `;
 }
@@ -38909,40 +38925,71 @@ function renderCoursesDashboard() {
     </section>
 
     <div class="courses-dashboard-grid">
-      <article class="card courses-dashboard-card courses-dashboard-main">
-        <div class="courses-section-head">
-          <div>
-            <p class="kicker">Student dashboard</p>
-            <h3>Today in Courses</h3>
+      <div class="courses-stats-row">
+        <div class="courses-stat-card">
+          <div class="courses-stat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           </div>
-          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">View enrolled</button>
+          <div class="courses-stat-value">${data.enrolledRows.length}</div>
+          <div class="courses-stat-label">Enrolled courses</div>
         </div>
-        <div class="courses-dashboard-stats">
-          <span><b>${data.enrolledRows.length}</b><small>Enrolled courses</small></span>
-          <span><b>${data.completedLessons}</b><small>Completed lessons</small></span>
-          <span><b>${data.overallProgress}%</b><small>Overall progress</small></span>
-          <span><b>${data.newAnnouncementsCount}</b><small>New announcements</small></span>
-          <span><b>${data.suggestionRows.length}</b><small>Suggested courses</small></span>
+        <div class="courses-stat-card">
+          <div class="courses-stat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </div>
+          <div class="courses-stat-value">${data.completedLessons}<span class="courses-stat-unit">/${data.totalLessons}</span></div>
+          <div class="courses-stat-label">Completed lessons</div>
         </div>
-      </article>
+        <div class="courses-stat-card">
+          <div class="courses-stat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+          <div class="courses-stat-value">${data.overallProgress}%</div>
+          <div class="courses-stat-label">Overall progress</div>
+        </div>
+        <div class="courses-stat-card">
+          <div class="courses-stat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          </div>
+          <div class="courses-stat-value">${data.newAnnouncementsCount}</div>
+          <div class="courses-stat-label">New announcements</div>
+        </div>
+        <div class="courses-stat-card">
+          <div class="courses-stat-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          </div>
+          <div class="courses-stat-value">${data.suggestionRows.length}</div>
+          <div class="courses-stat-label">Suggestions</div>
+        </div>
+      </div>
+    </div>
 
-      <article class="card courses-dashboard-card courses-continue-card">
-        <div class="courses-section-head">
-          <div>
-            <p class="kicker">Continue learning</p>
-            <h3>${data.continueLearning ? escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course)) : "Start your first course lesson."}</h3>
+    <div class="courses-dashboard-highlight">
+      ${data.continueLearning ? `
+        <article class="card courses-continue-card">
+          <div class="courses-continue-head">
+            <div>
+              <p class="kicker">Continue learning</p>
+              <h3>${escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course))}</h3>
+            </div>
+            <span class="courses-continue-pct">${data.continueLearning.progressPercent}%</span>
           </div>
-          ${data.continueLearning ? `<span>${data.continueLearning.progressPercent}%</span>` : ""}
-        </div>
-        ${data.continueLearning ? `
           <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
           <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
           <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
-        ` : `
-          <p class="subtle">Start your first course lesson.</p>
+        </article>
+      ` : `
+        <article class="card courses-continue-card courses-continue-empty">
+          <div class="courses-continue-head">
+            <div>
+              <p class="kicker">Continue learning</p>
+              <h3>Start your learning journey</h3>
+            </div>
+          </div>
+          <p class="subtle">You haven't started any course lessons yet. Browse suggestions to begin.</p>
           <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
-        `}
-      </article>
+        </article>
+      `}
     </div>
 
     <div class="courses-dashboard-lists">
@@ -38952,7 +38999,7 @@ function renderCoursesDashboard() {
             <p class="kicker">My learning</p>
             <h3>Enrolled Courses</h3>
           </div>
-          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">See all</button>
+          ${visibleEnrolled.length ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">See all</button>` : ""}
         </div>
         ${visibleEnrolled.length ? `<div class="courses-grid">${visibleEnrolled.map((row) => renderCoursePlatformCard(row)).join("")}</div>` : `<div class="card courses-empty"><h3>No enrolled courses yet</h3><p class="subtle">Open courses and admin-assigned courses will stay organized in this tab.</p></div>`}
       </section>
@@ -38963,9 +39010,9 @@ function renderCoursesDashboard() {
             <p class="kicker">Recommended for you</p>
             <h3>Course Suggestions</h3>
           </div>
-          <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="suggestions">See all</button>
+          ${visibleSuggestions.length ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="suggestions">See all</button>` : ""}
         </div>
-        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="card courses-empty"><h3>No suggestions available</h3><p class="subtle">New published courses will appear here when they match your learning path.</p></div>`}
+        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><h3>No suggestions yet</h3><p>Course recommendations from your admin will appear here when they match your year and semester.</p><button class="btn ghost" type="button" data-action="courses-home-tab" data-tab="enrolled">Browse enrolled courses</button></div>`}
       </section>
 
       <section class="courses-dashboard-list">
@@ -38975,7 +39022,7 @@ function renderCoursesDashboard() {
             <h3>New Announcements</h3>
           </div>
         </div>
-        ${data.announcements.length ? `<div class="course-update-list">${data.announcements.map((item) => `<article class="card course-update-card"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></article>`).join("")}</div>` : `<div class="card courses-empty"><p class="subtle">No new announcements yet.</p></div>`}
+        ${data.announcements.length ? `<div class="course-update-list">${data.announcements.map((item) => `<article class="card course-update-card"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div><div><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div></article>`).join("")}</div>` : `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><h3>No announcements yet</h3><p>Course announcements from instructors will show up here.</p></div>`}
       </section>
 
       ${data.recentLessons.length ? `
@@ -38986,7 +39033,7 @@ function renderCoursesDashboard() {
               <h3>Lessons</h3>
             </div>
           </div>
-          <div class="course-update-list">${data.recentLessons.map(({ row, lesson, module }) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(row.course.id)}" data-lesson-id="${escapeHtml(lesson.id)}"><b>${escapeHtml(lesson.title)}</b><p class="subtle">${escapeHtml(getCoursePlatformCourseTitle(row.course))}${module?.title ? ` • ${escapeHtml(module.title)}` : ""}</p></button>`).join("")}</div>
+          <div class="course-update-list">${data.recentLessons.map(({ row, lesson, module }) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(row.course.id)}" data-lesson-id="${escapeHtml(lesson.id)}"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg></div><div><b>${escapeHtml(lesson.title)}</b><p class="subtle">${escapeHtml(getCoursePlatformCourseTitle(row.course))}${module?.title ? ` • ${escapeHtml(module.title)}` : ""}</p></div></button>`).join("")}</div>
         </section>
       ` : ""}
 
@@ -38998,7 +39045,7 @@ function renderCoursesDashboard() {
               <h3>Practice linked course topics</h3>
             </div>
           </div>
-          <div class="course-update-list">${data.quickMcqRows.map((row) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(row.course.id)}"><b>${escapeHtml(getCoursePlatformCourseTitle(row.course))}</b><p class="subtle">Create an MCQ block using the existing MCQ Bank flow.</p></button>`).join("")}</div>
+          <div class="course-update-list">${data.quickMcqRows.map((row) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(row.course.id)}"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div><b>${escapeHtml(getCoursePlatformCourseTitle(row.course))}</b><p class="subtle">Create an MCQ block using the existing MCQ Bank flow.</p></div></button>`).join("")}</div>
         </section>
       ` : ""}
     </div>
@@ -39006,9 +39053,40 @@ function renderCoursesDashboard() {
 }
 
 function renderEnrolledCourses(courses) {
+  const inProgress = courses.filter((row) => row.status === "in_progress").length;
+  const completed = courses.filter((row) => row.status === "completed").length;
+  const mcqAvailable = courses.filter((row) => row.hasLinkedMcq).length;
   return `
-    ${renderCoursePlatformToolbar("enrolled", state.coursesFilter)}
-    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="card courses-empty"><h3>You are not enrolled in any courses yet.</h3><p class="subtle">Browse available courses or contact admin.</p></div>` : ""}
+    <div class="courses-page-header">
+      <div>
+        <h2 class="title" style="margin:0;">Enrolled Courses</h2>
+        <p class="subtle" style="margin:0.2rem 0 0;">Access course materials, track progress, and practice linked MCQs for your enrolled courses.</p>
+      </div>
+      <div class="courses-page-stats">
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${courses.length}</span>
+          <span class="courses-page-stat-label">Enrolled</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${inProgress}</span>
+          <span class="courses-page-stat-label">In progress</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${completed}</span>
+          <span class="courses-page-stat-label">Completed</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${mcqAvailable}</span>
+          <span class="courses-page-stat-label">MCQ courses</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card courses-toolbar-card">
+      ${renderCoursePlatformToolbar("enrolled", state.coursesFilter)}
+    </div>
+
+    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg><h3>You are not enrolled in any courses</h3><p>Once your admin assigns courses or you enroll in open courses, they will appear here.</p><button class="btn ghost" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button></div>` : ""}
     <div class="courses-grid">
       ${courses.map((row) => renderCoursePlatformCard(row)).join("")}
     </div>
@@ -39016,9 +39094,40 @@ function renderEnrolledCourses(courses) {
 }
 
 function renderSuggestedCourses(courses) {
+  const openCount = courses.filter((row) => !row.enrollment.isEnrolled && row.enrollment.mode === "open").length;
+  const requestCount = courses.filter((row) => !row.enrollment.isEnrolled && row.enrollment.mode === "request").length;
+  const enrolledCount = courses.filter((row) => row.enrollment.isEnrolled).length;
   return `
-    ${renderCoursePlatformToolbar("suggestions", state.coursesFilter)}
-    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="card courses-empty"><h3>No suggested courses yet</h3><p class="subtle">Suggestions appear here when an admin recommends courses for your academic year or semester.</p></div>` : ""}
+    <div class="courses-page-header">
+      <div>
+        <h2 class="title" style="margin:0;">Course Suggestions</h2>
+        <p class="subtle" style="margin:0.2rem 0 0;">Recommended courses based on your academic year and semester.</p>
+      </div>
+      <div class="courses-page-stats">
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${courses.length}</span>
+          <span class="courses-page-stat-label">Suggestions</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${openCount}</span>
+          <span class="courses-page-stat-label">Open</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${requestCount}</span>
+          <span class="courses-page-stat-label">Request-only</span>
+        </div>
+        <div class="courses-page-stat">
+          <span class="courses-page-stat-value">${enrolledCount}</span>
+          <span class="courses-page-stat-label">Enrolled</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card courses-toolbar-card">
+      ${renderCoursePlatformToolbar("suggestions", state.coursesFilter)}
+    </div>
+
+    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="courses-suggestions-empty"><svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><h3>No course suggestions yet</h3><p>Suggestions will appear here when admins recommend courses for your year or semester. Check back later or browse your enrolled courses.</p><button class="btn" type="button" data-action="courses-home-tab" data-tab="enrolled">View enrolled courses</button></div>` : ""}
     <div class="courses-grid">
       ${courses.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index < 2 ? "Suggested" : "" })).join("")}
     </div>
@@ -39112,7 +39221,7 @@ function renderCourseDetail(courseId) {
       <div class="course-detail-layout">
         <section class="course-modules">
           <h3>Modules</h3>
-          ${!modules.length ? `<div class="card courses-empty"><p class="subtle">No published modules are available yet.</p></div>` : modules.map((module) => {
+          ${!modules.length ? `<div class="card courses-empty"><p class="subtle">No lessons added yet.</p></div>` : modules.map((module) => {
             const moduleLessons = lessons.filter((lesson) => String(lesson?.module_id || "").trim() === String(module?.id || "").trim());
             return `
               <article class="card course-module-card">
@@ -39134,7 +39243,7 @@ function renderCourseDetail(courseId) {
                         <small>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds, lesson.is_free_preview ? "Preview" : ""))}</small>
                       </button>
                     `;
-                  }).join("") || `<p class="subtle">Lessons are coming soon.</p>`}
+                  }).join("") || `<p class="subtle">No lessons added yet.</p>`}
                 </div>
               </article>
             `;
@@ -39146,7 +39255,7 @@ function renderCourseDetail(courseId) {
             <h3>Announcements</h3>
             ${(state.coursesAnnouncements || []).length
               ? state.coursesAnnouncements.map((item) => `<div class="course-announcement"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div>`).join("")
-              : `<p class="subtle">No announcements yet.</p>`
+              : `<div class="courses-empty-state is-compact"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><p>No announcements yet.</p></div>`
             }
           </article>
         </aside>
@@ -39362,6 +39471,18 @@ function wireCourses() {
 
       if (action === "courses-review-topic-incorrect" && courseId && topicId) {
         openCourseMcqPractice(courseId, { topicId, source: "incorrect" });
+      }
+
+      if (action === "courses-clear-filters") {
+        state.coursesSearch = "";
+        state.coursesYearFilter = "";
+        state.coursesSemesterFilter = "";
+        state.coursesStatusFilter = "all";
+        state.coursesFilter = "all";
+        document.getElementById("courses-search") && (document.getElementById("courses-search").value = "");
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
       }
     });
   });
