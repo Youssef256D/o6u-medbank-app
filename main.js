@@ -39246,130 +39246,142 @@ function renderCoursesDashboard() {
       <button class="btn ghost admin-btn-sm" data-nav="app-launcher" type="button">Back to Apps</button>
     </section>
 
-    <div class="courses-dashboard-grid">
-      <div class="courses-stats-row">
-        <div class="courses-stat-card">
-          <div class="courses-stat-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+    <div class="courses-dashboard-layout-grid">
+      <div class="courses-dashboard-main-content">
+        <div class="courses-stats-row">
+          <div class="courses-stat-card">
+            <div class="courses-stat-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            </div>
+            <div class="courses-stat-value">${data.enrolledRows.length}</div>
+            <div class="courses-stat-label">Enrolled courses</div>
           </div>
-          <div class="courses-stat-value">${data.enrolledRows.length}</div>
-          <div class="courses-stat-label">Enrolled courses</div>
-        </div>
-        <div class="courses-stat-card">
-          <div class="courses-stat-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          <div class="courses-stat-card">
+            <div class="courses-stat-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div class="courses-stat-value">${data.completedLessons}<span class="courses-stat-unit">/${data.totalLessons}</span></div>
+            <div class="courses-stat-label">Completed lessons</div>
           </div>
-          <div class="courses-stat-value">${data.completedLessons}<span class="courses-stat-unit">/${data.totalLessons}</span></div>
-          <div class="courses-stat-label">Completed lessons</div>
-        </div>
-        <div class="courses-stat-card">
-          <div class="courses-stat-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <div class="courses-stat-card">
+            <div class="courses-stat-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div class="courses-stat-value">${data.overallProgress}%</div>
+            <div class="courses-stat-label">Overall progress</div>
           </div>
-          <div class="courses-stat-value">${data.overallProgress}%</div>
-          <div class="courses-stat-label">Overall progress</div>
-        </div>
-        <div class="courses-stat-card">
-          <div class="courses-stat-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <div class="courses-stat-card">
+            <div class="courses-stat-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            </div>
+            <div class="courses-stat-value">${data.newAnnouncementsCount}</div>
+            <div class="courses-stat-label">New announcements</div>
           </div>
-          <div class="courses-stat-value">${data.newAnnouncementsCount}</div>
-          <div class="courses-stat-label">New announcements</div>
-        </div>
-        <div class="courses-stat-card">
-          <div class="courses-stat-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          <div class="courses-stat-card">
+            <div class="courses-stat-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            </div>
+            <div class="courses-stat-value">${data.suggestionRows.length}</div>
+            <div class="courses-stat-label">Suggestions</div>
           </div>
-          <div class="courses-stat-value">${data.suggestionRows.length}</div>
-          <div class="courses-stat-label">Suggestions</div>
         </div>
+
+        <div class="courses-dashboard-highlight">
+          ${data.continueLearning ? `
+            <article class="card courses-continue-card">
+              <div class="courses-continue-head">
+                <div>
+                  <p class="kicker">Continue learning</p>
+                  <h3>${escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course))}</h3>
+                </div>
+                <span class="courses-continue-pct">${data.continueLearning.progressPercent}%</span>
+              </div>
+              <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
+              <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
+              <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
+            </article>
+          ` : `
+            <article class="card courses-continue-card courses-continue-empty">
+              <div class="courses-continue-head">
+                <div>
+                  <p class="kicker">Continue learning</p>
+                  <h3>Start your learning journey</h3>
+                </div>
+              </div>
+              <p class="subtle">You haven't started any course lessons yet. Browse suggestions to begin.</p>
+              <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
+            </article>
+          `}
+        </div>
+
+        ${data.quickMcqRows.length ? `
+          <section class="courses-dashboard-list">
+            <div class="courses-section-head">
+              <div>
+                <p class="kicker">Quick MCQ Practice</p>
+                <h3>Practice linked course topics</h3>
+              </div>
+            </div>
+            <div class="course-update-list">${data.quickMcqRows.map((row) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(row.course.id)}"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div><b>${escapeHtml(getCoursePlatformCourseTitle(row.course))}</b><p class="subtle">Create an MCQ block using the existing MCQ Bank flow.</p></div></button>`).join("")}</div>
+          </section>
+        ` : ""}
       </div>
 
-      <div class="courses-dashboard-highlight">
-        ${data.continueLearning ? `
-          <article class="card courses-continue-card">
-            <div class="courses-continue-head">
-              <div>
-                <p class="kicker">Continue learning</p>
-                <h3>${escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course))}</h3>
-              </div>
-              <span class="courses-continue-pct">${data.continueLearning.progressPercent}%</span>
-            </div>
-            <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
-            <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
-            <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
-          </article>
-        ` : `
-          <article class="card courses-continue-card courses-continue-empty">
-            <div class="courses-continue-head">
-              <div>
-                <p class="kicker">Continue learning</p>
-                <h3>Start your learning journey</h3>
-              </div>
-            </div>
-            <p class="subtle">You haven't started any course lessons yet. Browse suggestions to begin.</p>
-            <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
-          </article>
-        `}
-      </div>
-    </div>
-
-    <div class="courses-dashboard-lists">
-      <section class="courses-dashboard-list">
-        <div class="courses-section-head">
-          <div>
-            <p class="kicker">My learning</p>
-            <h3>Enrolled Courses</h3>
-          </div>
-          ${visibleEnrolled.length ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">See all</button>` : ""}
-        </div>
-        ${visibleEnrolled.length ? `<div class="courses-grid">${visibleEnrolled.map((row) => renderCoursePlatformCard(row)).join("")}</div>` : `<div class="card courses-empty"><h3>No enrolled courses yet</h3><p class="subtle">Courses appear here after an admin approves your enrollment request.</p></div>`}
-      </section>
-
-      <section class="courses-dashboard-list">
-        <div class="courses-section-head">
-          <div>
-            <p class="kicker">Recommended for you</p>
-            <h3>Course Suggestions</h3>
-          </div>
-          ${visibleSuggestions.length ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="suggestions">See all</button>` : ""}
-        </div>
-        ${visibleSuggestions.length ? `<div class="courses-grid">${visibleSuggestions.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index === 0 ? "Suggested" : "" })).join("")}</div>` : `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><h3>No suggestions yet</h3><p>Course recommendations from your admin will appear here when they match your year and semester.</p><button class="btn ghost" type="button" data-action="courses-home-tab" data-tab="enrolled">Browse enrolled courses</button></div>`}
-      </section>
-
-      <section class="courses-dashboard-list">
-        <div class="courses-section-head">
-          <div>
-            <p class="kicker">Updates</p>
-            <h3>New Announcements</h3>
-          </div>
-        </div>
-        ${data.announcements.length ? `<div class="course-update-list">${data.announcements.map((item) => `<article class="card course-update-card"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div><div><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div></article>`).join("")}</div>` : `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><h3>No announcements yet</h3><p>Course announcements from instructors will show up here.</p></div>`}
-      </section>
-
-      ${data.recentLessons.length ? `
+      <aside class="courses-dashboard-sidebar-content">
         <section class="courses-dashboard-list">
           <div class="courses-section-head">
             <div>
-              <p class="kicker">Recently added</p>
-              <h3>Lessons</h3>
+              <p class="kicker">Updates</p>
+              <h3>New Announcements</h3>
             </div>
           </div>
-          <div class="course-update-list">${data.recentLessons.map(({ row, lesson, module }) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(row.course.id)}" data-lesson-id="${escapeHtml(lesson.id)}"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg></div><div><b>${escapeHtml(lesson.title)}</b><p class="subtle">${escapeHtml(getCoursePlatformCourseTitle(row.course))}${module?.title ? ` • ${escapeHtml(module.title)}` : ""}</p></div></button>`).join("")}</div>
+          ${data.announcements.length ? `
+            <div class="courses-sidebar-list">
+              ${data.announcements.map((item) => `
+                <article class="card course-update-card">
+                  <div class="course-update-icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  </div>
+                  <div>
+                    <b>${escapeHtml(item.title)}</b>
+                    <p class="subtle">${escapeHtml(item.body)}</p>
+                  </div>
+                </article>
+              `).join("")}
+            </div>
+          ` : `
+            <div class="courses-empty-state is-compact">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              <h3>No announcements</h3>
+              <p>Course announcements from instructors will show up here.</p>
+            </div>
+          `}
         </section>
-      ` : ""}
 
-      ${data.quickMcqRows.length ? `
-        <section class="courses-dashboard-list">
-          <div class="courses-section-head">
-            <div>
-              <p class="kicker">Quick MCQ Practice</p>
-              <h3>Practice linked course topics</h3>
+        ${data.recentLessons.length ? `
+          <section class="courses-dashboard-list">
+            <div class="courses-section-head">
+              <div>
+                <p class="kicker">Recently added</p>
+                <h3>Lessons</h3>
+              </div>
             </div>
-          </div>
-          <div class="course-update-list">${data.quickMcqRows.map((row) => `<button class="card course-update-card course-update-button" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(row.course.id)}"><div class="course-update-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div><b>${escapeHtml(getCoursePlatformCourseTitle(row.course))}</b><p class="subtle">Create an MCQ block using the existing MCQ Bank flow.</p></div></button>`).join("")}</div>
-        </section>
-      ` : ""}
+            <div class="courses-sidebar-list">
+              ${data.recentLessons.map(({ row, lesson, module }) => `
+                <button class="card course-update-card course-update-button" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(row.course.id)}" data-lesson-id="${escapeHtml(lesson.id)}">
+                  <div class="course-update-icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg>
+                  </div>
+                  <div>
+                    <b>${escapeHtml(lesson.title)}</b>
+                    <p class="subtle">${escapeHtml(getCoursePlatformCourseTitle(row.course))}${module?.title ? ` • ${escapeHtml(module.title)}` : ""}</p>
+                  </div>
+                </button>
+              `).join("")}
+            </div>
+          </section>
+        ` : ""}
+      </aside>
     </div>
   `;
 }
