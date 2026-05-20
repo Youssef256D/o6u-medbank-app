@@ -39391,25 +39391,30 @@ function renderEnrolledCourses(courses) {
   const completed = courses.filter((row) => row.status === "completed").length;
   const moduleCount = courses.reduce((sum, row) => sum + (Number(row.moduleCount) || 0), 0);
   return `
-    <div class="courses-page-header">
+    <div class="courses-page-header courses-page-header-enrolled">
       <div>
-        <h2 class="title" style="margin:0;">Enrolled Courses</h2>
-        <p class="subtle" style="margin:0.2rem 0 0;">Access course materials, track progress, and continue assigned learning.</p>
+        <p class="kicker">My learning</p>
+        <h2 class="title">Enrolled Courses</h2>
+        <p class="subtle">Access course materials, track progress, and continue assigned learning.</p>
       </div>
       <div class="courses-page-stats">
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
           <span class="courses-page-stat-value">${courses.length}</span>
           <span class="courses-page-stat-label">Enrolled</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
           <span class="courses-page-stat-value">${inProgress}</span>
           <span class="courses-page-stat-label">In progress</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
           <span class="courses-page-stat-value">${completed}</span>
           <span class="courses-page-stat-label">Completed</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05"/><path d="M12 22.08V12"/></svg></span>
           <span class="courses-page-stat-value">${moduleCount}</span>
           <span class="courses-page-stat-label">Modules</span>
         </div>
@@ -39431,25 +39436,30 @@ function renderSuggestedCourses(courses) {
   const pendingCount = courses.filter((row) => row.enrollment.requestStatus === "pending").length;
   const availableCount = Math.max(0, courses.length - pendingCount);
   return `
-    <div class="courses-page-header">
+    <div class="courses-page-header courses-page-header-suggestions">
       <div>
-        <h2 class="title" style="margin:0;">Course Suggestions</h2>
-        <p class="subtle" style="margin:0.2rem 0 0;">Recommended courses based on your academic year and semester.</p>
+        <p class="kicker">Recommended for you</p>
+        <h2 class="title">Course Suggestions</h2>
+        <p class="subtle">Recommended courses based on your academic year and semester.</p>
       </div>
       <div class="courses-page-stats">
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
           <span class="courses-page-stat-value">${courses.length}</span>
           <span class="courses-page-stat-label">Suggestions</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
           <span class="courses-page-stat-value">${availableCount}</span>
           <span class="courses-page-stat-label">Available</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
           <span class="courses-page-stat-value">${pendingCount}</span>
           <span class="courses-page-stat-label">Pending</span>
         </div>
         <div class="courses-page-stat">
+          <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg></span>
           <span class="courses-page-stat-value">${courses.reduce((sum, row) => sum + (Number(row.lessonCount) || 0), 0)}</span>
           <span class="courses-page-stat-label">Lessons</span>
         </div>
