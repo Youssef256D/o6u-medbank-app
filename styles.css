@@ -818,14 +818,28 @@ body.is-routing .app-shell {
 .app-shell.route-enter {
   opacity: 0;
   transform: translateY(10px) scale(0.995);
+  filter: saturate(0.97);
+}
+
+body[data-route-transition="courses-app"] .app-shell.route-enter,
+body[data-route-transition="courses-in"] .app-shell.route-enter {
+  transform: translateY(18px) scale(0.985);
+  filter: blur(3px) saturate(0.9);
+}
+
+body[data-route-transition="courses-out"] .app-shell.route-enter {
+  transform: translateY(-12px) scale(0.99);
+  filter: blur(2px) saturate(0.94);
 }
 
 .app-shell.route-enter.route-enter-active {
   opacity: 1;
   transform: none;
+  filter: none;
   transition:
     opacity 420ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    transform 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    transform 420ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    filter 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 @supports (view-transition-name: root) {
@@ -842,6 +856,26 @@ body.is-routing .app-shell {
 
   ::view-transition-new(root) {
     animation-name: route-global-in;
+  }
+
+  body[data-route-transition="courses-app"] ::view-transition-old(root),
+  body[data-route-transition="courses-app"] ::view-transition-new(root),
+  body[data-route-transition="courses-in"] ::view-transition-old(root),
+  body[data-route-transition="courses-in"] ::view-transition-new(root),
+  body[data-route-transition="courses-out"] ::view-transition-old(root),
+  body[data-route-transition="courses-out"] ::view-transition-new(root) {
+    animation-duration: 520ms;
+    animation-timing-function: cubic-bezier(0.18, 0.78, 0.2, 1);
+  }
+
+  body[data-route-transition="courses-app"] ::view-transition-old(root),
+  body[data-route-transition="courses-out"] ::view-transition-old(root) {
+    animation-name: route-courses-out;
+  }
+
+  body[data-route-transition="courses-app"] ::view-transition-new(root),
+  body[data-route-transition="courses-in"] ::view-transition-new(root) {
+    animation-name: route-courses-in;
   }
 }
 
@@ -5881,6 +5915,62 @@ hr {
   }
 }
 
+@keyframes route-courses-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0) saturate(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.985);
+    filter: blur(5px) saturate(0.88);
+  }
+}
+
+@keyframes route-courses-in {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.985);
+    filter: blur(5px) saturate(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0) saturate(1);
+  }
+}
+
+@keyframes courses-stage-forward {
+  from {
+    opacity: 0;
+    transform: translateX(22px) translateY(8px) scale(0.988);
+    filter: blur(3px) saturate(0.92);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) translateY(0) scale(1);
+    filter: blur(0) saturate(1);
+  }
+}
+
+@keyframes courses-stage-back {
+  from {
+    opacity: 0;
+    transform: translateX(-18px) translateY(6px) scale(0.99);
+    filter: blur(3px) saturate(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) translateY(0) scale(1);
+    filter: blur(0) saturate(1);
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -8489,6 +8579,59 @@ html body :is(.title,
 .courses-shell {
   max-width: 1180px;
   margin: 1.2rem auto;
+}
+
+.courses-transition-stage {
+  transform-origin: 50% 18%;
+}
+
+.courses-transition-stage.courses-stage-forward,
+.courses-transition-stage.courses-stage-tab-forward,
+.courses-transition-stage.courses-stage-lesson-forward {
+  animation: courses-stage-forward 360ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+}
+
+.courses-transition-stage.courses-stage-back,
+.courses-transition-stage.courses-stage-tab-back,
+.courses-transition-stage.courses-stage-lesson-back {
+  animation: courses-stage-back 340ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+}
+
+.courses-transition-stage.courses-stage-tab-forward .courses-grid > *,
+.courses-transition-stage.courses-stage-tab-back .courses-grid > *,
+.courses-transition-stage.courses-stage-forward .course-module-card,
+.courses-transition-stage.courses-stage-forward .course-side > *,
+.courses-transition-stage.courses-stage-lesson-forward .lesson-layout > *,
+.courses-transition-stage.courses-stage-lesson-back .lesson-layout > * {
+  animation: reveal-up 360ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+  animation-delay: calc(var(--stagger, 0) * 24ms + 70ms);
+}
+
+.courses-transition-stage .courses-grid > :nth-child(1),
+.courses-transition-stage .course-module-card:nth-child(1),
+.courses-transition-stage .lesson-layout > :nth-child(1) {
+  --stagger: 0;
+}
+
+.courses-transition-stage .courses-grid > :nth-child(2),
+.courses-transition-stage .course-module-card:nth-child(2),
+.courses-transition-stage .lesson-layout > :nth-child(2) {
+  --stagger: 1;
+}
+
+.courses-transition-stage .courses-grid > :nth-child(3),
+.courses-transition-stage .course-module-card:nth-child(3) {
+  --stagger: 2;
+}
+
+.courses-transition-stage .courses-grid > :nth-child(4),
+.courses-transition-stage .course-module-card:nth-child(4) {
+  --stagger: 3;
+}
+
+.courses-transition-stage .courses-grid > :nth-child(n + 5),
+.courses-transition-stage .course-module-card:nth-child(n + 5) {
+  --stagger: 4;
 }
 
 .courses-hero,

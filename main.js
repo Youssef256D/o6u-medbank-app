@@ -39,7 +39,7 @@ const privateNavEl = document.getElementById("private-nav");
 const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
-const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-02.02").trim();
+const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-20.05").trim();
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -315,6 +315,7 @@ const state = {
   coursesResources: [],
   coursesAnnouncements: [],
   coursesSuggestions: [],
+  coursesTransitionMode: "",
   adminCoursesPlatformLoading: false,
   adminCoursesPlatformError: "",
   adminCoursesPlatformLoadedAt: 0,
@@ -808,6 +809,7 @@ let lastRenderedRoute = null;
 let routeTransitionHandle = null;
 let sessionQuestionTransitionHandle = null;
 let lastRenderedSessionPointer = null;
+let lastRenderedCoursesTransitionKey = "";
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
 let adminDashboardPollHandle = null;
@@ -1260,6 +1262,12 @@ function warnLargeSessionStorageFallback() {
   largeSessionStorageWarned = true;
 }
 
+function isLocalDemoAuthEnabled() {
+  const host = String(window.location?.hostname || "").trim().toLowerCase();
+  return ["localhost", "127.0.0.1", "::1"].includes(host)
+    && window.__SUPABASE_CONFIG?.localDemoAccounts !== false;
+}
+
 function isStorageQuotaExceededError(error) {
   const rawCode = Number(error?.code);
   const name = String(error?.name || "").trim().toLowerCase();
@@ -1273,6 +1281,7 @@ function isStorageQuotaExceededError(error) {
 
 const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
 const DEMO_STUDENT_EMAIL = "student@o6umed.local";
+const DEMO_PENDING_STUDENT_EMAIL = "student.pending@o6umed.local";
 const FORCED_ADMIN_EMAILS = new Set([
   "code.youssefaayoub@gmail.com",
   "code.youssefayoub@gmail.com",
@@ -2144,6 +2153,16 @@ function resolveInitialAdminPage() {
     return persistedLocal;
   }
   return "dashboard";
+}
+
+function shouldShowAppLauncherBeforeMcqBank(user, route = state.route) {
+  const normalizedRoute = String(route || "").trim().toLowerCase();
+  return Boolean(
+    user
+    && user.role !== "admin"
+    && normalizedRoute === "dashboard"
+    && !state.studentMcqBankEntered
+  );
 }
 
 function persistRouteState() {
@@ -5275,7 +5294,12 @@ function isForcedAdminEmail(email) {
 function isLegacyDemoUser(user) {
   const id = String(user?.id || "").trim();
   const email = String(user?.email || "").trim().toLowerCase();
-  return id === "u_admin" || id === "u_student" || email === DEMO_ADMIN_EMAIL || email === DEMO_STUDENT_EMAIL;
+  return id === "u_admin"
+    || id === "u_student"
+    || id === "u_student_pending"
+    || email === DEMO_ADMIN_EMAIL
+    || email === DEMO_STUDENT_EMAIL
+    || email === DEMO_PENDING_STUDENT_EMAIL;
 }
 
 function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) {
@@ -14414,69 +14438,105 @@ function seedData() {
 
   const allCourses = CURRICULUM_COURSE_LIST;
 
+  const createLocalDemoUsers = () => [
+    {
+      id: "u_admin",
+      name: "O6U Demo Admin",
+      email: DEMO_ADMIN_EMAIL,
+      password: "admin123",
+      phone: "",
+      role: "admin",
+      verified: true,
+      isApproved: true,
+      approvedAt: nowISO(),
+      approvedBy: "system",
+      assignedCourses: [...allCourses],
+      academicYear: null,
+      academicSemester: null,
+      createdAt: nowISO(),
+      identityAliases: ["u_admin"],
+    },
+    {
+      id: "u_student",
+      name: "O6U Approved Demo Student",
+      email: DEMO_STUDENT_EMAIL,
+      password: "student123",
+      phone: "+201000000000",
+      role: "student",
+      verified: true,
+      isApproved: true,
+      approvedAt: nowISO(),
+      approvedBy: "system",
+      assignedCourses: getCurriculumCourses(1, 1),
+      academicYear: 1,
+      academicSemester: 1,
+      createdAt: nowISO(),
+      identityAliases: ["u_student"],
+    },
+    {
+      id: "u_student_pending",
+      name: "O6U Pending Demo Student",
+      email: DEMO_PENDING_STUDENT_EMAIL,
+      password: "student123",
+      phone: "+201000000001",
+      role: "student",
+      verified: true,
+      isApproved: false,
+      approvedAt: null,
+      approvedBy: null,
+      assignedCourses: getCurriculumCourses(1, 1),
+      academicYear: 1,
+      academicSemester: 1,
+      createdAt: nowISO(),
+      identityAliases: ["u_student_pending"],
+    },
+  ];
+
   const savedUsers = load(STORAGE_KEYS.users, null);
   if (!savedUsers) {
-    const users = SUPABASE_CONFIG.enabled
-      ? []
-      : [
-        {
-          id: "u_admin",
-          name: "O6U Admin",
-          email: DEMO_ADMIN_EMAIL,
-          password: "admin123",
-          phone: "",
-          role: "admin",
-          verified: true,
-          isApproved: true,
-          approvedAt: nowISO(),
-          approvedBy: "system",
-          assignedCourses: [...allCourses],
-          academicYear: null,
-          academicSemester: null,
-          createdAt: nowISO(),
-          identityAliases: ["u_admin"],
-        },
-        {
-          id: "u_student",
-          name: "O6U Demo Student",
-          email: DEMO_STUDENT_EMAIL,
-          password: "student123",
-          phone: "+201000000000",
-          role: "student",
-          verified: true,
-          isApproved: true,
-          approvedAt: nowISO(),
-          approvedBy: "system",
-          assignedCourses: getCurriculumCourses(1, 1),
-          academicYear: 1,
-          academicSemester: 1,
-          createdAt: nowISO(),
-          identityAliases: ["u_student"],
-        },
-      ];
+    const users = (!SUPABASE_CONFIG.enabled || isLocalDemoAuthEnabled()) ? createLocalDemoUsers() : [];
     save(STORAGE_KEYS.users, users);
   } else {
     let users = getUsers();
     let changed = false;
-    if (SUPABASE_CONFIG.enabled) {
+    if (SUPABASE_CONFIG.enabled && !isLocalDemoAuthEnabled()) {
       const liveUsers = users.filter((user) => {
         const id = String(user?.id || "").trim();
         const email = String(user?.email || "").trim().toLowerCase();
         return id !== "u_admin"
           && id !== "u_student"
+          && id !== "u_student_pending"
           && email !== DEMO_ADMIN_EMAIL
-          && email !== DEMO_STUDENT_EMAIL;
+          && email !== DEMO_STUDENT_EMAIL
+          && email !== DEMO_PENDING_STUDENT_EMAIL;
       });
       if (liveUsers.length !== users.length) {
         users = liveUsers;
         changed = true;
       }
+    } else if (isLocalDemoAuthEnabled()) {
+      createLocalDemoUsers().forEach((demoUser) => {
+        const existingIndex = users.findIndex((user) => (
+          String(user?.id || "").trim() === demoUser.id
+          || String(user?.email || "").trim().toLowerCase() === demoUser.email
+        ));
+        if (existingIndex >= 0) {
+          users[existingIndex] = {
+            ...users[existingIndex],
+            ...demoUser,
+            createdAt: users[existingIndex].createdAt || demoUser.createdAt,
+          };
+        } else {
+          users.push(demoUser);
+        }
+        changed = true;
+      });
     }
     users.forEach((user) => {
       if (!SUPABASE_CONFIG.enabled && user.id === "u_admin") {
-        if (user.email !== DEMO_ADMIN_EMAIL || user.name !== "O6U Admin") {
+        if (user.email !== DEMO_ADMIN_EMAIL || user.name !== "O6U Demo Admin") {
           user.email = DEMO_ADMIN_EMAIL;
-          user.name = "O6U Admin";
+          user.name = "O6U Demo Admin";
           changed = true;
         }
       }
@@ -14963,7 +15023,12 @@ function bindGlobalEvents() {
 
     if (action === "courses-home-tab") {
       const requestedTab = String(actionTarget?.getAttribute("data-tab") || "dashboard").trim();
-      state.coursesHomeTab = ["dashboard", "enrolled", "suggestions"].includes(requestedTab) ? requestedTab : "dashboard";
+      const previousTab = String(state.coursesHomeTab || "dashboard").trim() || "dashboard";
+      const nextTab = ["dashboard", "enrolled", "suggestions"].includes(requestedTab) ? requestedTab : "dashboard";
+      if (state.route === "courses" && (state.coursesView !== "home" || previousTab !== nextTab)) {
+        setCoursesTabTransition(previousTab, nextTab);
+      }
+      state.coursesHomeTab = nextTab;
       state.coursesView = "home";
       state.coursesActiveCourseId = "";
       state.coursesActiveLessonId = "";
@@ -15043,6 +15108,11 @@ function bindGlobalEvents() {
 
     if (action === "quick-login-student") {
       loginAsDemo(DEMO_STUDENT_EMAIL, "student123");
+      return;
+    }
+
+    if (action === "quick-login-pending-student") {
+      loginAsDemo(DEMO_PENDING_STUDENT_EMAIL, "student123");
       return;
     }
 
@@ -15163,6 +15233,8 @@ function navigate(route, extras = {}) {
   }
   const canUseViewTransition = USE_NATIVE_VIEW_TRANSITIONS && typeof document.startViewTransition === "function";
   const shouldUseViewTransition = canUseViewTransition && targetRoute !== state.route;
+  const routeTransitionMode = getRouteTransitionMode(fromRoute, targetRoute);
+  document.body.dataset.routeTransition = routeTransitionMode;
 
   const applyNavigation = () => {
     if (targetRoute !== "session") {
@@ -15183,6 +15255,11 @@ function navigate(route, extras = {}) {
         applyNavigation();
       });
       attachViewTransitionErrorGuards(transition);
+      transition.finished.finally(() => {
+        if (document.body.dataset.routeTransition === routeTransitionMode) {
+          delete document.body.dataset.routeTransition;
+        }
+      }).catch(() => {});
     } catch (error) {
       const errorName = String(error?.name || "").trim();
       if (errorName !== "InvalidStateError" && errorName !== "AbortError") {
@@ -15202,6 +15279,21 @@ function navigate(route, extras = {}) {
   state.route = targetRoute;
   Object.assign(state, extras);
   render();
+}
+
+function getRouteTransitionMode(fromRoute, targetRoute) {
+  const from = String(fromRoute || "").trim().toLowerCase();
+  const to = String(targetRoute || "").trim().toLowerCase();
+  if ((from === "app-launcher" && to === "courses") || (from === "courses" && to === "app-launcher")) {
+    return "courses-app";
+  }
+  if (to === "courses") {
+    return "courses-in";
+  }
+  if (from === "courses") {
+    return "courses-out";
+  }
+  return "page";
 }
 
 function attachViewTransitionErrorGuards(transition) {
@@ -17967,7 +18059,7 @@ function render() {
     state.route = "login";
   }
 
-  if (user?.role === "student" && state.route === "dashboard" && !state.studentMcqBankEntered) {
+  if (shouldShowAppLauncherBeforeMcqBank(user)) {
     state.route = "app-launcher";
   }
 
@@ -18031,6 +18123,16 @@ function render() {
 
   const isExamWideRoute = state.route === "session" || state.route === "review";
   const isAdminRoute = state.route === "admin";
+  const coursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
+  if (
+    state.route === "courses"
+    && lastRenderedRoute === "courses"
+    && lastRenderedCoursesTransitionKey
+    && coursesTransitionKey !== lastRenderedCoursesTransitionKey
+    && !state.coursesTransitionMode
+  ) {
+    state.coursesTransitionMode = "forward";
+  }
   document.body.classList.toggle("is-session-route", isExamWideRoute);
   appEl.classList.toggle("is-session", isExamWideRoute);
   appEl.classList.toggle("is-admin", isAdminRoute);
@@ -18233,6 +18335,8 @@ function render() {
   lastRenderedSessionPointer = currentSessionPointer;
 
   if (skipTransition) {
+    lastRenderedCoursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
+    state.coursesTransitionMode = "";
     lastRenderedRoute = state.route;
     state.skipNextRouteAnimation = false;
     return;
@@ -18240,6 +18344,8 @@ function render() {
   if (routeChanged) {
     animateRouteTransition();
   }
+  lastRenderedCoursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
+  state.coursesTransitionMode = "";
   lastRenderedRoute = state.route;
 }
 
@@ -18482,6 +18588,7 @@ function animateRouteTransition() {
   routeTransitionHandle = window.setTimeout(() => {
     appEl.classList.remove("route-enter", "route-enter-active");
     document.body.classList.remove("is-routing");
+    delete document.body.dataset.routeTransition;
     routeTransitionHandle = null;
   }, ROUTE_TRANSITION_MS);
 }
@@ -18742,6 +18849,19 @@ function renderAuth(mode) {
       <section class="panel" style="max-width: 560px; margin-inline: auto;">
         <h2 class="title">Log In</h2>
         <p class="subtle">Access your O6U course question bank and saved blocks.</p>
+        ${isLocalDemoAuthEnabled() ? `
+          <div class="demo-panel">
+            <h4>Local demo accounts</h4>
+            <div class="stack">
+              <button class="btn ghost" type="button" data-action="quick-login-admin">Demo admin</button>
+              <button class="btn ghost" type="button" data-action="quick-login-student">Demo student</button>
+              <button class="btn ghost" type="button" data-action="quick-login-pending-student">Pending student</button>
+            </div>
+            <p class="subtle" style="margin:0.7rem 0 0;">Admin: ${escapeHtml(DEMO_ADMIN_EMAIL)} / admin123</p>
+            <p class="subtle" style="margin:0.2rem 0 0;">Student: ${escapeHtml(DEMO_STUDENT_EMAIL)} / student123</p>
+            <p class="subtle" style="margin:0.2rem 0 0;">Pending: ${escapeHtml(DEMO_PENDING_STUDENT_EMAIL)} / student123</p>
+          </div>
+        ` : ""}
         <form id="login-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
           <label>Email <input type="email" id="login-email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
           <label>Password <input type="password" id="login-password" name="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required /></label>
@@ -24396,7 +24516,7 @@ function renderAdminDataSidebarNav(activeAdminPage) {
   const items = [
     ["dashboard", "Dashboard"],
     ["users", "Users"],
-    ["courses", "MCQ Courses"],
+    ["courses", "Course Topics"],
     ["questions", "Questions"],
     ["bulk-import", "Bulk Import"],
     ["notifications", "Notifications"],
@@ -37902,8 +38022,8 @@ function removeSessionStorageKey(key) {
 }
 
 async function loginAsDemo(email, password) {
-  if (SUPABASE_CONFIG.enabled) {
-    toast("Demo accounts are disabled when Supabase is active. Please log in with your account.");
+  if (SUPABASE_CONFIG.enabled && !isLocalDemoAuthEnabled()) {
+    toast("Demo accounts are only available on localhost.");
     return;
   }
   const user = getUsers().find((entry) => entry.email === email && entry.password === password);
@@ -38178,18 +38298,33 @@ function renderBootstrapFallback() {
 }
 
 const COURSE_PLATFORM_TABLES = new Set([
-  "course_modules",
-  "course_lessons",
-  "course_resources",
-  "student_lesson_progress",
-  "course_announcements",
-  "course_enrollment_requests",
-  "course_suggestions",
+  "platform_courses",
+  "platform_course_enrollments",
+  "platform_course_modules",
+  "platform_course_lessons",
+  "platform_course_resources",
+  "platform_lesson_progress",
+  "platform_course_announcements",
+  "platform_course_enrollment_requests",
+  "platform_course_suggestions",
 ]);
+
+const COURSE_PLATFORM_COURSE_SELECT = "id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,updated_at";
+const LOCAL_DEMO_PLATFORM_IDS = {
+  enrolledCourse: "11111111-1111-4111-8111-111111111111",
+  suggestedCourse: "22222222-2222-4222-8222-222222222222",
+  extraSuggestedCourse: "33333333-3333-4333-8333-333333333333",
+  enrolledModule: "44444444-4444-4444-8444-444444444444",
+  suggestedModule: "55555555-5555-4555-8555-555555555555",
+  extraModule: "66666666-6666-4666-8666-666666666666",
+  lessonOne: "77777777-7777-4777-8777-777777777777",
+  lessonTwo: "88888888-8888-4888-8888-888888888888",
+  lessonThree: "99999999-9999-4999-8999-999999999999",
+};
 
 function normalizeCoursePlatformMode(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "open" || normalized === "request") {
+  if (normalized === "request") {
     return normalized;
   }
   return "assigned";
@@ -38207,8 +38342,17 @@ function getCoursesPlatformClient() {
   return getRelationalClient();
 }
 
+function isLocalDemoCoursePlatformUser(user = getCurrentUser()) {
+  return isLocalDemoAuthEnabled()
+    && isLegacyDemoUser(user)
+    && String(user?.role || "").trim() === "student";
+}
+
 function getCurrentCoursePlatformUserId() {
   const user = getCurrentUser();
+  if (isLocalDemoCoursePlatformUser(user)) {
+    return String(user?.id || "").trim();
+  }
   return String(getUserProfileId(user) || "").trim();
 }
 
@@ -38303,8 +38447,121 @@ function setCoursesPlatformError(error, fallback = "Courses could not be loaded.
   }
 }
 
+function buildLocalDemoPlatformData(user = getCurrentUser()) {
+  const userId = String(user?.id || "u_student").trim() || "u_student";
+  const now = nowISO();
+  const courses = [
+    {
+      id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse,
+      course_code: "DEMO-ANAT101",
+      course_name: "Demo Anatomy Foundations",
+      academic_year: 1,
+      academic_semester: 1,
+      is_active: true,
+      is_published: true,
+      enrollment_mode: "assigned",
+      level: "Year 1",
+      estimated_duration: "2 weeks",
+      instructor_name: "Dr. Demo Admin",
+      instructor_bio: "Local-only instructor profile for testing the Courses app.",
+      description: "An enrolled demo course with modules, lessons, announcements, and progress.",
+      cover_image_url: "Assets/branding/web-logo-hero.png",
+      intro_video_url: "",
+      price: 0,
+      updated_at: now,
+    },
+    {
+      id: LOCAL_DEMO_PLATFORM_IDS.suggestedCourse,
+      course_code: "DEMO-PHYS101",
+      course_name: "Demo Physiology Review",
+      academic_year: 1,
+      academic_semester: 1,
+      is_active: true,
+      is_published: true,
+      enrollment_mode: "request",
+      level: "Year 1",
+      estimated_duration: "1 week",
+      instructor_name: "Dr. Demo Admin",
+      instructor_bio: "",
+      description: "A suggested course for testing the request-and-approval workflow.",
+      cover_image_url: "Assets/branding/web-logo-hero.png",
+      intro_video_url: "",
+      price: 0,
+      updated_at: now,
+    },
+    {
+      id: LOCAL_DEMO_PLATFORM_IDS.extraSuggestedCourse,
+      course_code: "DEMO-HIST101",
+      course_name: "Demo Histology Lab Prep",
+      academic_year: 1,
+      academic_semester: 1,
+      is_active: true,
+      is_published: true,
+      enrollment_mode: "request",
+      level: "Year 1",
+      estimated_duration: "3 days",
+      instructor_name: "Dr. Demo Admin",
+      instructor_bio: "",
+      description: "Another suggested course so the suggestions page has more than one item.",
+      cover_image_url: "Assets/branding/web-logo-hero.png",
+      intro_video_url: "",
+      price: 0,
+      updated_at: now,
+    },
+  ];
+  const modules = [
+    { id: LOCAL_DEMO_PLATFORM_IDS.enrolledModule, course_id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse, title: "Getting started", description: "Core demo module.", position: 1, is_published: true, created_at: now, updated_at: now },
+    { id: LOCAL_DEMO_PLATFORM_IDS.suggestedModule, course_id: LOCAL_DEMO_PLATFORM_IDS.suggestedCourse, title: "Suggested preview", description: "Preview module.", position: 1, is_published: true, created_at: now, updated_at: now },
+    { id: LOCAL_DEMO_PLATFORM_IDS.extraModule, course_id: LOCAL_DEMO_PLATFORM_IDS.extraSuggestedCourse, title: "Lab checklist", description: "Preview module.", position: 1, is_published: true, created_at: now, updated_at: now },
+  ];
+  const lessons = [
+    { id: LOCAL_DEMO_PLATFORM_IDS.lessonOne, course_id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse, module_id: LOCAL_DEMO_PLATFORM_IDS.enrolledModule, is_published: true, is_free_preview: false, position: 1, title: "Demo lesson: course overview", description: "Open this lesson to test the lesson viewer.", lesson_type: "Video", duration_seconds: 420, created_at: now, updated_at: now, content_html: "This is local demo lesson content for testing before publishing.", video_url: "" },
+    { id: LOCAL_DEMO_PLATFORM_IDS.lessonTwo, course_id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse, module_id: LOCAL_DEMO_PLATFORM_IDS.enrolledModule, is_published: true, is_free_preview: false, position: 2, title: "Demo lesson: quick review", description: "Mark this complete to test progress.", lesson_type: "Reading", duration_seconds: 300, created_at: now, updated_at: now, content_html: "Use this second lesson to test next and previous navigation.", video_url: "" },
+    { id: LOCAL_DEMO_PLATFORM_IDS.lessonThree, course_id: LOCAL_DEMO_PLATFORM_IDS.suggestedCourse, module_id: LOCAL_DEMO_PLATFORM_IDS.suggestedModule, is_published: true, is_free_preview: true, position: 1, title: "Free preview lesson", description: "Visible before approval.", lesson_type: "Preview", duration_seconds: 240, created_at: now, updated_at: now, content_html: "This preview belongs to a suggested course.", video_url: "" },
+  ];
+  const existingRequests = (state.coursesRequests || []).filter((row) => String(row?.user_id || "").trim() === userId);
+  return {
+    courses,
+    modules,
+    lessons,
+    resources: [],
+    announcements: [
+      { id: "demo-announcement-1", course_id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse, title: "Welcome to the local demo", body: "This announcement is only for localhost testing.", is_published: true, created_at: now },
+    ],
+    suggestions: [
+      { id: "demo-suggestion-1", course_id: LOCAL_DEMO_PLATFORM_IDS.suggestedCourse, target_academic_year: 1, target_semester: 1, title: "Recommended physiology review", reason: "Suggested for Year 1 Semester 1 students.", priority: 20, is_active: true, starts_at: null, ends_at: null, created_at: now, updated_at: now },
+      { id: "demo-suggestion-2", course_id: LOCAL_DEMO_PLATFORM_IDS.extraSuggestedCourse, target_academic_year: 1, target_semester: 1, title: "Histology lab prep", reason: "Good before practical sessions.", priority: 10, is_active: true, starts_at: null, ends_at: null, created_at: now, updated_at: now },
+    ],
+    enrollments: [
+      { user_id: userId, course_id: LOCAL_DEMO_PLATFORM_IDS.enrolledCourse, assigned_at: now },
+    ],
+    requests: existingRequests,
+    progress: (state.coursesProgress || []).filter((row) => String(row?.user_id || "").trim() === userId),
+  };
+}
+
+async function loadLocalDemoCoursesWithProgress(user = getCurrentUser()) {
+  const data = buildLocalDemoPlatformData(user);
+  state.coursesCatalog = data.courses;
+  state.coursesEnrollments = data.enrollments;
+  state.coursesRequests = data.requests;
+  state.coursesProgress = data.progress;
+  state.coursesLessons = data.lessons;
+  state.coursesModules = data.modules;
+  state.coursesResources = data.resources;
+  state.coursesAnnouncements = data.announcements;
+  state.coursesSuggestions = data.suggestions;
+  state.coursesLoadedAt = Date.now();
+  state.coursesLoading = false;
+  state.coursesError = "";
+  return true;
+}
+
 async function loadStudentCoursesWithProgress(options = {}) {
   const user = getCurrentUser();
+  if (isLocalDemoCoursePlatformUser(user)) {
+    return loadLocalDemoCoursesWithProgress(user);
+  }
   const userId = String(getUserProfileId(user) || "").trim();
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(userId)) {
@@ -38321,8 +38578,8 @@ async function loadStudentCoursesWithProgress(options = {}) {
     const [courses, enrollments, requests, progress, lessons, modules, announcements, suggestions] = await Promise.all([
       runRelationalQueryWithTimeout(
         client
-          .from("courses")
-          .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+          .from("platform_courses")
+          .select(COURSE_PLATFORM_COURSE_SELECT)
           .eq("is_active", true)
           .order("academic_year", { ascending: true })
           .order("academic_semester", { ascending: true })
@@ -38330,46 +38587,46 @@ async function loadStudentCoursesWithProgress(options = {}) {
         "Courses query timed out.",
       ),
       runRelationalQueryWithTimeout(
-        client.from("user_course_enrollments").select("user_id,course_id,assigned_at").eq("user_id", userId),
+        client.from("platform_course_enrollments").select("user_id,course_id,assigned_at").eq("user_id", userId),
         "Enrollment query timed out.",
       ),
       runRelationalQueryWithTimeout(
-        client.from("course_enrollment_requests").select("id,user_id,course_id,status,created_at,updated_at").eq("user_id", userId),
+        client.from("platform_course_enrollment_requests").select("id,user_id,course_id,status,created_at,updated_at").eq("user_id", userId),
         "Enrollment request query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("student_lesson_progress").select("id,user_id,course_id,lesson_id,status,progress_percent,watched_seconds,completed_at,last_opened_at,updated_at").eq("user_id", userId),
+        client.from("platform_lesson_progress").select("id,user_id,course_id,lesson_id,status,progress_percent,watched_seconds,completed_at,last_opened_at,updated_at").eq("user_id", userId),
         "Lesson progress query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("course_lessons").select("id,course_id,module_id,is_published,position,title,description,lesson_type,duration_seconds,linked_topic_id,created_at,updated_at").order("position", { ascending: true }),
+        client.from("platform_course_lessons").select("id,course_id,module_id,is_published,position,title,description,lesson_type,duration_seconds,created_at,updated_at").order("position", { ascending: true }),
         "Lesson summary query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("course_modules").select("id,course_id,title,description,position,is_published,created_at,updated_at").order("position", { ascending: true }),
+        client.from("platform_course_modules").select("id,course_id,title,description,position,is_published,created_at,updated_at").order("position", { ascending: true }),
         "Module summary query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("course_announcements").select("id,course_id,title,body,is_published,created_at").order("created_at", { ascending: false }),
+        client.from("platform_course_announcements").select("id,course_id,title,body,is_published,created_at").order("created_at", { ascending: false }),
         "Announcement summary query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("course_suggestions").select("id,course_id,target_academic_year,target_semester,title,reason,priority,is_active,starts_at,ends_at,created_at,updated_at").order("priority", { ascending: false }).order("created_at", { ascending: false }),
+        client.from("platform_course_suggestions").select("id,course_id,target_academic_year,target_semester,title,reason,priority,is_active,starts_at,ends_at,created_at,updated_at").order("priority", { ascending: false }).order("created_at", { ascending: false }),
         "Course suggestions query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
@@ -38397,6 +38654,10 @@ async function loadStudentCoursesWithProgress(options = {}) {
 }
 
 async function loadCourseModulesAndLessons(courseId) {
+  if (isLocalDemoCoursePlatformUser()) {
+    await loadLocalDemoCoursesWithProgress();
+    return true;
+  }
   const client = getCoursesPlatformClient();
   const targetCourseId = String(courseId || "").trim();
   if (!client || !isUuidValue(targetCourseId)) {
@@ -38405,25 +38666,22 @@ async function loadCourseModulesAndLessons(courseId) {
   try {
     const [modules, lessons, resources, announcements, topics] = await Promise.all([
       runRelationalQueryWithTimeout(
-        client.from("course_modules").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        client.from("platform_course_modules").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
         "Course modules query timed out.",
       ),
       runRelationalQueryWithTimeout(
-        client.from("course_lessons").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        client.from("platform_course_lessons").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
         "Course lessons query timed out.",
       ),
       runRelationalQueryWithTimeout(
-        client.from("course_resources").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
+        client.from("platform_course_resources").select("*").eq("course_id", targetCourseId).order("position", { ascending: true }),
         "Course resources query timed out.",
       ),
       runRelationalQueryWithTimeout(
-        client.from("course_announcements").select("*").eq("course_id", targetCourseId).order("created_at", { ascending: false }),
+        client.from("platform_course_announcements").select("*").eq("course_id", targetCourseId).order("created_at", { ascending: false }),
         "Course announcements query timed out.",
       ),
-      runRelationalQueryWithTimeout(
-        client.from("course_topics").select("id,course_id,topic_name").eq("course_id", targetCourseId).order("topic_name", { ascending: true }),
-        "Course topics query timed out.",
-      ).catch(() => []),
+      Promise.resolve([]),
     ]);
     state.coursesModules = Array.isArray(modules) ? modules : [];
     state.coursesLessons = Array.isArray(lessons) ? lessons : [];
@@ -38439,6 +38697,20 @@ async function loadCourseModulesAndLessons(courseId) {
 }
 
 async function loadCourseDetail(courseId) {
+  if (isLocalDemoCoursePlatformUser()) {
+    await loadLocalDemoCoursesWithProgress();
+    const targetCourseId = String(courseId || "").trim();
+    const course = (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === targetCourseId);
+    if (!course) {
+      state.coursesError = "Course could not be opened.";
+      return false;
+    }
+    state.coursesDetail = course;
+    state.coursesActiveCourseId = targetCourseId;
+    state.coursesLoading = false;
+    state.coursesError = "";
+    return true;
+  }
   const client = getCoursesPlatformClient();
   const targetCourseId = String(courseId || "").trim();
   if (!client || !isUuidValue(targetCourseId)) {
@@ -38450,8 +38722,8 @@ async function loadCourseDetail(courseId) {
   try {
     const course = await runRelationalQueryWithTimeout(
       client
-        .from("courses")
-        .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+        .from("platform_courses")
+        .select(COURSE_PLATFORM_COURSE_SELECT)
         .eq("id", targetCourseId)
         .maybeSingle(),
       "Course detail query timed out.",
@@ -38479,6 +38751,30 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
   const client = getCoursesPlatformClient();
   const targetLessonId = String(lessonId || "").trim();
   const lesson = state.coursesLessons.find((entry) => String(entry?.id || "").trim() === targetLessonId);
+  if (isLocalDemoCoursePlatformUser()) {
+    if (!lesson || !userId) {
+      toast("Lesson progress could not be saved.");
+      return false;
+    }
+    const existingIndex = state.coursesProgress.findIndex((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
+    const normalizedStatus = String(status || "").trim() === "completed" ? "completed" : "in_progress";
+    const payload = {
+      user_id: userId,
+      course_id: lesson.course_id,
+      lesson_id: targetLessonId,
+      status: normalizedStatus,
+      progress_percent: normalizedStatus === "completed" ? 100 : Math.max(0, Math.min(99, Math.round(Number(progressPercent) || 0))),
+      last_opened_at: nowISO(),
+      updated_at: nowISO(),
+      completed_at: normalizedStatus === "completed" ? nowISO() : null,
+    };
+    if (existingIndex >= 0) {
+      state.coursesProgress[existingIndex] = { ...state.coursesProgress[existingIndex], ...payload };
+    } else {
+      state.coursesProgress.push(payload);
+    }
+    return true;
+  }
   if (!client || !isUuidValue(userId) || !lesson) {
     toast("Lesson progress could not be saved.");
     return false;
@@ -38501,7 +38797,7 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
   };
   try {
     await runRelationalQueryWithTimeout(
-      client.from("student_lesson_progress").upsert(payload, { onConflict: "user_id,lesson_id" }),
+      client.from("platform_lesson_progress").upsert(payload, { onConflict: "user_id,lesson_id" }),
       "Lesson progress update timed out.",
     );
     const existingIndex = state.coursesProgress.findIndex((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
@@ -38518,37 +38814,31 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
   }
 }
 
-async function enrollInOpenCourse(courseId) {
-  const client = getCoursesPlatformClient();
-  const userId = getCurrentCoursePlatformUserId();
-  const targetCourseId = String(courseId || "").trim();
-  if (!client || !isUuidValue(userId) || !isUuidValue(targetCourseId)) {
-    toast("Course enrollment could not start.");
-    return false;
-  }
-  if (state.coursesEnrollments.some((row) => String(row?.course_id || "").trim() === targetCourseId)) {
-    toast("You are already enrolled in this course.");
-    return true;
-  }
-  try {
-    await runRelationalQueryWithTimeout(
-      client.from("user_course_enrollments").insert({ user_id: userId, course_id: targetCourseId }),
-      "Course enrollment timed out.",
-    );
-    toast("Course enrolled.");
-    await loadStudentCoursesWithProgress({ force: true });
-    return true;
-  } catch (error) {
-    console.warn("Could not enroll in course.", error?.message || error);
-    toast(getErrorMessage(error, "Could not enroll in this course."));
-    return false;
-  }
-}
-
 async function requestCourseEnrollment(courseId) {
   const client = getCoursesPlatformClient();
   const userId = getCurrentCoursePlatformUserId();
   const targetCourseId = String(courseId || "").trim();
+  if (isLocalDemoCoursePlatformUser()) {
+    if (!userId || !isUuidValue(targetCourseId)) {
+      toast("Access request could not be sent.");
+      return false;
+    }
+    const existing = state.coursesRequests.find((row) => String(row?.course_id || "").trim() === targetCourseId && String(row?.user_id || "").trim() === userId);
+    if (existing) {
+      toast(`Request is ${String(existing.status || "pending")}.`);
+      return true;
+    }
+    state.coursesRequests.push({
+      id: `local-request-${Date.now()}`,
+      user_id: userId,
+      course_id: targetCourseId,
+      status: "pending",
+      created_at: nowISO(),
+      updated_at: nowISO(),
+    });
+    toast("Access request sent.");
+    return true;
+  }
   if (!client || !isUuidValue(userId) || !isUuidValue(targetCourseId)) {
     toast("Access request could not be sent.");
     return false;
@@ -38560,7 +38850,7 @@ async function requestCourseEnrollment(courseId) {
   }
   try {
     await runRelationalQueryWithTimeout(
-      client.from("course_enrollment_requests").insert({ user_id: userId, course_id: targetCourseId, status: "pending" }),
+      client.from("platform_course_enrollment_requests").insert({ user_id: userId, course_id: targetCourseId, status: "pending" }),
       "Course access request timed out.",
     );
     toast("Access request sent.");
@@ -38661,7 +38951,7 @@ function getCoursePlatformCourseModel(course) {
     newAnnouncements,
     lastLesson,
     lastModule,
-    hasLinkedMcq: publishedLessons.some((lesson) => isUuidValue(lesson?.linked_topic_id)) || normalizeCoursePlatformType(course?.course_type) !== "lessons_only",
+    hasLinkedMcq: false,
   };
 }
 
@@ -38686,7 +38976,7 @@ function getCoursePlatformSuggestionRows(decorated) {
   const nowMs = Date.now();
   return (state.coursesSuggestions || [])
     .map((suggestion) => ({ suggestion, ...(rowsByCourseId.get(String(suggestion?.course_id || "").trim()) || {}) }))
-    .filter((row) => row.course && row.progress < 100)
+    .filter((row) => row.course && !row.enrollment?.isEnrolled)
     .filter(({ suggestion }) => {
       if (suggestion?.is_active === false) return false;
       const startsMs = parseSyncTimestampMs(suggestion?.starts_at);
@@ -38714,9 +39004,8 @@ function filterCoursePlatformRows(rows, tab, query, filter) {
       return true;
     }
     if (tab === "suggestions") {
-      if (filter === "open") return row.enrollment.mode === "open";
-      if (filter === "request") return row.enrollment.mode === "request";
-      if (filter === "enrolled") return row.enrollment.isEnrolled;
+      if (filter === "pending") return row.enrollment.requestStatus === "pending";
+      if (filter === "available") return row.enrollment.requestStatus !== "pending";
       return true;
     }
     return true;
@@ -38744,20 +39033,14 @@ function renderCoursePlatformCard(row, options = {}) {
   const isSuggestion = Boolean(options.suggestion);
   const statusLabel = enrollment.isEnrolled
     ? `${progress}% complete`
-    : enrollment.mode === "open"
-      ? "Open enrollment"
-      : enrollment.requestStatus
+    : enrollment.requestStatus
         ? `Request ${enrollment.requestStatus}`
         : "Request access";
   const badge = String(options.badge || "").trim();
-  const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : enrollment.mode === "open" ? "Enroll now" : enrollment.mode === "request" ? "Request access" : "View details";
+  const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : "Request access";
   const primaryAction = enrollment.isEnrolled
     ? (lastLesson ? "courses-open-lesson" : "courses-open-course")
-    : enrollment.mode === "open"
-      ? "courses-enroll-open"
-      : enrollment.mode === "request"
-        ? "courses-request-access"
-        : "courses-open-course";
+    : "courses-request-access";
   const statusText = status === "completed" ? "Completed" : status === "in_progress" ? "In progress" : "Not started";
   const suggestionReason = String(row.suggestion?.reason || row.suggestion?.title || "").trim();
   const hasNoContent = !lessonCount && !moduleCount;
@@ -38772,7 +39055,7 @@ function renderCoursePlatformCard(row, options = {}) {
         <div class="course-card-top">
           <div class="course-card-badges-row">
             <span class="course-card-badge course-card-badge-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
-            ${enrollment.isEnrolled ? `<span class="course-card-badge course-card-badge-status course-card-badge-${status}">${escapeHtml(statusText)}</span>` : `<span class="course-card-badge course-card-badge-${enrollment.mode}">${enrollment.mode === "open" ? "Open" : "Request-only"}</span>`}
+            ${enrollment.isEnrolled ? `<span class="course-card-badge course-card-badge-status course-card-badge-${status}">${escapeHtml(statusText)}</span>` : `<span class="course-card-badge course-card-badge-request">${enrollment.requestStatus === "pending" ? "Pending approval" : "Approval required"}</span>`}
             ${courseCode ? `<span class="course-card-badge course-card-badge-code">${escapeHtml(courseCode)}</span>` : ""}
           </div>
           <h3>${escapeHtml(title)}</h3>
@@ -38807,8 +39090,7 @@ function renderCoursePlatformCard(row, options = {}) {
 
         <div class="course-card-footer">
           <div class="course-card-actions">
-            ${!isSuggestion && enrollment.isEnrolled ? `<button class="btn ghost admin-btn-sm course-card-mcq-btn" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice MCQs</button>` : ""}
-            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.mode === "request" && enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
+            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
           </div>
         </div>
       </div>
@@ -38817,7 +39099,7 @@ function renderCoursePlatformCard(row, options = {}) {
 }
 
 function renderCoursePlatformToolbar(activeTab, filter) {
-  const suggestionFilter = ["all", "open", "request", "enrolled"].includes(filter) ? filter : "all";
+  const suggestionFilter = ["all", "available", "pending"].includes(filter) ? filter : "all";
   return `
     <div class="courses-toolbar">
       <label class="courses-search">Search
@@ -38845,9 +39127,8 @@ function renderCoursePlatformToolbar(activeTab, filter) {
             <option value="completed" ${state.coursesStatusFilter === "completed" ? "selected" : ""}>Completed</option>
           ` : `
             <option value="all" ${suggestionFilter === "all" ? "selected" : ""}>All suggestions</option>
-            <option value="open" ${suggestionFilter === "open" ? "selected" : ""}>Open courses</option>
-            <option value="request" ${suggestionFilter === "request" ? "selected" : ""}>Request-only</option>
-            <option value="enrolled" ${suggestionFilter === "enrolled" ? "selected" : ""}>Already enrolled</option>
+            <option value="available" ${suggestionFilter === "available" ? "selected" : ""}>Available to request</option>
+            <option value="pending" ${suggestionFilter === "pending" ? "selected" : ""}>Pending approval</option>
           `}
         </select>
       </label>
@@ -38904,7 +39185,7 @@ function loadCoursesDashboardData() {
     announcements: announcements.slice(0, 4),
     newAnnouncementsCount: announcements.filter((item) => Date.now() - parseSyncTimestampMs(item?.created_at) <= 14 * 24 * 60 * 60 * 1000).length,
     recentLessons,
-    quickMcqRows: enrolledRows.filter((row) => row.hasLinkedMcq).slice(0, 3),
+    quickMcqRows: [],
   };
 }
 
@@ -38919,7 +39200,7 @@ function renderCoursesDashboard() {
       <div>
         <p class="kicker">O6U Courses</p>
         <h2 class="title">Welcome back${currentUser?.name ? `, ${escapeHtml(currentUser.name.split(" ")[0])}` : ""}</h2>
-        <p class="subtle">Continue lessons, follow announcements, and jump into linked MCQ practice from one Courses dashboard.</p>
+        <p class="subtle">Continue lessons, follow announcements, and track your learning from one Courses dashboard.</p>
       </div>
       <button class="btn ghost admin-btn-sm" data-nav="app-launcher" type="button">Back to Apps</button>
     </section>
@@ -39001,7 +39282,7 @@ function renderCoursesDashboard() {
           </div>
           ${visibleEnrolled.length ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-home-tab" data-tab="enrolled">See all</button>` : ""}
         </div>
-        ${visibleEnrolled.length ? `<div class="courses-grid">${visibleEnrolled.map((row) => renderCoursePlatformCard(row)).join("")}</div>` : `<div class="card courses-empty"><h3>No enrolled courses yet</h3><p class="subtle">Open courses and admin-assigned courses will stay organized in this tab.</p></div>`}
+        ${visibleEnrolled.length ? `<div class="courses-grid">${visibleEnrolled.map((row) => renderCoursePlatformCard(row)).join("")}</div>` : `<div class="card courses-empty"><h3>No enrolled courses yet</h3><p class="subtle">Courses appear here after an admin approves your enrollment request.</p></div>`}
       </section>
 
       <section class="courses-dashboard-list">
@@ -39055,12 +39336,12 @@ function renderCoursesDashboard() {
 function renderEnrolledCourses(courses) {
   const inProgress = courses.filter((row) => row.status === "in_progress").length;
   const completed = courses.filter((row) => row.status === "completed").length;
-  const mcqAvailable = courses.filter((row) => row.hasLinkedMcq).length;
+  const moduleCount = courses.reduce((sum, row) => sum + (Number(row.moduleCount) || 0), 0);
   return `
     <div class="courses-page-header">
       <div>
         <h2 class="title" style="margin:0;">Enrolled Courses</h2>
-        <p class="subtle" style="margin:0.2rem 0 0;">Access course materials, track progress, and practice linked MCQs for your enrolled courses.</p>
+        <p class="subtle" style="margin:0.2rem 0 0;">Access course materials, track progress, and continue assigned learning.</p>
       </div>
       <div class="courses-page-stats">
         <div class="courses-page-stat">
@@ -39076,8 +39357,8 @@ function renderEnrolledCourses(courses) {
           <span class="courses-page-stat-label">Completed</span>
         </div>
         <div class="courses-page-stat">
-          <span class="courses-page-stat-value">${mcqAvailable}</span>
-          <span class="courses-page-stat-label">MCQ courses</span>
+          <span class="courses-page-stat-value">${moduleCount}</span>
+          <span class="courses-page-stat-label">Modules</span>
         </div>
       </div>
     </div>
@@ -39086,7 +39367,7 @@ function renderEnrolledCourses(courses) {
       ${renderCoursePlatformToolbar("enrolled", state.coursesFilter)}
     </div>
 
-    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg><h3>You are not enrolled in any courses</h3><p>Once your admin assigns courses or you enroll in open courses, they will appear here.</p><button class="btn ghost" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button></div>` : ""}
+    ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="courses-empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg><h3>You are not enrolled in any courses</h3><p>Once your admin assigns a course or approves your request, it will appear here.</p><button class="btn ghost" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button></div>` : ""}
     <div class="courses-grid">
       ${courses.map((row) => renderCoursePlatformCard(row)).join("")}
     </div>
@@ -39094,9 +39375,8 @@ function renderEnrolledCourses(courses) {
 }
 
 function renderSuggestedCourses(courses) {
-  const openCount = courses.filter((row) => !row.enrollment.isEnrolled && row.enrollment.mode === "open").length;
-  const requestCount = courses.filter((row) => !row.enrollment.isEnrolled && row.enrollment.mode === "request").length;
-  const enrolledCount = courses.filter((row) => row.enrollment.isEnrolled).length;
+  const pendingCount = courses.filter((row) => row.enrollment.requestStatus === "pending").length;
+  const availableCount = Math.max(0, courses.length - pendingCount);
   return `
     <div class="courses-page-header">
       <div>
@@ -39109,16 +39389,16 @@ function renderSuggestedCourses(courses) {
           <span class="courses-page-stat-label">Suggestions</span>
         </div>
         <div class="courses-page-stat">
-          <span class="courses-page-stat-value">${openCount}</span>
-          <span class="courses-page-stat-label">Open</span>
+          <span class="courses-page-stat-value">${availableCount}</span>
+          <span class="courses-page-stat-label">Available</span>
         </div>
         <div class="courses-page-stat">
-          <span class="courses-page-stat-value">${requestCount}</span>
-          <span class="courses-page-stat-label">Request-only</span>
+          <span class="courses-page-stat-value">${pendingCount}</span>
+          <span class="courses-page-stat-label">Pending</span>
         </div>
         <div class="courses-page-stat">
-          <span class="courses-page-stat-value">${enrolledCount}</span>
-          <span class="courses-page-stat-label">Enrolled</span>
+          <span class="courses-page-stat-value">${courses.reduce((sum, row) => sum + (Number(row.lessonCount) || 0), 0)}</span>
+          <span class="courses-page-stat-label">Lessons</span>
         </div>
       </div>
     </div>
@@ -39143,6 +39423,38 @@ function renderCoursesListTab(activeTab, rows, filter) {
     return renderEnrolledCourses(rows);
   }
   return renderSuggestedCourses(rows);
+}
+
+function getCoursesTransitionClass() {
+  const mode = String(state.coursesTransitionMode || "").trim();
+  if (["forward", "back", "tab-forward", "tab-back", "lesson-forward", "lesson-back"].includes(mode)) {
+    return `courses-stage-${mode}`;
+  }
+  return "";
+}
+
+function getCoursesTransitionKey() {
+  const view = String(state.coursesView || "home").trim() || "home";
+  if (view === "home") {
+    return `home:${String(state.coursesHomeTab || "dashboard").trim() || "dashboard"}`;
+  }
+  if (view === "lesson") {
+    return `lesson:${String(state.coursesActiveLessonId || "").trim()}`;
+  }
+  return `detail:${String(state.coursesActiveCourseId || "").trim()}`;
+}
+
+function renderCoursesTransitionStage(markup) {
+  const transitionClass = getCoursesTransitionClass();
+  const viewKey = getCoursesTransitionKey();
+  return `<div class="courses-transition-stage ${transitionClass}" data-courses-view="${escapeHtml(viewKey)}">${markup}</div>`;
+}
+
+function setCoursesTabTransition(previousTab, nextTab) {
+  const order = ["dashboard", "enrolled", "suggestions"];
+  const previousIndex = order.indexOf(String(previousTab || "dashboard").trim());
+  const nextIndex = order.indexOf(String(nextTab || "dashboard").trim());
+  state.coursesTransitionMode = nextIndex >= previousIndex ? "tab-forward" : "tab-back";
 }
 
 function renderCoursesHome() {
@@ -39186,7 +39498,7 @@ function renderCourseDetail(courseId) {
   const enrollment = getCourseEnrollmentState(course);
   const progress = getCoursePlatformProgressPercent(course.id);
   const lastLesson = getLastOpenedCourseLesson(course.id) || lessons[0] || null;
-  const canOpenLessons = enrollment.isEnrolled || enrollment.mode === "open";
+  const canOpenLessons = enrollment.isEnrolled;
   return `
     <section class="panel courses-shell">
       <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button>
@@ -39195,7 +39507,7 @@ function renderCourseDetail(courseId) {
         <div class="course-detail-copy">
           <p class="kicker">Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</p>
           <h2 class="title">${escapeHtml(getCoursePlatformCourseTitle(course))}</h2>
-          <p class="subtle">${escapeHtml(course.description || "Course materials, lessons, announcements, and linked MCQ practice.")}</p>
+          <p class="subtle">${escapeHtml(course.description || "Course materials, lessons, announcements, and learning resources.")}</p>
           <div class="course-detail-facts">
             <span>${escapeHtml(course.instructor_name || "Instructor TBA")}</span>
             <span>${escapeHtml(course.estimated_duration || "Self-paced")}</span>
@@ -39203,15 +39515,10 @@ function renderCourseDetail(courseId) {
           </div>
           <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
           <div class="stack">
-            ${enrollment.isEnrolled || enrollment.mode === "open"
-              ? `<button class="btn" type="button" data-action="${enrollment.isEnrolled ? "courses-open-lesson" : "courses-enroll-open"}" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>${enrollment.isEnrolled ? "Continue learning" : "Enroll in course"}</button>`
-              : enrollment.mode === "request"
-                ? `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request access"}</button>`
-                : ""
+            ${enrollment.isEnrolled
+              ? `<button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>Continue learning</button>`
+              : `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request access"}</button>`
             }
-            <button class="btn ghost" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Practice this course</button>
-            <button class="btn ghost" type="button" data-action="courses-practice-course" data-course-id="${escapeHtml(course.id)}">Create MCQ block</button>
-            <button class="btn ghost" type="button" data-action="courses-review-weak" data-course-id="${escapeHtml(course.id)}">Review weak areas</button>
           </div>
         </div>
       </div>
@@ -39275,7 +39582,6 @@ function renderLessonViewer(lessonId) {
   const previous = index > 0 ? lessons[index - 1] : null;
   const next = index >= 0 && index < lessons.length - 1 ? lessons[index + 1] : null;
   const resources = (state.coursesResources || []).filter((resource) => String(resource?.lesson_id || "").trim() === String(lesson.id || "").trim());
-  const linkedTopicName = buildCoursePlatformTopicLabel(lesson.linked_topic_id);
   const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
   const isComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
   const safeVideoUrl = /^https?:\/\//i.test(String(lesson.video_url || "").trim()) ? String(lesson.video_url || "").trim() : "";
@@ -39307,17 +39613,6 @@ function renderLessonViewer(lessonId) {
               }).join("")}
             </div>
           ` : ""}
-          ${linkedTopicName ? `
-            <div class="lesson-mcq-panel">
-              <h3>Linked MCQ topic</h3>
-              <p class="subtle">${escapeHtml(linkedTopicName)}</p>
-              <div class="stack">
-                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-topic" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Practice this topic</button>
-                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-practice-topic" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Create MCQ block from this topic</button>
-                <button class="btn ghost admin-btn-sm" type="button" data-action="courses-review-topic-incorrect" data-course-id="${escapeHtml(lesson.course_id)}" data-topic-id="${escapeHtml(lesson.linked_topic_id)}">Review incorrect questions from this topic</button>
-              </div>
-            </div>
-          ` : ""}
         </article>
         <aside class="card lesson-next">
           <h3>Lesson navigation</h3>
@@ -39338,13 +39633,15 @@ function renderCourses() {
       }
     });
   }
+  let markup = "";
   if (state.coursesView === "detail") {
-    return renderCourseDetail(state.coursesActiveCourseId);
+    markup = renderCourseDetail(state.coursesActiveCourseId);
+  } else if (state.coursesView === "lesson") {
+    markup = renderLessonViewer(state.coursesActiveLessonId);
+  } else {
+    markup = renderCoursesHome();
   }
-  if (state.coursesView === "lesson") {
-    return renderLessonViewer(state.coursesActiveLessonId);
-  }
-  return renderCoursesHome();
+  return renderCoursesTransitionStage(markup);
 }
 
 function wireCourses() {
@@ -39388,6 +39685,7 @@ function wireCourses() {
       const topicId = String(button.getAttribute("data-topic-id") || "").trim();
 
       if (action === "courses-home") {
+        state.coursesTransitionMode = "back";
         state.coursesView = "home";
         state.coursesActiveCourseId = "";
         state.coursesActiveLessonId = "";
@@ -39397,6 +39695,7 @@ function wireCourses() {
       }
 
       if (action === "courses-open-course" && courseId) {
+        state.coursesTransitionMode = state.coursesView === "lesson" ? "back" : "forward";
         state.coursesView = "detail";
         state.coursesActiveCourseId = courseId;
         state.coursesActiveLessonId = "";
@@ -39411,6 +39710,10 @@ function wireCourses() {
       }
 
       if (action === "courses-open-lesson" && lessonId) {
+        const lessonsForDirection = getCoursePlatformLessonsForCourse(courseId || state.coursesActiveCourseId);
+        const currentLessonIndex = lessonsForDirection.findIndex((entry) => String(entry?.id || "").trim() === String(state.coursesActiveLessonId || "").trim());
+        const nextLessonIndex = lessonsForDirection.findIndex((entry) => String(entry?.id || "").trim() === lessonId);
+        state.coursesTransitionMode = currentLessonIndex >= 0 && nextLessonIndex >= 0 && nextLessonIndex < currentLessonIndex ? "lesson-back" : "lesson-forward";
         if (courseId && String(state.coursesDetail?.id || "").trim() !== courseId) {
           await loadCourseDetail(courseId);
         }
@@ -39420,18 +39723,6 @@ function wireCourses() {
         await updateLessonProgress(lessonId, "in_progress", 10);
         state.skipNextRouteAnimation = true;
         render();
-        return;
-      }
-
-      if (action === "courses-enroll-open" && courseId) {
-        const ok = await enrollInOpenCourse(courseId);
-        if (ok) {
-          await loadCourseDetail(courseId);
-          state.coursesView = lessonId ? "lesson" : "detail";
-          state.coursesActiveLessonId = lessonId || "";
-          state.skipNextRouteAnimation = true;
-          render();
-        }
         return;
       }
 
@@ -39504,39 +39795,39 @@ async function loadAdminCoursesPlatform(options = {}) {
     const [courses, modules, lessons, resources, announcements, suggestions, requests, enrollments, topics] = await Promise.all([
       runRelationalQueryWithTimeout(
         client
-          .from("courses")
-          .select("id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,course_type,updated_at")
+          .from("platform_courses")
+          .select(COURSE_PLATFORM_COURSE_SELECT)
           .order("academic_year", { ascending: true })
           .order("academic_semester", { ascending: true })
           .order("course_name", { ascending: true }),
         "Admin courses query timed out.",
       ),
-      runRelationalQueryWithTimeout(client.from("course_modules").select("*").order("position", { ascending: true }), "Admin modules query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_modules").select("*").order("position", { ascending: true }), "Admin modules query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("course_lessons").select("*").order("position", { ascending: true }), "Admin lessons query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_lessons").select("*").order("position", { ascending: true }), "Admin lessons query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("course_resources").select("*").order("position", { ascending: true }), "Admin resources query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_resources").select("*").order("position", { ascending: true }), "Admin resources query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("course_announcements").select("*").order("created_at", { ascending: false }), "Admin announcements query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_announcements").select("*").order("created_at", { ascending: false }), "Admin announcements query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("course_suggestions").select("*").order("priority", { ascending: false }).order("created_at", { ascending: false }), "Admin suggestions query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_suggestions").select("*").order("priority", { ascending: false }).order("created_at", { ascending: false }), "Admin suggestions query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("course_enrollment_requests").select("*").order("created_at", { ascending: false }), "Admin requests query timed out.").catch((error) => {
+      runRelationalQueryWithTimeout(client.from("platform_course_enrollment_requests").select("*").order("created_at", { ascending: false }), "Admin requests query timed out.").catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("user_course_enrollments").select("user_id,course_id,assigned_at"), "Admin enrollment query timed out.").catch(() => []),
-      runRelationalQueryWithTimeout(client.from("course_topics").select("id,course_id,topic_name").order("topic_name", { ascending: true }), "Admin topic query timed out.").catch(() => []),
+      runRelationalQueryWithTimeout(client.from("platform_course_enrollments").select("user_id,course_id,assigned_at"), "Admin enrollment query timed out.").catch(() => []),
+      Promise.resolve([]),
     ]);
 
     const userIds = [...new Set([
@@ -39618,6 +39909,10 @@ function getAdminCourseBuilderProfileLabel(userId) {
 
 function coerceAdminCourseMetadataPayload(data) {
   return {
+    course_code: String(data.course_code || "").trim() || null,
+    course_name: String(data.course_name || "").trim(),
+    academic_year: sanitizeAcademicYear(data.academic_year),
+    academic_semester: sanitizeAcademicSemester(data.academic_semester),
     description: String(data.description || "").trim() || null,
     cover_image_url: String(data.cover_image_url || "").trim() || null,
     intro_video_url: String(data.intro_video_url || "").trim() || null,
@@ -39628,18 +39923,104 @@ function coerceAdminCourseMetadataPayload(data) {
     is_published: Boolean(data.is_published),
     enrollment_mode: normalizeCoursePlatformMode(data.enrollment_mode),
     price: Math.max(0, Number(data.price) || 0),
-    course_type: normalizeCoursePlatformType(data.course_type),
+    is_active: data.is_active !== false,
     updated_at: nowISO(),
   };
+}
+
+async function upsertDefaultPlatformCourseSuggestion(courseId, coursePayload, data = {}) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(targetCourseId)) {
+    return false;
+  }
+  const preserveExistingDetails = Boolean(data.preserveDetails);
+  const suggestionPayload = {
+    course_id: targetCourseId,
+    target_academic_year: normalizeAcademicYearOrNull(coursePayload?.academic_year),
+    target_semester: normalizeAcademicSemesterOrNull(coursePayload?.academic_semester),
+    updated_at: nowISO(),
+  };
+  if (!preserveExistingDetails) {
+    Object.assign(suggestionPayload, {
+      title: String(data.title || coursePayload?.course_name || "").trim() || null,
+      reason: String(data.reason || "").trim() || "Recommended by your course admin.",
+      priority: Number(data.priority) || 0,
+      is_active: true,
+      created_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
+    });
+  }
+  const existingSuggestion = await runRelationalQueryWithTimeout(
+    client
+      .from("platform_course_suggestions")
+      .select("id")
+      .eq("course_id", targetCourseId)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    "Course suggestion lookup timed out.",
+  ).catch((error) => {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  });
+  if (existingSuggestion?.id) {
+    const updatePayload = { ...suggestionPayload };
+    delete updatePayload.course_id;
+    delete updatePayload.created_by;
+    await runRelationalQueryWithTimeout(
+      client.from("platform_course_suggestions").update(updatePayload).eq("id", existingSuggestion.id),
+      "Course suggestion update timed out.",
+    );
+    return true;
+  }
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_suggestions").insert({
+      ...suggestionPayload,
+      title: String(data.title || coursePayload?.course_name || "").trim() || null,
+      reason: String(data.reason || "").trim() || "Recommended by your course admin.",
+      priority: Number(data.priority) || 0,
+      is_active: true,
+      created_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
+    }),
+    "Course suggestion create timed out.",
+  ).catch((error) => {
+    if (!isMissingRelationError(error)) throw error;
+  });
+  return true;
+}
+
+async function adminCreatePlatformCourse(data) {
+  const client = getCoursesPlatformClient();
+  if (!client) throw new Error("Course cannot be created.");
+  const courseName = String(data.course_name || "").trim();
+  if (!courseName) throw new Error("Course name is required.");
+  const payload = coerceAdminCourseMetadataPayload({
+    ...data,
+    is_active: true,
+    is_published: data.is_published !== false,
+    enrollment_mode: data.enrollment_mode || "request",
+  });
+  const createdCourse = await runRelationalQueryWithTimeout(
+    client.from("platform_courses").insert(payload).select("id").single(),
+    "Course create timed out.",
+  );
+  const courseId = String(createdCourse?.id || "").trim();
+  if (isUuidValue(courseId)) {
+    await upsertDefaultPlatformCourseSuggestion(courseId, payload, data);
+    state.adminCourseBuilderCourseId = courseId;
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
 }
 
 async function adminSaveCourseMetadata(courseId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId)) throw new Error("Course metadata cannot be saved.");
   await runRelationalQueryWithTimeout(
-    client.from("courses").update(coerceAdminCourseMetadataPayload(data)).eq("id", courseId),
+    client.from("platform_courses").update(coerceAdminCourseMetadataPayload(data)).eq("id", courseId),
     "Course metadata save timed out.",
   );
+  await upsertDefaultPlatformCourseSuggestion(courseId, coerceAdminCourseMetadataPayload(data), { preserveDetails: true });
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -39648,7 +40029,7 @@ async function adminCreateModule(courseId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId)) throw new Error("Module cannot be created.");
   await runRelationalQueryWithTimeout(
-    client.from("course_modules").insert({
+    client.from("platform_course_modules").insert({
       course_id: courseId,
       title: String(data.title || "").trim(),
       description: String(data.description || "").trim() || null,
@@ -39665,7 +40046,7 @@ async function adminUpdateModule(moduleId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be updated.");
   await runRelationalQueryWithTimeout(
-    client.from("course_modules").update({
+    client.from("platform_course_modules").update({
       title: String(data.title || "").trim(),
       description: String(data.description || "").trim() || null,
       position: Number(data.position) || 0,
@@ -39681,7 +40062,7 @@ async function adminUpdateModule(moduleId, data) {
 async function adminDeleteModule(moduleId) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be deleted.");
-  await runRelationalQueryWithTimeout(client.from("course_modules").delete().eq("id", moduleId), "Module delete timed out.");
+  await runRelationalQueryWithTimeout(client.from("platform_course_modules").delete().eq("id", moduleId), "Module delete timed out.");
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -39690,7 +40071,7 @@ async function adminCreateLesson(courseId, moduleId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId) || !isUuidValue(moduleId)) throw new Error("Lesson cannot be created.");
   await runRelationalQueryWithTimeout(
-    client.from("course_lessons").insert({
+    client.from("platform_course_lessons").insert({
       course_id: courseId,
       module_id: moduleId,
       title: String(data.title || "").trim(),
@@ -39703,7 +40084,6 @@ async function adminCreateLesson(courseId, moduleId, data) {
       position: Number(data.position) || 0,
       is_free_preview: Boolean(data.is_free_preview),
       is_published: Boolean(data.is_published),
-      linked_topic_id: isUuidValue(data.linked_topic_id) ? String(data.linked_topic_id).trim() : null,
     }),
     "Lesson create timed out.",
   );
@@ -39715,7 +40095,7 @@ async function adminUpdateLesson(lessonId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be updated.");
   await runRelationalQueryWithTimeout(
-    client.from("course_lessons").update({
+    client.from("platform_course_lessons").update({
       title: String(data.title || "").trim(),
       description: String(data.description || "").trim() || null,
       lesson_type: String(data.lesson_type || "video").trim() || "video",
@@ -39726,7 +40106,6 @@ async function adminUpdateLesson(lessonId, data) {
       position: Number(data.position) || 0,
       is_free_preview: Boolean(data.is_free_preview),
       is_published: Boolean(data.is_published),
-      linked_topic_id: isUuidValue(data.linked_topic_id) ? String(data.linked_topic_id).trim() : null,
       updated_at: nowISO(),
     }).eq("id", lessonId),
     "Lesson update timed out.",
@@ -39738,7 +40117,7 @@ async function adminUpdateLesson(lessonId, data) {
 async function adminDeleteLesson(lessonId) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be deleted.");
-  await runRelationalQueryWithTimeout(client.from("course_lessons").delete().eq("id", lessonId), "Lesson delete timed out.");
+  await runRelationalQueryWithTimeout(client.from("platform_course_lessons").delete().eq("id", lessonId), "Lesson delete timed out.");
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -39748,7 +40127,7 @@ async function adminCreateResource(lessonId, data) {
   const lesson = (state.adminCoursesPlatformLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
   if (!client || !lesson) throw new Error("Resource cannot be created.");
   await runRelationalQueryWithTimeout(
-    client.from("course_resources").insert({
+    client.from("platform_course_resources").insert({
       course_id: lesson.course_id,
       module_id: lesson.module_id,
       lesson_id: lesson.id,
@@ -39769,7 +40148,7 @@ async function adminCreateResource(lessonId, data) {
 async function adminDeleteResource(resourceId) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(resourceId)) throw new Error("Resource cannot be deleted.");
-  await runRelationalQueryWithTimeout(client.from("course_resources").delete().eq("id", resourceId), "Resource delete timed out.");
+  await runRelationalQueryWithTimeout(client.from("platform_course_resources").delete().eq("id", resourceId), "Resource delete timed out.");
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -39779,7 +40158,7 @@ async function adminCreateAnnouncement(courseId, data) {
   const userId = getCurrentCoursePlatformUserId();
   if (!client || !isUuidValue(courseId)) throw new Error("Announcement cannot be created.");
   await runRelationalQueryWithTimeout(
-    client.from("course_announcements").insert({
+    client.from("platform_course_announcements").insert({
       course_id: courseId,
       title: String(data.title || "").trim(),
       body: String(data.body || "").trim(),
@@ -39829,12 +40208,12 @@ async function adminSaveCourseSuggestion(courseId, data) {
   if (isUuidValue(suggestionId)) {
     delete payload.created_by;
     await runRelationalQueryWithTimeout(
-      client.from("course_suggestions").update(payload).eq("id", suggestionId),
+      client.from("platform_course_suggestions").update(payload).eq("id", suggestionId),
       "Course suggestion update timed out.",
     );
   } else {
     await runRelationalQueryWithTimeout(
-      client.from("course_suggestions").insert(payload),
+      client.from("platform_course_suggestions").insert(payload),
       "Course suggestion create timed out.",
     );
   }
@@ -39847,7 +40226,7 @@ async function adminDeleteCourseSuggestion(suggestionId) {
   const targetSuggestionId = String(suggestionId || "").trim();
   if (!client || !isUuidValue(targetSuggestionId)) throw new Error("Suggestion cannot be deleted.");
   await runRelationalQueryWithTimeout(
-    client.from("course_suggestions").delete().eq("id", targetSuggestionId),
+    client.from("platform_course_suggestions").delete().eq("id", targetSuggestionId),
     "Course suggestion delete timed out.",
   );
   await loadAdminCoursesPlatform({ force: true });
@@ -39877,7 +40256,7 @@ async function adminBulkEnrollStudentsByTerm(courseId, year, semester) {
     }));
   for (const batch of splitIntoBatches(rows, ENROLLMENT_SYNC_WRITE_BATCH_SIZE)) {
     await runRelationalQueryWithTimeout(
-      client.from("user_course_enrollments").upsert(batch, { onConflict: "user_id,course_id", defaultToNull: false }),
+      client.from("platform_course_enrollments").upsert(batch, { onConflict: "user_id,course_id", defaultToNull: false }),
       "Bulk enrollment timed out.",
     );
   }
@@ -39891,12 +40270,12 @@ async function adminResolveEnrollmentRequest(requestId, status) {
   const nextStatus = String(status || "").trim() === "approved" ? "approved" : "rejected";
   if (!client || !request) throw new Error("Enrollment request cannot be updated.");
   await runRelationalQueryWithTimeout(
-    client.from("course_enrollment_requests").update({ status: nextStatus, updated_at: nowISO() }).eq("id", request.id),
+    client.from("platform_course_enrollment_requests").update({ status: nextStatus, updated_at: nowISO() }).eq("id", request.id),
     "Enrollment request update timed out.",
   );
   if (nextStatus === "approved") {
     await runRelationalQueryWithTimeout(
-      client.from("user_course_enrollments").upsert({ user_id: request.user_id, course_id: request.course_id, assigned_by: getCurrentCoursePlatformUserId() || null }, { onConflict: "user_id,course_id", defaultToNull: false }),
+      client.from("platform_course_enrollments").upsert({ user_id: request.user_id, course_id: request.course_id, assigned_by: getCurrentCoursePlatformUserId() || null }, { onConflict: "user_id,course_id", defaultToNull: false }),
       "Approved enrollment sync timed out.",
     );
   }
@@ -40002,7 +40381,28 @@ function adminRenderCourseBuilder(courseId) {
 
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
-      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No database courses found</h4><p class="subtle" style="margin: 0;">Save the curriculum to Supabase, then refresh this builder.</p></div>` : `
+      <form id="admin-course-create-form" class="course-builder-form">
+        <h4>Create platform course</h4>
+        <p class="subtle" style="margin-top: -0.35rem;">This creates a Courses platform course only. It does not create or edit MCQ bank courses.</p>
+        <div class="course-builder-grid compact">
+          <label>Course name<input name="course_name" required /></label>
+          <label>Course code<input name="course_code" /></label>
+          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}">Year ${year}</option>`).join("")}</select></label>
+          <label>Suggestion semester<select name="academic_semester"><option value="1">Semester 1</option><option value="2">Semester 2</option></select></label>
+          <label>Enrollment mode
+            <select name="enrollment_mode">
+              <option value="request">Request only</option>
+              <option value="assigned">Assigned</option>
+            </select>
+          </label>
+          <label>Priority<input name="priority" type="number" value="0" /></label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+          <label class="course-builder-wide">Description<textarea name="description" rows="2"></textarea></label>
+          <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
+        </div>
+        <button class="btn admin-btn-sm" type="submit">Create course</button>
+      </form>
+      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Create the first Courses platform course above.</p></div>` : `
         <div class="courses-builder-selector">
           <label>Course
             <select id="admin-course-builder-course-select">
@@ -40018,6 +40418,10 @@ function adminRenderCourseBuilder(courseId) {
           <form id="admin-course-metadata-form" class="course-builder-form">
             <h4>Course metadata</h4>
             <div class="course-builder-grid">
+              <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
+              <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
+              <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+              <label>Suggestion semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
               <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
               <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
               <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
@@ -40029,18 +40433,11 @@ function adminRenderCourseBuilder(courseId) {
               <label>Enrollment mode
                 <select name="enrollment_mode">
                   <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
-                  <option value="open" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "open" ? "selected" : ""}>Open</option>
                   <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
                 </select>
               </label>
-              <label>Course type
-                <select name="course_type">
-                  <option value="mcq_and_lessons" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_and_lessons" ? "selected" : ""}>MCQ and lessons</option>
-                  <option value="lessons_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "lessons_only" ? "selected" : ""}>Lessons only</option>
-                  <option value="mcq_only" ${normalizeCoursePlatformType(selectedCourse.course_type) === "mcq_only" ? "selected" : ""}>MCQ only</option>
-                </select>
-              </label>
               <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
+              <label class="course-builder-check"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
             </div>
             <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
           </form>
@@ -40054,7 +40451,7 @@ function adminRenderCourseBuilder(courseId) {
               <section class="course-builder-preview-module">
                 <b>${escapeHtml(module.title)}</b>
                 <ul>
-                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `<li>${escapeHtml(lesson.title)}${lesson.linked_topic_id ? ` • MCQ: ${escapeHtml((rows.topics.find((topic) => topic.id === lesson.linked_topic_id) || {}).topic_name || "Linked topic")}` : ""}</li>`).join("") || "<li>No lessons yet</li>"}
+                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `<li>${escapeHtml(lesson.title)}</li>`).join("") || "<li>No lessons yet</li>"}
                 </ul>
               </section>
             `).join("") || `<p class="subtle">No modules yet.</p>`}
@@ -40100,7 +40497,6 @@ function adminRenderCourseBuilder(courseId) {
                     <label>Video URL<input name="video_url" /></label>
                     <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
                     <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
-                    <label>Linked topic<select name="linked_topic_id"><option value="">No linked topic</option>${rows.topics.map((topic) => `<option value="${escapeHtml(topic.id)}">${escapeHtml(topic.topic_name)}</option>`).join("")}</select></label>
                     <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
                     <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
                     <label class="course-builder-wide">Description<input name="description" /></label>
@@ -40123,7 +40519,6 @@ function adminRenderCourseBuilder(courseId) {
                             <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
                             <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
                             <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
-                            <label>Linked topic<select name="linked_topic_id"><option value="">No linked topic</option>${rows.topics.map((topic) => `<option value="${escapeHtml(topic.id)}" ${lesson.linked_topic_id === topic.id ? "selected" : ""}>${escapeHtml(topic.topic_name)}</option>`).join("")}</select></label>
                             <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
                             <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
                             <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
@@ -40250,6 +40645,11 @@ function wireAdminCoursesPlatformBuilder() {
     state.adminCoursePlatformSection = isPreviewOpen ? "builder" : "preview";
     state.skipNextRouteAnimation = true;
     render();
+  });
+
+  root.querySelector("#admin-course-create-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAdminCourseAction("Course created.", () => adminCreatePlatformCourse(readFormDataObject(event.currentTarget)));
   });
 
   root.querySelector("#admin-course-metadata-form")?.addEventListener("submit", (event) => {
