@@ -10871,3 +10871,280 @@ body.theme-comfort .courses-page-stat-icon {
   justify-content: center;
   color: currentColor;
 }
+
+/* ==========================================================================
+   COURSES DASHBOARD ENHANCEMENTS & CONTRAST FIXES
+   ========================================================================== */
+
+/* Courses Toolbar Layout Overrides */
+.courses-toolbar-card .courses-toolbar.has-no-search {
+  grid-template-columns: repeat(3, minmax(130px, 1fr)) auto;
+}
+
+@media (max-width: 820px) {
+  .courses-toolbar-card .courses-toolbar.has-no-search {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .courses-toolbar-card .courses-toolbar.has-no-search {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Semantic Page Stat Icon Colors (Light Theme) */
+.courses-page-stat.is-enrolled .courses-page-stat-icon,
+.courses-page-stat.is-suggestions .courses-page-stat-icon {
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+.courses-page-stat.is-in-progress .courses-page-stat-icon,
+.courses-page-stat.is-pending .courses-page-stat-icon {
+  color: var(--accent);
+  background: rgba(244, 162, 89, 0.14);
+}
+.courses-page-stat.is-completed .courses-page-stat-icon,
+.courses-page-stat.is-available .courses-page-stat-icon {
+  color: var(--good);
+  background: rgba(43, 147, 72, 0.11);
+}
+.courses-page-stat.is-modules .courses-page-stat-icon,
+.courses-page-stat.is-lessons .courses-page-stat-icon {
+  color: var(--exam-blue);
+  background: rgba(62, 83, 168, 0.10);
+}
+
+/* --------------------------------------------------------------------------
+   DARK THEME CONTRAST & ACCESSIBILITY OVERRIDES
+   -------------------------------------------------------------------------- */
+
+/* Stats Page Icons */
+body.theme-dark .courses-page-stat.is-enrolled .courses-page-stat-icon,
+body.theme-dark .courses-page-stat.is-suggestions .courses-page-stat-icon {
+  color: #48cae4;
+  background: rgba(23, 126, 137, 0.18);
+}
+body.theme-dark .courses-page-stat.is-in-progress .courses-page-stat-icon,
+body.theme-dark .courses-page-stat.is-pending .courses-page-stat-icon {
+  color: #ff9800;
+  background: rgba(244, 162, 89, 0.18);
+}
+body.theme-dark .courses-page-stat.is-completed .courses-page-stat-icon,
+body.theme-dark .courses-page-stat.is-available .courses-page-stat-icon {
+  color: #4ade80;
+  background: rgba(43, 147, 72, 0.18);
+}
+body.theme-dark .courses-page-stat.is-modules .courses-page-stat-icon,
+body.theme-dark .courses-page-stat.is-lessons .courses-page-stat-icon {
+  color: #7980ff;
+  background: rgba(99, 102, 241, 0.18);
+}
+
+/* Fix Dashboard tab statistics card icons */
+body.theme-dark .courses-stat-card:nth-child(1) .courses-stat-icon {
+  color: #48cae4;
+  background: rgba(23, 126, 137, 0.18);
+}
+body.theme-dark .courses-stat-card:nth-child(2) .courses-stat-icon {
+  color: #4ade80;
+  background: rgba(43, 147, 72, 0.18);
+}
+body.theme-dark .courses-stat-card:nth-child(3) .courses-stat-icon {
+  color: #ff9800;
+  background: rgba(244, 162, 89, 0.18);
+}
+body.theme-dark .courses-stat-card:nth-child(4) .courses-stat-icon {
+  color: #ef4444;
+  background: rgba(196, 58, 58, 0.18);
+}
+body.theme-dark .courses-stat-card:nth-child(5) .courses-stat-icon {
+  color: #7980ff;
+  background: rgba(99, 102, 241, 0.18);
+}
+
+/* Course Cards Facts Icon */
+body.theme-dark .course-card-facts svg {
+  color: #48cae4;
+}
+
+/* Course Card Badges */
+body.theme-dark .course-card-badge-year {
+  background: rgba(23, 126, 137, 0.15);
+  color: #48cae4;
+  border-color: rgba(23, 126, 137, 0.3);
+}
+body.theme-dark .course-card-badge-completed {
+  background: rgba(46, 125, 50, 0.18);
+  color: #4ade80;
+  border-color: rgba(46, 125, 50, 0.35);
+}
+body.theme-dark .course-card-badge-in_progress {
+  background: rgba(184, 134, 11, 0.18);
+  color: #fdd835;
+  border-color: rgba(184, 134, 11, 0.35);
+}
+body.theme-dark .course-card-badge-not_started {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.3);
+}
+body.theme-dark .course-card-badge-request {
+  background: rgba(230, 81, 0, 0.15);
+  color: #ff9800;
+  border-color: rgba(230, 81, 0, 0.3);
+}
+body.theme-dark .course-card-badge-open {
+  background: rgba(46, 125, 50, 0.18);
+  color: #4ade80;
+  border-color: rgba(46, 125, 50, 0.3);
+}
+
+/* Course Primary Action Buttons in Dark Mode */
+body.theme-dark .course-card-primary {
+  background: linear-gradient(180deg, #177e89 0%, #11555d 100%) !important;
+  border-color: rgba(23, 126, 137, 0.3) !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 10px rgba(23, 126, 137, 0.25) !important;
+}
+body.theme-dark .course-card-primary:hover {
+  background: linear-gradient(180deg, #1f9fae 0%, #177e89 100%) !important;
+  box-shadow: 0 6px 14px rgba(23, 126, 137, 0.35) !important;
+}
+
+/* Progress bar gradient in dark mode */
+body.theme-dark .course-progress-track span {
+  background: linear-gradient(90deg, #177e89, #48cae4);
+}
+
+/* Cover Image Fallback Gradient in Dark Mode */
+body.theme-dark .course-card-cover {
+  background: linear-gradient(135deg, rgba(23, 126, 137, 0.2) 0%, rgba(62, 83, 168, 0.15) 100%);
+}
+
+/* Glassmorphism Cards in Dark Mode */
+body.theme-dark .course-card,
+body.theme-dark .courses-page-stat,
+body.theme-dark .courses-toolbar-card {
+  background: rgba(22, 22, 22, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* --------------------------------------------------------------------------
+   COMFORT THEME ACCESSIBILITY OVERRIDES
+   -------------------------------------------------------------------------- */
+
+/* Stats Page Icons */
+body.theme-comfort .courses-page-stat.is-enrolled .courses-page-stat-icon,
+body.theme-comfort .courses-page-stat.is-suggestions .courses-page-stat-icon {
+  color: #76563f;
+  background: rgba(118, 86, 63, 0.15);
+}
+body.theme-comfort .courses-page-stat.is-in-progress .courses-page-stat-icon,
+body.theme-comfort .courses-page-stat.is-pending .courses-page-stat-icon {
+  color: #d87d31;
+  background: rgba(216, 125, 49, 0.14);
+}
+body.theme-comfort .courses-page-stat.is-completed .courses-page-stat-icon,
+body.theme-comfort .courses-page-stat.is-available .courses-page-stat-icon {
+  color: #2e7d32;
+  background: rgba(56, 142, 60, 0.12);
+}
+body.theme-comfort .courses-page-stat.is-modules .courses-page-stat-icon,
+body.theme-comfort .courses-page-stat.is-lessons .courses-page-stat-icon {
+  color: #866448;
+  background: rgba(134, 100, 72, 0.12);
+}
+
+/* Fix Dashboard tab statistics card icons */
+body.theme-comfort .courses-stat-card:nth-child(1) .courses-stat-icon {
+  color: #76563f;
+  background: rgba(118, 86, 63, 0.15);
+}
+body.theme-comfort .courses-stat-card:nth-child(2) .courses-stat-icon {
+  color: #2e7d32;
+  background: rgba(56, 142, 60, 0.12);
+}
+body.theme-comfort .courses-stat-card:nth-child(3) .courses-stat-icon {
+  color: #d87d31;
+  background: rgba(216, 125, 49, 0.14);
+}
+body.theme-comfort .courses-stat-card:nth-child(4) .courses-stat-icon {
+  color: #c43a3a;
+  background: rgba(196, 58, 58, 0.1);
+}
+body.theme-comfort .courses-stat-card:nth-child(5) .courses-stat-icon {
+  color: #866448;
+  background: rgba(134, 100, 72, 0.12);
+}
+
+/* Course Cards Facts Icon */
+body.theme-comfort .course-card-facts svg {
+  color: var(--brand);
+}
+
+/* Course Card Badges */
+body.theme-comfort .course-card-badge-year {
+  background: rgba(118, 86, 63, 0.12);
+  color: #76563f;
+  border-color: rgba(118, 86, 63, 0.25);
+}
+body.theme-comfort .course-card-badge-completed {
+  background: rgba(56, 142, 60, 0.12);
+  color: #2e7d32;
+  border-color: rgba(56, 142, 60, 0.25);
+}
+body.theme-comfort .course-card-badge-in_progress {
+  background: rgba(184, 134, 11, 0.12);
+  color: #b8860b;
+  border-color: rgba(184, 134, 11, 0.25);
+}
+body.theme-comfort .course-card-badge-not_started {
+  background: rgba(26, 115, 232, 0.1);
+  color: #1a73e8;
+  border-color: rgba(26, 115, 232, 0.2);
+}
+body.theme-comfort .course-card-badge-request {
+  background: rgba(230, 81, 0, 0.1);
+  color: #e65100;
+  border-color: rgba(230, 81, 0, 0.25);
+}
+body.theme-comfort .course-card-badge-open {
+  background: rgba(56, 142, 60, 0.12);
+  color: #2e7d32;
+  border-color: rgba(56, 142, 60, 0.25);
+}
+
+/* Course Primary Action Buttons in Comfort Mode */
+body.theme-comfort .course-card-primary {
+  background: linear-gradient(180deg, #7b5b43 0%, #5d4330 100%) !important;
+  border-color: rgba(93, 67, 48, 0.3) !important;
+  color: #f7efe5 !important;
+  box-shadow: 0 4px 10px rgba(118, 86, 63, 0.2) !important;
+}
+body.theme-comfort .course-card-primary:hover {
+  background: linear-gradient(180deg, #8c684d 0%, #6e4e37 100%) !important;
+  box-shadow: 0 6px 14px rgba(118, 86, 63, 0.3) !important;
+}
+
+/* Progress bar gradient in comfort mode */
+body.theme-comfort .course-progress-track span {
+  background: linear-gradient(90deg, #76563f, #f4a259);
+}
+
+/* Cover Image Fallback Gradient in Comfort Mode */
+body.theme-comfort .course-card-cover {
+  background: linear-gradient(135deg, rgba(118, 86, 63, 0.18) 0%, rgba(184, 134, 11, 0.12) 100%);
+}
+
+/* Glassmorphism Cards in Comfort Mode */
+body.theme-comfort .course-card,
+body.theme-comfort .courses-page-stat,
+body.theme-comfort .courses-toolbar-card {
+  background: rgba(240, 236, 227, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(105, 81, 61, 0.18);
+}

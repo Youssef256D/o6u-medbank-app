@@ -15034,6 +15034,9 @@ function bindGlobalEvents() {
       state.coursesActiveLessonId = "";
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
+      state.coursesSearch = "";
+      state.coursesFilter = "all";
+      state.coursesStatusFilter = "all";
       if (state.route !== "courses") {
         navigate("courses");
       } else {
@@ -39141,11 +39144,14 @@ function renderCoursePlatformCard(row, options = {}) {
 
 function renderCoursePlatformToolbar(activeTab, filter) {
   const suggestionFilter = ["all", "available", "pending"].includes(filter) ? filter : "all";
+  const isEnrolled = activeTab === "enrolled";
   return `
-    <div class="courses-toolbar">
-      <label class="courses-search">Search
-        <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
-      </label>
+    <div class="courses-toolbar${isEnrolled ? " has-no-search" : ""}">
+      ${!isEnrolled ? `
+        <label class="courses-search">Search
+          <input id="courses-search" type="search" value="${escapeHtml(state.coursesSearch)}" placeholder="Search courses, instructors, topics..." />
+        </label>
+      ` : ""}
       <label>Year
         <select id="courses-year-filter">
           <option value="" ${state.coursesYearFilter ? "" : "selected"}>All years</option>
@@ -39159,9 +39165,9 @@ function renderCoursePlatformToolbar(activeTab, filter) {
           <option value="2" ${String(state.coursesSemesterFilter) === "2" ? "selected" : ""}>Semester 2</option>
         </select>
       </label>
-      <label>${activeTab === "enrolled" ? "Status" : "Enrollment"}
+      <label>${isEnrolled ? "Status" : "Enrollment"}
         <select id="courses-filter">
-          ${activeTab === "enrolled" ? `
+          ${isEnrolled ? `
             <option value="all" ${state.coursesStatusFilter === "all" ? "selected" : ""}>All</option>
             <option value="not_started" ${state.coursesStatusFilter === "not_started" ? "selected" : ""}>Not started</option>
             <option value="in_progress" ${state.coursesStatusFilter === "in_progress" ? "selected" : ""}>In progress</option>
@@ -39173,7 +39179,7 @@ function renderCoursePlatformToolbar(activeTab, filter) {
           `}
         </select>
       </label>
-      ${String(state.coursesSearch || "").trim() || String(state.coursesYearFilter || "").trim() || String(state.coursesSemesterFilter || "").trim() || (activeTab === "enrolled" ? state.coursesStatusFilter : suggestionFilter) !== "all" ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-clear-filters">Clear filters</button>` : ""}
+      ${String(state.coursesSearch || "").trim() || String(state.coursesYearFilter || "").trim() || String(state.coursesSemesterFilter || "").trim() || (isEnrolled ? state.coursesStatusFilter : suggestionFilter) !== "all" ? `<button class="btn ghost admin-btn-sm" type="button" data-action="courses-clear-filters">Clear filters</button>` : ""}
     </div>
   `;
 }
@@ -39398,22 +39404,22 @@ function renderEnrolledCourses(courses) {
         <p class="subtle">Access course materials, track progress, and continue assigned learning.</p>
       </div>
       <div class="courses-page-stats">
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-enrolled">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
           <span class="courses-page-stat-value">${courses.length}</span>
           <span class="courses-page-stat-label">Enrolled</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-in-progress">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
           <span class="courses-page-stat-value">${inProgress}</span>
           <span class="courses-page-stat-label">In progress</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-completed">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
           <span class="courses-page-stat-value">${completed}</span>
           <span class="courses-page-stat-label">Completed</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-modules">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05"/><path d="M12 22.08V12"/></svg></span>
           <span class="courses-page-stat-value">${moduleCount}</span>
           <span class="courses-page-stat-label">Modules</span>
@@ -39443,22 +39449,22 @@ function renderSuggestedCourses(courses) {
         <p class="subtle">Recommended courses based on your academic year and semester.</p>
       </div>
       <div class="courses-page-stats">
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-suggestions">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
           <span class="courses-page-stat-value">${courses.length}</span>
           <span class="courses-page-stat-label">Suggestions</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-available">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
           <span class="courses-page-stat-value">${availableCount}</span>
           <span class="courses-page-stat-label">Available</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-pending">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
           <span class="courses-page-stat-value">${pendingCount}</span>
           <span class="courses-page-stat-label">Pending</span>
         </div>
-        <div class="courses-page-stat">
+        <div class="courses-page-stat is-lessons">
           <span class="courses-page-stat-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg></span>
           <span class="courses-page-stat-value">${courses.reduce((sum, row) => sum + (Number(row.lessonCount) || 0), 0)}</span>
           <span class="courses-page-stat-label">Lessons</span>
