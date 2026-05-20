@@ -39243,34 +39243,34 @@ function renderCoursesDashboard() {
           <div class="courses-stat-label">Suggestions</div>
         </div>
       </div>
-    </div>
 
-    <div class="courses-dashboard-highlight">
-      ${data.continueLearning ? `
-        <article class="card courses-continue-card">
-          <div class="courses-continue-head">
-            <div>
-              <p class="kicker">Continue learning</p>
-              <h3>${escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course))}</h3>
+      <div class="courses-dashboard-highlight">
+        ${data.continueLearning ? `
+          <article class="card courses-continue-card">
+            <div class="courses-continue-head">
+              <div>
+                <p class="kicker">Continue learning</p>
+                <h3>${escapeHtml(getCoursePlatformCourseTitle(data.continueLearning.course))}</h3>
+              </div>
+              <span class="courses-continue-pct">${data.continueLearning.progressPercent}%</span>
             </div>
-            <span class="courses-continue-pct">${data.continueLearning.progressPercent}%</span>
-          </div>
-          <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
-          <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
-          <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
-        </article>
-      ` : `
-        <article class="card courses-continue-card courses-continue-empty">
-          <div class="courses-continue-head">
-            <div>
-              <p class="kicker">Continue learning</p>
-              <h3>Start your learning journey</h3>
+            <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, data.continueLearning.progressPercent))}%;"></span></div>
+            <p class="subtle">${escapeHtml(data.continueLearning.module?.title || "Course module")} • ${escapeHtml(data.continueLearning.lesson.title)}</p>
+            <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(data.continueLearning.course.id)}" data-lesson-id="${escapeHtml(data.continueLearning.lesson.id)}">Continue</button>
+          </article>
+        ` : `
+          <article class="card courses-continue-card courses-continue-empty">
+            <div class="courses-continue-head">
+              <div>
+                <p class="kicker">Continue learning</p>
+                <h3>Start your learning journey</h3>
+              </div>
             </div>
-          </div>
-          <p class="subtle">You haven't started any course lessons yet. Browse suggestions to begin.</p>
-          <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
-        </article>
-      `}
+            <p class="subtle">You haven't started any course lessons yet. Browse suggestions to begin.</p>
+            <button class="btn" type="button" data-action="courses-home-tab" data-tab="suggestions">Browse suggestions</button>
+          </article>
+        `}
+      </div>
     </div>
 
     <div class="courses-dashboard-lists">
@@ -39545,7 +39545,7 @@ function renderCourseDetail(courseId) {
                     const done = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
                     return `
                       <button class="course-lesson-row" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" data-lesson-id="${escapeHtml(lesson.id)}" ${canOpenLessons || lesson.is_free_preview ? "" : "disabled"}>
-                        <span class="course-lesson-status ${done ? "is-complete" : ""}">${done ? "Done" : lesson.lesson_type || "Lesson"}</span>
+                        <span class="course-lesson-status ${done ? "is-complete" : ""}">${getLessonTypeIcon(lesson.lesson_type, done)} ${done ? "Done" : lesson.lesson_type || "Lesson"}</span>
                         <span>${escapeHtml(lesson.title)}</span>
                         <small>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds, lesson.is_free_preview ? "Preview" : ""))}</small>
                       </button>
@@ -39571,6 +39571,23 @@ function renderCourseDetail(courseId) {
   `;
 }
 
+function getLessonTypeIcon(lessonType, isComplete) {
+  if (isComplete) {
+    return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: -2px; display: inline-block;"><polyline points="20 6 9 17 4 12"/></svg>`;
+  }
+  switch (String(lessonType).toLowerCase()) {
+    case "video":
+      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: -2px; display: inline-block;"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+    case "quiz":
+      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: -2px; display: inline-block;"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    case "document":
+    case "pdf":
+      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: -2px; display: inline-block;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+    default:
+      return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: -2px; display: inline-block;"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`;
+  }
+}
+
 function renderLessonViewer(lessonId) {
   const lesson = (state.coursesLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
   const course = state.coursesDetail || (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(lesson?.course_id || "").trim());
@@ -39585,6 +39602,8 @@ function renderLessonViewer(lessonId) {
   const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
   const isComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
   const safeVideoUrl = /^https?:\/\//i.test(String(lesson.video_url || "").trim()) ? String(lesson.video_url || "").trim() : "";
+  const currentModule = (state.coursesModules || []).find((m) => String(m?.id || "").trim() === String(lesson.module_id || "").trim());
+  const moduleLessons = lessons.filter((entry) => String(entry?.module_id || "").trim() === String(lesson.module_id || "").trim());
 
   return `
     <section class="panel courses-shell lesson-shell">
@@ -39616,8 +39635,28 @@ function renderLessonViewer(lessonId) {
         </article>
         <aside class="card lesson-next">
           <h3>Lesson navigation</h3>
-          <button class="btn ghost" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(previous?.id || "")}" ${previous ? "" : "disabled"}>Previous lesson</button>
-          <button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(next?.id || "")}" ${next ? "" : "disabled"}>Next lesson</button>
+          <div style="display: flex; gap: 0.5rem; width: 100%;">
+            <button class="btn ghost" style="flex: 1;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(previous?.id || "")}" ${previous ? "" : "disabled"}>Previous</button>
+            <button class="btn" style="flex: 1;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(next?.id || "")}" ${next ? "" : "disabled"}>Next</button>
+          </div>
+          ${moduleLessons.length ? `
+            <div class="lesson-playlist">
+              <div class="lesson-playlist-title">${escapeHtml(currentModule?.title || "Current Module")}</div>
+              ${moduleLessons.map((item) => {
+                const isCurrent = String(item.id).trim() === String(lesson.id).trim();
+                const prog = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(item.id || "").trim());
+                const itemDone = String(prog?.status || "").trim() === "completed" || Number(prog?.progress_percent) >= 100;
+                return `
+                  <button class="lesson-playlist-item ${isCurrent ? "is-active" : ""}" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(item.id)}">
+                    <span class="lesson-playlist-item-icon">
+                      ${getLessonTypeIcon(item.lesson_type, itemDone)}
+                    </span>
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.title)}</span>
+                  </button>
+                `;
+              }).join("")}
+            </div>
+          ` : ""}
         </aside>
       </div>
     </section>
