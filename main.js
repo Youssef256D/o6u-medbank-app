@@ -24531,13 +24531,54 @@ function renderAdminDataSidebarNav(activeAdminPage) {
 
 function renderAdminCoursesPlatformSidebarNav(activeSection) {
   const items = [
-    ["overview", "Course metadata"],
-    ["builder", "Add Module"],
-    ["announcements", "Announces"],
-    ["requests", "Access Requests"],
+    ["overview", "Course metadata", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="16" y1="13" x2="8" y2="13"></line>
+        <line x1="16" y1="17" x2="8" y2="17"></line>
+        <polyline points="10 9 9 9 8 9"></polyline>
+      </svg>
+    `],
+    ["builder", "Course Builder", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="9" y1="3" x2="9" y2="21"></line>
+        <line x1="9" y1="9" x2="21" y2="9"></line>
+        <line x1="9" y1="15" x2="21" y2="15"></line>
+      </svg>
+    `],
+    ["suggestions", "Suggestions", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+      </svg>
+    `],
+    ["announcements", "Announcements", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+      </svg>
+    `],
+    ["enrollments", "Enrollments", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+        <circle cx="9" cy="7" r="4"></circle>
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+      </svg>
+    `],
+    ["requests", "Access Requests", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+    `],
   ];
-  return items.map(([section, label]) => `
-    <button class="btn ghost ${activeSection === section ? "is-active" : ""}" type="button" data-action="admin-course-platform-section" data-section="${escapeHtml(section)}">${escapeHtml(label)}</button>
+  return items.map(([section, label, svg]) => `
+    <button class="btn ghost ${activeSection === section ? "is-active" : ""}" type="button" data-action="admin-course-platform-section" data-section="${escapeHtml(section)}">
+      ${svg}
+      <span>${escapeHtml(label)}</span>
+    </button>
   `).join("");
 }
 
@@ -40420,8 +40461,16 @@ function adminRenderCourseBuilder(courseId) {
 
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
+      
       <form id="admin-course-create-form" class="course-builder-form">
-        <h4>Create platform course</h4>
+        <h4>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="16"></line>
+            <line x1="8" y1="12" x2="16" y2="12"></line>
+          </svg>
+          Create platform course
+        </h4>
         <p class="subtle" style="margin-top: -0.35rem;">This creates a Courses platform course only. It does not create or edit MCQ bank courses.</p>
         <div class="course-builder-grid compact">
           <label>Course name<input name="course_name" required /></label>
@@ -40441,9 +40490,10 @@ function adminRenderCourseBuilder(courseId) {
         </div>
         <button class="btn admin-btn-sm" type="submit">Create course</button>
       </form>
+      
       ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Create the first Courses platform course above.</p></div>` : `
         <div class="courses-builder-selector">
-          <label>Course
+          <label>Selected Course
             <select id="admin-course-builder-course-select">
               ${courses.map((course) => `<option value="${escapeHtml(course.id)}" ${course.id === selectedCourseId ? "selected" : ""}>${escapeHtml(getCoursePlatformCourseTitle(course))} • Y${escapeHtml(course.academic_year)} S${escapeHtml(course.academic_semester)}</option>`).join("")}
             </select>
@@ -40455,7 +40505,13 @@ function adminRenderCourseBuilder(courseId) {
 
         ${activePlatformSection === "overview" ? `
           <form id="admin-course-metadata-form" class="course-builder-form">
-            <h4>Course metadata</h4>
+            <h4>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+              </svg>
+              Course metadata
+            </h4>
             <div class="course-builder-grid">
               <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
               <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
@@ -40484,13 +40540,31 @@ function adminRenderCourseBuilder(courseId) {
 
         ${showPlatformPreview ? `
           <div class="card course-builder-preview">
-            <h3>${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}</h3>
+            <h3>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              Student Preview: ${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}
+            </h3>
             <p class="subtle">${escapeHtml(selectedCourse.description || "No course description yet.")}</p>
             ${rows.modules.map((module) => `
               <section class="course-builder-preview-module">
                 <b>${escapeHtml(module.title)}</b>
                 <ul>
-                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `<li>${escapeHtml(lesson.title)}</li>`).join("") || "<li>No lessons yet</li>"}
+                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `
+                    <li style="display: flex; align-items: center; gap: 0.5rem;">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand-strong);">
+                        ${lesson.lesson_type === "video" 
+                          ? '<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>' 
+                          : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline>'}
+                      </svg>
+                      <span>${escapeHtml(lesson.title)}</span>
+                      <span class="${lesson.is_published ? "admin-badge-published" : "admin-badge-draft"}" style="font-size: 0.65rem; padding: 0.05rem 0.25rem; margin-left: auto;">
+                        ${lesson.is_published ? "Published" : "Draft"}
+                      </span>
+                    </li>
+                  `).join("") || "<li>No lessons yet</li>"}
                 </ul>
               </section>
             `).join("") || `<p class="subtle">No modules yet.</p>`}
@@ -40499,129 +40573,210 @@ function adminRenderCourseBuilder(courseId) {
 
         ${activePlatformSection === "suggestions" ? adminRenderSuggestionSettings(selectedCourseId) : ""}
 
-        ${activePlatformSection === "builder" ? `<form id="admin-course-module-create-form" class="course-builder-form">
-          <h4>Add module</h4>
-          <div class="course-builder-grid compact">
-            <label>Title<input name="title" required /></label>
-            <label>Description<input name="description" /></label>
-            <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
-          </div>
-          <button class="btn admin-btn-sm" type="submit">Add module</button>
-        </form>
+        ${activePlatformSection === "builder" ? `
+          <form id="admin-course-module-create-form" class="course-builder-form">
+            <h4>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="16"></line>
+                <line x1="8" y1="12" x2="16" y2="12"></line>
+              </svg>
+              Add module
+            </h4>
+            <div class="course-builder-grid compact">
+              <label>Title<input name="title" required /></label>
+              <label>Description<input name="description" /></label>
+              <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
+              <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+            </div>
+            <button class="btn admin-btn-sm" type="submit">Add module</button>
+          </form>
 
-        <div class="course-builder-modules">
-          ${rows.modules.map((module) => {
-            const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(module.id || ""));
-            return `
-              <article class="card course-builder-module" data-module-id="${escapeHtml(module.id)}">
-                <form class="course-builder-module-form" data-role="admin-module-form">
-                  <div class="course-builder-grid compact">
-                    <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
-                    <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
-                    <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
-                    <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
-                  </div>
-                  <div class="stack">
-                    <button class="btn ghost admin-btn-sm" type="submit">Save module</button>
-                    <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}">Delete module</button>
-                  </div>
-                </form>
+          <div class="course-builder-modules">
+            ${rows.modules.map((module) => {
+              const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(module.id || ""));
+              return `
+                <article class="card course-builder-module" data-module-id="${escapeHtml(module.id)}">
+                  <form class="course-builder-module-form" data-role="admin-module-form">
+                    <div class="course-builder-grid compact">
+                      <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
+                      <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
+                      <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
+                      <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
+                    </div>
+                    <div class="stack">
+                      <button class="btn ghost admin-btn-sm" type="submit">Save module</button>
+                      <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}">Delete module</button>
+                    </div>
+                  </form>
 
-                <form class="course-builder-lesson-create-form" data-role="admin-lesson-create-form">
-                  <h5>Add lesson</h5>
-                  <div class="course-builder-grid">
-                    <label>Title<input name="title" required /></label>
-                    <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
-                    <label>Video URL<input name="video_url" /></label>
-                    <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
-                    <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
-                    <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
-                    <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
-                    <label class="course-builder-wide">Description<input name="description" /></label>
-                    <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
-                  </div>
-                  <button class="btn admin-btn-sm" type="submit">Add lesson</button>
-                </form>
+                  <form class="course-builder-lesson-create-form" data-role="admin-lesson-create-form">
+                    <h5>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="8" x2="12" y2="16"></line>
+                        <line x1="8" y1="12" x2="16" y2="12"></line>
+                      </svg>
+                      Add lesson
+                    </h5>
+                    <div class="course-builder-grid">
+                      <label>Title<input name="title" required /></label>
+                      <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
+                      <label>Video URL<input name="video_url" /></label>
+                      <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
+                      <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
+                      <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
+                      <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+                      <label class="course-builder-wide">Description<input name="description" /></label>
+                      <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
+                    </div>
+                    <button class="btn admin-btn-sm" type="submit">Add lesson</button>
+                  </form>
 
-                <div class="course-builder-lessons">
-                  ${moduleLessons.map((lesson) => {
-                    const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
-                    return `
-                      <details class="course-builder-lesson" data-lesson-id="${escapeHtml(lesson.id)}">
-                        <summary>${escapeHtml(lesson.title)} ${lesson.is_published ? "• Published" : "• Draft"}</summary>
-                        <form data-role="admin-lesson-form">
-                          <div class="course-builder-grid">
-                            <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
-                            <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
-                            <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
-                            <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
-                            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
-                            <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
-                            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
-                            <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
-                            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
-                            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
-                          </div>
-                          <div class="stack">
-                            <button class="btn ghost admin-btn-sm" type="submit">Save lesson</button>
-                            <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">Delete lesson</button>
-                          </div>
-                        </form>
-                        <form data-role="admin-resource-create-form" class="course-builder-resource-form">
-                          <h5>Add resource</h5>
-                          <div class="course-builder-grid compact">
-                            <label>Title<input name="title" required /></label>
-                            <label>Type<input name="resource_type" value="file" /></label>
-                            <label>File URL<input name="file_url" /></label>
-                            <label>External URL<input name="external_url" /></label>
-                            <label>Description<input name="description" /></label>
-                            <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
-                            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
-                          </div>
-                          <button class="btn ghost admin-btn-sm" type="submit">Add resource</button>
-                        </form>
-                        ${lessonResources.length ? `<div class="course-builder-resources">${lessonResources.map((resource) => `<span class="course-builder-resource">${escapeHtml(resource.title)} <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-resource" data-resource-id="${escapeHtml(resource.id)}">Delete</button></span>`).join("")}</div>` : ""}
-                      </details>
-                    `;
-                  }).join("") || `<p class="subtle">No lessons in this module yet.</p>`}
-                </div>
-              </article>
-            `;
-          }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
-        </div>` : ""}
+                  <div class="course-builder-lessons">
+                    ${moduleLessons.map((lesson) => {
+                      const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
+                      return `
+                        <details class="course-builder-lesson" data-lesson-id="${escapeHtml(lesson.id)}">
+                          <summary>
+                            <span style="display: flex; align-items: center; gap: 0.5rem;">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand-strong);">
+                                ${lesson.lesson_type === "video" 
+                                  ? '<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>' 
+                                  : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line>'}
+                              </svg>
+                              <b>${escapeHtml(lesson.title)}</b>
+                            </span>
+                            ${lesson.is_published ? '<span class="admin-badge-published">Published</span>' : '<span class="admin-badge-draft">Draft</span>'}
+                          </summary>
+                          <form data-role="admin-lesson-form">
+                            <div class="course-builder-grid">
+                              <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
+                              <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
+                              <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
+                              <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
+                              <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
+                              <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
+                              <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
+                              <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
+                              <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
+                              <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
+                            </div>
+                            <div class="stack">
+                              <button class="btn ghost admin-btn-sm" type="submit">Save lesson</button>
+                              <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">Delete lesson</button>
+                            </div>
+                          </form>
+                          <form data-role="admin-resource-create-form" class="course-builder-resource-form">
+                            <h5>
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="16"></line>
+                                <line x1="8" y1="12" x2="16" y2="12"></line>
+                              </svg>
+                              Add resource
+                            </h5>
+                            <div class="course-builder-grid compact">
+                              <label>Title<input name="title" required /></label>
+                              <label>Type<input name="resource_type" value="file" /></label>
+                              <label>File URL<input name="file_url" /></label>
+                              <label>External URL<input name="external_url" /></label>
+                              <label>Description<input name="description" /></label>
+                              <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
+                              <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+                            </div>
+                            <button class="btn ghost admin-btn-sm" type="submit">Add resource</button>
+                          </form>
+                          ${lessonResources.length ? `
+                            <div class="course-builder-resources">
+                              ${lessonResources.map((resource) => `
+                                <span class="course-builder-resource">
+                                  <span style="display: flex; align-items: center; gap: 0.4rem;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);">
+                                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                                    </svg>
+                                    ${escapeHtml(resource.title)}
+                                  </span>
+                                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-resource" data-resource-id="${escapeHtml(resource.id)}">Delete</button>
+                                </span>
+                              `).join("")}
+                            </div>
+                          ` : ""}
+                        </details>
+                      `;
+                    }).join("") || `<p class="subtle">No lessons in this module yet.</p>`}
+                  </div>
+                </article>
+              `;
+            }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
+          </div>` : ""}
 
         ${activePlatformSection === "announcements" ? `
           <form id="admin-course-announcement-form" class="course-builder-form">
-            <h4>Announcements</h4>
+            <h4>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+              Announcements
+            </h4>
             <label>Title<input name="title" required /></label>
             <label>Body<textarea name="body" rows="3" required></textarea></label>
             <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
             <button class="btn admin-btn-sm" type="submit">Post announcement</button>
-            <div class="course-builder-list">${rows.announcements.map((item) => `<p><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.is_published ? "Published" : "Draft")}</small></p>`).join("") || `<p class="subtle">No announcements yet.</p>`}</div>
+            <div class="course-builder-list" style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem;">
+              ${rows.announcements.map((item) => `
+                <div style="padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
+                  <span>
+                    <b style="font-size: 0.95rem; color: var(--ink);">${escapeHtml(item.title)}</b>
+                    <p class="subtle" style="margin: 0.2rem 0 0; font-size: 0.85rem;">${escapeHtml(item.body || "")}</p>
+                  </span>
+                  <span class="${item.is_published ? "admin-badge-published" : "admin-badge-draft"}">${item.is_published ? "Published" : "Draft"}</span>
+                </div>
+              `).join("") || `<p class="subtle">No announcements yet.</p>`}
+            </div>
           </form>
         ` : ""}
 
         ${activePlatformSection === "enrollments" ? `
           <form id="admin-course-bulk-enroll-form" class="course-builder-form">
-            <h4>Enrollments</h4>
+            <h4>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              Enrollments
+            </h4>
             <div class="course-builder-grid compact">
               <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
               <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
             </div>
             <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
-            <p class="subtle">${rows.enrollments.length} student enrollment row${rows.enrollments.length === 1 ? "" : "s"}.</p>
+            <p class="subtle">This course currently has <b>${rows.enrollments.length}</b> enrolled student${rows.enrollments.length === 1 ? "" : "s"}.</p>
           </form>
         ` : ""}
 
         ${activePlatformSection === "requests" ? `
           <div class="course-builder-form">
-            <h4>Access requests</h4>
+            <h4>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              Access requests
+            </h4>
             ${rows.requests.length ? rows.requests.map((request) => `
               <div class="course-request-row">
-                <span>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}<small>${escapeHtml(request.status || "pending")}</small></span>
-                <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
-                <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
+                <span>
+                  <b>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}</b>
+                  <small style="text-transform: uppercase;">Status: ${escapeHtml(request.status || "pending")}</small>
+                </span>
+                <div class="stack">
+                  <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
+                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
+                </div>
               </div>
             `).join("") : `<p class="subtle">No access requests.</p>`}
           </div>
