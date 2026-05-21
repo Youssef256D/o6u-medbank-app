@@ -24646,7 +24646,7 @@ function renderAdminCoursesPlatformSidebarNav(activeSection) {
         <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
       </svg>
     `],
-    ["requests", "Access Requests", `
+    ["requests", "Enrollment Requests", `
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
@@ -40797,13 +40797,46 @@ function adminRenderCourseBuilder(courseId) {
   const pendingRequestCount = requestQueue.filter((request) => String(request?.status || "").trim() === "pending").length;
   const activePlatformSection = getAdminCoursePlatformSection();
   const showPlatformPreview = activePlatformSection === "preview" || Boolean(state.adminCourseBuilderPreview);
+  const sectionCopy = {
+    overview: {
+      title: "Course metadata",
+      description: "Review every course students can see, then edit the selected course details, cover, instructor, status, and enrollment mode.",
+    },
+    builder: {
+      title: "Course Builder",
+      description: "Create new student courses, then build their modules, video lessons, and lesson materials.",
+    },
+    suggestions: {
+      title: "Suggestions",
+      description: "Choose which courses appear on the Course Suggestions page and feature important courses first for students.",
+    },
+    announcements: {
+      title: "Announcements",
+      description: "Push course announcements to enrolled students from the selected course.",
+    },
+    enrollments: {
+      title: "Enrollments",
+      description: "Bulk enroll students, review who is enrolled, and cancel enrollment when needed.",
+    },
+    requests: {
+      title: "Enrollment requests",
+      description: "Approve or reject student requests so approved courses move into their Enrolled Courses page.",
+    },
+    preview: {
+      title: "Student preview",
+      description: "Preview how the selected course structure will look to students.",
+    },
+  }[activePlatformSection] || {
+    title: "Courses learning platform",
+    description: "Build modules, lessons, resources, announcements, and enrollments without changing MCQ question-bank tools.",
+  };
 
   return `
     <section class="card admin-section courses-admin-builder" id="admin-courses-platform-builder">
       <div class="admin-courses-minimal-head">
         <div>
-          <h3 style="margin: 0;">Courses learning platform</h3>
-          <p class="subtle" style="margin: 0.22rem 0 0;">Build modules, lessons, resources, announcements, and enrollments without changing MCQ question-bank tools.</p>
+          <h3 style="margin: 0;">${escapeHtml(sectionCopy.title)}</h3>
+          <p class="subtle" style="margin: 0.22rem 0 0;">${escapeHtml(sectionCopy.description)}</p>
         </div>
         <div class="stack">
           <button class="btn ghost admin-btn-sm ${state.adminCoursesPlatformLoading ? "is-loading" : ""}" type="button" data-action="admin-courses-platform-refresh">${state.adminCoursesPlatformLoading ? "Refreshing..." : "Refresh platform"}</button>
@@ -40814,7 +40847,7 @@ function adminRenderCourseBuilder(courseId) {
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
       
-      <form id="admin-course-create-form" class="course-builder-form">
+      ${activePlatformSection === "builder" ? `<form id="admin-course-create-form" class="course-builder-form">
         <h4>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
             <circle cx="12" cy="12" r="10"></circle>
@@ -40844,9 +40877,9 @@ function adminRenderCourseBuilder(courseId) {
           <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
         </div>
         <button class="btn admin-btn-sm" type="submit">Create course</button>
-      </form>
+      </form>` : ""}
       
-      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Create the first Courses platform course above.</p></div>` : `
+      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
         <div class="courses-builder-selector">
           <label>Selected Course
             <select id="admin-course-builder-course-select">
@@ -40860,6 +40893,26 @@ function adminRenderCourseBuilder(courseId) {
         </div>
 
         ${activePlatformSection === "overview" ? `
+          <div class="course-platform-section-note">
+            <b>All student courses</b>
+            <span>${escapeHtml(courses.length)} course${courses.length === 1 ? "" : "s"} are managed here. Pick a course from the selector above to edit its metadata.</span>
+          </div>
+          <div class="course-platform-course-list">
+            ${courses.map((course) => {
+              const courseRows = getAdminCourseBuilderCourseRows(course.id);
+              const isSelected = String(course.id || "") === selectedCourseId;
+              return `
+                <button class="course-platform-course-tile ${isSelected ? "is-active" : ""}" type="button" data-action="admin-select-course-platform-course" data-course-id="${escapeHtml(course.id)}">
+                  <span>
+                    <b>${escapeHtml(getCoursePlatformCourseTitle(course))}</b>
+                    <small>Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")} • ${escapeHtml(normalizeCoursePlatformMode(course.enrollment_mode) === "assigned" ? "Assigned" : "Request only")}</small>
+                  </span>
+                  <span class="${course.is_published ? "admin-badge-published" : "admin-badge-draft"}">${course.is_published ? "Published" : "Draft"}</span>
+                  <small>${courseRows.lessons.length} lesson${courseRows.lessons.length === 1 ? "" : "s"} • ${courseRows.enrollments.length} enrolled</small>
+                </button>
+              `;
+            }).join("")}
+          </div>
           <form id="admin-course-metadata-form" class="course-builder-form">
             <h4>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
@@ -41283,7 +41336,13 @@ function wireAdminCoursesPlatformBuilder() {
     const button = event.target.closest("[data-action]");
     if (!button || !root.contains(button)) return;
     const action = button.getAttribute("data-action");
-    if (action === "admin-delete-module") {
+    if (action === "admin-select-course-platform-course") {
+      const courseId = button.getAttribute("data-course-id") || "";
+      if (!isUuidValue(courseId)) return;
+      state.adminCourseBuilderCourseId = courseId;
+      state.skipNextRouteAnimation = true;
+      render();
+    } else if (action === "admin-delete-module") {
       const moduleId = button.getAttribute("data-module-id") || "";
       if (!window.confirm("Delete this module and its lessons?")) return;
       runAdminCourseAction("Module deleted.", () => adminDeleteModule(moduleId));
