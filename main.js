@@ -39399,7 +39399,7 @@ function renderCoursePlatformCard(row, options = {}) {
   return `
     <article class="card course-card ${hasNoContent ? "course-card-empty-content" : ""}">
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" style="background:#ffffff;" />
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" style="background:#ffffff;" onerror="this.onerror=null; this.src='Assets/branding/web-logo-hero.png';" />
         
         <span class="course-card-badge-overlay overlay-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
         ${courseCode ? `<span class="course-card-badge-overlay overlay-code">${escapeHtml(courseCode)}</span>` : ""}
@@ -39880,7 +39880,7 @@ function renderCourseDetail(courseId) {
       </button>
       
       <div class="course-detail-hero">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" style="background:#ffffff;" />
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" style="background:#ffffff;" onerror="this.onerror=null; this.src='Assets/branding/web-logo-hero.png';" />
         <div class="course-detail-copy">
           <p class="kicker">Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</p>
           <h2 class="title">${escapeHtml(getCoursePlatformCourseTitle(course))}</h2>
