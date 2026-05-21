@@ -334,6 +334,10 @@ const state = {
   adminCourseBuilderLessonId: "",
   adminCourseBuilderPreview: false,
   adminCoursePlatformSection: "builder",
+  adminCourseBuilderActiveType: null,
+  adminCourseBuilderActiveId: "",
+  adminCourseBuilderActiveParentId: "",
+  adminCourseBuilderModuleCollapsed: {},
   adminCourseTableSearch: "",
   adminCourseTableFilterYear: "",
   adminCourseTableFilterSemester: "",
@@ -39198,11 +39202,6 @@ function renderCoursePlatformCard(row, options = {}) {
   const { course, enrollment, progress, lessonCount, moduleCount, completedLessons, lastLesson, status, newLessons, newAnnouncements } = row;
   const title = getCoursePlatformCourseTitle(course);
   const isSuggestion = Boolean(options.suggestion);
-  const statusLabel = enrollment.isEnrolled
-    ? `${progress}% complete`
-    : enrollment.requestStatus
-        ? `Request ${enrollment.requestStatus}`
-        : "Request enrollment";
   const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : "View details";
   const primaryAction = enrollment.isEnrolled
     ? (lastLesson ? "courses-open-lesson" : "courses-open-course")
@@ -39211,51 +39210,74 @@ function renderCoursePlatformCard(row, options = {}) {
   const suggestionReason = String(row.suggestion?.reason || row.suggestion?.title || "").trim();
   const hasNoContent = !lessonCount && !moduleCount;
   const courseCode = String(course.course_code || course.code || "").trim();
+
+  let buttonIcon = "";
+  if (enrollment.isEnrolled) {
+    if (lastLesson) {
+      buttonIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+    } else {
+      buttonIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`;
+    }
+  } else {
+    buttonIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
+  }
+
   return `
     <article class="card course-card ${hasNoContent ? "course-card-empty-content" : ""}">
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" style="background:#ffffff;" />
+        
+        <span class="course-card-badge-overlay overlay-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
+        ${courseCode ? `<span class="course-card-badge-overlay overlay-code">${escapeHtml(courseCode)}</span>` : ""}
+        ${enrollment.isEnrolled 
+          ? `<span class="course-card-badge-overlay overlay-status status-${status}">${escapeHtml(statusText)}</span>` 
+          : `<span class="course-card-badge-overlay overlay-status status-${enrollment.requestStatus === "pending" ? "request-pending" : "request"}">${enrollment.requestStatus === "pending" ? "Pending approval" : "Approval required"}</span>`
+        }
       </button>
+      
       <div class="course-card-body">
         <div class="course-card-top">
-          <div class="course-card-badges-row">
-            <span class="course-card-badge course-card-badge-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
-            ${enrollment.isEnrolled ? `<span class="course-card-badge course-card-badge-status course-card-badge-${status}">${escapeHtml(statusText)}</span>` : `<span class="course-card-badge course-card-badge-request">${enrollment.requestStatus === "pending" ? "Pending approval" : "Approval required"}</span>`}
-            ${courseCode ? `<span class="course-card-badge course-card-badge-code">${escapeHtml(courseCode)}</span>` : ""}
-          </div>
           <h3>${escapeHtml(title)}</h3>
-          ${course.instructor_name ? `<span class="course-card-instructor">${escapeHtml(course.instructor_name)}</span>` : ""}
+          ${course.instructor_name ? `
+            <div class="course-card-instructor-row">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              <span>${escapeHtml(course.instructor_name)}</span>
+            </div>
+          ` : ""}
         </div>
 
         <p class="course-card-desc">${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
-        ${isSuggestion ? `<p class="course-suggestion-reason">${escapeHtml(suggestionReason || "Recommended by your course admin.")}</p>` : ""}
-
-        <div class="course-card-facts">
-          <span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-            ${moduleCount || 0} module${moduleCount === 1 ? "" : "s"}
-          </span>
-          <span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg>
-            ${completedLessons || 0}/${lessonCount || 0} lessons
-          </span>
-        </div>
-
-        ${hasNoContent ? `<div class="course-card-empty-note">Course content is being prepared.</div>` : `
-          <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
-        `}
-
-        ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
-        ${Number(newLessons?.length || 0) || Number(newAnnouncements?.length || 0) ? `
-          <div class="course-card-badges">
-            ${Number(newLessons?.length || 0) ? `<span class="badge good">${newLessons.length} new lesson${newLessons.length === 1 ? "" : "s"}</span>` : ""}
-            ${Number(newAnnouncements?.length || 0) ? `<span class="badge neutral">${newAnnouncements.length} new announcement${newAnnouncements.length === 1 ? "" : "s"}</span>` : ""}
-          </div>
-        ` : ""}
+        ${isSuggestion ? `<p class="course-suggestion-reason-row">${escapeHtml(suggestionReason || "Recommended by your course admin.")}</p>` : ""}
 
         <div class="course-card-footer">
+          <div class="course-card-facts-row">
+            <span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              ${moduleCount || 0} module${moduleCount === 1 ? "" : "s"}
+            </span>
+            <span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5"/></svg>
+              ${completedLessons || 0}/${lessonCount || 0} lessons
+            </span>
+          </div>
+
+          ${hasNoContent ? `<div class="course-card-empty-note">Course content is being prepared.</div>` : `
+            <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+          `}
+
+          ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
+          ${Number(newLessons?.length || 0) || Number(newAnnouncements?.length || 0) ? `
+            <div class="course-card-badges" style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
+              ${Number(newLessons?.length || 0) ? `<span class="badge good">${newLessons.length} new lesson${newLessons.length === 1 ? "" : "s"}</span>` : ""}
+              ${Number(newAnnouncements?.length || 0) ? `<span class="badge neutral">${newAnnouncements.length} new announcement${newAnnouncements.length === 1 ? "" : "s"}</span>` : ""}
+            </div>
+          ` : ""}
+
           <div class="course-card-actions">
-            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>${escapeHtml(actionLabel)}</button>
+            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>
+              ${buttonIcon}
+              <span>${escapeHtml(actionLabel)}</span>
+            </button>
           </div>
         </div>
       </div>
@@ -39606,13 +39628,66 @@ function renderCoursesHome() {
   `;
 }
 
+function renderInstructorAvatarBubble(name) {
+  const nameStr = String(name || "").trim();
+  if (!nameStr) {
+    return `<div class="instructor-avatar-bubble-el" style="background: linear-gradient(135deg, var(--brand), var(--accent));">TR</div>`;
+  }
+  const parts = nameStr.split(/\s+/);
+  let initials = "";
+  if (parts.length >= 2) {
+    initials = (parts[0][0] || "") + (parts[parts.length - 1][0] || "");
+  } else if (parts.length === 1) {
+    initials = parts[0].slice(0, 2);
+  }
+  initials = initials.toUpperCase() || "?";
+  
+  let hash = 0;
+  for (let i = 0; i < nameStr.length; i++) {
+    hash = nameStr.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const colors = [
+    ["#177e89", "#0b3c43"],
+    ["#2b9348", "#1b5e20"],
+    ["#f4a259", "#b85c00"],
+    ["#e63946", "#9d0208"],
+    ["#457b9d", "#1d3557"],
+    ["#7209b7", "#3f0071"]
+  ];
+  const idx = Math.abs(hash) % colors.length;
+  const grad = colors[idx];
+  return `<div class="instructor-avatar-bubble-el" style="background: linear-gradient(135deg, ${grad[0]}, ${grad[1]});" aria-hidden="true">${escapeHtml(initials)}</div>`;
+}
+
 function renderCourseDetail(courseId) {
   const course = state.coursesDetail || (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(courseId || "").trim());
   if (!course && state.coursesLoading) {
-    return `<section class="panel courses-shell"><button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button><div class="card courses-empty"><span class="inline-loader" aria-hidden="true"></span><p>Opening course...</p></div></section>`;
+    return `
+      <section class="panel courses-shell">
+        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          <span>Back to Courses</span>
+        </button>
+        <div class="card courses-empty">
+          <span class="inline-loader" aria-hidden="true"></span>
+          <p>Opening course...</p>
+        </div>
+      </section>
+    `;
   }
   if (!course) {
-    return `<section class="panel courses-shell"><button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button><div class="card courses-error"><b>Course unavailable</b><p>${escapeHtml(state.coursesError || "This course could not be opened.")}</p></div></section>`;
+    return `
+      <section class="panel courses-shell">
+        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          <span>Back to Courses</span>
+        </button>
+        <div class="card courses-error">
+          <b>Course unavailable</b>
+          <p>${escapeHtml(state.coursesError || "This course could not be opened.")}</p>
+        </div>
+      </section>
+    `;
   }
   const modules = (state.coursesModules || []).filter((module) => String(module?.course_id || "").trim() === String(course.id || "").trim());
   const lessons = getCoursePlatformLessonsForCourse(course.id);
@@ -39622,27 +39697,55 @@ function renderCourseDetail(courseId) {
   const canOpenLessons = enrollment.isEnrolled;
   const courseAnnouncements = (state.coursesAnnouncements || []).filter((item) => String(item?.course_id || "").trim() === String(course.id || "").trim());
   const requestStatus = String(enrollment.requestStatus || "").trim();
+  
   return `
     <section class="panel courses-shell">
-      <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button>
+      <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        <span>Back to Courses</span>
+      </button>
+      
       <div class="course-detail-hero">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" />
+        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" style="background:#ffffff;" />
         <div class="course-detail-copy">
           <p class="kicker">Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</p>
           <h2 class="title">${escapeHtml(getCoursePlatformCourseTitle(course))}</h2>
           <p class="subtle">${escapeHtml(course.description || "Course materials, lessons, announcements, and learning resources.")}</p>
+          
           <div class="course-detail-facts">
-            <span>${escapeHtml(course.instructor_name || "Instructor TBA")}</span>
-            <span>${escapeHtml(course.estimated_duration || "Self-paced")}</span>
-            <span>${progress}% complete</span>
+            <span class="fact-instructor">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              ${escapeHtml(course.instructor_name || "Instructor TBA")}
+            </span>
+            <span class="fact-duration">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              ${escapeHtml(course.estimated_duration || "Self-paced")}
+            </span>
+            <span class="fact-progress">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
+              ${progress}% complete
+            </span>
           </div>
+          
           <div class="course-progress-track is-large"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+          
           <div class="stack">
             ${enrollment.isEnrolled
-              ? `<button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>Continue learning</button>`
-              : `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request enrollment"}</button>`
+              ? `<button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>
+                   ${lastLesson 
+                     ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Continue learning</span>`
+                     : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>View Course</span>`
+                   }
+                 </button>`
+              : `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>
+                   ${enrollment.requestStatus === "pending" 
+                     ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>Request pending</span>`
+                     : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span>Request enrollment</span>`
+                   }
+                 </button>`
             }
           </div>
+          
           ${!enrollment.isEnrolled ? `
             <div class="course-detail-request-note">
               <b>${requestStatus === "pending" ? "Waiting for admin approval" : requestStatus === "rejected" ? "Request rejected" : "Enrollment requires admin approval"}</b>
@@ -39652,12 +39755,31 @@ function renderCourseDetail(courseId) {
         </div>
       </div>
 
-      ${course.instructor_bio ? `<article class="card course-instructor"><h3>Instructor</h3><p><b>${escapeHtml(course.instructor_name || "Instructor")}</b></p><p class="subtle">${escapeHtml(course.instructor_bio)}</p></article>` : ""}
+      ${course.instructor_bio ? `
+        <article class="card course-instructor-card" style="display: flex; gap: 1.25rem; align-items: start; flex-wrap: wrap;">
+          ${renderInstructorAvatarBubble(course.instructor_name)}
+          <div style="flex: 1 1 300px; display: flex; flex-direction: column; gap: 0.35rem;">
+            <span class="instructor-role-badge">Instructor</span>
+            <h3 class="instructor-name">${escapeHtml(course.instructor_name || "Instructor")}</h3>
+            <p class="subtle" style="margin: 0; font-size: 0.88rem; line-height: 1.5;">${escapeHtml(course.instructor_bio)}</p>
+          </div>
+        </article>
+      ` : ""}
 
       <div class="course-detail-layout">
         <section class="course-modules">
           <h3>Modules</h3>
-          ${!modules.length ? `<div class="card courses-empty"><p class="subtle">No lessons added yet.</p></div>` : modules.map((module) => {
+          ${!modules.length ? `
+            <div class="courses-empty-state">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                <circle cx="12" cy="10" r="3"/>
+              </svg>
+              <h3>No modules available yet</h3>
+              <p>The instructor has not added modules or lessons to this course yet. Please check back later.</p>
+            </div>
+          ` : modules.map((module) => {
             const moduleLessons = lessons.filter((lesson) => String(lesson?.module_id || "").trim() === String(module?.id || "").trim());
             return `
               <article class="card course-module-card">
@@ -39679,7 +39801,7 @@ function renderCourseDetail(courseId) {
                         <small>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds, lesson.is_free_preview ? "Preview" : ""))}</small>
                       </button>
                     `;
-                  }).join("") || `<p class="subtle">No lessons added yet.</p>`}
+                  }).join("") || `<p class="subtle">No lessons added yet in this module.</p>`}
                 </div>
               </article>
             `;
@@ -39687,15 +39809,49 @@ function renderCourseDetail(courseId) {
         </section>
 
         <aside class="course-side">
-          <article class="card course-detail-enrollment-card">
-            <h3>Enrollment</h3>
-            <p class="subtle">${enrollment.isEnrolled ? "You are enrolled in this course." : requestStatus === "pending" ? "Your enrollment request is pending admin review." : "Request enrollment to have this course added to your enrolled list after approval."}</p>
+          <article class="card course-detail-enrollment-card ${enrollment.isEnrolled ? "is-enrolled" : requestStatus === "pending" ? "is-pending" : ""}">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+              <div class="enrollment-status-icon">
+                ${enrollment.isEnrolled 
+                  ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>` 
+                  : requestStatus === "pending" 
+                    ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>` 
+                    : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
+                }
+              </div>
+              <div>
+                <h3 style="margin: 0; font-size: 1rem; font-weight: 800;">Enrollment</h3>
+                <div class="enrollment-status-pill">${enrollment.isEnrolled ? "Enrolled" : requestStatus === "pending" ? "Pending Approval" : "Not Enrolled"}</div>
+              </div>
+            </div>
+            <p class="subtle" style="margin: 0; font-size: 0.82rem; line-height: 1.45;">
+              ${enrollment.isEnrolled 
+                ? "You have full access to this course. You can watch videos, complete lessons, and view announcements." 
+                : requestStatus === "pending" 
+                  ? "Your enrollment request has been submitted and is currently pending administrator approval." 
+                  : "You do not have access to this course yet. Request enrollment to gain access to materials and lessons."
+              }
+            </p>
           </article>
-          <article class="card">
-            <h3>Announcements</h3>
+          
+          <article class="card" style="padding: 1.25rem;">
+            <h3 style="margin-bottom: 0.75rem;">Announcements</h3>
             ${courseAnnouncements.length
-              ? courseAnnouncements.map((item) => `<div class="course-announcement"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div>`).join("")
-              : `<div class="courses-empty-state is-compact"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><p>No announcements yet.</p></div>`
+              ? `<div class="course-announcements-list">
+                  ${courseAnnouncements.map((item) => `
+                    <div class="course-announcement-item">
+                      <div class="course-announcement-header">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                        <b>${escapeHtml(item.title)}</b>
+                      </div>
+                      <p class="subtle" style="margin: 0.35rem 0 0 0; font-size: 0.82rem; line-height: 1.45;">${escapeHtml(item.body)}</p>
+                    </div>
+                  `).join("")}
+                 </div>`
+              : `<div class="courses-empty-state is-compact">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  <p>No announcements yet.</p>
+                 </div>`
             }
           </article>
         </aside>
@@ -40172,6 +40328,33 @@ function getAdminCourseBuilderProfileLabel(userId) {
     : String(userId || "Unknown student").trim();
 }
 
+function getProfileInitials(userId) {
+  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  if (!profile) return "ST";
+  const name = String(profile.full_name || profile.email || "").trim();
+  if (!name) return "ST";
+  const parts = name.split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
+function renderAdminAvatarBubble(userId) {
+  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const name = profile ? String(profile.full_name || profile.email || "").trim() : "";
+  const initials = getProfileInitials(userId);
+  let hash = 0;
+  const colorSeed = name || userId || "ST";
+  for (let i = 0; i < colorSeed.length; i++) {
+    hash = colorSeed.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const h = Math.abs(hash % 360);
+  const bg = `hsl(${h}, 65%, 42%)`;
+  return `<div class="admin-avatar-bubble" style="background: ${bg};" aria-hidden="true">${escapeHtml(initials)}</div>`;
+}
+
+
 function getAdminCourseBuilderCourseLabel(courseId) {
   const course = (state.adminCoursesPlatformCourses || []).find((entry) => String(entry?.id || "").trim() === String(courseId || "").trim());
   if (!course) {
@@ -40349,6 +40532,93 @@ async function adminDeleteModule(moduleId) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be deleted.");
   await runRelationalQueryWithTimeout(client.from("platform_course_modules").delete().eq("id", moduleId), "Module delete timed out.");
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminMoveModule(moduleId, direction) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(moduleId)) throw new Error("Module cannot be moved.");
+  const courseId = state.adminCourseBuilderCourseId;
+  if (!isUuidValue(courseId)) throw new Error("No active course selected.");
+  
+  const rows = getAdminCourseBuilderCourseRows(courseId);
+  const modules = rows.modules;
+  const currentIndex = modules.findIndex((m) => String(m.id) === String(moduleId));
+  if (currentIndex === -1) throw new Error("Module not found.");
+  
+  const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+  if (targetIndex < 0 || targetIndex >= modules.length) {
+    return false;
+  }
+  
+  const promises = [];
+  modules.forEach((mod, idx) => {
+    let newPos = idx;
+    if (idx === currentIndex) {
+      newPos = targetIndex;
+    } else if (idx === targetIndex) {
+      newPos = currentIndex;
+    }
+    if (Number(mod.position) !== newPos) {
+      promises.push(
+        client.from("platform_course_modules").update({
+          position: newPos,
+          updated_at: nowISO()
+        }).eq("id", mod.id)
+      );
+    }
+  });
+  
+  if (promises.length > 0) {
+    await Promise.all(promises);
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminMoveLesson(lessonId, direction) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be moved.");
+  
+  const lesson = (state.adminCoursesPlatformLessons || []).find((l) => String(l.id) === String(lessonId));
+  if (!lesson) throw new Error("Lesson not found.");
+  
+  const moduleId = lesson.module_id;
+  const courseId = state.adminCourseBuilderCourseId;
+  if (!isUuidValue(courseId)) throw new Error("No active course selected.");
+  
+  const rows = getAdminCourseBuilderCourseRows(courseId);
+  const lessons = rows.lessons.filter((l) => String(l.module_id) === String(moduleId));
+  const currentIndex = lessons.findIndex((l) => String(l.id) === String(lessonId));
+  if (currentIndex === -1) throw new Error("Lesson not found.");
+  
+  const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+  if (targetIndex < 0 || targetIndex >= lessons.length) {
+    return false;
+  }
+  
+  const promises = [];
+  lessons.forEach((less, idx) => {
+    let newPos = idx;
+    if (idx === currentIndex) {
+      newPos = targetIndex;
+    } else if (idx === targetIndex) {
+      newPos = currentIndex;
+    }
+    if (Number(less.position) !== newPos) {
+      promises.push(
+        client.from("platform_course_lessons").update({
+          position: newPos,
+          updated_at: nowISO()
+        }).eq("id", less.id)
+      );
+    }
+  });
+  
+  if (promises.length > 0) {
+    await Promise.all(promises);
+  }
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -41111,32 +41381,71 @@ function renderAdminEnrollmentsSection(selectedCourse, rows) {
   });
   const visibleEnrollments = filteredEnrollments.slice(0, limit);
   const hasMore = filteredEnrollments.length > visibleEnrollments.length;
+
   return `
-    <form id="admin-course-bulk-enroll-form" class="course-builder-form">
-      <h4>Enrollments</h4>
-      <div class="admin-enrollment-search">
-        <input type="search" id="admin-enrollment-search" placeholder="Search enrolled students by name or email..." value="${escapeHtml(state.adminEnrollmentSearch || "")}" />
-        <span class="admin-enrollment-count-badge"><b>${rows.enrollments.length}</b> enrolled</span>
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <!-- Bulk Enrollment Card -->
+      <form id="admin-course-bulk-enroll-form" class="course-builder-form" style="margin: 0;">
+        <h4>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
+          Bulk Enroll Students
+        </h4>
+        <p class="subtle" style="margin: 0; font-size: 0.82rem; font-weight: 550;">Enroll all active students from a specific year and semester into this course.</p>
+        <div class="course-builder-grid compact" style="margin-top: 0.5rem;">
+          <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+          <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+        </div>
+        <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.5rem; align-self: flex-start;">Bulk enroll students</button>
+      </form>
+
+      <!-- Student Roster Card -->
+      <div class="course-builder-form" style="margin: 0;">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; border-bottom: 1px solid var(--line); padding-bottom: 0.75rem;">
+          <h4 style="margin: 0; border: none; padding: 0;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+            </svg>
+            Enrolled Students Roster
+          </h4>
+          <span class="admin-enrollment-count-badge" style="background: var(--brand-soft); color: var(--brand-strong); padding: 0.25rem 0.6rem; border-radius: 20px; font-size: 0.8rem; font-weight: 700;">
+            <b>${rows.enrollments.length}</b> enrolled
+          </span>
+        </div>
+
+        <div class="admin-enrollment-search" style="margin-top: 0.5rem;">
+          <input type="search" id="admin-enrollment-search" placeholder="Search enrolled students by name or email..." value="${escapeHtml(state.adminEnrollmentSearch || "")}" style="width: 100%;" />
+        </div>
+
+        <div class="course-enrollment-admin-list">
+          ${visibleEnrollments.length ? visibleEnrollments.map((enrollment) => {
+            const label = getAdminCourseBuilderProfileLabel(enrollment.user_id);
+            return `
+              <div class="course-request-row course-enrollment-row" style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                  ${renderAdminAvatarBubble(enrollment.user_id)}
+                  <span style="display: flex; flex-direction: column; gap: 0.15rem;">
+                    <b style="font-size: 0.92rem;">${escapeHtml(label)}</b>
+                    <small style="color: var(--muted); font-size: 0.75rem;">Enrolled on ${escapeHtml(formatReportDateTime(enrollment.assigned_at || ""))}</small>
+                  </span>
+                </div>
+                <button class="btn danger admin-btn-sm outline" type="button" data-action="admin-cancel-course-enrollment" data-user-id="${escapeHtml(enrollment.user_id)}" data-course-id="${escapeHtml(enrollment.course_id)}">Cancel enrollment</button>
+              </div>
+            `;
+          }).join("") : `<p class="subtle" style="margin: 1rem 0;">${search ? "No enrolled students match your search." : "No students are enrolled in this course yet."}</p>`}
+        </div>
+
+        ${hasMore ? `<button class="btn ghost admin-btn-sm" type="button" data-action="admin-enrollment-show-more" style="margin-top: 0.75rem; align-self: flex-start;">Show more (${filteredEnrollments.length - visibleEnrollments.length} remaining)</button>` : ""}
+        ${search && filteredEnrollments.length ? `<p class="subtle" style="margin: 0.5rem 0 0;">${escapeHtml(filteredEnrollments.length)} student${filteredEnrollments.length === 1 ? "" : "s"} match your search.</p>` : ""}
       </div>
-      <div class="course-builder-grid compact">
-        <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
-        <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
-      </div>
-      <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
-      <div class="course-enrollment-admin-list">
-        ${visibleEnrollments.length ? visibleEnrollments.map((enrollment) => `
-          <div class="course-request-row course-enrollment-row">
-            <span>
-              <b>${escapeHtml(getAdminCourseBuilderProfileLabel(enrollment.user_id))}</b>
-              <small>Enrolled on ${escapeHtml(formatReportDateTime(enrollment.assigned_at || ""))}</small>
-            </span>
-            <button class="btn danger admin-btn-sm" type="button" data-action="admin-cancel-course-enrollment" data-user-id="${escapeHtml(enrollment.user_id)}" data-course-id="${escapeHtml(enrollment.course_id)}">Cancel enrollment</button>
-          </div>
-        `).join("") : `<p class="subtle">${search ? "No enrolled students match your search." : "No students are enrolled in this course yet."}</p>`}
-      </div>
-      ${hasMore ? `<button class="btn ghost admin-btn-sm" type="button" data-action="admin-enrollment-show-more">Show more (${filteredEnrollments.length - visibleEnrollments.length} remaining)</button>` : ""}
-      ${search && filteredEnrollments.length ? `<p class="subtle">${escapeHtml(filteredEnrollments.length)} student${filteredEnrollments.length === 1 ? "" : "s"} match your search.</p>` : ""}
-    </form>
+    </div>
   `;
 }
 
@@ -41193,20 +41502,43 @@ function renderAdminRequestsSection(courses) {
               </button>
               ${pendingCount ? `<button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-all-pending-course" data-course-id="${escapeHtml(courseId)}">Approve all pending</button>` : ""}
             </div>
-            <div class="admin-request-group-body">
-              ${courseRequests.map((request) => `
-                <div class="course-request-row">
-                  <span>
-                    <b>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}</b>
-                    <small>Requested ${escapeHtml(formatReportDateTime(request.created_at || ""))}</small>
-                    <small style="text-transform: uppercase;">Status: ${escapeHtml(request.status || "pending")}</small>
-                  </span>
-                  <div class="stack">
-                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
-                    <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
+            <div class="admin-request-group-body" style="display: flex; flex-direction: column; gap: 0.5rem; padding: 0.75rem 0.85rem;">
+              ${courseRequests.map((request) => {
+                const label = getAdminCourseBuilderProfileLabel(request.user_id);
+                const status = String(request.status || "pending").toLowerCase();
+                let statusBadge = "";
+                let actionsHtml = "";
+
+                if (status === "approved") {
+                  statusBadge = `<span class="status-badge is-approved">Approved</span>`;
+                  actionsHtml = `<button class="btn danger admin-btn-sm ghost" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}">Reject</button>`;
+                } else if (status === "rejected") {
+                  statusBadge = `<span class="status-badge is-rejected">Rejected</span>`;
+                  actionsHtml = `<button class="btn good admin-btn-sm ghost" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}">Approve</button>`;
+                } else {
+                  statusBadge = `<span class="status-badge is-pending">Pending</span>`;
+                  actionsHtml = `
+                    <button class="btn good admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}">Approve</button>
+                    <button class="btn danger admin-btn-sm outline" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}">Reject</button>
+                  `;
+                }
+
+                return `
+                  <div class="course-request-row" style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1rem;">
+                    <div style="display: flex; align-items: center; gap: 0.75rem;">
+                      ${renderAdminAvatarBubble(request.user_id)}
+                      <span style="display: flex; flex-direction: column; gap: 0.15rem;">
+                        <b style="font-size: 0.92rem;">${escapeHtml(label)}</b>
+                        <small style="color: var(--muted); font-size: 0.75rem;">Requested on ${escapeHtml(formatReportDateTime(request.created_at || ""))}</small>
+                        <div style="margin-top: 0.25rem;">${statusBadge}</div>
+                      </span>
+                    </div>
+                    <div class="stack" style="gap: 0.45rem;">
+                      ${actionsHtml}
+                    </div>
                   </div>
-                </div>
-              `).join("")}
+                `;
+              }).join("")}
             </div>
           </section>
         `;
@@ -41218,6 +41550,379 @@ function renderAdminRequestsSection(courses) {
 function getAdminCoursePlatformSection() {
   const section = String(state.adminCoursePlatformSection || "").trim();
   return ADMIN_COURSES_PLATFORM_SECTIONS.has(section) ? section : "builder";
+}
+
+function renderSyllabusOutline(selectedCourse, rows) {
+  if (!selectedCourse) {
+    return `
+      <div class="course-builder-outline">
+        <div class="course-builder-outline-title">
+          <span>Syllabus Outline</span>
+        </div>
+        <div class="outline-empty-state">
+          No course selected or created yet.
+        </div>
+      </div>
+    `;
+  }
+  const activeType = state.adminCourseBuilderActiveType;
+  const activeId = state.adminCourseBuilderActiveId;
+  const collapsedState = state.adminCourseBuilderModuleCollapsed || {};
+
+  const modulesHtml = rows.modules.map((module, mIdx) => {
+    const isModuleActive = activeType === "module-edit" && String(activeId) === String(module.id);
+    const isCollapsed = Boolean(collapsedState[module.id]);
+    const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(module.id || ""));
+    
+    const lessonsListHtml = moduleLessons.map((lesson, lIdx) => {
+      const isLessonActive = activeType === "lesson-edit" && String(activeId) === String(lesson.id);
+      return `
+        <div class="outline-lesson-item ${isLessonActive ? "is-active" : ""}">
+          <div class="outline-lesson-info" data-action="admin-select-builder-active" data-active-type="lesson-edit" data-active-id="${escapeHtml(lesson.id)}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand-strong); flex-shrink: 0;">
+              ${lesson.lesson_type === "video" 
+                ? '<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>' 
+                : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline>'}
+            </svg>
+            <span class="outline-lesson-title" title="${escapeHtml(lesson.title)}">${escapeHtml(lesson.title)}</span>
+          </div>
+          <div class="outline-actions">
+            <button class="outline-btn active-hover" type="button" data-action="admin-move-lesson" data-lesson-id="${escapeHtml(lesson.id)}" data-direction="up" ${lIdx === 0 ? "disabled" : ""} title="Move Up">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="outline-btn active-hover" type="button" data-action="admin-move-lesson" data-lesson-id="${escapeHtml(lesson.id)}" data-direction="down" ${lIdx === moduleLessons.length - 1 ? "disabled" : ""} title="Move Down">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <button class="outline-btn danger-hover" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}" title="Delete Lesson">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+      `;
+    }).join("") || `<div class="outline-empty-state">No lessons in this module yet.</div>`;
+
+    return `
+      <div class="outline-module-card ${isCollapsed ? "is-collapsed" : ""} ${isModuleActive ? "is-active" : ""}" data-module-id="${escapeHtml(module.id)}">
+        <div class="outline-module-header">
+          <div class="outline-module-info" data-action="admin-select-builder-active" data-active-type="module-edit" data-active-id="${escapeHtml(module.id)}">
+            <button class="outline-btn" style="width: 20px; height: 20px;" type="button" data-action="admin-toggle-module-collapse" data-module-id="${escapeHtml(module.id)}">
+              <svg class="outline-module-toggle-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <span class="outline-module-title" title="${escapeHtml(module.title)}">${escapeHtml(module.title)}</span>
+          </div>
+          <div class="outline-actions">
+            <button class="outline-btn active-hover" type="button" data-action="admin-move-module" data-module-id="${escapeHtml(module.id)}" data-direction="up" ${mIdx === 0 ? "disabled" : ""} title="Move Up">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button class="outline-btn active-hover" type="button" data-action="admin-move-module" data-module-id="${escapeHtml(module.id)}" data-direction="down" ${mIdx === rows.modules.length - 1 ? "disabled" : ""} title="Move Down">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <button class="outline-btn active-hover" type="button" data-action="admin-select-builder-active" data-active-type="lesson-create" data-active-parent-id="${escapeHtml(module.id)}" title="Add Lesson">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="outline-btn danger-hover" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}" title="Delete Module">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="outline-lessons-list">
+          ${lessonsListHtml}
+        </div>
+      </div>
+    `;
+  }).join("") || `<div class="outline-empty-state">No modules yet. Click "+ Add Module" below to start.</div>`;
+
+  return `
+    <div class="course-builder-outline">
+      <div class="course-builder-outline-title">
+        <span>Syllabus Outline</span>
+        <button class="btn ghost admin-btn-sm" type="button" data-action="admin-select-builder-active" data-active-type="metadata" style="padding: 0.15rem 0.5rem; font-size: 0.75rem;">
+          Edit Course Info
+        </button>
+      </div>
+      <div class="course-builder-outline-scroll">
+        ${modulesHtml}
+      </div>
+      <div class="course-builder-outline-footer">
+        <button class="btn admin-btn-sm" style="width: 100%; justify-content: center;" type="button" data-action="admin-select-builder-active" data-active-type="module-create">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Add Module
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderFocusedEditorPanel(selectedCourse, rows) {
+  const activeType = state.adminCourseBuilderActiveType;
+  const activeId = state.adminCourseBuilderActiveId;
+  const selectedCourseId = String(selectedCourse?.id || "").trim();
+
+  if (activeType === "course-create" || !selectedCourse) {
+    return `
+      <form id="admin-course-create-form" class="course-builder-form">
+        <div class="course-builder-editor-header">
+          <h4>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="16"></line>
+              <line x1="8" y1="12" x2="16" y2="12"></line>
+            </svg>
+            Create platform course
+          </h4>
+        </div>
+        <p class="subtle" style="margin-top: -0.35rem; margin-bottom: 1.25rem;">This creates a Courses platform course only. It does not create or edit MCQ bank courses.</p>
+        <div class="course-builder-grid compact">
+          <label>Course name<input name="course_name" required /></label>
+          <label>Course code<input name="course_code" /></label>
+          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}">Year ${year}</option>`).join("")}</select></label>
+          <label>Suggestion semester<select name="academic_semester"><option value="1">Semester 1</option><option value="2">Semester 2</option></select></label>
+          <label>Enrollment mode
+            <select name="enrollment_mode">
+              <option value="request">Request only</option>
+              <option value="assigned">Assigned</option>
+            </select>
+          </label>
+          <label>Priority<input name="priority" type="number" value="0" /></label>
+          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." /></label>
+          <label>Instructor name<input name="instructor_name" /></label>
+          <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" /></label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+          <label class="course-builder-wide">Description<textarea name="description" rows="2"></textarea></label>
+          <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
+        </div>
+        <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Create course</button>
+      </form>
+    `;
+  }
+
+  if (activeType === "metadata") {
+    return `
+      <form id="admin-course-metadata-form" class="course-builder-form">
+        <div class="course-builder-editor-header">
+          <h4>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
+            Course metadata
+          </h4>
+        </div>
+        <div class="course-builder-grid">
+          <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
+          <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
+          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+          <label>Suggestion semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+          <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
+          <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
+          <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
+          <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
+          <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
+          <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
+          <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
+          <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
+          <label>Enrollment mode
+            <select name="enrollment_mode">
+              <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
+              <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
+            </select>
+          </label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
+          <label class="course-builder-check"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
+        </div>
+        <div class="stack" style="margin-top: 0.75rem;">
+          <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+          <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-platform-course" data-course-id="${escapeHtml(selectedCourseId)}">Delete course</button>
+        </div>
+      </form>
+    `;
+  }
+
+  if (activeType === "module-create") {
+    return `
+      <form id="admin-course-module-create-form" class="course-builder-form">
+        <div class="course-builder-editor-header">
+          <h4>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="16"></line>
+              <line x1="8" y1="12" x2="16" y2="12"></line>
+            </svg>
+            Add module
+          </h4>
+        </div>
+        <div class="course-builder-grid compact">
+          <label>Title<input name="title" required /></label>
+          <label>Description<input name="description" /></label>
+          <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+        </div>
+        <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add module</button>
+      </form>
+    `;
+  }
+
+  if (activeType === "module-edit") {
+    const module = rows.modules.find((m) => String(m.id) === String(activeId));
+    if (!module) {
+      return `<p class="subtle">Module not found or deleted.</p>`;
+    }
+    return `
+      <div data-module-id="${escapeHtml(module.id)}">
+        <form class="course-builder-form" data-role="admin-module-form">
+          <div class="course-builder-editor-header">
+            <h4>Edit Module: ${escapeHtml(module.title)}</h4>
+          </div>
+          <div class="course-builder-grid compact">
+            <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
+            <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
+          </div>
+          <div class="stack" style="margin-top: 0.75rem;">
+            <button class="btn admin-btn-sm" type="submit">Save module</button>
+            <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}">Delete module</button>
+          </div>
+        </form>
+      </div>
+    `;
+  }
+
+  if (activeType === "lesson-create") {
+    const parentModule = rows.modules.find((m) => String(m.id) === String(state.adminCourseBuilderActiveParentId));
+    if (!parentModule) {
+      return `<p class="subtle">Parent module not found.</p>`;
+    }
+    const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(parentModule.id || ""));
+    return `
+      <div data-module-id="${escapeHtml(parentModule.id)}">
+        <form class="course-builder-form" data-role="admin-lesson-create-form">
+          <div class="course-builder-editor-header">
+            <h4>Add Lesson to: ${escapeHtml(parentModule.title)}</h4>
+          </div>
+          <div class="course-builder-grid">
+            <label>Title<input name="title" required /></label>
+            <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
+            <label>Video URL<input name="video_url" /></label>
+            <label>Upload video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
+            <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
+            <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+            <label class="course-builder-wide">Description<input name="description" /></label>
+            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
+          </div>
+          <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add lesson</button>
+        </form>
+      </div>
+    `;
+  }
+
+  if (activeType === "lesson-edit") {
+    const lesson = rows.lessons.find((l) => String(l.id) === String(activeId));
+    if (!lesson) {
+      return `<p class="subtle">Lesson not found or deleted.</p>`;
+    }
+    const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
+    return `
+      <div data-lesson-id="${escapeHtml(lesson.id)}">
+        <form class="course-builder-form" data-role="admin-lesson-form">
+          <div class="course-builder-editor-header">
+            <h4>Edit Lesson: ${escapeHtml(lesson.title)}</h4>
+          </div>
+          <div class="course-builder-grid">
+            <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
+            <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
+            <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
+            <label>Replace video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
+            <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
+            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
+            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
+            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
+          </div>
+          <div class="stack" style="margin-top: 0.75rem;">
+            <button class="btn admin-btn-sm" type="submit">Save lesson</button>
+            <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">Delete lesson</button>
+          </div>
+        </form>
+
+        <form class="course-builder-form" data-role="admin-resource-create-form" style="border-top: 1px solid var(--line); padding-top: 1.5rem; margin-top: 1.5rem;">
+          <h5>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="16"></line>
+              <line x1="8" y1="12" x2="16" y2="12"></line>
+            </svg>
+            Add material
+          </h5>
+          <div class="course-builder-grid compact">
+            <label>Title<input name="title" required /></label>
+            <label>Type<input name="resource_type" value="material" /></label>
+            <label>Upload material<input name="material_file" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.csv,.png,.jpg,.jpeg,.webp,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,image/png,image/jpeg,image/webp,application/zip" /></label>
+            <label>File URL<input name="file_url" placeholder="Optional existing file link" /></label>
+            <label>External URL<input name="external_url" placeholder="Optional web link" /></label>
+            <label>Description<input name="description" /></label>
+            <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+          </div>
+          <button class="btn ghost admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add material</button>
+        </form>
+
+        ${lessonResources.length ? `
+          <div class="course-builder-resources" style="margin-top: 1rem;">
+            <h6 style="margin: 0 0 0.5rem 0; font-size: 0.8rem; text-transform: uppercase; color: var(--muted); letter-spacing: 0.05em;">Current Materials</h6>
+            ${lessonResources.map((resource) => `
+              <div class="course-builder-resource" style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-sm); margin-bottom: 0.35rem;">
+                <span style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                  </svg>
+                  ${escapeHtml(resource.title)}
+                </span>
+                <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-resource" data-resource-id="${escapeHtml(resource.id)}">Delete</button>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  // Fallback empty state
+  return `
+    <div class="editor-empty-card">
+      <div class="editor-empty-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+        </svg>
+      </div>
+      <h3>Course Syllabus Editor</h3>
+      <p class="subtle" style="max-width: 360px; margin: 0.5rem auto 0;">
+        Select any module, lesson, or course metadata from the syllabus outline on the left to begin editing, or use the quick actions below.
+      </p>
+      <div class="editor-empty-shortcuts">
+        <button class="editor-shortcut-btn" type="button" data-action="admin-select-builder-active" data-active-type="metadata">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+          </svg>
+          <span>Course Info</span>
+        </button>
+        <button class="editor-shortcut-btn" type="button" data-action="admin-select-builder-active" data-active-type="module-create">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          <span>Add Module</span>
+        </button>
+      </div>
+    </div>
+  `;
 }
 
 function adminRenderCourseBuilder(courseId) {
@@ -41234,6 +41939,14 @@ function adminRenderCourseBuilder(courseId) {
   if (selectedCourse && state.adminCourseBuilderCourseId !== selectedCourse.id) {
     state.adminCourseBuilderCourseId = selectedCourse.id;
   }
+
+  // Initialize selection states
+  if (!selectedCourse) {
+    state.adminCourseBuilderActiveType = "course-create";
+    state.adminCourseBuilderActiveId = "";
+    state.adminCourseBuilderActiveParentId = "";
+  }
+
   const selectedCourseId = String(selectedCourse?.id || "").trim();
   const rows = getAdminCourseBuilderCourseRows(selectedCourseId);
   const pendingRequestCount = (state.adminCoursesPlatformRequests || []).filter(
@@ -41294,86 +42007,132 @@ function adminRenderCourseBuilder(courseId) {
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
       
-      ${activePlatformSection === "builder" ? `<form id="admin-course-create-form" class="course-builder-form">
-        <h4>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="12" y1="8" x2="12" y2="16"></line>
-            <line x1="8" y1="12" x2="16" y2="12"></line>
-          </svg>
-          Create platform course
-        </h4>
-        <p class="subtle" style="margin-top: -0.35rem;">This creates a Courses platform course only. It does not create or edit MCQ bank courses.</p>
-        <div class="course-builder-grid compact">
-          <label>Course name<input name="course_name" required /></label>
-          <label>Course code<input name="course_code" /></label>
-          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}">Year ${year}</option>`).join("")}</select></label>
-          <label>Suggestion semester<select name="academic_semester"><option value="1">Semester 1</option><option value="2">Semester 2</option></select></label>
-          <label>Enrollment mode
-            <select name="enrollment_mode">
-              <option value="request">Request only</option>
-              <option value="assigned">Assigned</option>
-            </select>
-          </label>
-          <label>Priority<input name="priority" type="number" value="0" /></label>
-          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." /></label>
-          <label>Instructor name<input name="instructor_name" /></label>
-          <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" /></label>
-          <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
-          <label class="course-builder-wide">Description<textarea name="description" rows="2"></textarea></label>
-          <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
-        </div>
-        <button class="btn admin-btn-sm" type="submit">Create course</button>
-      </form>` : ""}
-      
-      ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
-        ${activePlatformSection !== "requests" ? renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) : ""}
+      ${!selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
+        ${activePlatformSection !== "requests" && selectedCourse ? renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) : ""}
 
-        ${activePlatformSection === "overview" ? `
+        ${activePlatformSection === "overview" && selectedCourse ? `
           ${renderAdminCourseStatsCards()}
           ${showOverviewCourseTable ? renderAdminCourseTable(courses, selectedCourseId, { showStats: false }) : ""}
           <div class="course-platform-section-note">
             <b>Course metadata</b>
             <span>${useCourseTableSelector ? "Select a course from the table above to edit its details." : "Select a course from the table to edit its details."}</span>
           </div>
-          <form id="admin-course-metadata-form" class="course-builder-form">
-            <h4>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-              </svg>
-              Course metadata
-            </h4>
-            <div class="course-builder-grid">
-              <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
-              <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
-              <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
-              <label>Suggestion semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
-              <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
-              <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
-              <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
-              <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
-              <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
-              <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
-              <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
-              <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
-              <label>Enrollment mode
-                <select name="enrollment_mode">
-                  <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
-                  <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
-                </select>
-              </label>
-              <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
-              <label class="course-builder-check"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
+          <form id="admin-course-metadata-form" class="course-builder-form" style="background: transparent; border: none; padding: 0; gap: 1.5rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid var(--line); padding-bottom: 0.75rem; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.75rem;">
+              <h4 style="margin: 0; border: none; padding: 0;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                  <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+                Edit Course Details
+              </h4>
+              <div class="stack">
+                <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+                <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-platform-course" data-course-id="${escapeHtml(selectedCourseId)}">Delete course</button>
+              </div>
             </div>
-            <div class="stack" style="margin-top: 0.75rem;">
+
+            <div class="course-metadata-groups">
+              <!-- Primary Information Card -->
+              <div class="course-metadata-card">
+                <div class="course-metadata-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                  </svg>
+                  Primary Information
+                </div>
+                <div class="course-metadata-card-body grid-2col">
+                  <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
+                  <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
+                  <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
+                  <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
+                  <label>Price ($)<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
+                </div>
+              </div>
+
+              <!-- Academic & Status Card -->
+              <div class="course-metadata-card">
+                <div class="course-metadata-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 10v6M2 10l10-5 10 5-10 5z"></path>
+                    <path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5"></path>
+                  </svg>
+                  Academic Settings & Status
+                </div>
+                <div class="course-metadata-card-body grid-2col">
+                  <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+                  <label>Suggestion semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+                  <label>Enrollment mode
+                    <select name="enrollment_mode">
+                      <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
+                      <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
+                    </select>
+                  </label>
+                  <div style="display: flex; gap: 1.5rem; align-items: center; margin-top: 1.25rem; flex-wrap: wrap;">
+                    <label class="course-builder-check" style="margin: 0;"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
+                    <label class="course-builder-check" style="margin: 0;"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Media & Cover Card -->
+              <div class="course-metadata-card">
+                <div class="course-metadata-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                    <polyline points="21 15 16 10 5 21"></polyline>
+                  </svg>
+                  Media & Cover
+                </div>
+                <div class="course-metadata-card-body grid-2col">
+                  <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
+                  <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
+                </div>
+              </div>
+
+              <!-- Instructor Info Card -->
+              <div class="course-metadata-card">
+                <div class="course-metadata-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
+                  </svg>
+                  Instructor Information
+                </div>
+                <div class="course-metadata-card-body" style="display: flex; flex-direction: column; gap: 1rem;">
+                  <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
+                  <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
+                </div>
+              </div>
+
+              <!-- Course Description Card -->
+              <div class="course-metadata-card">
+                <div class="course-metadata-card-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                  </svg>
+                  Course Description
+                </div>
+                <div class="course-metadata-card-body">
+                  <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack" style="border-top: 2px solid var(--line); padding-top: 1.25rem;">
               <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
               <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-platform-course" data-course-id="${escapeHtml(selectedCourseId)}">Delete course</button>
             </div>
           </form>
         ` : ""}
 
-        ${showPlatformPreview ? `
+        ${showPlatformPreview && selectedCourse ? `
           <div class="card course-builder-preview">
             <h3>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
@@ -41406,152 +42165,20 @@ function adminRenderCourseBuilder(courseId) {
           </div>
         ` : ""}
 
-        ${activePlatformSection === "suggestions" ? `${renderAdminGlobalSuggestions()}${adminRenderSuggestionSettings(selectedCourseId)}` : ""}
+        ${activePlatformSection === "suggestions" && selectedCourse ? `${renderAdminGlobalSuggestions()}${adminRenderSuggestionSettings(selectedCourseId)}` : ""}
 
         ${activePlatformSection === "builder" ? `
-          <form id="admin-course-module-create-form" class="course-builder-form">
-            <h4>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="16"></line>
-                <line x1="8" y1="12" x2="16" y2="12"></line>
-              </svg>
-              Add module
-            </h4>
-            <div class="course-builder-grid compact">
-              <label>Title<input name="title" required /></label>
-              <label>Description<input name="description" /></label>
-              <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
-              <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+          <div class="course-builder-split-layout">
+            ${renderSyllabusOutline(selectedCourse, rows)}
+            <div class="course-builder-editor">
+              ${renderFocusedEditorPanel(selectedCourse, rows)}
             </div>
-            <button class="btn admin-btn-sm" type="submit">Add module</button>
-          </form>
+          </div>
+        ` : ""}
 
-          <div class="course-builder-modules">
-            ${rows.modules.map((module) => {
-              const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(module.id || ""));
-              return `
-                <article class="card course-builder-module" data-module-id="${escapeHtml(module.id)}">
-                  <form class="course-builder-module-form" data-role="admin-module-form">
-                    <div class="course-builder-grid compact">
-                      <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
-                      <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
-                      <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
-                      <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
-                    </div>
-                    <div class="stack">
-                      <button class="btn ghost admin-btn-sm" type="submit">Save module</button>
-                      <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-module" data-module-id="${escapeHtml(module.id)}">Delete module</button>
-                    </div>
-                  </form>
+        ${activePlatformSection === "announcements" && selectedCourse ? renderAdminAnnouncementsSection(courses, selectedCourseId, rows) : ""}
 
-                  <form class="course-builder-lesson-create-form" data-role="admin-lesson-create-form">
-                    <h5>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <line x1="12" y1="8" x2="12" y2="16"></line>
-                        <line x1="8" y1="12" x2="16" y2="12"></line>
-                      </svg>
-                      Add lesson
-                    </h5>
-                    <div class="course-builder-grid">
-                      <label>Title<input name="title" required /></label>
-                      <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
-                      <label>Video URL<input name="video_url" /></label>
-                      <label>Upload video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
-                      <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
-                      <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
-                      <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
-                      <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
-                      <label class="course-builder-wide">Description<input name="description" /></label>
-                      <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
-                    </div>
-                    <button class="btn admin-btn-sm" type="submit">Add lesson</button>
-                  </form>
-
-                  <div class="course-builder-lessons">
-                    ${moduleLessons.map((lesson) => {
-                      const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
-                      return `
-                        <details class="course-builder-lesson" data-lesson-id="${escapeHtml(lesson.id)}">
-                          <summary>
-                            <span style="display: flex; align-items: center; gap: 0.5rem;">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand-strong);">
-                                ${lesson.lesson_type === "video" 
-                                  ? '<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>' 
-                                  : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line>'}
-                              </svg>
-                              <b>${escapeHtml(lesson.title)}</b>
-                            </span>
-                            ${lesson.is_published ? '<span class="admin-badge-published">Published</span>' : '<span class="admin-badge-draft">Draft</span>'}
-                          </summary>
-                          <form data-role="admin-lesson-form">
-                            <div class="course-builder-grid">
-                              <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
-                              <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
-                              <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
-                              <label>Replace video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
-                              <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
-                              <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
-                              <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
-                              <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
-                              <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
-                              <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
-                              <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
-                            </div>
-                            <div class="stack">
-                              <button class="btn ghost admin-btn-sm" type="submit">Save lesson</button>
-                              <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">Delete lesson</button>
-                            </div>
-                          </form>
-                          <form data-role="admin-resource-create-form" class="course-builder-resource-form">
-                            <h5>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <line x1="12" y1="8" x2="12" y2="16"></line>
-                                <line x1="8" y1="12" x2="16" y2="12"></line>
-                              </svg>
-                              Add material
-                            </h5>
-                            <div class="course-builder-grid compact">
-                              <label>Title<input name="title" required /></label>
-                              <label>Type<input name="resource_type" value="material" /></label>
-                              <label>Upload material<input name="material_file" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.csv,.png,.jpg,.jpeg,.webp,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,image/png,image/jpeg,image/webp,application/zip" /></label>
-                              <label>File URL<input name="file_url" placeholder="Optional existing file link" /></label>
-                              <label>External URL<input name="external_url" placeholder="Optional web link" /></label>
-                              <label>Description<input name="description" /></label>
-                              <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
-                              <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
-                            </div>
-                            <button class="btn ghost admin-btn-sm" type="submit">Add material</button>
-                          </form>
-                          ${lessonResources.length ? `
-                            <div class="course-builder-resources">
-                              ${lessonResources.map((resource) => `
-                                <span class="course-builder-resource">
-                                  <span style="display: flex; align-items: center; gap: 0.4rem;">
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);">
-                                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-                                    </svg>
-                                    ${escapeHtml(resource.title)}
-                                  </span>
-                                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-resource" data-resource-id="${escapeHtml(resource.id)}">Delete</button>
-                                </span>
-                              `).join("")}
-                            </div>
-                          ` : ""}
-                        </details>
-                      `;
-                    }).join("") || `<p class="subtle">No lessons in this module yet.</p>`}
-                  </div>
-                </article>
-              `;
-            }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
-          </div>` : ""}
-
-        ${activePlatformSection === "announcements" ? renderAdminAnnouncementsSection(courses, selectedCourseId, rows) : ""}
-
-        ${activePlatformSection === "enrollments" ? renderAdminEnrollmentsSection(selectedCourse, rows) : ""}
+        ${activePlatformSection === "enrollments" && selectedCourse ? renderAdminEnrollmentsSection(selectedCourse, rows) : ""}
 
         ${activePlatformSection === "requests" ? renderAdminRequestsSection(courses) : ""}
       `}
@@ -41583,47 +42210,10 @@ function wireAdminCoursesPlatformBuilder() {
     });
   }
 
-  root.querySelector("#admin-course-builder-course-select")?.addEventListener("change", (event) => {
-    state.adminCourseBuilderCourseId = String(event.target?.value || "");
-    state.adminCourseBuilderPreview = false;
-    state.skipNextRouteAnimation = true;
-    render();
-  });
-
   const rerenderAdminCourses = () => {
     state.skipNextRouteAnimation = true;
     render();
   };
-
-  root.querySelector("#admin-course-table-search")?.addEventListener("input", (event) => {
-    state.adminCourseTableSearch = String(event.target?.value || "");
-    rerenderAdminCourses();
-  });
-
-  root.querySelectorAll("[data-action='admin-course-table-filter'], #admin-course-table-filter-year, #admin-course-table-filter-semester, #admin-course-table-filter-status").forEach((select) => {
-    select.addEventListener("change", (event) => {
-      const target = event.currentTarget;
-      if (target.id === "admin-course-table-filter-year") {
-        state.adminCourseTableFilterYear = String(target.value || "");
-      } else if (target.id === "admin-course-table-filter-semester") {
-        state.adminCourseTableFilterSemester = String(target.value || "");
-      } else if (target.id === "admin-course-table-filter-status") {
-        state.adminCourseTableFilterStatus = String(target.value || "all");
-      }
-      rerenderAdminCourses();
-    });
-  });
-
-  root.querySelector("#admin-enrollment-search")?.addEventListener("input", (event) => {
-    state.adminEnrollmentSearch = String(event.target?.value || "");
-    state.adminEnrollmentListLimit = 25;
-    rerenderAdminCourses();
-  });
-
-  root.querySelector("#admin-announcement-course-filter")?.addEventListener("change", (event) => {
-    state.adminAnnouncementCourseFilter = String(event.target?.value || "all");
-    rerenderAdminCourses();
-  });
 
   const runAdminCourseAction = async (label, task) => {
     try {
@@ -41637,103 +42227,200 @@ function wireAdminCoursesPlatformBuilder() {
     }
   };
 
-  root.querySelector("[data-action='admin-courses-platform-refresh']")?.addEventListener("click", () => {
-    runAdminCourseAction("Courses platform refreshed.", () => loadAdminCoursesPlatform({ force: true }));
-  });
+  // Delegated form submissions
+  root.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!form || !root.contains(form)) return;
+    const id = form.id;
+    const role = form.getAttribute("data-role");
 
-  root.querySelector("[data-action='admin-course-preview-toggle']")?.addEventListener("click", () => {
-    const isPreviewOpen = getAdminCoursePlatformSection() === "preview" || Boolean(state.adminCourseBuilderPreview);
-    state.adminCourseBuilderPreview = !isPreviewOpen;
-    state.adminCoursePlatformSection = isPreviewOpen ? "builder" : "preview";
-    state.skipNextRouteAnimation = true;
-    render();
-  });
-
-  root.querySelector("#admin-course-create-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAdminCourseAction("Course created.", () => adminCreatePlatformCourse(readFormDataObject(event.currentTarget)));
-  });
-
-  root.querySelector("#admin-course-metadata-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
-  });
-
-  root.querySelector("#admin-course-suggestion-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAdminCourseAction("Course suggestion saved.", () => adminSaveCourseSuggestion(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
-  });
-
-  root.querySelector("#admin-course-module-create-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAdminCourseAction("Module created.", () => adminCreateModule(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
-  });
-
-  root.querySelectorAll("[data-role='admin-module-form']").forEach((form) => {
-    form.addEventListener("submit", (event) => {
+    if (id === "admin-course-create-form") {
+      event.preventDefault();
+      runAdminCourseAction("Course created.", async () => {
+        const newCourse = await adminCreatePlatformCourse(readFormDataObject(form));
+        if (newCourse && newCourse.id) {
+          state.adminCourseBuilderCourseId = newCourse.id;
+          state.adminCourseBuilderActiveType = "metadata";
+          state.adminCourseBuilderActiveId = "";
+          state.adminCourseBuilderActiveParentId = "";
+        }
+      });
+    } else if (id === "admin-course-metadata-form") {
+      event.preventDefault();
+      runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+    } else if (id === "admin-course-suggestion-form") {
+      event.preventDefault();
+      runAdminCourseAction("Course suggestion saved.", () => adminSaveCourseSuggestion(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+    } else if (id === "admin-course-module-create-form") {
+      event.preventDefault();
+      runAdminCourseAction("Module created.", async () => {
+        const newMod = await adminCreateModule(state.adminCourseBuilderCourseId, readFormDataObject(form));
+        if (newMod && newMod.id) {
+          state.adminCourseBuilderActiveType = "module-edit";
+          state.adminCourseBuilderActiveId = newMod.id;
+          state.adminCourseBuilderActiveParentId = "";
+        } else {
+          state.adminCourseBuilderActiveType = null;
+          state.adminCourseBuilderActiveId = "";
+          state.adminCourseBuilderActiveParentId = "";
+        }
+      });
+    } else if (role === "admin-module-form") {
       event.preventDefault();
       const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
       runAdminCourseAction("Module updated.", () => adminUpdateModule(moduleId, readFormDataObject(form)));
-    });
-  });
-
-  root.querySelectorAll("[data-role='admin-lesson-create-form']").forEach((form) => {
-    form.addEventListener("submit", (event) => {
+    } else if (role === "admin-lesson-create-form") {
       event.preventDefault();
       const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
-      runAdminCourseAction("Lesson created.", () => adminCreateLesson(state.adminCourseBuilderCourseId, moduleId, readFormDataObject(form)));
-    });
-  });
-
-  root.querySelectorAll("[data-role='admin-lesson-form']").forEach((form) => {
-    form.addEventListener("submit", (event) => {
+      runAdminCourseAction("Lesson created.", async () => {
+        const newLesson = await adminCreateLesson(state.adminCourseBuilderCourseId, moduleId, readFormDataObject(form));
+        if (newLesson && newLesson.id) {
+          state.adminCourseBuilderActiveType = "lesson-edit";
+          state.adminCourseBuilderActiveId = newLesson.id;
+          state.adminCourseBuilderActiveParentId = "";
+        } else {
+          state.adminCourseBuilderActiveType = null;
+          state.adminCourseBuilderActiveId = "";
+          state.adminCourseBuilderActiveParentId = "";
+        }
+      });
+    } else if (role === "admin-lesson-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
       runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readFormDataObject(form)));
-    });
-  });
-
-  root.querySelectorAll("[data-role='admin-resource-create-form']").forEach((form) => {
-    form.addEventListener("submit", (event) => {
+    } else if (role === "admin-resource-create-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
       runAdminCourseAction("Resource added.", () => adminCreateResource(lessonId, readFormDataObject(form)));
-    });
+    } else if (id === "admin-course-announcement-form") {
+      event.preventDefault();
+      runAdminCourseAction("Announcement posted.", () => adminCreateAnnouncement(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+    } else if (id === "admin-course-bulk-enroll-form") {
+      event.preventDefault();
+      const data = readFormDataObject(form);
+      if (!window.confirm("Bulk enroll all matching students into this course?")) return;
+      runAdminCourseAction("Bulk enrollment completed.", async () => {
+        const count = await adminBulkEnrollStudentsByTerm(state.adminCourseBuilderCourseId, data.academic_year, data.academic_semester);
+        toast(`Bulk enrolled ${count} student${count === 1 ? "" : "s"}.`);
+      });
+    }
   });
 
-  root.querySelector("#admin-course-announcement-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAdminCourseAction("Announcement posted.", () => adminCreateAnnouncement(state.adminCourseBuilderCourseId, readFormDataObject(event.currentTarget)));
+  // Delegated change events
+  root.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || !root.contains(target)) return;
+
+    if (target.id === "admin-course-builder-course-select") {
+      state.adminCourseBuilderCourseId = String(target.value || "");
+      state.adminCourseBuilderPreview = false;
+      state.adminCourseBuilderActiveType = null;
+      state.adminCourseBuilderActiveId = "";
+      state.adminCourseBuilderActiveParentId = "";
+      state.skipNextRouteAnimation = true;
+      render();
+    } else if (
+      target.id === "admin-course-table-filter-year" || 
+      target.hasAttribute("data-action") && target.getAttribute("data-action") === "admin-course-table-filter"
+    ) {
+      state.adminCourseTableFilterYear = String(target.value || "");
+      rerenderAdminCourses();
+    } else if (target.id === "admin-course-table-filter-semester") {
+      state.adminCourseTableFilterSemester = String(target.value || "");
+      rerenderAdminCourses();
+    } else if (target.id === "admin-course-table-filter-status") {
+      state.adminCourseTableFilterStatus = String(target.value || "all");
+      rerenderAdminCourses();
+    } else if (target.id === "admin-announcement-course-filter") {
+      state.adminAnnouncementCourseFilter = String(target.value || "all");
+      rerenderAdminCourses();
+    }
   });
 
-  root.querySelector("#admin-course-bulk-enroll-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const data = readFormDataObject(event.currentTarget);
-    if (!window.confirm("Bulk enroll all matching students into this course?")) return;
-    runAdminCourseAction("Bulk enrollment completed.", async () => {
-      const count = await adminBulkEnrollStudentsByTerm(state.adminCourseBuilderCourseId, data.academic_year, data.academic_semester);
-      toast(`Bulk enrolled ${count} student${count === 1 ? "" : "s"}.`);
-    });
+  // Delegated input events
+  root.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!target || !root.contains(target)) return;
+
+    if (target.id === "admin-course-table-search") {
+      state.adminCourseTableSearch = String(target.value || "");
+      rerenderAdminCourses();
+    } else if (target.id === "admin-enrollment-search") {
+      state.adminEnrollmentSearch = String(target.value || "");
+      state.adminEnrollmentListLimit = 25;
+      rerenderAdminCourses();
+    }
   });
 
+  // Delegated click events
   root.addEventListener("click", (event) => {
     const button = event.target.closest("[data-action]");
     if (!button || !root.contains(button)) return;
     const action = button.getAttribute("data-action");
-    if (action === "admin-select-course-platform-course") {
+
+    if (action === "admin-courses-platform-refresh") {
+      runAdminCourseAction("Courses platform refreshed.", () => loadAdminCoursesPlatform({ force: true }));
+    } else if (action === "admin-course-preview-toggle") {
+      const isPreviewOpen = getAdminCoursePlatformSection() === "preview" || Boolean(state.adminCourseBuilderPreview);
+      state.adminCourseBuilderPreview = !isPreviewOpen;
+      state.adminCoursePlatformSection = isPreviewOpen ? "builder" : "preview";
+      state.skipNextRouteAnimation = true;
+      render();
+    } else if (action === "admin-select-course-platform-course") {
       const courseId = button.getAttribute("data-course-id") || "";
       if (!isUuidValue(courseId)) return;
       state.adminCourseBuilderCourseId = courseId;
+      state.adminCourseBuilderActiveType = null;
+      state.adminCourseBuilderActiveId = "";
+      state.adminCourseBuilderActiveParentId = "";
       state.skipNextRouteAnimation = true;
       render();
+    } else if (action === "admin-select-builder-active") {
+      state.adminCourseBuilderActiveType = button.getAttribute("data-active-type") || null;
+      state.adminCourseBuilderActiveId = button.getAttribute("data-active-id") || "";
+      state.adminCourseBuilderActiveParentId = button.getAttribute("data-active-parent-id") || "";
+      state.skipNextRouteAnimation = true;
+      render();
+    } else if (action === "admin-toggle-module-collapse") {
+      const moduleId = button.getAttribute("data-module-id") || "";
+      if (moduleId) {
+        if (!state.adminCourseBuilderModuleCollapsed) {
+          state.adminCourseBuilderModuleCollapsed = {};
+        }
+        state.adminCourseBuilderModuleCollapsed[moduleId] = !state.adminCourseBuilderModuleCollapsed[moduleId];
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    } else if (action === "admin-move-module") {
+      const moduleId = button.getAttribute("data-module-id") || "";
+      const direction = button.getAttribute("data-direction") || "";
+      runAdminCourseAction("Module moved.", () => adminMoveModule(moduleId, direction));
+    } else if (action === "admin-move-lesson") {
+      const lessonId = button.getAttribute("data-lesson-id") || "";
+      const direction = button.getAttribute("data-direction") || "";
+      runAdminCourseAction("Lesson moved.", () => adminMoveLesson(lessonId, direction));
     } else if (action === "admin-delete-module") {
       const moduleId = button.getAttribute("data-module-id") || "";
       if (!window.confirm("Delete this module and its lessons?")) return;
-      runAdminCourseAction("Module deleted.", () => adminDeleteModule(moduleId));
+      runAdminCourseAction("Module deleted.", async () => {
+        await adminDeleteModule(moduleId);
+        if (state.adminCourseBuilderActiveType === "module-edit" && String(state.adminCourseBuilderActiveId) === String(moduleId)) {
+          state.adminCourseBuilderActiveType = null;
+          state.adminCourseBuilderActiveId = "";
+          state.adminCourseBuilderActiveParentId = "";
+        }
+      });
     } else if (action === "admin-delete-lesson") {
       const lessonId = button.getAttribute("data-lesson-id") || "";
       if (!window.confirm("Delete this lesson and its resources?")) return;
-      runAdminCourseAction("Lesson deleted.", () => adminDeleteLesson(lessonId));
+      runAdminCourseAction("Lesson deleted.", async () => {
+        await adminDeleteLesson(lessonId);
+        if (state.adminCourseBuilderActiveType === "lesson-edit" && String(state.adminCourseBuilderActiveId) === String(lessonId)) {
+          state.adminCourseBuilderActiveType = null;
+          state.adminCourseBuilderActiveId = "";
+          state.adminCourseBuilderActiveParentId = "";
+        }
+      });
     } else if (action === "admin-delete-resource") {
       const resourceId = button.getAttribute("data-resource-id") || "";
       if (!window.confirm("Delete this resource?")) return;
@@ -41760,7 +42447,13 @@ function wireAdminCoursesPlatformBuilder() {
       const courseId = button.getAttribute("data-course-id") || "";
       const courseLabel = getAdminCourseBuilderCourseLabel(courseId);
       if (!window.confirm(`Delete ${courseLabel}? This permanently removes the course and all related modules, lessons, enrollments, and requests.`)) return;
-      runAdminCourseAction("Course deleted.", () => adminDeletePlatformCourse(courseId));
+      runAdminCourseAction("Course deleted.", async () => {
+        await adminDeletePlatformCourse(courseId);
+        state.adminCourseBuilderCourseId = "";
+        state.adminCourseBuilderActiveType = null;
+        state.adminCourseBuilderActiveId = "";
+        state.adminCourseBuilderActiveParentId = "";
+      });
     } else if (action === "admin-request-filter") {
       state.adminRequestFilterStatus = String(button.getAttribute("data-status") || "all");
       rerenderAdminCourses();
@@ -41796,15 +42489,19 @@ function wireAdminCoursesPlatformBuilder() {
     }
   });
 
-  root.querySelectorAll(".admin-course-table tbody tr[data-action]").forEach((row) => {
-    row.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      const courseId = row.getAttribute("data-course-id") || "";
-      if (!isUuidValue(courseId)) return;
-      state.adminCourseBuilderCourseId = courseId;
-      rerenderAdminCourses();
-    });
+  // Delegated keydown events for table navigation
+  root.addEventListener("keydown", (event) => {
+    const row = event.target.closest(".admin-course-table tbody tr[data-action]");
+    if (!row || !root.contains(row)) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    const courseId = row.getAttribute("data-course-id") || "";
+    if (!isUuidValue(courseId)) return;
+    state.adminCourseBuilderCourseId = courseId;
+    state.adminCourseBuilderActiveType = null;
+    state.adminCourseBuilderActiveId = "";
+    state.adminCourseBuilderActiveParentId = "";
+    rerenderAdminCourses();
   });
 }
 
