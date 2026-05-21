@@ -338,6 +338,8 @@ const state = {
   adminCourseBuilderActiveId: "",
   adminCourseBuilderActiveParentId: "",
   adminCourseBuilderModuleCollapsed: {},
+  adminCourseBuilderDrafts: {},
+  adminCourseBuilderFileDrafts: {},
   adminCourseTableSearch: "",
   adminCourseTableFilterYear: "",
   adminCourseTableFilterSemester: "",
@@ -18095,7 +18097,177 @@ function renderSiteMaintenancePage(user = null) {
   `;
 }
 
+let savedFocusSelector = null;
+let savedFocusStart = null;
+let savedFocusEnd = null;
+let savedScrollTop = 0;
+let savedScrollLeft = 0;
+
+function getFormCSSSelector(form) {
+  if (!form) return "";
+  if (form.id) {
+    return `form#${form.id}`;
+  }
+  const role = form.getAttribute("data-role");
+  if (role) {
+    const moduleParent = form.closest("[data-module-id]");
+    if (moduleParent) {
+      const modId = moduleParent.getAttribute("data-module-id");
+      return `[data-module-id="${modId}"] form[data-role="${role}"]`;
+    }
+    const lessonParent = form.closest("[data-lesson-id]");
+    if (lessonParent) {
+      const lesId = lessonParent.getAttribute("data-lesson-id");
+      return `[data-lesson-id="${lesId}"] form[data-role="${role}"]`;
+    }
+    return `form[data-role="${role}"]`;
+  }
+  return "form";
+}
+
+function getAdminCourseBuilderDraftKey(form) {
+  if (!form) return "";
+  const id = form.id;
+  const role = form.getAttribute("data-role");
+  const courseId = String(state.adminCourseBuilderCourseId || "").trim();
+
+  if (id === "admin-course-create-form") {
+    return "admin-course-create-form";
+  }
+  if (id === "admin-course-metadata-form") {
+    return `admin-course-metadata-form_${courseId}`;
+  }
+  if (id === "admin-course-suggestion-form") {
+    return `admin-course-suggestion-form_${courseId}`;
+  }
+  if (id === "admin-course-module-create-form") {
+    return `admin-course-module-create-form_${courseId}`;
+  }
+  if (role === "admin-module-form") {
+    const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
+    return `admin-module-form_${moduleId}`;
+  }
+  if (role === "admin-lesson-create-form") {
+    const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
+    return `admin-lesson-create-form_${moduleId}`;
+  }
+  if (role === "admin-lesson-form") {
+    const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
+    return `admin-lesson-form_${lessonId}`;
+  }
+  if (role === "admin-resource-create-form") {
+    const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
+    return `admin-resource-create-form_${lessonId}`;
+  }
+  if (id === "admin-course-announcement-form") {
+    return `admin-course-announcement-form_${courseId}`;
+  }
+  if (id === "admin-course-bulk-enroll-form") {
+    return `admin-course-bulk-enroll-form_${courseId}`;
+  }
+  return "";
+}
+
+function getAdminCourseBuilderFieldValue(draftKey, fieldName, fallback) {
+  if (state.adminCourseBuilderDrafts && state.adminCourseBuilderDrafts[draftKey]) {
+    const draft = state.adminCourseBuilderDrafts[draftKey];
+    if (draft.hasOwnProperty(fieldName)) {
+      return draft[fieldName];
+    }
+  }
+  return fallback;
+}
+
+function getAdminCourseBuilderCheckboxChecked(draftKey, fieldName, fallback) {
+  const val = getAdminCourseBuilderFieldValue(draftKey, fieldName, fallback);
+  return val ? "checked" : "";
+}
+
+function getAdminCourseBuilderOptionSelected(draftKey, fieldName, optionValue, fallback) {
+  const val = getAdminCourseBuilderFieldValue(draftKey, fieldName, fallback);
+  return String(val) === String(optionValue) ? "selected" : "";
+}
+
+function getAdminCourseBuilderCheckboxState(draftKey, fieldName, fallback) {
+  if (state.adminCourseBuilderDrafts && state.adminCourseBuilderDrafts[draftKey]) {
+    const draft = state.adminCourseBuilderDrafts[draftKey];
+    if (draft.hasOwnProperty(fieldName)) {
+      return Boolean(draft[fieldName]) ? "checked" : "";
+    }
+  }
+  return fallback ? "checked" : "";
+}
+
+function clearAdminCourseBuilderDraft(form) {
+  const draftKey = getAdminCourseBuilderDraftKey(form);
+  if (!draftKey) return;
+  if (state.adminCourseBuilderDrafts) {
+    delete state.adminCourseBuilderDrafts[draftKey];
+  }
+  if (state.adminCourseBuilderFileDrafts) {
+    delete state.adminCourseBuilderFileDrafts[draftKey];
+  }
+}
+
+function saveFocusState() {
+  savedFocusSelector = null;
+  const active = document.activeElement;
+  if (!active || active === document.body || !appEl.contains(active)) {
+    return;
+  }
+  const form = active.closest("form");
+  if (!form) return;
+  const formSelector = getFormCSSSelector(form);
+  if (!formSelector) return;
+
+  const name = active.getAttribute("name");
+  if (!name) return;
+
+  savedFocusSelector = `${formSelector} [name="${name}"]`;
+
+  try {
+    if (typeof active.selectionStart === "number") {
+      savedFocusStart = active.selectionStart;
+      savedFocusEnd = active.selectionEnd;
+    } else {
+      savedFocusStart = null;
+      savedFocusEnd = null;
+    }
+  } catch (e) {
+    savedFocusStart = null;
+    savedFocusEnd = null;
+  }
+
+  savedScrollTop = active.scrollTop || 0;
+  savedScrollLeft = active.scrollLeft || 0;
+}
+
+function restoreFocusState() {
+  if (!savedFocusSelector) return;
+  const element = appEl.querySelector(savedFocusSelector);
+  if (element) {
+    element.focus({ preventScroll: true });
+
+    if (savedFocusStart !== null && typeof element.selectionStart === "number") {
+      try {
+        element.setSelectionRange(savedFocusStart, savedFocusEnd);
+      } catch (e) {
+        // Safe fallback
+      }
+    }
+
+    if (savedScrollTop > 0) {
+      element.scrollTop = savedScrollTop;
+    }
+    if (savedScrollLeft > 0) {
+      element.scrollLeft = savedScrollLeft;
+    }
+  }
+  savedFocusSelector = null;
+}
+
 function render() {
+  saveFocusState();
   document.body.classList.remove("no-panel-animations");
   clearTimer();
   appEl.removeEventListener("click", handleSessionClick);
@@ -18431,6 +18603,7 @@ function render() {
     state.coursesTransitionMode = "";
     lastRenderedRoute = state.route;
     state.skipNextRouteAnimation = false;
+    restoreFocusState();
     return;
   }
   if (routeChanged) {
@@ -18439,6 +18612,7 @@ function render() {
   lastRenderedCoursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
   state.coursesTransitionMode = "";
   lastRenderedRoute = state.route;
+  restoreFocusState();
 }
 
 function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) {
@@ -41333,13 +41507,14 @@ function renderAdminAnnouncementsSection(courses, selectedCourseId, rows) {
   const filteredAnnouncements = filterCourseId === "all"
     ? allAnnouncements
     : allAnnouncements.filter((item) => String(item?.course_id || "").trim() === filterCourseId);
+  const dk = `admin-course-announcement-form_${selectedCourseId}`;
   return `
     <form id="admin-course-announcement-form" class="course-builder-form">
       <h4>Announcements</h4>
       <p class="subtle">Post to the selected course. Browse announcements from all courses below.</p>
-      <label>Title<input name="title" required /></label>
-      <label>Body<textarea name="body" rows="3" required></textarea></label>
-      <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+      <label>Title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "title", ""))}" required /></label>
+      <label>Body<textarea name="body" rows="3" required>${escapeHtml(getAdminCourseBuilderFieldValue(dk, "body", ""))}</textarea></label>
+      <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", true)} /> Published</label>
       <button class="btn admin-btn-sm" type="submit">Post announcement</button>
     </form>
     <div class="course-builder-form" style="margin-top: 1rem;">
@@ -41397,8 +41572,17 @@ function renderAdminEnrollmentsSection(selectedCourse, rows) {
         </h4>
         <p class="subtle" style="margin: 0; font-size: 0.82rem; font-weight: 550;">Enroll all active students from a specific year and semester into this course.</p>
         <div class="course-builder-grid compact" style="margin-top: 0.5rem;">
-          <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
-          <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+          <label>Year
+            <select name="academic_year">
+              ${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${getAdminCourseBuilderOptionSelected(`admin-course-bulk-enroll-form_${selectedCourse.id}`, "academic_year", year, selectedCourse.academic_year)}>Year ${year}</option>`).join("")}
+            </select>
+          </label>
+          <label>Semester
+            <select name="academic_semester">
+              <option value="1" ${getAdminCourseBuilderOptionSelected(`admin-course-bulk-enroll-form_${selectedCourse.id}`, "academic_semester", "1", selectedCourse.academic_semester)}>Semester 1</option>
+              <option value="2" ${getAdminCourseBuilderOptionSelected(`admin-course-bulk-enroll-form_${selectedCourse.id}`, "academic_semester", "2", selectedCourse.academic_semester)}>Semester 2</option>
+            </select>
+          </label>
         </div>
         <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.5rem; align-self: flex-start;">Bulk enroll students</button>
       </form>
@@ -41662,6 +41846,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
   const selectedCourseId = String(selectedCourse?.id || "").trim();
 
   if (activeType === "course-create" || !selectedCourse) {
+    const dk = "admin-course-create-form";
     return `
       <form id="admin-course-create-form" class="course-builder-form">
         <div class="course-builder-editor-header">
@@ -41676,23 +41861,23 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
         </div>
         <p class="subtle" style="margin-top: -0.35rem; margin-bottom: 1.25rem;">This creates a Courses platform course only. It does not create or edit MCQ bank courses.</p>
         <div class="course-builder-grid compact">
-          <label>Course name<input name="course_name" required /></label>
-          <label>Course code<input name="course_code" /></label>
-          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}">Year ${year}</option>`).join("")}</select></label>
-          <label>Suggestion semester<select name="academic_semester"><option value="1">Semester 1</option><option value="2">Semester 2</option></select></label>
+          <label>Course name<input name="course_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "course_name", ""))}" required /></label>
+          <label>Course code<input name="course_code" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "course_code", ""))}" /></label>
+          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${getAdminCourseBuilderOptionSelected(dk, "academic_year", year, 1)}>Year ${year}</option>`).join("")}</select></label>
+          <label>Suggestion semester<select name="academic_semester"><option value="1" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 1, 1)}>Semester 1</option><option value="2" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 2, 1)}>Semester 2</option></select></label>
           <label>Enrollment mode
             <select name="enrollment_mode">
-              <option value="request">Request only</option>
-              <option value="assigned">Assigned</option>
+              <option value="request" ${getAdminCourseBuilderOptionSelected(dk, "enrollment_mode", "request", "request")}>Request only</option>
+              <option value="assigned" ${getAdminCourseBuilderOptionSelected(dk, "enrollment_mode", "assigned", "request")}>Assigned</option>
             </select>
           </label>
-          <label>Priority<input name="priority" type="number" value="0" /></label>
-          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." /></label>
-          <label>Instructor name<input name="instructor_name" /></label>
-          <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" /></label>
-          <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
-          <label class="course-builder-wide">Description<textarea name="description" rows="2"></textarea></label>
-          <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
+          <label>Priority<input name="priority" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "priority", 0))}" /></label>
+          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "cover_image_url", ""))}" /></label>
+          <label>Instructor name<input name="instructor_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_name", ""))}" /></label>
+          <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "estimated_duration", ""))}" /></label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", true)} /> Published</label>
+          <label class="course-builder-wide">Description<textarea name="description" rows="2">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", ""))}</textarea></label>
+          <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "reason", "Recommended by your course admin."))}</textarea></label>
         </div>
         <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Create course</button>
       </form>
@@ -41700,6 +41885,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
   }
 
   if (activeType === "metadata") {
+    const dk = `admin-course-metadata-form_${selectedCourseId}`;
     return `
       <form id="admin-course-metadata-form" class="course-builder-form">
         <div class="course-builder-editor-header">
@@ -41712,26 +41898,26 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
           </h4>
         </div>
         <div class="course-builder-grid">
-          <label>Course name<input name="course_name" value="${escapeHtml(selectedCourse.course_name || "")}" required /></label>
-          <label>Course code<input name="course_code" value="${escapeHtml(selectedCourse.course_code || "")}" /></label>
-          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
-          <label>Suggestion semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
-          <label>Description<textarea name="description" rows="4">${escapeHtml(selectedCourse.description || "")}</textarea></label>
-          <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
-          <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
-          <label>Instructor name<input name="instructor_name" value="${escapeHtml(selectedCourse.instructor_name || "")}" /></label>
-          <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(selectedCourse.instructor_bio || "")}</textarea></label>
-          <label>Level<input name="level" value="${escapeHtml(selectedCourse.level || "")}" /></label>
-          <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(selectedCourse.estimated_duration || "")}" /></label>
-          <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(selectedCourse.price || 0)}" /></label>
+          <label>Course name<input name="course_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "course_name", selectedCourse.course_name || ""))}" required /></label>
+          <label>Course code<input name="course_code" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "course_code", selectedCourse.course_code || ""))}" /></label>
+          <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${getAdminCourseBuilderOptionSelected(dk, "academic_year", year, selectedCourse.academic_year)}>Year ${year}</option>`).join("")}</select></label>
+          <label>Suggestion semester<select name="academic_semester"><option value="1" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 1, selectedCourse.academic_semester)}>Semester 1</option><option value="2" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 2, selectedCourse.academic_semester)}>Semester 2</option></select></label>
+          <label>Description<textarea name="description" rows="4">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", selectedCourse.description || ""))}</textarea></label>
+          <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "cover_image_url", selectedCourse.cover_image_url || ""))}" /></label>
+          <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "intro_video_url", selectedCourse.intro_video_url || ""))}" /></label>
+          <label>Instructor name<input name="instructor_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_name", selectedCourse.instructor_name || ""))}" /></label>
+          <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_bio", selectedCourse.instructor_bio || ""))}</textarea></label>
+          <label>Level<input name="level" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "level", selectedCourse.level || ""))}" /></label>
+          <label>Estimated duration<input name="estimated_duration" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "estimated_duration", selectedCourse.estimated_duration || ""))}" /></label>
+          <label>Price<input name="price" type="number" min="0" step="0.01" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "price", selectedCourse.price || 0))}" /></label>
           <label>Enrollment mode
             <select name="enrollment_mode">
-              <option value="assigned" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "assigned" ? "selected" : ""}>Assigned</option>
-              <option value="request" ${normalizeCoursePlatformMode(selectedCourse.enrollment_mode) === "request" ? "selected" : ""}>Request only</option>
+              <option value="assigned" ${getAdminCourseBuilderOptionSelected(dk, "enrollment_mode", "assigned", normalizeCoursePlatformMode(selectedCourse.enrollment_mode))}>Assigned</option>
+              <option value="request" ${getAdminCourseBuilderOptionSelected(dk, "enrollment_mode", "request", normalizeCoursePlatformMode(selectedCourse.enrollment_mode))}>Request only</option>
             </select>
           </label>
-          <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
-          <label class="course-builder-check"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", selectedCourse.is_published)} /> Published course</label>
+          <label class="course-builder-check"><input type="checkbox" name="is_active" ${getAdminCourseBuilderCheckboxState(dk, "is_active", selectedCourse.is_active !== false)} /> Active course</label>
         </div>
         <div class="stack" style="margin-top: 0.75rem;">
           <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
@@ -41742,6 +41928,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
   }
 
   if (activeType === "module-create") {
+    const dk = `admin-course-module-create-form_${selectedCourseId}`;
     return `
       <form id="admin-course-module-create-form" class="course-builder-form">
         <div class="course-builder-editor-header">
@@ -41755,10 +41942,10 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
           </h4>
         </div>
         <div class="course-builder-grid compact">
-          <label>Title<input name="title" required /></label>
-          <label>Description<input name="description" /></label>
-          <label>Position<input name="position" type="number" value="${rows.modules.length + 1}" /></label>
-          <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
+          <label>Title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "title", ""))}" required /></label>
+          <label>Description<input name="description" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", ""))}" /></label>
+          <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "position", rows.modules.length + 1))}" /></label>
+          <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", false)} /> Published</label>
         </div>
         <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add module</button>
       </form>
@@ -41770,6 +41957,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
     if (!module) {
       return `<p class="subtle">Module not found or deleted.</p>`;
     }
+    const dk = `admin-module-form_${module.id}`;
     return `
       <div data-module-id="${escapeHtml(module.id)}">
         <form class="course-builder-form" data-role="admin-module-form">
@@ -41777,10 +41965,10 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             <h4>Edit Module: ${escapeHtml(module.title)}</h4>
           </div>
           <div class="course-builder-grid compact">
-            <label>Module title<input name="title" value="${escapeHtml(module.title || "")}" required /></label>
-            <label>Description<input name="description" value="${escapeHtml(module.description || "")}" /></label>
-            <label>Position<input name="position" type="number" value="${escapeHtml(module.position || 0)}" /></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" ${module.is_published ? "checked" : ""} /> Published</label>
+            <label>Module title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "title", module.title || ""))}" required /></label>
+            <label>Description<input name="description" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", module.description || ""))}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "position", module.position || 0))}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", module.is_published)} /> Published</label>
           </div>
           <div class="stack" style="margin-top: 0.75rem;">
             <button class="btn admin-btn-sm" type="submit">Save module</button>
@@ -41797,6 +41985,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
       return `<p class="subtle">Parent module not found.</p>`;
     }
     const moduleLessons = rows.lessons.filter((lesson) => String(lesson.module_id || "") === String(parentModule.id || ""));
+    const dk = `admin-lesson-create-form_${parentModule.id}`;
     return `
       <div data-module-id="${escapeHtml(parentModule.id)}">
         <form class="course-builder-form" data-role="admin-lesson-create-form">
@@ -41804,16 +41993,22 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             <h4>Add Lesson to: ${escapeHtml(parentModule.title)}</h4>
           </div>
           <div class="course-builder-grid">
-            <label>Title<input name="title" required /></label>
-            <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
-            <label>Video URL<input name="video_url" /></label>
+            <label>Title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "title", ""))}" required /></label>
+            <label>Type
+              <select name="lesson_type">
+                <option value="video" ${getAdminCourseBuilderOptionSelected(dk, "lesson_type", "video", "video")}>Video</option>
+                <option value="text" ${getAdminCourseBuilderOptionSelected(dk, "lesson_type", "text", "video")}>Text</option>
+                <option value="mixed" ${getAdminCourseBuilderOptionSelected(dk, "lesson_type", "mixed", "video")}>Mixed</option>
+              </select>
+            </label>
+            <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "video_url", ""))}" /></label>
             <label>Upload video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
-            <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
-            <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" /> Published</label>
-            <label class="course-builder-wide">Description<input name="description" /></label>
-            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4"></textarea></label>
+            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "duration_seconds", 0))}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "position", moduleLessons.length + 1))}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${getAdminCourseBuilderCheckboxState(dk, "is_free_preview", false)} /> Free preview</label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", false)} /> Published</label>
+            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", ""))}" /></label>
+            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "content_html", ""))}</textarea></label>
           </div>
           <button class="btn admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add lesson</button>
         </form>
@@ -41827,6 +42022,8 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
       return `<p class="subtle">Lesson not found or deleted.</p>`;
     }
     const lessonResources = rows.resources.filter((resource) => String(resource.lesson_id || "") === String(lesson.id || ""));
+    const dkLesson = `admin-lesson-form_${lesson.id}`;
+    const dkResource = `admin-resource-create-form_${lesson.id}`;
     return `
       <div data-lesson-id="${escapeHtml(lesson.id)}">
         <form class="course-builder-form" data-role="admin-lesson-form">
@@ -41834,17 +42031,23 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             <h4>Edit Lesson: ${escapeHtml(lesson.title)}</h4>
           </div>
           <div class="course-builder-grid">
-            <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
-            <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
-            <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
+            <label>Title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "title", lesson.title || ""))}" required /></label>
+            <label>Type
+              <select name="lesson_type">
+                <option value="video" ${getAdminCourseBuilderOptionSelected(dkLesson, "lesson_type", "video", lesson.lesson_type)}>Video</option>
+                <option value="text" ${getAdminCourseBuilderOptionSelected(dkLesson, "lesson_type", "text", lesson.lesson_type)}>Text</option>
+                <option value="mixed" ${getAdminCourseBuilderOptionSelected(dkLesson, "lesson_type", "mixed", lesson.lesson_type)}>Mixed</option>
+              </select>
+            </label>
+            <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_url", lesson.video_url || ""))}" /></label>
             <label>Replace video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
-            <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
-            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
-            <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${lesson.is_free_preview ? "checked" : ""} /> Free preview</label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" ${lesson.is_published ? "checked" : ""} /> Published</label>
-            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(lesson.description || "")}" /></label>
-            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(lesson.content_html || "")}</textarea></label>
+            <label>Video provider<input name="video_provider" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_provider", lesson.video_provider || ""))}" /></label>
+            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "duration_seconds", lesson.duration_seconds || 0))}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "position", lesson.position || 0))}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${getAdminCourseBuilderCheckboxState(dkLesson, "is_free_preview", lesson.is_free_preview)} /> Free preview</label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dkLesson, "is_published", lesson.is_published)} /> Published</label>
+            <label class="course-builder-wide">Description<input name="description" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "description", lesson.description || ""))}" /></label>
+            <label class="course-builder-wide">Lesson text<textarea name="content_html" rows="4">${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "content_html", lesson.content_html || ""))}</textarea></label>
           </div>
           <div class="stack" style="margin-top: 0.75rem;">
             <button class="btn admin-btn-sm" type="submit">Save lesson</button>
@@ -41862,14 +42065,14 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             Add material
           </h5>
           <div class="course-builder-grid compact">
-            <label>Title<input name="title" required /></label>
-            <label>Type<input name="resource_type" value="material" /></label>
+            <label>Title<input name="title" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "title", ""))}" required /></label>
+            <label>Type<input name="resource_type" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "resource_type", "material"))}" /></label>
             <label>Upload material<input name="material_file" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.csv,.png,.jpg,.jpeg,.webp,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,image/png,image/jpeg,image/webp,application/zip" /></label>
-            <label>File URL<input name="file_url" placeholder="Optional existing file link" /></label>
-            <label>External URL<input name="external_url" placeholder="Optional web link" /></label>
-            <label>Description<input name="description" /></label>
-            <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+            <label>File URL<input name="file_url" placeholder="Optional existing file link" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "file_url", ""))}" /></label>
+            <label>External URL<input name="external_url" placeholder="Optional web link" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "external_url", ""))}" /></label>
+            <label>Description<input name="description" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "description", ""))}" /></label>
+            <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkResource, "position", lessonResources.length + 1))}" /></label>
+            <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dkResource, "is_published", true)} /> Published</label>
           </div>
           <button class="btn ghost admin-btn-sm" type="submit" style="margin-top: 0.75rem;">Add material</button>
         </form>
@@ -42195,12 +42398,58 @@ function readFormDataObject(form) {
   form.querySelectorAll("input[type='checkbox'][name]").forEach((input) => {
     payload[input.name] = Boolean(input.checked);
   });
+
+  const draftKey = getAdminCourseBuilderDraftKey(form);
+  if (draftKey && state.adminCourseBuilderFileDrafts && state.adminCourseBuilderFileDrafts[draftKey]) {
+    const fileDrafts = state.adminCourseBuilderFileDrafts[draftKey];
+    for (const name in fileDrafts) {
+      if (fileDrafts.hasOwnProperty(name)) {
+        const currentFile = payload[name];
+        if (!currentFile || (currentFile instanceof File && currentFile.size === 0)) {
+          payload[name] = fileDrafts[name];
+        }
+      }
+    }
+  }
+
   return payload;
 }
 
 function wireAdminCoursesPlatformBuilder() {
   const root = document.getElementById("admin-courses-platform-builder");
   if (!root) return;
+
+  const handleFormDraftInput = (event) => {
+    const target = event.target;
+    if (!target) return;
+    const form = target.closest("form");
+    if (!form || !root.contains(form)) return;
+    const draftKey = getAdminCourseBuilderDraftKey(form);
+    if (!draftKey) return;
+
+    if (!state.adminCourseBuilderDrafts) {
+      state.adminCourseBuilderDrafts = {};
+    }
+    const currentData = readFormDataObject(form);
+
+    form.querySelectorAll("input[type='file']").forEach((fileInput) => {
+      const name = fileInput.name;
+      if (name && fileInput.files && fileInput.files.length > 0) {
+        if (!state.adminCourseBuilderFileDrafts) {
+          state.adminCourseBuilderFileDrafts = {};
+        }
+        if (!state.adminCourseBuilderFileDrafts[draftKey]) {
+          state.adminCourseBuilderFileDrafts[draftKey] = {};
+        }
+        state.adminCourseBuilderFileDrafts[draftKey][name] = fileInput.files[0];
+      }
+    });
+
+    state.adminCourseBuilderDrafts[draftKey] = currentData;
+  };
+
+  root.addEventListener("input", handleFormDraftInput);
+  root.addEventListener("change", handleFormDraftInput);
   if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
     loadAdminCoursesPlatform().then((ok) => {
       if (ok && state.route === "admin" && state.adminPage === "course-platform") {
@@ -42215,9 +42464,12 @@ function wireAdminCoursesPlatformBuilder() {
     render();
   };
 
-  const runAdminCourseAction = async (label, task) => {
+  const runAdminCourseAction = async (label, task, form) => {
     try {
       await task();
+      if (form) {
+        clearAdminCourseBuilderDraft(form);
+      }
       toast(label);
       state.skipNextRouteAnimation = true;
       render();
@@ -42244,13 +42496,13 @@ function wireAdminCoursesPlatformBuilder() {
           state.adminCourseBuilderActiveId = "";
           state.adminCourseBuilderActiveParentId = "";
         }
-      });
+      }, form);
     } else if (id === "admin-course-metadata-form") {
       event.preventDefault();
-      runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+      runAdminCourseAction("Course metadata saved.", () => adminSaveCourseMetadata(state.adminCourseBuilderCourseId, readFormDataObject(form)), form);
     } else if (id === "admin-course-suggestion-form") {
       event.preventDefault();
-      runAdminCourseAction("Course suggestion saved.", () => adminSaveCourseSuggestion(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+      runAdminCourseAction("Course suggestion saved.", () => adminSaveCourseSuggestion(state.adminCourseBuilderCourseId, readFormDataObject(form)), form);
     } else if (id === "admin-course-module-create-form") {
       event.preventDefault();
       runAdminCourseAction("Module created.", async () => {
@@ -42264,11 +42516,11 @@ function wireAdminCoursesPlatformBuilder() {
           state.adminCourseBuilderActiveId = "";
           state.adminCourseBuilderActiveParentId = "";
         }
-      });
+      }, form);
     } else if (role === "admin-module-form") {
       event.preventDefault();
       const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
-      runAdminCourseAction("Module updated.", () => adminUpdateModule(moduleId, readFormDataObject(form)));
+      runAdminCourseAction("Module updated.", () => adminUpdateModule(moduleId, readFormDataObject(form)), form);
     } else if (role === "admin-lesson-create-form") {
       event.preventDefault();
       const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
@@ -42283,18 +42535,18 @@ function wireAdminCoursesPlatformBuilder() {
           state.adminCourseBuilderActiveId = "";
           state.adminCourseBuilderActiveParentId = "";
         }
-      });
+      }, form);
     } else if (role === "admin-lesson-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
-      runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readFormDataObject(form)));
+      runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readFormDataObject(form)), form);
     } else if (role === "admin-resource-create-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
-      runAdminCourseAction("Resource added.", () => adminCreateResource(lessonId, readFormDataObject(form)));
+      runAdminCourseAction("Resource added.", () => adminCreateResource(lessonId, readFormDataObject(form)), form);
     } else if (id === "admin-course-announcement-form") {
       event.preventDefault();
-      runAdminCourseAction("Announcement posted.", () => adminCreateAnnouncement(state.adminCourseBuilderCourseId, readFormDataObject(form)));
+      runAdminCourseAction("Announcement posted.", () => adminCreateAnnouncement(state.adminCourseBuilderCourseId, readFormDataObject(form)), form);
     } else if (id === "admin-course-bulk-enroll-form") {
       event.preventDefault();
       const data = readFormDataObject(form);
@@ -42302,7 +42554,7 @@ function wireAdminCoursesPlatformBuilder() {
       runAdminCourseAction("Bulk enrollment completed.", async () => {
         const count = await adminBulkEnrollStudentsByTerm(state.adminCourseBuilderCourseId, data.academic_year, data.academic_semester);
         toast(`Bulk enrolled ${count} student${count === 1 ? "" : "s"}.`);
-      });
+      }, form);
     }
   });
 
