@@ -21,4 +21,8 @@ window.__SUPABASE_CONFIG = {
   forceMobileAuthRedirect: false,
   // Optional storage bucket for uploaded question images.
   questionImageBucket: "question-images",
+  // Optional private storage bucket for uploaded course lesson videos.
+  courseVideoBucket: "course-videos",
+  // Optional private storage bucket for uploaded lesson materials.
+  courseMaterialBucket: "course-materials",
 };

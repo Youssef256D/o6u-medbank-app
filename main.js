@@ -315,6 +315,7 @@ const state = {
   coursesResources: [],
   coursesAnnouncements: [],
   coursesSuggestions: [],
+  coursesWatchedLessonIds: new Set(),
   coursesTransitionMode: "",
   adminCoursesPlatformLoading: false,
   adminCoursesPlatformError: "",
@@ -328,6 +329,7 @@ const state = {
   adminCoursesPlatformRequests: [],
   adminCoursesPlatformEnrollments: [],
   adminCoursesPlatformTopics: [],
+  adminCoursesPlatformProfiles: [],
   adminCourseBuilderCourseId: "",
   adminCourseBuilderLessonId: "",
   adminCourseBuilderPreview: false,
@@ -642,6 +644,8 @@ const SUPABASE_CONFIG = {
   mobileAuthRedirectUrl: window.__SUPABASE_CONFIG?.mobileAuthRedirectUrl || "",
   forceMobileAuthRedirect: window.__SUPABASE_CONFIG?.forceMobileAuthRedirect === true,
   questionImageBucket: window.__SUPABASE_CONFIG?.questionImageBucket || "question-images",
+  courseVideoBucket: window.__SUPABASE_CONFIG?.courseVideoBucket || "course-videos",
+  courseMaterialBucket: window.__SUPABASE_CONFIG?.courseMaterialBucket || "course-materials",
 };
 
 const QUESTION_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
@@ -656,6 +660,30 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/jpg",
   "image/webp",
   "image/gif",
+]);
+const COURSE_VIDEO_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/webm",
+  "video/ogg",
+  "video/quicktime",
+  "video/x-m4v",
+]);
+const COURSE_MATERIAL_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const COURSE_MATERIAL_ALLOWED_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "text/plain",
+  "text/csv",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "application/zip",
 ]);
 const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
 const ASK_AI_WINDOW_NAME = "o6u-medbank-ask-ai";
@@ -11837,6 +11865,54 @@ function resolveImageFileExtension(fileName, mimeType) {
     return ext === "jpeg" ? "jpg" : ext;
   }
   return "png";
+}
+
+function resolveVideoFileExtension(fileName, mimeType) {
+  const normalizedMime = String(mimeType || "").trim().toLowerCase();
+  const mimeMap = {
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/ogg": "ogv",
+    "video/quicktime": "mov",
+    "video/x-m4v": "m4v",
+  };
+  if (mimeMap[normalizedMime]) {
+    return mimeMap[normalizedMime];
+  }
+  const match = String(fileName || "").trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = String(match?.[1] || "").trim();
+  if (["mp4", "webm", "ogv", "ogg", "mov", "m4v"].includes(ext)) {
+    return ext === "ogg" ? "ogv" : ext;
+  }
+  return "mp4";
+}
+
+function resolveMaterialFileExtension(fileName, mimeType) {
+  const normalizedMime = String(mimeType || "").trim().toLowerCase();
+  const mimeMap = {
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/plain": "txt",
+    "text/csv": "csv",
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "application/zip": "zip",
+  };
+  if (mimeMap[normalizedMime]) {
+    return mimeMap[normalizedMime];
+  }
+  const match = String(fileName || "").trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = String(match?.[1] || "").trim();
+  if (["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "csv", "png", "jpg", "jpeg", "webp", "zip"].includes(ext)) {
+    return ext === "jpeg" ? "jpg" : ext;
+  }
+  return "pdf";
 }
 
 function convertFileToDataUrl(file) {
@@ -38864,12 +38940,19 @@ async function requestCourseEnrollment(courseId) {
   const targetCourseId = String(courseId || "").trim();
   if (isLocalDemoCoursePlatformUser()) {
     if (!userId || !isUuidValue(targetCourseId)) {
-      toast("Access request could not be sent.");
+      toast("Enrollment request could not be sent.");
       return false;
     }
     const existing = state.coursesRequests.find((row) => String(row?.course_id || "").trim() === targetCourseId && String(row?.user_id || "").trim() === userId);
     if (existing) {
-      toast(`Request is ${String(existing.status || "pending")}.`);
+      const status = String(existing.status || "pending").trim().toLowerCase();
+      if (status === "pending") {
+        toast("Request is pending.");
+        return true;
+      }
+      existing.status = "pending";
+      existing.updated_at = nowISO();
+      toast("Enrollment request sent again.");
       return true;
     }
     state.coursesRequests.push({
@@ -38880,29 +38963,48 @@ async function requestCourseEnrollment(courseId) {
       created_at: nowISO(),
       updated_at: nowISO(),
     });
-    toast("Access request sent.");
+    toast("Enrollment request sent.");
     return true;
   }
   if (!client || !isUuidValue(userId) || !isUuidValue(targetCourseId)) {
-    toast("Access request could not be sent.");
+    toast("Enrollment request could not be sent.");
     return false;
   }
   const existing = state.coursesRequests.find((row) => String(row?.course_id || "").trim() === targetCourseId);
   if (existing) {
-    toast(`Request is ${String(existing.status || "pending")}.`);
-    return true;
+    const status = String(existing.status || "pending").trim().toLowerCase();
+    if (status === "pending") {
+      toast("Request is pending.");
+      return true;
+    }
+    try {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("platform_course_enrollment_requests")
+          .update({ status: "pending", updated_at: nowISO() })
+          .eq("id", existing.id),
+        "Course enrollment request update timed out.",
+      );
+      toast("Enrollment request sent again.");
+      await loadStudentCoursesWithProgress({ force: true });
+      return true;
+    } catch (error) {
+      console.warn("Could not renew course enrollment request.", error?.message || error);
+      toast(getErrorMessage(error, "Could not request enrollment."));
+      return false;
+    }
   }
   try {
     await runRelationalQueryWithTimeout(
       client.from("platform_course_enrollment_requests").insert({ user_id: userId, course_id: targetCourseId, status: "pending" }),
       "Course access request timed out.",
     );
-    toast("Access request sent.");
+    toast("Enrollment request sent.");
     await loadStudentCoursesWithProgress({ force: true });
     return true;
   } catch (error) {
     console.warn("Could not request course enrollment.", error?.message || error);
-    toast(getErrorMessage(error, "Could not request access."));
+    toast(getErrorMessage(error, "Could not request enrollment."));
     return false;
   }
 }
@@ -39079,19 +39181,17 @@ function renderCoursePlatformCard(row, options = {}) {
     ? `${progress}% complete`
     : enrollment.requestStatus
         ? `Request ${enrollment.requestStatus}`
-        : "Request access";
-  const badge = String(options.badge || "").trim();
-  const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : "Request access";
+        : "Request enrollment";
+  const actionLabel = enrollment.isEnrolled ? (lastLesson ? "Continue" : "View Course") : "View details";
   const primaryAction = enrollment.isEnrolled
     ? (lastLesson ? "courses-open-lesson" : "courses-open-course")
-    : "courses-request-access";
+    : "courses-open-course";
   const statusText = status === "completed" ? "Completed" : status === "in_progress" ? "In progress" : "Not started";
   const suggestionReason = String(row.suggestion?.reason || row.suggestion?.title || "").trim();
   const hasNoContent = !lessonCount && !moduleCount;
   const courseCode = String(course.course_code || course.code || "").trim();
   return `
-    <article class="card course-card ${badge ? "course-card-with-badge" : ""} ${hasNoContent ? "course-card-empty-content" : ""}">
-      ${badge ? `<span class="course-suggestion-badge">${escapeHtml(badge)}</span>` : ""}
+    <article class="card course-card ${hasNoContent ? "course-card-empty-content" : ""}">
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
         <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" />
       </button>
@@ -39134,7 +39234,7 @@ function renderCoursePlatformCard(row, options = {}) {
 
         <div class="course-card-footer">
           <div class="course-card-actions">
-            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""} ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : escapeHtml(actionLabel)}</button>
+            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>${escapeHtml(actionLabel)}</button>
           </div>
         </div>
       </div>
@@ -39409,7 +39509,7 @@ function renderSuggestedCourses(courses) {
 
     ${!state.coursesLoading && !state.coursesError && !courses.length ? `<div class="courses-suggestions-empty"><svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><h3>No course suggestions yet</h3><p>Suggestions will appear here when admins recommend courses for your year or semester. Check back later or browse your enrolled courses.</p><button class="btn" type="button" data-action="courses-home-tab" data-tab="enrolled">View enrolled courses</button></div>` : ""}
     <div class="courses-grid">
-      ${courses.map((row, index) => renderCoursePlatformCard(row, { suggestion: true, badge: index < 2 ? "Suggested" : "" })).join("")}
+      ${courses.map((row) => renderCoursePlatformCard(row, { suggestion: true })).join("")}
     </div>
   `;
 }
@@ -39499,6 +39599,8 @@ function renderCourseDetail(courseId) {
   const progress = getCoursePlatformProgressPercent(course.id);
   const lastLesson = getLastOpenedCourseLesson(course.id) || lessons[0] || null;
   const canOpenLessons = enrollment.isEnrolled;
+  const courseAnnouncements = (state.coursesAnnouncements || []).filter((item) => String(item?.course_id || "").trim() === String(course.id || "").trim());
+  const requestStatus = String(enrollment.requestStatus || "").trim();
   return `
     <section class="panel courses-shell">
       <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">Back to Courses</button>
@@ -39517,9 +39619,15 @@ function renderCourseDetail(courseId) {
           <div class="stack">
             ${enrollment.isEnrolled
               ? `<button class="btn" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(course.id)}" ${lastLesson ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>Continue learning</button>`
-              : `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request access"}</button>`
+              : `<button class="btn" type="button" data-action="courses-request-access" data-course-id="${escapeHtml(course.id)}" ${enrollment.requestStatus === "pending" ? "disabled" : ""}>${enrollment.requestStatus === "pending" ? "Request pending" : "Request enrollment"}</button>`
             }
           </div>
+          ${!enrollment.isEnrolled ? `
+            <div class="course-detail-request-note">
+              <b>${requestStatus === "pending" ? "Waiting for admin approval" : requestStatus === "rejected" ? "Request rejected" : "Enrollment requires admin approval"}</b>
+              <span>${requestStatus === "pending" ? "Your request was sent. Once an admin approves it, this course will move to Enrolled Courses." : requestStatus === "rejected" ? "You can contact an admin if you still need access to this course." : "Send a request and an admin can approve it from Access Requests."}</span>
+            </div>
+          ` : ""}
         </div>
       </div>
 
@@ -39558,10 +39666,14 @@ function renderCourseDetail(courseId) {
         </section>
 
         <aside class="course-side">
+          <article class="card course-detail-enrollment-card">
+            <h3>Enrollment</h3>
+            <p class="subtle">${enrollment.isEnrolled ? "You are enrolled in this course." : requestStatus === "pending" ? "Your enrollment request is pending admin review." : "Request enrollment to have this course added to your enrolled list after approval."}</p>
+          </article>
           <article class="card">
             <h3>Announcements</h3>
-            ${(state.coursesAnnouncements || []).length
-              ? state.coursesAnnouncements.map((item) => `<div class="course-announcement"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div>`).join("")
+            ${courseAnnouncements.length
+              ? courseAnnouncements.map((item) => `<div class="course-announcement"><b>${escapeHtml(item.title)}</b><p class="subtle">${escapeHtml(item.body)}</p></div>`).join("")
               : `<div class="courses-empty-state is-compact"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><p>No announcements yet.</p></div>`
             }
           </article>
@@ -39588,6 +39700,62 @@ function getLessonTypeIcon(lessonType, isComplete) {
   }
 }
 
+function isUploadedCourseVideoSource(value) {
+  const descriptor = parseSupabaseStorageObjectSource(value);
+  return Boolean(descriptor && descriptor.bucket === String(SUPABASE_CONFIG.courseVideoBucket || "").trim());
+}
+
+function isDirectCourseVideoUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (isUploadedCourseVideoSource(raw)) return true;
+  try {
+    const parsed = new URL(raw);
+    return /\.(mp4|webm|ogv|ogg|mov|m4v)(?:$|\?)/i.test(parsed.pathname || "");
+  } catch {
+    return false;
+  }
+}
+
+function getRenderableCourseLessonVideoUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (isUploadedCourseVideoSource(raw)) {
+    return getRenderableQuestionImageUrl(raw);
+  }
+  return /^https?:\/\//i.test(raw) ? raw : "";
+}
+
+function getRenderableCourseMaterialUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const descriptor = parseSupabaseStorageObjectSource(raw);
+  if (descriptor && descriptor.bucket === String(SUPABASE_CONFIG.courseMaterialBucket || "").trim()) {
+    return getRenderableQuestionImageUrl(raw);
+  }
+  if (descriptor && !descriptor.isPublic) {
+    return getRenderableQuestionImageUrl(raw);
+  }
+  return /^https?:\/\//i.test(raw) ? raw : "";
+}
+
+function renderCourseMaterialIcon(resource) {
+  const type = String(resource?.resource_type || "").trim().toLowerCase();
+  const href = String(resource?.file_url || resource?.external_url || "").trim().toLowerCase();
+  if (type.includes("pdf") || href.includes(".pdf")) {
+    return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15h6"/><path d="M9 18h4"/></svg>`;
+  }
+  if (type.includes("slide") || href.includes(".ppt")) {
+    return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8"/><path d="M12 18v4"/></svg>`;
+  }
+  return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
+}
+
+function hasWatchedCourseLessonVideo(lessonId) {
+  return state.coursesWatchedLessonIds instanceof Set
+    && state.coursesWatchedLessonIds.has(String(lessonId || "").trim());
+}
+
 function renderLessonViewer(lessonId) {
   const lesson = (state.coursesLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
   const course = state.coursesDetail || (state.coursesCatalog || []).find((entry) => String(entry?.id || "").trim() === String(lesson?.course_id || "").trim());
@@ -39601,7 +39769,12 @@ function renderLessonViewer(lessonId) {
   const resources = (state.coursesResources || []).filter((resource) => String(resource?.lesson_id || "").trim() === String(lesson.id || "").trim());
   const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
   const isComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
-  const safeVideoUrl = /^https?:\/\//i.test(String(lesson.video_url || "").trim()) ? String(lesson.video_url || "").trim() : "";
+  const rawVideoUrl = String(lesson.video_url || "").trim();
+  const safeVideoUrl = getRenderableCourseLessonVideoUrl(rawVideoUrl);
+  const directVideo = isDirectCourseVideoUrl(rawVideoUrl);
+  const isVideoLesson = String(lesson.lesson_type || "").trim().toLowerCase() === "video" || Boolean(rawVideoUrl);
+  const requiresVideoWatch = isVideoLesson && directVideo && Boolean(rawVideoUrl);
+  const canCompleteLesson = isComplete || !requiresVideoWatch || hasWatchedCourseLessonVideo(lesson.id);
   const currentModule = (state.coursesModules || []).find((m) => String(m?.id || "").trim() === String(lesson.module_id || "").trim());
   const moduleLessons = lessons.filter((entry) => String(entry?.module_id || "").trim() === String(lesson.module_id || "").trim());
 
@@ -39619,16 +39792,19 @@ function renderLessonViewer(lessonId) {
               <h2>${escapeHtml(lesson.title)}</h2>
               ${lesson.description ? `<p class="subtle">${escapeHtml(lesson.description)}</p>` : ""}
             </div>
-            <button class="btn ${isComplete ? "ghost" : ""}" type="button" data-action="courses-complete-lesson" data-lesson-id="${escapeHtml(lesson.id)}">${isComplete ? "Completed" : "Mark complete"}</button>
+            <button class="btn ${isComplete ? "ghost" : ""}" type="button" data-action="courses-complete-lesson" data-lesson-id="${escapeHtml(lesson.id)}" ${canCompleteLesson ? "" : "disabled"}>${isComplete ? "Completed" : canCompleteLesson ? "Mark complete" : "Watch video to unlock"}</button>
           </div>
-          ${safeVideoUrl ? `<div class="lesson-video"><iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy"></iframe></div>` : ""}
+          ${rawVideoUrl && !safeVideoUrl && isUploadedCourseVideoSource(rawVideoUrl) ? `<div class="lesson-video-placeholder"><span class="inline-loader" aria-hidden="true"></span><span>Preparing secure video...</span></div>` : ""}
+          ${safeVideoUrl ? `<div class="lesson-video">${directVideo ? `<video id="course-lesson-video-player" controls playsinline preload="metadata" src="${escapeHtml(safeVideoUrl)}"></video>` : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy"></iframe>`}</div>` : ""}
+          ${isVideoLesson && safeVideoUrl && directVideo && !isComplete ? `<p class="lesson-completion-note">${canCompleteLesson ? "Video watched. You can mark this lesson complete." : "Watch the video until the end to unlock completion."}</p>` : ""}
           ${lesson.content_html ? `<div class="lesson-content">${escapeHtml(lesson.content_html).replaceAll("\n", "<br />")}</div>` : `<p class="subtle">No text content has been added to this lesson yet.</p>`}
           ${resources.length ? `
             <div class="lesson-resources">
-              <h3>Resources</h3>
+              <h3>Materials</h3>
               ${resources.map((resource) => {
                 const href = String(resource.external_url || resource.file_url || "").trim();
-                return `<a class="course-resource-link" href="${escapeHtml(/^https?:\/\//i.test(href) ? href : "#")}" target="_blank" rel="noopener">${escapeHtml(resource.title)}<small>${escapeHtml(resource.description || resource.resource_type || "")}</small></a>`;
+                const materialUrl = getRenderableCourseMaterialUrl(href);
+                return `<a class="course-resource-link ${materialUrl ? "" : "is-loading"}" href="${escapeHtml(materialUrl || "#")}" target="_blank" rel="noopener" ${materialUrl ? "" : "aria-disabled=\"true\""}>${renderCourseMaterialIcon(resource)}<span>${escapeHtml(resource.title)}<small>${escapeHtml(resource.description || resource.resource_type || "Lesson material")}</small></span></a>`;
               }).join("")}
             </div>
           ` : ""}
@@ -39716,6 +39892,19 @@ function wireCourses() {
     render();
   });
 
+  appEl.querySelector("#course-lesson-video-player")?.addEventListener("ended", async () => {
+    const lessonId = String(state.coursesActiveLessonId || "").trim();
+    if (!lessonId) return;
+    if (!(state.coursesWatchedLessonIds instanceof Set)) {
+      state.coursesWatchedLessonIds = new Set();
+    }
+    state.coursesWatchedLessonIds.add(lessonId);
+    await updateLessonProgress(lessonId, "in_progress", 95);
+    toast("Video watched. You can mark this lesson complete.");
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
   appEl.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.getAttribute("data-action");
@@ -39773,6 +39962,18 @@ function wireCourses() {
       }
 
       if (action === "courses-complete-lesson" && lessonId) {
+        const lesson = (state.coursesLessons || []).find((entry) => String(entry?.id || "").trim() === lessonId);
+        const rawVideoUrl = String(lesson?.video_url || "").trim();
+        const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === lessonId);
+        const alreadyComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
+        const needsVideoWatch = !alreadyComplete
+          && (String(lesson?.lesson_type || "").trim().toLowerCase() === "video" || Boolean(rawVideoUrl))
+          && isDirectCourseVideoUrl(rawVideoUrl)
+          && !hasWatchedCourseLessonVideo(lessonId);
+        if (needsVideoWatch) {
+          toast("Watch the video to the end before marking complete.");
+          return;
+        }
         const ok = await updateLessonProgress(lessonId, "completed", 100);
         if (ok) {
           toast("Lesson marked complete.");
@@ -39928,7 +40129,11 @@ function getAdminCourseBuilderCourseRows(courseId = state.adminCourseBuilderCour
     .filter((entry) => String(entry?.course_id || "").trim() === target);
   const suggestions = (state.adminCoursesPlatformSuggestions || [])
     .filter((entry) => String(entry?.course_id || "").trim() === target)
-    .sort((a, b) => (Number(b?.priority) || 0) - (Number(a?.priority) || 0));
+    .sort((a, b) => {
+      const priorityDiff = (Number(b?.priority) || 0) - (Number(a?.priority) || 0);
+      if (priorityDiff) return priorityDiff;
+      return parseSyncTimestampMs(a?.created_at) - parseSyncTimestampMs(b?.created_at);
+    });
   const requests = (state.adminCoursesPlatformRequests || [])
     .filter((entry) => String(entry?.course_id || "").trim() === target);
   const enrollments = (state.adminCoursesPlatformEnrollments || [])
@@ -39944,6 +40149,27 @@ function getAdminCourseBuilderProfileLabel(userId) {
   return profile
     ? `${String(profile.full_name || profile.email || userId).trim()}${profile.email ? ` (${profile.email})` : ""}`
     : String(userId || "Unknown student").trim();
+}
+
+function getAdminCourseBuilderCourseLabel(courseId) {
+  const course = (state.adminCoursesPlatformCourses || []).find((entry) => String(entry?.id || "").trim() === String(courseId || "").trim());
+  if (!course) {
+    return "Unknown course";
+  }
+  return `${getCoursePlatformCourseTitle(course)} • Y${course.academic_year || ""} S${course.academic_semester || ""}`;
+}
+
+function getAdminCourseRequestQueue(selectedCourseId = "") {
+  const selectedId = String(selectedCourseId || "").trim();
+  return [...(state.adminCoursesPlatformRequests || [])].sort((left, right) => {
+    const leftSelected = String(left?.course_id || "").trim() === selectedId ? 0 : 1;
+    const rightSelected = String(right?.course_id || "").trim() === selectedId ? 0 : 1;
+    if (leftSelected !== rightSelected) return leftSelected - rightSelected;
+    const leftPending = String(left?.status || "").trim() === "pending" ? 0 : 1;
+    const rightPending = String(right?.status || "").trim() === "pending" ? 0 : 1;
+    if (leftPending !== rightPending) return leftPending - rightPending;
+    return parseSyncTimestampMs(right?.created_at) - parseSyncTimestampMs(left?.created_at);
+  });
 }
 
 function coerceAdminCourseMetadataPayload(data) {
@@ -40106,9 +40332,74 @@ async function adminDeleteModule(moduleId) {
   return true;
 }
 
+function getCourseVideoUploadFile(data) {
+  const file = data?.video_file;
+  if (typeof File !== "undefined" && file instanceof File && Number(file.size || 0) > 0) {
+    return file;
+  }
+  return null;
+}
+
+async function uploadCourseLessonVideo(courseId, file) {
+  const client = getCoursesPlatformClient();
+  const bucket = String(SUPABASE_CONFIG.courseVideoBucket || "").trim();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client?.storage || !isUuidValue(targetCourseId)) {
+    throw new Error("Video upload needs an active Supabase session.");
+  }
+  if (!bucket) {
+    throw new Error("Course video bucket is not configured.");
+  }
+  if (!(file instanceof File) || Number(file.size || 0) <= 0) {
+    return "";
+  }
+  if (file.size > COURSE_VIDEO_UPLOAD_MAX_BYTES) {
+    throw new Error("Video is too large. Maximum upload size is 500 MB.");
+  }
+  const normalizedType = String(file.type || "").trim().toLowerCase();
+  if (normalizedType && !COURSE_VIDEO_ALLOWED_MIME_TYPES.has(normalizedType)) {
+    throw new Error("Unsupported video type. Use MP4, WebM, OGG, MOV, or M4V.");
+  }
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveVideoFileExtension(file.name, normalizedType);
+  const fileId = sanitizeStoragePathSegment(makeId("lesson-video"), "lesson-video");
+  const filePath = `courses/${targetCourseId}/${userScope}/${Date.now()}-${fileId}.${extension}`;
+  const uploadResult = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
+    "Video upload timed out.",
+  );
+  const uploadError = uploadResult?.error || null;
+  if (uploadError) {
+    const bucketMissing = isStorageBucketMissingError(uploadError);
+    throw new Error(
+      bucketMissing
+        ? `Storage bucket "${bucket}" was not found. Run the latest Supabase migration, then retry.`
+        : getErrorMessage(uploadError, "Could not upload course video."),
+    );
+  }
+  return `supabase-storage://${bucket}/${filePath}`;
+}
+
+async function resolveAdminLessonVideoUrl(courseId, data) {
+  const uploadFile = getCourseVideoUploadFile(data);
+  if (uploadFile) {
+    return uploadCourseLessonVideo(courseId, uploadFile);
+  }
+  return String(data.video_url || "").trim() || null;
+}
+
 async function adminCreateLesson(courseId, moduleId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId) || !isUuidValue(moduleId)) throw new Error("Lesson cannot be created.");
+  const videoUrl = await resolveAdminLessonVideoUrl(courseId, data);
   await runRelationalQueryWithTimeout(
     client.from("platform_course_lessons").insert({
       course_id: courseId,
@@ -40116,7 +40407,7 @@ async function adminCreateLesson(courseId, moduleId, data) {
       title: String(data.title || "").trim(),
       description: String(data.description || "").trim() || null,
       lesson_type: String(data.lesson_type || "video").trim() || "video",
-      video_url: String(data.video_url || "").trim() || null,
+      video_url: videoUrl,
       video_provider: String(data.video_provider || "").trim() || null,
       duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
       content_html: String(data.content_html || "").trim() || null,
@@ -40133,12 +40424,14 @@ async function adminCreateLesson(courseId, moduleId, data) {
 async function adminUpdateLesson(lessonId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be updated.");
+  const lesson = (state.adminCoursesPlatformLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
+  const videoUrl = await resolveAdminLessonVideoUrl(lesson?.course_id || state.adminCourseBuilderCourseId, data);
   await runRelationalQueryWithTimeout(
     client.from("platform_course_lessons").update({
       title: String(data.title || "").trim(),
       description: String(data.description || "").trim() || null,
       lesson_type: String(data.lesson_type || "video").trim() || "video",
-      video_url: String(data.video_url || "").trim() || null,
+      video_url: videoUrl,
       video_provider: String(data.video_provider || "").trim() || null,
       duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
       content_html: String(data.content_html || "").trim() || null,
@@ -40161,18 +40454,77 @@ async function adminDeleteLesson(lessonId) {
   return true;
 }
 
+function getCourseMaterialUploadFile(data) {
+  const file = data?.material_file;
+  if (typeof File !== "undefined" && file instanceof File && Number(file.size || 0) > 0) {
+    return file;
+  }
+  return null;
+}
+
+async function uploadCourseLessonMaterial(lesson, file) {
+  const client = getCoursesPlatformClient();
+  const bucket = String(SUPABASE_CONFIG.courseMaterialBucket || "").trim();
+  const courseId = String(lesson?.course_id || "").trim();
+  const lessonId = String(lesson?.id || "").trim();
+  if (!client?.storage || !isUuidValue(courseId) || !isUuidValue(lessonId)) {
+    throw new Error("Material upload needs an active Supabase session.");
+  }
+  if (!bucket) {
+    throw new Error("Course material bucket is not configured.");
+  }
+  if (!(file instanceof File) || Number(file.size || 0) <= 0) {
+    return "";
+  }
+  if (file.size > COURSE_MATERIAL_UPLOAD_MAX_BYTES) {
+    throw new Error("Material is too large. Maximum upload size is 100 MB.");
+  }
+  const normalizedType = String(file.type || "").trim().toLowerCase();
+  if (normalizedType && !COURSE_MATERIAL_ALLOWED_MIME_TYPES.has(normalizedType)) {
+    throw new Error("Unsupported material type. Use PDF, Office files, text/CSV, images, or ZIP.");
+  }
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveMaterialFileExtension(file.name, normalizedType);
+  const fileId = sanitizeStoragePathSegment(makeId("lesson-material"), "lesson-material");
+  const filePath = `courses/${courseId}/lessons/${lessonId}/${userScope}/${Date.now()}-${fileId}.${extension}`;
+  const uploadResult = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 60000),
+    "Material upload timed out.",
+  );
+  const uploadError = uploadResult?.error || null;
+  if (uploadError) {
+    const bucketMissing = isStorageBucketMissingError(uploadError);
+    throw new Error(
+      bucketMissing
+        ? `Storage bucket "${bucket}" was not found. Run the latest Supabase migration, then retry.`
+        : getErrorMessage(uploadError, "Could not upload lesson material."),
+    );
+  }
+  return `supabase-storage://${bucket}/${filePath}`;
+}
+
 async function adminCreateResource(lessonId, data) {
   const client = getCoursesPlatformClient();
   const lesson = (state.adminCoursesPlatformLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
   if (!client || !lesson) throw new Error("Resource cannot be created.");
+  const uploadFile = getCourseMaterialUploadFile(data);
+  const uploadedMaterialUrl = uploadFile ? await uploadCourseLessonMaterial(lesson, uploadFile) : "";
   await runRelationalQueryWithTimeout(
     client.from("platform_course_resources").insert({
       course_id: lesson.course_id,
       module_id: lesson.module_id,
       lesson_id: lesson.id,
-      title: String(data.title || "").trim(),
-      resource_type: String(data.resource_type || "file").trim() || "file",
-      file_url: String(data.file_url || "").trim() || null,
+      title: String(data.title || "").trim() || String(uploadFile?.name || "").trim() || "Lesson material",
+      resource_type: String(data.resource_type || (uploadFile ? "material" : "file")).trim() || "file",
+      file_url: uploadedMaterialUrl || String(data.file_url || "").trim() || null,
       external_url: String(data.external_url || "").trim() || null,
       description: String(data.description || "").trim() || null,
       position: Number(data.position) || 0,
@@ -40218,18 +40570,20 @@ function adminLoadCourseSuggestions(courseId) {
 }
 
 function coerceCourseSuggestionPayload(courseId, data) {
-  const targetYear = normalizeAcademicYearOrNull(data.target_academic_year);
-  const targetSemester = normalizeAcademicSemesterOrNull(data.target_semester);
+  const featuredForAll = Boolean(data.featured_for_all);
+  const targetYear = featuredForAll ? null : normalizeAcademicYearOrNull(data.target_academic_year);
+  const targetSemester = featuredForAll ? null : normalizeAcademicSemesterOrNull(data.target_semester);
   const startsAt = String(data.starts_at || "").trim();
   const endsAt = String(data.ends_at || "").trim();
-  const showAsSuggested = Boolean(data.show_as_suggested);
+  const showAsSuggested = Boolean(data.show_as_suggested) || featuredForAll;
+  const priority = Math.max(Number(data.priority) || 0, featuredForAll ? 1000 : 0);
   return {
     course_id: courseId,
     target_academic_year: targetYear,
     target_semester: targetSemester,
     title: String(data.title || "").trim() || null,
     reason: String(data.reason || "").trim() || null,
-    priority: Number(data.priority) || 0,
+    priority,
     is_active: showAsSuggested && Boolean(data.is_active),
     starts_at: startsAt ? startsAt : null,
     ends_at: endsAt ? endsAt : null,
@@ -40322,6 +40676,38 @@ async function adminResolveEnrollmentRequest(requestId, status) {
   return true;
 }
 
+async function adminCancelCourseEnrollment(userId, courseId) {
+  const client = getCoursesPlatformClient();
+  const targetUserId = String(userId || "").trim();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(targetUserId) || !isUuidValue(targetCourseId)) {
+    throw new Error("Enrollment cannot be cancelled.");
+  }
+  await runRelationalQueryWithTimeout(
+    client
+      .from("platform_course_enrollments")
+      .delete()
+      .eq("user_id", targetUserId)
+      .eq("course_id", targetCourseId),
+    "Enrollment cancellation timed out.",
+  );
+  await runRelationalQueryWithTimeout(
+    client
+      .from("platform_course_enrollment_requests")
+      .update({ status: "rejected", updated_at: nowISO() })
+      .eq("user_id", targetUserId)
+      .eq("course_id", targetCourseId)
+      .neq("status", "rejected"),
+    "Enrollment request reset timed out.",
+  ).catch((error) => {
+    if (!isMissingRelationError(error)) {
+      console.warn("Could not reset course enrollment request after cancellation.", error?.message || error);
+    }
+  });
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
 function formatDateTimeLocalValue(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -40334,11 +40720,16 @@ function formatDateTimeLocalValue(value) {
 function adminRenderSuggestionSettings(courseId) {
   const suggestions = adminLoadCourseSuggestions(courseId);
   const activeSuggestion = suggestions[0] || null;
+  const activeSuggestionFeatured = Boolean(activeSuggestion?.is_active)
+    && !normalizeAcademicYearOrNull(activeSuggestion?.target_academic_year)
+    && !normalizeAcademicSemesterOrNull(activeSuggestion?.target_semester)
+    && Number(activeSuggestion?.priority || 0) >= 1000;
   return `
     <form id="admin-course-suggestion-form" class="course-builder-form">
       <h4>Suggestion Settings</h4>
       <input type="hidden" name="suggestion_id" value="${escapeHtml(activeSuggestion?.id || "")}" />
       <label class="course-builder-check"><input type="checkbox" name="show_as_suggested" ${activeSuggestion ? "checked" : ""} /> Show as suggested course</label>
+      <label class="course-builder-check"><input type="checkbox" name="featured_for_all" ${activeSuggestionFeatured ? "checked" : ""} /> Featured for all students</label>
       <div class="course-builder-grid">
         <label>Target academic year
           <select name="target_academic_year">
@@ -40370,7 +40761,7 @@ function adminRenderSuggestionSettings(courseId) {
           <div class="course-request-row">
             <span>
               <b>${escapeHtml(suggestion.title || "Suggested course")}</b>
-              <small>${escapeHtml(suggestion.is_active ? "Active" : "Inactive")} • ${suggestion.target_academic_year ? `Year ${escapeHtml(suggestion.target_academic_year)}` : "All years"} • ${suggestion.target_semester ? `Semester ${escapeHtml(suggestion.target_semester)}` : "All semesters"} • Priority ${escapeHtml(suggestion.priority || 0)}</small>
+              <small>${escapeHtml(suggestion.is_active ? "Active" : "Inactive")} • ${Number(suggestion.priority || 0) >= 1000 && !suggestion.target_academic_year && !suggestion.target_semester ? "Featured for all students" : `${suggestion.target_academic_year ? `Year ${escapeHtml(suggestion.target_academic_year)}` : "All years"} • ${suggestion.target_semester ? `Semester ${escapeHtml(suggestion.target_semester)}` : "All semesters"}`} • Priority ${escapeHtml(suggestion.priority || 0)}</small>
             </span>
             <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-course-suggestion" data-suggestion-id="${escapeHtml(suggestion.id)}">Delete</button>
           </div>
@@ -40402,6 +40793,8 @@ function adminRenderCourseBuilder(courseId) {
   const selectedCourseId = String(selectedCourse?.id || "").trim();
   const rows = getAdminCourseBuilderCourseRows(selectedCourseId);
   const profileCount = rows.enrollments.length;
+  const requestQueue = getAdminCourseRequestQueue(selectedCourseId);
+  const pendingRequestCount = requestQueue.filter((request) => String(request?.status || "").trim() === "pending").length;
   const activePlatformSection = getAdminCoursePlatformSection();
   const showPlatformPreview = activePlatformSection === "preview" || Boolean(state.adminCourseBuilderPreview);
 
@@ -40443,6 +40836,9 @@ function adminRenderCourseBuilder(courseId) {
             </select>
           </label>
           <label>Priority<input name="priority" type="number" value="0" /></label>
+          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." /></label>
+          <label>Instructor name<input name="instructor_name" /></label>
+          <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" /></label>
           <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
           <label class="course-builder-wide">Description<textarea name="description" rows="2"></textarea></label>
           <label class="course-builder-wide">Suggestion reason<textarea name="reason" rows="2">Recommended by your course admin.</textarea></label>
@@ -40460,6 +40856,7 @@ function adminRenderCourseBuilder(courseId) {
           <span class="admin-course-meta-pill"><b>${rows.modules.length}</b><small>Modules</small></span>
           <span class="admin-course-meta-pill"><b>${rows.lessons.length}</b><small>Lessons</small></span>
           <span class="admin-course-meta-pill"><b>${profileCount}</b><small>Enrollments</small></span>
+          <span class="admin-course-meta-pill"><b>${pendingRequestCount}</b><small>Pending requests</small></span>
         </div>
 
         ${activePlatformSection === "overview" ? `
@@ -40582,6 +40979,7 @@ function adminRenderCourseBuilder(courseId) {
                       <label>Title<input name="title" required /></label>
                       <label>Type<select name="lesson_type"><option value="video">Video</option><option value="text">Text</option><option value="mixed">Mixed</option></select></label>
                       <label>Video URL<input name="video_url" /></label>
+                      <label>Upload video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
                       <label>Duration seconds<input name="duration_seconds" type="number" value="0" /></label>
                       <label>Position<input name="position" type="number" value="${moduleLessons.length + 1}" /></label>
                       <label class="course-builder-check"><input type="checkbox" name="is_free_preview" /> Free preview</label>
@@ -40613,6 +41011,7 @@ function adminRenderCourseBuilder(courseId) {
                               <label>Title<input name="title" value="${escapeHtml(lesson.title || "")}" required /></label>
                               <label>Type<select name="lesson_type"><option value="video" ${lesson.lesson_type === "video" ? "selected" : ""}>Video</option><option value="text" ${lesson.lesson_type === "text" ? "selected" : ""}>Text</option><option value="mixed" ${lesson.lesson_type === "mixed" ? "selected" : ""}>Mixed</option></select></label>
                               <label>Video URL<input name="video_url" value="${escapeHtml(lesson.video_url || "")}" /></label>
+                              <label>Replace video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
                               <label>Video provider<input name="video_provider" value="${escapeHtml(lesson.video_provider || "")}" /></label>
                               <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(lesson.duration_seconds || 0)}" /></label>
                               <label>Position<input name="position" type="number" value="${escapeHtml(lesson.position || 0)}" /></label>
@@ -40633,18 +41032,19 @@ function adminRenderCourseBuilder(courseId) {
                                 <line x1="12" y1="8" x2="12" y2="16"></line>
                                 <line x1="8" y1="12" x2="16" y2="12"></line>
                               </svg>
-                              Add resource
+                              Add material
                             </h5>
                             <div class="course-builder-grid compact">
                               <label>Title<input name="title" required /></label>
-                              <label>Type<input name="resource_type" value="file" /></label>
-                              <label>File URL<input name="file_url" /></label>
-                              <label>External URL<input name="external_url" /></label>
+                              <label>Type<input name="resource_type" value="material" /></label>
+                              <label>Upload material<input name="material_file" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.csv,.png,.jpg,.jpeg,.webp,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv,image/png,image/jpeg,image/webp,application/zip" /></label>
+                              <label>File URL<input name="file_url" placeholder="Optional existing file link" /></label>
+                              <label>External URL<input name="external_url" placeholder="Optional web link" /></label>
                               <label>Description<input name="description" /></label>
                               <label>Position<input name="position" type="number" value="${lessonResources.length + 1}" /></label>
                               <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
                             </div>
-                            <button class="btn ghost admin-btn-sm" type="submit">Add resource</button>
+                            <button class="btn ghost admin-btn-sm" type="submit">Add material</button>
                           </form>
                           ${lessonResources.length ? `
                             <div class="course-builder-resources">
@@ -40714,6 +41114,17 @@ function adminRenderCourseBuilder(courseId) {
             </div>
             <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
             <p class="subtle">This course currently has <b>${rows.enrollments.length}</b> enrolled student${rows.enrollments.length === 1 ? "" : "s"}.</p>
+            <div class="course-enrollment-admin-list">
+              ${rows.enrollments.length ? rows.enrollments.map((enrollment) => `
+                <div class="course-request-row course-enrollment-row">
+                  <span>
+                    <b>${escapeHtml(getAdminCourseBuilderProfileLabel(enrollment.user_id))}</b>
+                    <small>Enrolled ${escapeHtml(formatReportDateTime(enrollment.assigned_at || ""))}</small>
+                  </span>
+                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-cancel-course-enrollment" data-user-id="${escapeHtml(enrollment.user_id)}" data-course-id="${escapeHtml(enrollment.course_id)}">Cancel enrollment</button>
+                </div>
+              `).join("") : `<p class="subtle">No students are enrolled in this course yet.</p>`}
+            </div>
           </form>
         ` : ""}
 
@@ -40724,12 +41135,13 @@ function adminRenderCourseBuilder(courseId) {
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
               </svg>
-              Access requests
+              Enrollment requests
             </h4>
-            ${rows.requests.length ? rows.requests.map((request) => `
+            ${requestQueue.length ? requestQueue.map((request) => `
               <div class="course-request-row">
                 <span>
                   <b>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}</b>
+                  <small>${escapeHtml(getAdminCourseBuilderCourseLabel(request.course_id))}</small>
                   <small style="text-transform: uppercase;">Status: ${escapeHtml(request.status || "pending")}</small>
                 </span>
                 <div class="stack">
@@ -40891,6 +41303,12 @@ function wireAdminCoursesPlatformBuilder() {
       runAdminCourseAction("Enrollment request approved.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "approved"));
     } else if (action === "admin-reject-course-request") {
       runAdminCourseAction("Enrollment request rejected.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "rejected"));
+    } else if (action === "admin-cancel-course-enrollment") {
+      const userId = button.getAttribute("data-user-id") || "";
+      const courseId = button.getAttribute("data-course-id") || "";
+      const studentLabel = getAdminCourseBuilderProfileLabel(userId);
+      if (!window.confirm(`Cancel enrollment for ${studentLabel}? The course will be removed from this student's Enrolled Courses page.`)) return;
+      runAdminCourseAction("Enrollment cancelled.", () => adminCancelCourseEnrollment(userId, courseId));
     }
   });
 }
