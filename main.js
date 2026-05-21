@@ -334,6 +334,15 @@ const state = {
   adminCourseBuilderLessonId: "",
   adminCourseBuilderPreview: false,
   adminCoursePlatformSection: "builder",
+  adminCourseTableSearch: "",
+  adminCourseTableFilterYear: "",
+  adminCourseTableFilterSemester: "",
+  adminCourseTableFilterStatus: "all",
+  adminEnrollmentSearch: "",
+  adminEnrollmentListLimit: 25,
+  adminRequestFilterStatus: "all",
+  adminRequestGroupCollapsed: {},
+  adminAnnouncementCourseFilter: "all",
   createTestSource: "all",
   previousTestFilters: {
     dateKey: "",
@@ -24609,6 +24618,10 @@ function renderAdminDataSidebarNav(activeAdminPage) {
 }
 
 function renderAdminCoursesPlatformSidebarNav(activeSection) {
+  const totalEnrollments = (state.adminCoursesPlatformEnrollments || []).length;
+  const pendingRequestCount = (state.adminCoursesPlatformRequests || []).filter(
+    (request) => String(request?.status || "").trim() === "pending",
+  ).length;
   const items = [
     ["overview", "Course metadata", `
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -24653,12 +24666,20 @@ function renderAdminCoursesPlatformSidebarNav(activeSection) {
       </svg>
     `],
   ];
-  return items.map(([section, label, svg]) => `
+  return items.map(([section, label, svg]) => {
+    const navBadge = section === "requests" && pendingRequestCount
+      ? `<span class="nav-badge">${pendingRequestCount > 99 ? "99+" : pendingRequestCount}</span>`
+      : section === "enrollments" && totalEnrollments
+        ? `<span class="nav-badge nav-badge-muted">${totalEnrollments > 999 ? "999+" : totalEnrollments}</span>`
+        : "";
+    return `
     <button class="btn ghost ${activeSection === section ? "is-active" : ""}" type="button" data-action="admin-course-platform-section" data-section="${escapeHtml(section)}">
       ${svg}
       <span>${escapeHtml(label)}</span>
+      ${navBadge}
     </button>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function renderAdmin() {
@@ -40676,6 +40697,64 @@ async function adminResolveEnrollmentRequest(requestId, status) {
   return true;
 }
 
+async function adminApproveAllPendingEnrollmentRequests(courseId = "") {
+  const client = getCoursesPlatformClient();
+  if (!client) throw new Error("Enrollment requests cannot be approved.");
+  const targetCourseId = String(courseId || "").trim();
+  const pendingRequests = (state.adminCoursesPlatformRequests || []).filter((request) => {
+    if (String(request?.status || "").trim() !== "pending") return false;
+    if (targetCourseId && String(request?.course_id || "").trim() !== targetCourseId) return false;
+    return isUuidValue(request.id);
+  });
+  if (!pendingRequests.length) return 0;
+  const requestIds = pendingRequests.map((request) => request.id);
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_enrollment_requests").update({ status: "approved", updated_at: nowISO() }).in("id", requestIds),
+    "Bulk enrollment request approval timed out.",
+  );
+  const enrollRows = pendingRequests.map((request) => ({
+    user_id: request.user_id,
+    course_id: request.course_id,
+    assigned_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
+  }));
+  for (const batch of splitIntoBatches(enrollRows, ENROLLMENT_SYNC_WRITE_BATCH_SIZE)) {
+    await runRelationalQueryWithTimeout(
+      client.from("platform_course_enrollments").upsert(batch, { onConflict: "user_id,course_id", defaultToNull: false }),
+      "Bulk approved enrollment sync timed out.",
+    );
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return pendingRequests.length;
+}
+
+async function adminDeleteAnnouncement(announcementId) {
+  const client = getCoursesPlatformClient();
+  const targetId = String(announcementId || "").trim();
+  if (!client || !isUuidValue(targetId)) throw new Error("Announcement cannot be deleted.");
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_announcements").delete().eq("id", targetId),
+    "Announcement delete timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminDeletePlatformCourse(courseId) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client || !isUuidValue(targetCourseId)) throw new Error("Course cannot be deleted.");
+  await runRelationalQueryWithTimeout(
+    client.from("platform_courses").delete().eq("id", targetCourseId),
+    "Course delete timed out.",
+  );
+  if (state.adminCourseBuilderCourseId === targetCourseId) {
+    const remaining = (state.adminCoursesPlatformCourses || []).filter((course) => String(course?.id || "") !== targetCourseId);
+    state.adminCourseBuilderCourseId = String(remaining[0]?.id || "");
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
 async function adminCancelCourseEnrollment(userId, courseId) {
   const client = getCoursesPlatformClient();
   const targetUserId = String(userId || "").trim();
@@ -40771,6 +40850,371 @@ function adminRenderSuggestionSettings(courseId) {
   `;
 }
 
+function getAdminCoursesPlatformAggregates() {
+  const courses = state.adminCoursesPlatformCourses || [];
+  const enrollments = state.adminCoursesPlatformEnrollments || [];
+  const requests = state.adminCoursesPlatformRequests || [];
+  return {
+    totalCourses: courses.length,
+    publishedCourses: courses.filter((course) => course.is_published).length,
+    totalEnrollments: enrollments.length,
+    totalPendingRequests: requests.filter((request) => String(request?.status || "").trim() === "pending").length,
+  };
+}
+
+function getAdminCourseTableRowStats(courseId) {
+  const rows = getAdminCourseBuilderCourseRows(courseId);
+  const pendingRequests = (state.adminCoursesPlatformRequests || []).filter(
+    (request) => String(request?.course_id || "").trim() === String(courseId || "").trim()
+      && String(request?.status || "").trim() === "pending",
+  ).length;
+  return {
+    modules: rows.modules.length,
+    lessons: rows.lessons.length,
+    enrollments: rows.enrollments.length,
+    pendingRequests,
+  };
+}
+
+function filterAdminCoursesForTable(courses) {
+  const search = String(state.adminCourseTableSearch || "").trim().toLowerCase();
+  const yearFilter = String(state.adminCourseTableFilterYear || "").trim();
+  const semesterFilter = String(state.adminCourseTableFilterSemester || "").trim();
+  const statusFilter = String(state.adminCourseTableFilterStatus || "all").trim().toLowerCase();
+  return (courses || []).filter((course) => {
+    if (yearFilter && Number(course.academic_year) !== Number(yearFilter)) return false;
+    if (semesterFilter && Number(course.academic_semester) !== Number(semesterFilter)) return false;
+    if (statusFilter === "published" && !course.is_published) return false;
+    if (statusFilter === "draft" && course.is_published) return false;
+    if (!search) return true;
+    const haystack = [
+      getCoursePlatformCourseTitle(course),
+      course.course_code,
+      course.instructor_name,
+    ].map((value) => String(value || "").toLowerCase()).join(" ");
+    return haystack.includes(search);
+  });
+}
+
+function renderAdminCourseStatsCards(aggregates) {
+  const stats = aggregates || getAdminCoursesPlatformAggregates();
+  return `
+    <div class="admin-course-table-stats">
+      <div class="admin-course-stat-card"><span class="admin-course-stat-label">Total courses</span><b>${stats.totalCourses}</b></div>
+      <div class="admin-course-stat-card"><span class="admin-course-stat-label">Published</span><b>${stats.publishedCourses}</b></div>
+      <div class="admin-course-stat-card"><span class="admin-course-stat-label">Total enrollments</span><b>${stats.totalEnrollments}</b></div>
+      <div class="admin-course-stat-card"><span class="admin-course-stat-label">Pending requests</span><b>${stats.totalPendingRequests}</b></div>
+    </div>
+  `;
+}
+
+function renderAdminCourseTableToolbar() {
+  const yearFilter = String(state.adminCourseTableFilterYear || "");
+  const semesterFilter = String(state.adminCourseTableFilterSemester || "");
+  const statusFilter = String(state.adminCourseTableFilterStatus || "all");
+  return `
+    <div class="admin-course-table-toolbar">
+      <input class="admin-course-search-input" type="search" id="admin-course-table-search" placeholder="Search courses, codes, instructors..." value="${escapeHtml(state.adminCourseTableSearch || "")}" />
+      <div class="admin-course-filter-row">
+        <label>Year
+          <select id="admin-course-table-filter-year" data-action="admin-course-table-filter">
+            <option value="" ${!yearFilter ? "selected" : ""}>All years</option>
+            ${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${yearFilter === String(year) ? "selected" : ""}>Year ${year}</option>`).join("")}
+          </select>
+        </label>
+        <label>Semester
+          <select id="admin-course-table-filter-semester" data-action="admin-course-table-filter">
+            <option value="" ${!semesterFilter ? "selected" : ""}>All semesters</option>
+            <option value="1" ${semesterFilter === "1" ? "selected" : ""}>Semester 1</option>
+            <option value="2" ${semesterFilter === "2" ? "selected" : ""}>Semester 2</option>
+          </select>
+        </label>
+        <label>Status
+          <select id="admin-course-table-filter-status" data-action="admin-course-table-filter">
+            <option value="all" ${statusFilter === "all" ? "selected" : ""}>All</option>
+            <option value="published" ${statusFilter === "published" ? "selected" : ""}>Published</option>
+            <option value="draft" ${statusFilter === "draft" ? "selected" : ""}>Draft</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminCourseTable(courses, selectedCourseId, options = {}) {
+  const filteredCourses = filterAdminCoursesForTable(courses);
+  const showToolbar = options.showToolbar !== false;
+  const compact = Boolean(options.compact);
+  const aggregates = getAdminCoursesPlatformAggregates();
+  return `
+    ${options.showStats ? renderAdminCourseStatsCards(aggregates) : ""}
+    <div class="admin-course-table-wrap ${compact ? "is-compact" : ""}">
+      ${showToolbar ? renderAdminCourseTableToolbar() : ""}
+      <div class="admin-course-table-scroll">
+        <table class="admin-course-table">
+          <thead>
+            <tr>
+              <th>Course</th>
+              <th>Year / Sem</th>
+              <th>Status</th>
+              <th>Enrollment</th>
+              <th>Modules</th>
+              <th>Lessons</th>
+              <th>Enrolled</th>
+              <th>Pending</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredCourses.length ? filteredCourses.map((course) => {
+              const courseId = String(course.id || "").trim();
+              const stats = getAdminCourseTableRowStats(courseId);
+              const isActive = courseId === String(selectedCourseId || "").trim();
+              return `
+                <tr class="${isActive ? "is-active" : ""}" data-action="admin-select-course-platform-course" data-course-id="${escapeHtml(courseId)}" role="button" tabindex="0">
+                  <td>
+                    <b>${escapeHtml(getCoursePlatformCourseTitle(course))}</b>
+                    ${course.course_code ? `<small>${escapeHtml(course.course_code)}</small>` : ""}
+                  </td>
+                  <td>Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</td>
+                  <td><span class="${course.is_published ? "admin-badge-published" : "admin-badge-draft"}">${course.is_published ? "Published" : "Draft"}</span></td>
+                  <td>${escapeHtml(normalizeCoursePlatformMode(course.enrollment_mode) === "assigned" ? "Assigned" : "Request")}</td>
+                  <td>${stats.modules}</td>
+                  <td>${stats.lessons}</td>
+                  <td>${stats.enrollments}</td>
+                  <td>${stats.pendingRequests || "-"}</td>
+                </tr>
+              `;
+            }).join("") : `<tr><td colspan="8" class="subtle">No courses match your filters.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <p class="subtle admin-course-table-foot">${escapeHtml(filteredCourses.length)} of ${escapeHtml(courses.length)} course${courses.length === 1 ? "" : "s"} shown</p>
+    </div>
+  `;
+}
+
+function renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) {
+  const profileCount = rows.enrollments.length;
+  const pills = `
+    <div class="admin-course-selector-pills">
+      <span class="admin-course-meta-pill"><b>${rows.modules.length}</b><small>Modules</small></span>
+      <span class="admin-course-meta-pill"><b>${rows.lessons.length}</b><small>Lessons</small></span>
+      <span class="admin-course-meta-pill"><b>${profileCount}</b><small>Enrollments</small></span>
+      <span class="admin-course-meta-pill"><b>${pendingRequestCount}</b><small>Pending requests</small></span>
+    </div>
+  `;
+  if (courses.length <= 3) {
+    return `
+      <div class="courses-builder-selector">
+        <label>Selected Course
+          <select id="admin-course-builder-course-select">
+            ${courses.map((course) => `<option value="${escapeHtml(course.id)}" ${course.id === selectedCourseId ? "selected" : ""}>${escapeHtml(getCoursePlatformCourseTitle(course))} • Y${escapeHtml(course.academic_year)} S${escapeHtml(course.academic_semester)}</option>`).join("")}
+          </select>
+        </label>
+        ${pills}
+      </div>
+    `;
+  }
+  return `
+    <div class="admin-course-selector-table">
+      ${renderAdminCourseTable(courses, selectedCourseId, { compact: true })}
+      ${pills}
+    </div>
+  `;
+}
+
+function renderAdminGlobalSuggestions() {
+  const courses = state.adminCoursesPlatformCourses || [];
+  const suggestions = [...(state.adminCoursesPlatformSuggestions || [])].sort((left, right) => {
+    const courseCompare = getAdminCourseBuilderCourseLabel(left?.course_id).localeCompare(getAdminCourseBuilderCourseLabel(right?.course_id));
+    if (courseCompare) return courseCompare;
+    return (Number(right?.priority) || 0) - (Number(left?.priority) || 0);
+  });
+  return `
+    <div class="course-builder-form">
+      <h4>All course suggestions</h4>
+      <p class="subtle">Suggestions across every platform course. Select a course below to edit its settings.</p>
+      <div class="course-builder-list">
+        ${suggestions.length ? suggestions.map((suggestion) => {
+          const course = courses.find((entry) => String(entry?.id || "") === String(suggestion?.course_id || ""));
+          const statusLabel = suggestion.is_active ? "Active" : "Inactive";
+          const featured = Number(suggestion.priority || 0) >= 1000 && !suggestion.target_academic_year && !suggestion.target_semester;
+          return `
+            <div class="course-request-row">
+              <span>
+                <b>${escapeHtml(suggestion.title || getCoursePlatformCourseTitle(course) || "Suggested course")}</b>
+                <small>${escapeHtml(getAdminCourseBuilderCourseLabel(suggestion.course_id))}</small>
+                <small>${escapeHtml(statusLabel)}${featured ? " • Featured for all" : ""} • Priority ${escapeHtml(suggestion.priority || 0)}</small>
+              </span>
+              <span class="${suggestion.is_active ? "admin-badge-published" : "admin-badge-draft"}">${escapeHtml(statusLabel)}</span>
+            </div>
+          `;
+        }).join("") : `<p class="subtle">No suggestions configured yet.</p>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminAnnouncementsSection(courses, selectedCourseId, rows) {
+  const filterCourseId = String(state.adminAnnouncementCourseFilter || "all").trim();
+  const allAnnouncements = [...(state.adminCoursesPlatformAnnouncements || [])].sort(
+    (left, right) => parseSyncTimestampMs(right?.created_at) - parseSyncTimestampMs(left?.created_at),
+  );
+  const filteredAnnouncements = filterCourseId === "all"
+    ? allAnnouncements
+    : allAnnouncements.filter((item) => String(item?.course_id || "").trim() === filterCourseId);
+  return `
+    <form id="admin-course-announcement-form" class="course-builder-form">
+      <h4>Announcements</h4>
+      <p class="subtle">Post to the selected course. Browse announcements from all courses below.</p>
+      <label>Title<input name="title" required /></label>
+      <label>Body<textarea name="body" rows="3" required></textarea></label>
+      <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
+      <button class="btn admin-btn-sm" type="submit">Post announcement</button>
+    </form>
+    <div class="course-builder-form" style="margin-top: 1rem;">
+      <div class="admin-course-filter-row">
+        <label>Filter by course
+          <select id="admin-announcement-course-filter">
+            <option value="all" ${filterCourseId === "all" ? "selected" : ""}>All courses</option>
+            ${courses.map((course) => `<option value="${escapeHtml(course.id)}" ${filterCourseId === String(course.id || "") ? "selected" : ""}>${escapeHtml(getCoursePlatformCourseTitle(course))}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div class="course-builder-list admin-announcement-feed">
+        ${filteredAnnouncements.length ? filteredAnnouncements.map((item) => `
+          <div class="admin-announcement-card">
+            <div>
+              <b>${escapeHtml(item.title)}</b>
+              <small class="admin-announcement-course">${escapeHtml(getAdminCourseBuilderCourseLabel(item.course_id))}</small>
+              <p class="subtle">${escapeHtml(item.body || "")}</p>
+              <small class="admin-announcement-date">${escapeHtml(formatReportDateTime(item.created_at || ""))}</small>
+            </div>
+            <div class="stack">
+              <span class="${item.is_published ? "admin-badge-published" : "admin-badge-draft"}">${item.is_published ? "Published" : "Draft"}</span>
+              <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-announcement" data-announcement-id="${escapeHtml(item.id)}">Delete</button>
+            </div>
+          </div>
+        `).join("") : `<p class="subtle">No announcements yet.</p>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminEnrollmentsSection(selectedCourse, rows) {
+  const search = String(state.adminEnrollmentSearch || "").trim().toLowerCase();
+  const limit = Math.max(25, Number(state.adminEnrollmentListLimit) || 25);
+  const filteredEnrollments = rows.enrollments.filter((enrollment) => {
+    if (!search) return true;
+    const label = getAdminCourseBuilderProfileLabel(enrollment.user_id).toLowerCase();
+    return label.includes(search);
+  });
+  const visibleEnrollments = filteredEnrollments.slice(0, limit);
+  const hasMore = filteredEnrollments.length > visibleEnrollments.length;
+  return `
+    <form id="admin-course-bulk-enroll-form" class="course-builder-form">
+      <h4>Enrollments</h4>
+      <div class="admin-enrollment-search">
+        <input type="search" id="admin-enrollment-search" placeholder="Search enrolled students by name or email..." value="${escapeHtml(state.adminEnrollmentSearch || "")}" />
+        <span class="admin-enrollment-count-badge"><b>${rows.enrollments.length}</b> enrolled</span>
+      </div>
+      <div class="course-builder-grid compact">
+        <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
+        <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
+      </div>
+      <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
+      <div class="course-enrollment-admin-list">
+        ${visibleEnrollments.length ? visibleEnrollments.map((enrollment) => `
+          <div class="course-request-row course-enrollment-row">
+            <span>
+              <b>${escapeHtml(getAdminCourseBuilderProfileLabel(enrollment.user_id))}</b>
+              <small>Enrolled on ${escapeHtml(formatReportDateTime(enrollment.assigned_at || ""))}</small>
+            </span>
+            <button class="btn danger admin-btn-sm" type="button" data-action="admin-cancel-course-enrollment" data-user-id="${escapeHtml(enrollment.user_id)}" data-course-id="${escapeHtml(enrollment.course_id)}">Cancel enrollment</button>
+          </div>
+        `).join("") : `<p class="subtle">${search ? "No enrolled students match your search." : "No students are enrolled in this course yet."}</p>`}
+      </div>
+      ${hasMore ? `<button class="btn ghost admin-btn-sm" type="button" data-action="admin-enrollment-show-more">Show more (${filteredEnrollments.length - visibleEnrollments.length} remaining)</button>` : ""}
+      ${search && filteredEnrollments.length ? `<p class="subtle">${escapeHtml(filteredEnrollments.length)} student${filteredEnrollments.length === 1 ? "" : "s"} match your search.</p>` : ""}
+    </form>
+  `;
+}
+
+function renderAdminRequestsSection(courses) {
+  const statusFilter = String(state.adminRequestFilterStatus || "all").trim().toLowerCase();
+  const allRequests = [...(state.adminCoursesPlatformRequests || [])].sort(
+    (left, right) => parseSyncTimestampMs(right?.created_at) - parseSyncTimestampMs(left?.created_at),
+  );
+  const filteredRequests = statusFilter === "all"
+    ? allRequests
+    : allRequests.filter((request) => String(request?.status || "").trim() === statusFilter);
+  const globalPendingCount = allRequests.filter((request) => String(request?.status || "").trim() === "pending").length;
+  const requestsByCourse = new Map();
+  filteredRequests.forEach((request) => {
+    const courseId = String(request?.course_id || "").trim() || "unknown";
+    if (!requestsByCourse.has(courseId)) requestsByCourse.set(courseId, []);
+    requestsByCourse.get(courseId).push(request);
+  });
+  const courseGroups = [...requestsByCourse.entries()].sort((left, right) => {
+    const leftPending = left[1].filter((request) => String(request?.status || "").trim() === "pending").length;
+    const rightPending = right[1].filter((request) => String(request?.status || "").trim() === "pending").length;
+    if (leftPending !== rightPending) return rightPending - leftPending;
+    return getAdminCourseBuilderCourseLabel(left[0]).localeCompare(getAdminCourseBuilderCourseLabel(right[0]));
+  });
+  const filterTabs = [
+    ["all", "All"],
+    ["pending", "Pending"],
+    ["approved", "Approved"],
+    ["rejected", "Rejected"],
+  ];
+  return `
+    <div class="course-builder-form">
+      <div class="admin-requests-head">
+        <h4>Enrollment requests</h4>
+        ${globalPendingCount ? `<button class="btn admin-btn-sm" type="button" data-action="admin-approve-all-pending-global" ${state.adminApproveAllPendingRunning ? "disabled" : ""}>${state.adminApproveAllPendingRunning ? "Approving..." : `Approve all pending (${globalPendingCount})`}</button>` : ""}
+      </div>
+      <div class="admin-request-filter-tabs">
+        ${filterTabs.map(([value, label]) => `
+          <button class="btn ghost admin-btn-sm ${statusFilter === value ? "is-active" : ""}" type="button" data-action="admin-request-filter" data-status="${escapeHtml(value)}">${escapeHtml(label)}</button>
+        `).join("")}
+      </div>
+      ${courseGroups.length ? courseGroups.map(([courseId, courseRequests]) => {
+        const pendingCount = courseRequests.filter((request) => String(request?.status || "").trim() === "pending").length;
+        const collapsed = Boolean(state.adminRequestGroupCollapsed?.[courseId]);
+        return `
+          <section class="admin-request-group ${collapsed ? "is-collapsed" : ""}">
+            <div class="admin-request-group-header">
+              <button class="admin-request-group-toggle" type="button" data-action="admin-toggle-request-group" data-course-id="${escapeHtml(courseId)}">
+                <span>
+                  <b>${escapeHtml(getAdminCourseBuilderCourseLabel(courseId))}</b>
+                  <small>${escapeHtml(courseRequests.length)} request${courseRequests.length === 1 ? "" : "s"}</small>
+                </span>
+                ${pendingCount ? `<span class="nav-badge">${pendingCount}</span>` : ""}
+              </button>
+              ${pendingCount ? `<button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-all-pending-course" data-course-id="${escapeHtml(courseId)}">Approve all pending</button>` : ""}
+            </div>
+            <div class="admin-request-group-body">
+              ${courseRequests.map((request) => `
+                <div class="course-request-row">
+                  <span>
+                    <b>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}</b>
+                    <small>Requested ${escapeHtml(formatReportDateTime(request.created_at || ""))}</small>
+                    <small style="text-transform: uppercase;">Status: ${escapeHtml(request.status || "pending")}</small>
+                  </span>
+                  <div class="stack">
+                    <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
+                    <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          </section>
+        `;
+      }).join("") : `<p class="subtle">No enrollment requests match this filter.</p>`}
+    </div>
+  `;
+}
+
 function getAdminCoursePlatformSection() {
   const section = String(state.adminCoursePlatformSection || "").trim();
   return ADMIN_COURSES_PLATFORM_SECTIONS.has(section) ? section : "builder";
@@ -40792,11 +41236,14 @@ function adminRenderCourseBuilder(courseId) {
   }
   const selectedCourseId = String(selectedCourse?.id || "").trim();
   const rows = getAdminCourseBuilderCourseRows(selectedCourseId);
-  const profileCount = rows.enrollments.length;
-  const requestQueue = getAdminCourseRequestQueue(selectedCourseId);
-  const pendingRequestCount = requestQueue.filter((request) => String(request?.status || "").trim() === "pending").length;
+  const pendingRequestCount = (state.adminCoursesPlatformRequests || []).filter(
+    (request) => String(request?.course_id || "").trim() === selectedCourseId
+      && String(request?.status || "").trim() === "pending",
+  ).length;
   const activePlatformSection = getAdminCoursePlatformSection();
   const showPlatformPreview = activePlatformSection === "preview" || Boolean(state.adminCourseBuilderPreview);
+  const useCourseTableSelector = courses.length > 3;
+  const showOverviewCourseTable = activePlatformSection === "overview" && !useCourseTableSelector;
   const sectionCopy = {
     overview: {
       title: "Course metadata",
@@ -40880,38 +41327,14 @@ function adminRenderCourseBuilder(courseId) {
       </form>` : ""}
       
       ${!selectedCourse ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
-        <div class="courses-builder-selector">
-          <label>Selected Course
-            <select id="admin-course-builder-course-select">
-              ${courses.map((course) => `<option value="${escapeHtml(course.id)}" ${course.id === selectedCourseId ? "selected" : ""}>${escapeHtml(getCoursePlatformCourseTitle(course))} • Y${escapeHtml(course.academic_year)} S${escapeHtml(course.academic_semester)}</option>`).join("")}
-            </select>
-          </label>
-          <span class="admin-course-meta-pill"><b>${rows.modules.length}</b><small>Modules</small></span>
-          <span class="admin-course-meta-pill"><b>${rows.lessons.length}</b><small>Lessons</small></span>
-          <span class="admin-course-meta-pill"><b>${profileCount}</b><small>Enrollments</small></span>
-          <span class="admin-course-meta-pill"><b>${pendingRequestCount}</b><small>Pending requests</small></span>
-        </div>
+        ${activePlatformSection !== "requests" ? renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) : ""}
 
         ${activePlatformSection === "overview" ? `
+          ${renderAdminCourseStatsCards()}
+          ${showOverviewCourseTable ? renderAdminCourseTable(courses, selectedCourseId, { showStats: false }) : ""}
           <div class="course-platform-section-note">
-            <b>All student courses</b>
-            <span>${escapeHtml(courses.length)} course${courses.length === 1 ? "" : "s"} are managed here. Pick a course from the selector above to edit its metadata.</span>
-          </div>
-          <div class="course-platform-course-list">
-            ${courses.map((course) => {
-              const courseRows = getAdminCourseBuilderCourseRows(course.id);
-              const isSelected = String(course.id || "") === selectedCourseId;
-              return `
-                <button class="course-platform-course-tile ${isSelected ? "is-active" : ""}" type="button" data-action="admin-select-course-platform-course" data-course-id="${escapeHtml(course.id)}">
-                  <span>
-                    <b>${escapeHtml(getCoursePlatformCourseTitle(course))}</b>
-                    <small>Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")} • ${escapeHtml(normalizeCoursePlatformMode(course.enrollment_mode) === "assigned" ? "Assigned" : "Request only")}</small>
-                  </span>
-                  <span class="${course.is_published ? "admin-badge-published" : "admin-badge-draft"}">${course.is_published ? "Published" : "Draft"}</span>
-                  <small>${courseRows.lessons.length} lesson${courseRows.lessons.length === 1 ? "" : "s"} • ${courseRows.enrollments.length} enrolled</small>
-                </button>
-              `;
-            }).join("")}
+            <b>Course metadata</b>
+            <span>${useCourseTableSelector ? "Select a course from the table above to edit its details." : "Select a course from the table to edit its details."}</span>
           </div>
           <form id="admin-course-metadata-form" class="course-builder-form">
             <h4>
@@ -40943,7 +41366,10 @@ function adminRenderCourseBuilder(courseId) {
               <label class="course-builder-check"><input type="checkbox" name="is_published" ${selectedCourse.is_published ? "checked" : ""} /> Published course</label>
               <label class="course-builder-check"><input type="checkbox" name="is_active" ${selectedCourse.is_active !== false ? "checked" : ""} /> Active course</label>
             </div>
-            <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+            <div class="stack" style="margin-top: 0.75rem;">
+              <button class="btn admin-btn-sm" type="submit">Save course metadata</button>
+              <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-platform-course" data-course-id="${escapeHtml(selectedCourseId)}">Delete course</button>
+            </div>
           </form>
         ` : ""}
 
@@ -40980,7 +41406,7 @@ function adminRenderCourseBuilder(courseId) {
           </div>
         ` : ""}
 
-        ${activePlatformSection === "suggestions" ? adminRenderSuggestionSettings(selectedCourseId) : ""}
+        ${activePlatformSection === "suggestions" ? `${renderAdminGlobalSuggestions()}${adminRenderSuggestionSettings(selectedCourseId)}` : ""}
 
         ${activePlatformSection === "builder" ? `
           <form id="admin-course-module-create-form" class="course-builder-form">
@@ -41123,88 +41549,11 @@ function adminRenderCourseBuilder(courseId) {
             }).join("") || `<div class="admin-course-empty-state"><h4 style="margin: 0;">No modules yet</h4><p class="subtle" style="margin: 0;">Add the first module above.</p></div>`}
           </div>` : ""}
 
-        ${activePlatformSection === "announcements" ? `
-          <form id="admin-course-announcement-form" class="course-builder-form">
-            <h4>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
-                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-              </svg>
-              Announcements
-            </h4>
-            <label>Title<input name="title" required /></label>
-            <label>Body<textarea name="body" rows="3" required></textarea></label>
-            <label class="course-builder-check"><input type="checkbox" name="is_published" checked /> Published</label>
-            <button class="btn admin-btn-sm" type="submit">Post announcement</button>
-            <div class="course-builder-list" style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem;">
-              ${rows.announcements.map((item) => `
-                <div style="padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
-                  <span>
-                    <b style="font-size: 0.95rem; color: var(--ink);">${escapeHtml(item.title)}</b>
-                    <p class="subtle" style="margin: 0.2rem 0 0; font-size: 0.85rem;">${escapeHtml(item.body || "")}</p>
-                  </span>
-                  <span class="${item.is_published ? "admin-badge-published" : "admin-badge-draft"}">${item.is_published ? "Published" : "Draft"}</span>
-                </div>
-              `).join("") || `<p class="subtle">No announcements yet.</p>`}
-            </div>
-          </form>
-        ` : ""}
+        ${activePlatformSection === "announcements" ? renderAdminAnnouncementsSection(courses, selectedCourseId, rows) : ""}
 
-        ${activePlatformSection === "enrollments" ? `
-          <form id="admin-course-bulk-enroll-form" class="course-builder-form">
-            <h4>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                <circle cx="9" cy="7" r="4"></circle>
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-              </svg>
-              Enrollments
-            </h4>
-            <div class="course-builder-grid compact">
-              <label>Year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${Number(selectedCourse.academic_year) === year ? "selected" : ""}>Year ${year}</option>`).join("")}</select></label>
-              <label>Semester<select name="academic_semester"><option value="1" ${Number(selectedCourse.academic_semester) === 1 ? "selected" : ""}>Semester 1</option><option value="2" ${Number(selectedCourse.academic_semester) === 2 ? "selected" : ""}>Semester 2</option></select></label>
-            </div>
-            <button class="btn admin-btn-sm" type="submit">Bulk enroll students</button>
-            <p class="subtle">This course currently has <b>${rows.enrollments.length}</b> enrolled student${rows.enrollments.length === 1 ? "" : "s"}.</p>
-            <div class="course-enrollment-admin-list">
-              ${rows.enrollments.length ? rows.enrollments.map((enrollment) => `
-                <div class="course-request-row course-enrollment-row">
-                  <span>
-                    <b>${escapeHtml(getAdminCourseBuilderProfileLabel(enrollment.user_id))}</b>
-                    <small>Enrolled ${escapeHtml(formatReportDateTime(enrollment.assigned_at || ""))}</small>
-                  </span>
-                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-cancel-course-enrollment" data-user-id="${escapeHtml(enrollment.user_id)}" data-course-id="${escapeHtml(enrollment.course_id)}">Cancel enrollment</button>
-                </div>
-              `).join("") : `<p class="subtle">No students are enrolled in this course yet.</p>`}
-            </div>
-          </form>
-        ` : ""}
+        ${activePlatformSection === "enrollments" ? renderAdminEnrollmentsSection(selectedCourse, rows) : ""}
 
-        ${activePlatformSection === "requests" ? `
-          <div class="course-builder-form">
-            <h4>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-              </svg>
-              Enrollment requests
-            </h4>
-            ${requestQueue.length ? requestQueue.map((request) => `
-              <div class="course-request-row">
-                <span>
-                  <b>${escapeHtml(getAdminCourseBuilderProfileLabel(request.user_id))}</b>
-                  <small>${escapeHtml(getAdminCourseBuilderCourseLabel(request.course_id))}</small>
-                  <small style="text-transform: uppercase;">Status: ${escapeHtml(request.status || "pending")}</small>
-                </span>
-                <div class="stack">
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="admin-approve-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "approved" ? "disabled" : ""}>Approve</button>
-                  <button class="btn danger admin-btn-sm" type="button" data-action="admin-reject-course-request" data-request-id="${escapeHtml(request.id)}" ${request.status === "rejected" ? "disabled" : ""}>Reject</button>
-                </div>
-              </div>
-            `).join("") : `<p class="subtle">No access requests.</p>`}
-          </div>
-        ` : ""}
+        ${activePlatformSection === "requests" ? renderAdminRequestsSection(courses) : ""}
       `}
     </section>
   `;
@@ -41239,6 +41588,41 @@ function wireAdminCoursesPlatformBuilder() {
     state.adminCourseBuilderPreview = false;
     state.skipNextRouteAnimation = true;
     render();
+  });
+
+  const rerenderAdminCourses = () => {
+    state.skipNextRouteAnimation = true;
+    render();
+  };
+
+  root.querySelector("#admin-course-table-search")?.addEventListener("input", (event) => {
+    state.adminCourseTableSearch = String(event.target?.value || "");
+    rerenderAdminCourses();
+  });
+
+  root.querySelectorAll("[data-action='admin-course-table-filter'], #admin-course-table-filter-year, #admin-course-table-filter-semester, #admin-course-table-filter-status").forEach((select) => {
+    select.addEventListener("change", (event) => {
+      const target = event.currentTarget;
+      if (target.id === "admin-course-table-filter-year") {
+        state.adminCourseTableFilterYear = String(target.value || "");
+      } else if (target.id === "admin-course-table-filter-semester") {
+        state.adminCourseTableFilterSemester = String(target.value || "");
+      } else if (target.id === "admin-course-table-filter-status") {
+        state.adminCourseTableFilterStatus = String(target.value || "all");
+      }
+      rerenderAdminCourses();
+    });
+  });
+
+  root.querySelector("#admin-enrollment-search")?.addEventListener("input", (event) => {
+    state.adminEnrollmentSearch = String(event.target?.value || "");
+    state.adminEnrollmentListLimit = 25;
+    rerenderAdminCourses();
+  });
+
+  root.querySelector("#admin-announcement-course-filter")?.addEventListener("change", (event) => {
+    state.adminAnnouncementCourseFilter = String(event.target?.value || "all");
+    rerenderAdminCourses();
   });
 
   const runAdminCourseAction = async (label, task) => {
@@ -41368,7 +41752,59 @@ function wireAdminCoursesPlatformBuilder() {
       const studentLabel = getAdminCourseBuilderProfileLabel(userId);
       if (!window.confirm(`Cancel enrollment for ${studentLabel}? The course will be removed from this student's Enrolled Courses page.`)) return;
       runAdminCourseAction("Enrollment cancelled.", () => adminCancelCourseEnrollment(userId, courseId));
+    } else if (action === "admin-delete-announcement") {
+      const announcementId = button.getAttribute("data-announcement-id") || "";
+      if (!window.confirm("Delete this announcement?")) return;
+      runAdminCourseAction("Announcement deleted.", () => adminDeleteAnnouncement(announcementId));
+    } else if (action === "admin-delete-platform-course") {
+      const courseId = button.getAttribute("data-course-id") || "";
+      const courseLabel = getAdminCourseBuilderCourseLabel(courseId);
+      if (!window.confirm(`Delete ${courseLabel}? This permanently removes the course and all related modules, lessons, enrollments, and requests.`)) return;
+      runAdminCourseAction("Course deleted.", () => adminDeletePlatformCourse(courseId));
+    } else if (action === "admin-request-filter") {
+      state.adminRequestFilterStatus = String(button.getAttribute("data-status") || "all");
+      rerenderAdminCourses();
+    } else if (action === "admin-toggle-request-group") {
+      const courseId = button.getAttribute("data-course-id") || "";
+      if (!state.adminRequestGroupCollapsed) state.adminRequestGroupCollapsed = {};
+      state.adminRequestGroupCollapsed[courseId] = !state.adminRequestGroupCollapsed[courseId];
+      rerenderAdminCourses();
+    } else if (action === "admin-approve-all-pending-course") {
+      const courseId = button.getAttribute("data-course-id") || "";
+      const courseLabel = getAdminCourseBuilderCourseLabel(courseId);
+      if (!window.confirm(`Approve all pending enrollment requests for ${courseLabel}?`)) return;
+      runAdminCourseAction("Pending requests approved.", async () => {
+        const count = await adminApproveAllPendingEnrollmentRequests(courseId);
+        toast(`Approved ${count} request${count === 1 ? "" : "s"}.`);
+      });
+    } else if (action === "admin-approve-all-pending-global") {
+      if (state.adminApproveAllPendingRunning) return;
+      if (!window.confirm("Approve all pending enrollment requests across every course?")) return;
+      state.adminApproveAllPendingRunning = true;
+      rerenderAdminCourses();
+      runAdminCourseAction("All pending requests approved.", async () => {
+        try {
+          const count = await adminApproveAllPendingEnrollmentRequests();
+          toast(`Approved ${count} request${count === 1 ? "" : "s"}.`);
+        } finally {
+          state.adminApproveAllPendingRunning = false;
+        }
+      });
+    } else if (action === "admin-enrollment-show-more") {
+      state.adminEnrollmentListLimit = Math.max(25, Number(state.adminEnrollmentListLimit) || 25) + 25;
+      rerenderAdminCourses();
     }
+  });
+
+  root.querySelectorAll(".admin-course-table tbody tr[data-action]").forEach((row) => {
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      const courseId = row.getAttribute("data-course-id") || "";
+      if (!isUuidValue(courseId)) return;
+      state.adminCourseBuilderCourseId = courseId;
+      rerenderAdminCourses();
+    });
   });
 }
 
