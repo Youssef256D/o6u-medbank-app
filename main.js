@@ -39321,7 +39321,7 @@ function getCoursePlatformSuggestionRows(decorated) {
   const nowMs = Date.now();
   return (state.coursesSuggestions || [])
     .map((suggestion) => ({ suggestion, ...(rowsByCourseId.get(String(suggestion?.course_id || "").trim()) || {}) }))
-    .filter((row) => row.course && !row.enrollment?.isEnrolled)
+    .filter((row) => row.course)
     .filter(({ suggestion }) => {
       if (suggestion?.is_active === false) return false;
       const startsMs = parseSyncTimestampMs(suggestion?.starts_at);
@@ -39350,7 +39350,7 @@ function filterCoursePlatformRows(rows, tab, query, filter) {
     }
     if (tab === "suggestions") {
       if (filter === "pending") return row.enrollment.requestStatus === "pending";
-      if (filter === "available") return row.enrollment.requestStatus !== "pending";
+      if (filter === "available") return row.enrollment.requestStatus !== "pending" && !row.enrollment.isEnrolled;
       return true;
     }
     return true;
@@ -39515,7 +39515,7 @@ function loadContinueLearning(enrolledRows = loadStudentEnrolledCourses()) {
     course: row.course,
     lesson,
     module: getCoursePlatformModuleForLesson(lesson),
-    progressPercent: Math.max(0, Math.min(100, Math.round(Number(latestProgress.progress_percent) || row.progress || 0))),
+    progressPercent: Math.max(0, Math.min(100, Math.round(row.progress || 0))),
   };
 }
 
