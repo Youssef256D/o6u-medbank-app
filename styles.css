@@ -8526,55 +8526,375 @@ html body :is(.title,
 
 }
 
+/* ==========================================================================
+   APP LAUNCHER (DASHBOARD)
+   ========================================================================== */
+
+.app-launcher-wrapper {
+  position: relative;
+  width: 100%;
+  overflow: visible;
+  padding: 3rem 1rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.launcher-glow-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.25;
+  z-index: 0;
+  pointer-events: none;
+  animation: launcher-blob-drift 14s infinite alternate ease-in-out;
+}
+
+.launcher-glow-blob-1 {
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, var(--brand) 0%, rgba(23,126,137,0) 70%);
+  top: -10%;
+  left: 15%;
+}
+
+.launcher-glow-blob-2 {
+  width: 320px;
+  height: 320px;
+  background: radial-gradient(circle, var(--accent) 0%, rgba(244,162,89,0) 70%);
+  bottom: -15%;
+  right: 15%;
+  animation-delay: -7s;
+}
+
+@keyframes launcher-blob-drift {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    transform: translate(40px, 30px) scale(1.15);
+  }
+}
+
 .app-launcher-panel {
-  max-width: 40rem;
-  margin: 2rem auto;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 3.5rem 3rem;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 10px 40px rgba(31, 38, 135, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  z-index: 1;
+  position: relative;
   text-align: center;
+}
+
+.launcher-header {
+  margin-bottom: 3rem;
+}
+
+.launcher-header .kicker {
+  font-size: 0.82rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  font-weight: 800;
+  color: var(--brand);
+  margin-bottom: 0.5rem;
+}
+
+.launcher-header .title {
+  font-size: 2.4rem;
+  font-weight: 900;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  margin: 0 0 0.6rem;
+}
+
+.launcher-header .subtle {
+  font-size: 0.98rem;
+  color: var(--muted);
+  margin: 0;
 }
 
 .app-launcher-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
-  margin-top: 2rem;
+  gap: 2rem;
 }
 
 .app-launcher-card {
-  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.8rem 2rem 2.2rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.65);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.02), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   cursor: pointer;
   text-align: center;
-  transition: transform 0.15s, box-shadow 0.15s;
-  border: 2px solid var(--border, #e0e0e0);
-  background: var(--card-bg, #fff);
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  outline: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.app-launcher-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, var(--brand), var(--accent));
+  opacity: 0;
+  transition: opacity 0.3s ease;
 }
 
 .app-launcher-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.1);
+  transform: translateY(-6px);
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 15px 35px rgba(23, 126, 137, 0.08), 0 5px 15px rgba(0, 0, 0, 0.02);
 }
 
-.app-launcher-icon {
-  font-size: 2.5rem;
-  margin-bottom: 0.75rem;
+.app-launcher-card:hover::before {
+  opacity: 1;
+}
+
+.app-launcher-icon-wrapper {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.6rem;
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-launcher-icon-wrapper.is-mcq {
+  background: rgba(23, 126, 137, 0.08);
+  color: var(--brand);
+}
+
+.app-launcher-icon-wrapper.is-courses {
+  background: rgba(244, 162, 89, 0.08);
+  color: var(--accent);
+}
+
+.app-launcher-card:hover .app-launcher-icon-wrapper.is-mcq {
+  background: var(--brand-soft);
+  transform: scale(1.1) rotate(-3deg);
+  box-shadow: 0 8px 20px rgba(23, 126, 137, 0.15);
+}
+
+.app-launcher-card:hover .app-launcher-icon-wrapper.is-courses {
+  background: rgba(244, 162, 89, 0.15);
+  transform: scale(1.1) rotate(3deg);
+  box-shadow: 0 8px 20px rgba(244, 162, 89, 0.2);
+}
+
+.launcher-svg-icon {
+  width: 32px;
+  height: 32px;
+  z-index: 1;
+}
+
+.icon-pulse-ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  border: 2px solid currentColor;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-launcher-card:hover .icon-pulse-ring {
+  animation: icon-pulse-out 0.8s ease-out;
+}
+
+@keyframes icon-pulse-out {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(1.3);
+    opacity: 0;
+  }
+}
+
+.checkmark-path {
+  stroke-dasharray: 50;
+  stroke-dashoffset: 50;
+  transition: stroke-dashoffset 0.6s ease-out;
+}
+
+.app-launcher-card:hover .checkmark-path {
+  stroke-dashoffset: 0;
+}
+
+.cap-path {
+  transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.app-launcher-card:hover .cap-path {
+  transform: translateY(-2px);
 }
 
 .app-launcher-card h3 {
-  margin: 0 0 0.5rem;
-  font-size: 1.15rem;
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin: 0 0 0.6rem;
 }
 
 .app-launcher-card p {
-  margin: 0;
-  font-size: 0.875rem;
-  opacity: 0.75;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 0 0 1.8rem;
+  flex-grow: 1;
+  opacity: 0.85;
 }
 
-@media (max-width: 500px) {
-  .app-launcher-grid {
-    grid-template-columns: 1fr;
-    gap: 1rem;
+.app-launcher-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.55rem 1.1rem;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  transition: all 0.3s ease;
+}
+
+.app-launcher-card:hover .app-launcher-badge {
+  background: var(--brand);
+  color: #fff;
+}
+
+.app-launcher-card:hover [data-nav="courses"] .app-launcher-badge,
+.app-launcher-card:hover .is-courses ~ .app-launcher-badge {
+  background: var(--accent);
+  color: #fff;
+}
+
+.arrow-icon {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-launcher-card:hover .arrow-icon {
+  transform: translateX(4px);
+}
+
+/* Dark Mode Launcher Styles */
+body.theme-dark .launcher-glow-blob-1 {
+  background: radial-gradient(circle, rgba(23,126,137,0.3) 0%, rgba(23,126,137,0) 70%);
+}
+
+body.theme-dark .launcher-glow-blob-2 {
+  background: radial-gradient(circle, rgba(244,162,89,0.2) 0%, rgba(244,162,89,0) 70%);
+}
+
+body.theme-dark .app-launcher-panel {
+  background: rgba(18, 18, 18, 0.45);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+body.theme-dark .app-launcher-card {
+  background: rgba(26, 26, 26, 0.6);
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+body.theme-dark .app-launcher-card:hover {
+  background: rgba(32, 32, 32, 0.85);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.4), 0 5px 15px rgba(23, 126, 137, 0.08);
+}
+
+body.theme-dark .app-launcher-badge {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Comfort Mode Launcher Styles */
+body.theme-comfort .launcher-glow-blob-1 {
+  background: radial-gradient(circle, rgba(118, 86, 63, 0.2) 0%, rgba(118, 86, 63, 0) 70%);
+}
+
+body.theme-comfort .launcher-glow-blob-2 {
+  background: radial-gradient(circle, rgba(216, 125, 49, 0.15) 0%, rgba(216, 125, 49, 0) 70%);
+}
+
+body.theme-comfort .app-launcher-panel {
+  background: rgba(240, 236, 227, 0.55);
+  border-color: rgba(105, 81, 61, 0.2);
+  box-shadow: 0 10px 40px rgba(105, 81, 61, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+body.theme-comfort .app-launcher-card {
+  background: rgba(247, 245, 240, 0.7);
+  border-color: rgba(105, 81, 61, 0.15);
+  box-shadow: 0 4px 15px rgba(105, 81, 61, 0.02), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+body.theme-comfort .app-launcher-card:hover {
+  background: rgba(255, 254, 252, 0.95);
+  border-color: rgba(105, 81, 61, 0.25);
+  box-shadow: 0 18px 40px rgba(118, 86, 63, 0.1), 0 5px 15px rgba(0, 0, 0, 0.02);
+}
+
+body.theme-comfort .app-launcher-badge {
+  background: rgba(118, 86, 63, 0.08);
+  color: #76563f;
+}
+
+body.theme-comfort .app-launcher-card:hover .app-launcher-badge {
+  background: #76563f;
+  color: #f7efe5;
+}
+
+body.theme-comfort .app-launcher-card:hover [data-nav="courses"] .app-launcher-badge,
+body.theme-comfort .app-launcher-card:hover .is-courses ~ .app-launcher-badge {
+  background: #d87d31;
+  color: #f7efe5;
+}
+
+@media (max-width: 768px) {
+  .app-launcher-panel {
+    padding: 3rem 2rem;
+    margin: 1.5rem 1rem;
   }
 }
+
+@media (max-width: 560px) {
+  .app-launcher-grid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+  .app-launcher-card {
+    padding: 2.2rem 1.5rem;
+  }
+  .launcher-header .title {
+    font-size: 2rem;
+  }
+}
+
 
 .courses-shell {
   max-width: 1180px;

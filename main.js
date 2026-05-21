@@ -40902,23 +40902,46 @@ function wireAdminCoursesPlatformBuilder() {
 function renderAppLauncher() {
   const user = getCurrentUser();
   return `
-    <section class="panel app-launcher-panel">
-      <p class="kicker">Welcome back</p>
-      <h2 class="title">Dr. ${escapeHtml(user?.name || "")}</h2>
-      <p class="subtle" style="margin-top: 0.25rem;">Choose an app to get started</p>
-      <div class="app-launcher-grid">
-        <button class="card app-launcher-card" type="button" data-action="open-mcq-bank">
-          <div class="app-launcher-icon">📝</div>
-          <h3>MCQ Bank</h3>
-          <p>Practice questions, take tests, and track your progress</p>
-        </button>
-        <button class="card app-launcher-card" data-nav="courses">
-          <div class="app-launcher-icon">📚</div>
-          <h3>Courses</h3>
-          <p>Browse course materials and learning resources</p>
-        </button>
-      </div>
-    </section>
+    <div class="app-launcher-wrapper">
+      <div class="launcher-glow-blob launcher-glow-blob-1"></div>
+      <div class="launcher-glow-blob launcher-glow-blob-2"></div>
+      
+      <section class="panel app-launcher-panel">
+        <div class="launcher-header">
+          <p class="kicker">Welcome back</p>
+          <h2 class="title">Dr. ${escapeHtml(user?.name || "")}</h2>
+          <p class="subtle">Select a portal to begin your learning session</p>
+        </div>
+        
+        <div class="app-launcher-grid">
+          <button class="card app-launcher-card" type="button" data-action="open-mcq-bank">
+            <div class="app-launcher-icon-wrapper is-mcq">
+              <div class="icon-pulse-ring"></div>
+              <svg class="launcher-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 11l3 3L22 4" class="animated-path checkmark-path" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+            </div>
+            <h3>MCQ Bank</h3>
+            <p>Practice questions, customize mock tests, and track your performance trends.</p>
+            <span class="app-launcher-badge">Practice Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg></span>
+          </button>
+          
+          <button class="card app-launcher-card" data-nav="courses" type="button">
+            <div class="app-launcher-icon-wrapper is-courses">
+              <div class="icon-pulse-ring"></div>
+              <svg class="launcher-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
+                <path d="M6 12v5c0 1.1 2.7 3 6 3s6-1.9 6-3v-5" class="animated-path cap-path" />
+              </svg>
+            </div>
+            <h3>Courses</h3>
+            <p>Browse interactive syllabus modules, access lessons, and view learning resources.</p>
+            <span class="app-launcher-badge">Learning Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg></span>
+          </button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
