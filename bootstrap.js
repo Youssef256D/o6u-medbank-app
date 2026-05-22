@@ -1,7 +1,14 @@
 (() => {
   const versionTag = document.querySelector('meta[name="app-version"]');
   const appVersion = String(versionTag?.getAttribute("content") || "").trim();
-  const versionSuffix = appVersion ? `?v=${encodeURIComponent(appVersion)}` : "";
+  let requestedAppVersion = "";
+  try {
+    requestedAppVersion = String(new URL(window.location.href).searchParams.get("appv") || "").trim();
+  } catch {
+    requestedAppVersion = "";
+  }
+  const effectiveAppVersion = requestedAppVersion || appVersion;
+  const versionSuffix = effectiveAppVersion ? `?v=${encodeURIComponent(effectiveAppVersion)}` : "";
   const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
   const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
   const GOOGLE_OAUTH_PENDING_KEY = "mcq_google_oauth_pending";
@@ -28,6 +35,8 @@
     "forgot",
     "reset-password",
     "complete-profile",
+    "app-launcher",
+    "courses",
     "dashboard",
     "notifications",
     "create-test",
@@ -451,7 +460,7 @@
 
   async function ensureLatestPublishedVersionOnStartup() {
     const publishedVersion = await fetchPublishedAppVersion();
-    if (!publishedVersion || publishedVersion === appVersion) {
+    if (!publishedVersion || publishedVersion === effectiveAppVersion) {
       clearSessionValue(BOOTSTRAP_RELOAD_TARGET_KEY);
       return false;
     }
@@ -493,7 +502,7 @@
     let reloadedForControllerChange = false;
     window.addEventListener("load", () => {
       const currentSwUrl = new URL(`./sw.js${versionSuffix}`, window.location.href).href;
-      const currentCacheName = `o6u-medbank-static-v${appVersion.replaceAll(".", "-") || "runtime"}`;
+      const currentCacheName = `o6u-medbank-static-v${effectiveAppVersion.replaceAll(".", "-") || "runtime"}`;
 
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (reloadedForControllerChange) {

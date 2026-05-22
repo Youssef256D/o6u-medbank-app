@@ -179,6 +179,8 @@ const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000
 const QUESTION_RELATIONAL_PAGE_SIZE = 250;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
+const SESSION_HISTORY_SYNC_BATCH_SIZE = 25;
+const SESSION_HISTORY_SYNC_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 45000);
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
 const SUPABASE_AUTH_FETCH_TIMEOUT_MS = SUPABASE_SESSION_TIMEOUT_MS + 5000;
@@ -14379,7 +14381,11 @@ async function syncSessionsToRelational(sessionsPayload) {
       .order("course_name", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to)
-  ));
+  ), {
+    pageSize: 250,
+    timeoutMs: SESSION_HISTORY_SYNC_TIMEOUT_MS,
+    timeoutMessage: "Course lookup for session history sync timed out.",
+  });
   if (courseRowsResult.error) {
     throw courseRowsResult.error;
   }
@@ -14404,6 +14410,7 @@ async function syncSessionsToRelational(sessionsPayload) {
       ),
     );
     return {
+      sourceSession: session,
       row: {
         user_id: ownerProfileId,
         external_id: sessionId,
@@ -14428,7 +14435,9 @@ async function syncSessionsToRelational(sessionsPayload) {
   }
 
   const persistedHistoryBySyncKey = new Map();
-  for (const rowBatch of splitIntoBatches(desiredRows, RELATIONAL_INSERT_BATCH_SIZE)) {
+  const rowBatches = splitIntoBatches(desiredRows, SESSION_HISTORY_SYNC_BATCH_SIZE);
+  for (let batchIndex = 0; batchIndex < rowBatches.length; batchIndex += 1) {
+    const rowBatch = rowBatches[batchIndex];
     const batchRows = rowBatch.map((entry) => entry.row);
     let persistedRows;
     try {
@@ -14441,10 +14450,25 @@ async function syncSessionsToRelational(sessionsPayload) {
           })
           .select("id,user_id,external_id"),
         "Completed session history sync timed out.",
+        SESSION_HISTORY_SYNC_TIMEOUT_MS,
       );
     } catch (error) {
       if (isMissingRelationError(error)) {
         throw new Error("Previous-test history table is missing in Supabase. Run the latest migration first.");
+      }
+      const retrySessions = rowBatches
+        .slice(batchIndex)
+        .flat()
+        .map((entry) => entry.sourceSession)
+        .filter(Boolean);
+      if (retrySessions.length) {
+        const retryError = error && typeof error === "object"
+          ? error
+          : new Error(getErrorMessage(error, "Completed session history sync failed."));
+        retryError.retryRelationalPayload = retrySessions;
+        retryError.retryRelationalMessage = "Some completed test history is still queued for retry. The remaining items will sync again soon.";
+        retryError.partialRelationalSuccess = persistedHistoryBySyncKey.size > 0;
+        throw retryError;
       }
       throw error;
     }
@@ -15001,6 +15025,74 @@ function scheduleDeferredAppResume(delayMs = 0) {
   }, Math.max(0, Number(delayMs) || 0));
 }
 
+function isEditableCourseProtectionTarget(target) {
+  const element = target?.closest?.("input, textarea, select, [contenteditable='true']");
+  return Boolean(element);
+}
+
+function isProtectedCoursesRoute() {
+  return String(state.route || "").trim().toLowerCase() === "courses";
+}
+
+function isInsideProtectedCoursesSurface(target) {
+  return Boolean(target?.closest?.(".courses-shell, [data-protected-course-content='true']"));
+}
+
+function shouldBlockCoursesShortcut(event) {
+  if (!isProtectedCoursesRoute() || isEditableCourseProtectionTarget(event.target)) {
+    return false;
+  }
+  const key = String(event.key || "").trim().toLowerCase();
+  if (key === "printscreen" || key === "f12") {
+    return true;
+  }
+  const modifier = event.ctrlKey || event.metaKey;
+  if (!modifier) {
+    return false;
+  }
+  if (["s", "p", "u"].includes(key)) {
+    return true;
+  }
+  if (["c", "x"].includes(key) && isInsideProtectedCoursesSurface(event.target)) {
+    return true;
+  }
+  return event.shiftKey && ["i", "j", "c"].includes(key);
+}
+
+function handleProtectedCoursesEvent(event) {
+  if (!isProtectedCoursesRoute() || !isInsideProtectedCoursesSurface(event.target)) {
+    return;
+  }
+  if (isEditableCourseProtectionTarget(event.target)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleProtectedCoursesKeydown(event) {
+  if (!shouldBlockCoursesShortcut(event)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  if (String(event.key || "").trim().toLowerCase() === "printscreen" && navigator?.clipboard?.writeText) {
+    navigator.clipboard.writeText("").catch(() => { });
+  }
+}
+
+function setCoursePrivacyObscured(obscured) {
+  document.body.classList.toggle("is-course-privacy-obscured", Boolean(obscured) && isProtectedCoursesRoute());
+}
+
+function syncCourseProtectionUi() {
+  const isCourses = isProtectedCoursesRoute();
+  document.body.classList.toggle("is-courses-route", isCourses);
+  if (!isCourses) {
+    setCoursePrivacyObscured(false);
+  }
+}
+
 function bindGlobalEvents() {
   if (globalEventsBound) {
     return;
@@ -15225,6 +15317,10 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
+    handleProtectedCoursesKeydown(event);
+    if (event.defaultPrevented) {
+      return;
+    }
     if (event.key === "Escape" && (state.userMenuOpen || state.notificationMenuOpen)) {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
@@ -15232,8 +15328,19 @@ function bindGlobalEvents() {
     }
   });
 
+  ["contextmenu", "copy", "cut", "dragstart", "drop", "selectstart"].forEach((eventName) => {
+    document.addEventListener(eventName, handleProtectedCoursesEvent, true);
+  });
+
+  document.addEventListener("auxclick", (event) => {
+    if (Number(event.button) > 0) {
+      handleProtectedCoursesEvent(event);
+    }
+  }, true);
+
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
+      setCoursePrivacyObscured(true);
       clearLifecycleResumeHandle();
       persistInProgressSessionSnapshot({
         immediate: true,
@@ -15246,11 +15353,18 @@ function bindGlobalEvents() {
       }
       return;
     }
+    setCoursePrivacyObscured(false);
     clearBackgroundSync();
     scheduleDeferredAppResume(0);
   });
 
+  window.addEventListener("blur", () => setCoursePrivacyObscured(true));
+  window.addEventListener("focus", () => setCoursePrivacyObscured(false));
+  window.addEventListener("beforeprint", () => setCoursePrivacyObscured(true));
+  window.addEventListener("afterprint", () => setCoursePrivacyObscured(false));
+
   window.addEventListener("pagehide", () => {
+    setCoursePrivacyObscured(true);
     clearLifecycleResumeHandle();
     persistInProgressSessionSnapshot({
       immediate: true,
@@ -15270,6 +15384,7 @@ function bindGlobalEvents() {
   });
 
   window.addEventListener("pageshow", () => {
+    setCoursePrivacyObscured(false);
     scheduleDeferredAppResume(0);
   });
 
@@ -18401,6 +18516,7 @@ function render() {
   appEl.classList.toggle("is-session", isExamWideRoute);
   appEl.classList.toggle("is-admin", isAdminRoute);
   topbarEl?.classList.toggle("hidden", false);
+  syncCourseProtectionUi();
 
   syncTopbar();
   if (
@@ -38681,10 +38797,71 @@ function getCoursePlatformCourseTitle(course) {
 
 function getCoursePlatformCoverUrl(course) {
   const entered = String(course?.cover_image_url || "").trim();
-  if (/^https?:\/\//i.test(entered) || entered.startsWith("Assets/")) {
+  if ((/^https?:\/\//i.test(entered) || entered.startsWith("Assets/")) && entered !== "Assets/branding/web-logo-hero.png") {
     return entered;
   }
-  return "Assets/branding/web-logo-hero.png";
+  return "";
+}
+
+function renderCourseCoverHtml(course, extraClass = "") {
+  const title = getCoursePlatformCourseTitle(course);
+  const coverUrl = getCoursePlatformCoverUrl(course);
+  const hasCover = !!coverUrl;
+
+  // Extract clean initials (ignore prefixes like "Anatomy of", "Intro to", etc.)
+  let cleanTitle = title.replace(/^(anatomy\s+of|intro\s+to|introduction\s+to|principles\s+of|essentials\s+of|applied\s+)\s+/i, "");
+  const words = cleanTitle.split(/\s+/).filter(w => w.trim().length > 0);
+  let initials = "";
+  if (words.length >= 2) {
+    initials = (words[0][0] + words[1][0]).toUpperCase();
+  } else if (words.length === 1 && words[0].length >= 2) {
+    initials = words[0].slice(0, 2).toUpperCase();
+  } else if (words.length === 1) {
+    initials = words[0].slice(0, 1).toUpperCase();
+  } else {
+    initials = "CO";
+  }
+
+  // Hash title for stable gradient index
+  let hash = 0;
+  for (let i = 0; i < title.length; i++) {
+    hash = title.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  
+  // Vibrant gradients
+  const gradients = [
+    { from: "#0f766e", to: "#0d9488" }, // Teal
+    { from: "#1d4ed8", to: "#3b82f6" }, // Royal Blue
+    { from: "#6d28d9", to: "#8b5cf6" }, // Violet/Purple
+    { from: "#b45309", to: "#f59e0b" }, // Warm Amber
+    { from: "#047857", to: "#10b981" }, // Emerald Green
+    { from: "#be185d", to: "#ec4899" }, // Rose Pink
+    { from: "#c2410c", to: "#f97316" }  // Burnt Orange
+  ];
+  const idx = Math.abs(hash) % gradients.length;
+  const g = gradients[idx];
+
+  const placeholderHtml = `
+    <div class="course-cover-placeholder" style="background: linear-gradient(135deg, ${g.from}, ${g.to});">
+      <div class="course-cover-pattern"></div>
+      <span class="course-cover-initials">${escapeHtml(initials)}</span>
+    </div>
+  `;
+
+  if (hasCover) {
+    return `
+      <div class="course-cover-container ${extraClass}">
+        ${placeholderHtml}
+        <img src="${escapeHtml(coverUrl)}" alt="${escapeHtml(title)}" loading="lazy" class="course-cover-image" onerror="this.style.display='none';" />
+      </div>
+    `;
+  }
+
+  return `
+    <div class="course-cover-container ${extraClass}">
+      ${placeholderHtml}
+    </div>
+  `;
 }
 
 function formatCourseDurationLabel(seconds, fallback = "") {
@@ -39399,7 +39576,7 @@ function renderCoursePlatformCard(row, options = {}) {
   return `
     <article class="card course-card ${hasNoContent ? "course-card-empty-content" : ""}">
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" loading="lazy" style="background:#ffffff;" onerror="this.onerror=null; this.src='Assets/branding/web-logo-hero.png';" />
+        ${renderCourseCoverHtml(course)}
         
         <span class="course-card-badge-overlay overlay-year">Y${escapeHtml(course.academic_year || "")} S${escapeHtml(course.academic_semester || "")}</span>
         ${courseCode ? `<span class="course-card-badge-overlay overlay-code">${escapeHtml(courseCode)}</span>` : ""}
@@ -39764,7 +39941,7 @@ function getCoursesTransitionKey() {
 function renderCoursesTransitionStage(markup) {
   const transitionClass = getCoursesTransitionClass();
   const viewKey = getCoursesTransitionKey();
-  return `<div class="courses-transition-stage ${transitionClass}" data-courses-view="${escapeHtml(viewKey)}">${markup}</div>`;
+  return `<div class="courses-transition-stage ${transitionClass}" data-courses-view="${escapeHtml(viewKey)}" data-protected-course-content="true">${markup}</div>`;
 }
 
 function setCoursesTabTransition(previousTab, nextTab) {
@@ -39838,7 +40015,7 @@ function renderCourseDetail(courseId) {
   if (!course && state.coursesLoading) {
     return `
       <section class="panel courses-shell">
-        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+        <button class="btn ghost course-back-btn" type="button" data-action="courses-home">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           <span>Back to Courses</span>
         </button>
@@ -39852,7 +40029,7 @@ function renderCourseDetail(courseId) {
   if (!course) {
     return `
       <section class="panel courses-shell">
-        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+        <button class="btn ghost course-back-btn" type="button" data-action="courses-home">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           <span>Back to Courses</span>
         </button>
@@ -39874,13 +40051,13 @@ function renderCourseDetail(courseId) {
   
   return `
     <section class="panel courses-shell">
-      <button class="btn ghost admin-btn-sm" type="button" data-action="courses-home">
+      <button class="btn ghost course-back-btn" type="button" data-action="courses-home">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
         <span>Back to Courses</span>
       </button>
       
       <div class="course-detail-hero">
-        <img src="${escapeHtml(getCoursePlatformCoverUrl(course))}" alt="" style="background:#ffffff;" onerror="this.onerror=null; this.src='Assets/branding/web-logo-hero.png';" />
+        ${renderCourseCoverHtml(course)}
         <div class="course-detail-copy">
           <p class="kicker">Year ${escapeHtml(course.academic_year || "")} • Semester ${escapeHtml(course.academic_semester || "")}</p>
           <h2 class="title">${escapeHtml(getCoursePlatformCourseTitle(course))}</h2>
@@ -39942,7 +40119,11 @@ function renderCourseDetail(courseId) {
 
       <div class="course-detail-layout">
         <section class="course-modules">
-          <h3>Modules</h3>
+          <div class="course-modules-section-header">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="section-icon"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <h3>Course Curriculum</h3>
+            <span class="module-count-badge">${modules.length} Module${modules.length === 1 ? "" : "s"}</span>
+          </div>
           ${!modules.length ? `
             <div class="courses-empty-state">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -39975,7 +40156,12 @@ function renderCourseDetail(courseId) {
                         <small>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds, lesson.is_free_preview ? "Preview" : ""))}</small>
                       </button>
                     `;
-                  }).join("") || `<p class="subtle">No lessons added yet in this module.</p>`}
+                  }).join("") || `
+                    <div class="course-lessons-empty-state">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="empty-icon"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                      <span>No lessons added yet in this module.</span>
+                    </div>
+                  `}
                 </div>
               </article>
             `;
@@ -40008,8 +40194,8 @@ function renderCourseDetail(courseId) {
             </p>
           </article>
           
-          <article class="card" style="padding: 1.25rem;">
-            <h3 style="margin-bottom: 0.75rem;">Announcements</h3>
+          <article class="card course-announcements-card">
+            <h3>Announcements</h3>
             ${courseAnnouncements.length
               ? `<div class="course-announcements-list">
                   ${courseAnnouncements.map((item) => `
@@ -40132,23 +40318,77 @@ function renderLessonViewer(lessonId) {
   return `
     <section class="panel courses-shell lesson-shell">
       <div class="lesson-topbar">
-        <button class="btn ghost admin-btn-sm" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(lesson.course_id)}">Back to Course</button>
-        <span>${escapeHtml(getCoursePlatformCourseTitle(course))}</span>
+        <button class="btn ghost course-back-btn" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(lesson.course_id)}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          <span>Back to Course</span>
+        </button>
+        <div class="lesson-topbar-breadcrumb">
+          <span class="breadcrumb-prefix">Courses</span>
+          <svg class="breadcrumb-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          <span class="breadcrumb-title">${escapeHtml(getCoursePlatformCourseTitle(course))}</span>
+        </div>
       </div>
       <div class="lesson-layout">
         <article class="card lesson-viewer">
           <div class="lesson-viewer-head">
-            <div>
-              <p class="kicker">${escapeHtml(lesson.lesson_type || "Lesson")}</p>
+            <div class="lesson-viewer-title-area">
+              <span class="lesson-type-badge">${escapeHtml(lesson.lesson_type || "Lesson")}</span>
               <h2>${escapeHtml(lesson.title)}</h2>
-              ${lesson.description ? `<p class="subtle">${escapeHtml(lesson.description)}</p>` : ""}
+              
+              <div class="lesson-metadata-row">
+                ${currentModule ? `
+                  <span class="lesson-meta-item">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    <span>${escapeHtml(currentModule.title)}</span>
+                  </span>
+                ` : ""}
+                ${lesson.duration_seconds ? `
+                  <span class="lesson-meta-item">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    <span>${escapeHtml(formatCourseDurationLabel(lesson.duration_seconds))}</span>
+                  </span>
+                ` : ""}
+              </div>
             </div>
-            <button class="btn ${isComplete ? "ghost" : ""}" type="button" data-action="courses-complete-lesson" data-lesson-id="${escapeHtml(lesson.id)}" ${canCompleteLesson ? "" : "disabled"}>${isComplete ? "Completed" : canCompleteLesson ? "Mark complete" : "Watch video to unlock"}</button>
+            <button class="btn ${isComplete ? "ghost" : ""}" type="button" data-action="courses-complete-lesson" data-lesson-id="${escapeHtml(lesson.id)}" ${canCompleteLesson ? "" : "disabled"}>
+              ${isComplete 
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>Completed` 
+                : "Mark complete"
+              }
+            </button>
           </div>
-          ${rawVideoUrl && !safeVideoUrl && isUploadedCourseVideoSource(rawVideoUrl) ? `<div class="lesson-video-placeholder"><span class="inline-loader" aria-hidden="true"></span><span>Preparing secure video...</span></div>` : ""}
-          ${safeVideoUrl ? `<div class="lesson-video">${directVideo ? `<video id="course-lesson-video-player" controls playsinline preload="metadata" src="${escapeHtml(safeVideoUrl)}"></video>` : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy"></iframe>`}</div>` : ""}
+          
+          ${lesson.description && lesson.description !== currentModule?.title ? `<p class="lesson-description-text">${escapeHtml(lesson.description)}</p>` : ""}
+
+          ${rawVideoUrl && !safeVideoUrl && isUploadedCourseVideoSource(rawVideoUrl) ? `
+            <div class="lesson-video-placeholder">
+              <span class="lesson-video-loader" aria-hidden="true"></span>
+              <span>Preparing secure video stream...</span>
+            </div>
+          ` : ""}
+          
+          ${safeVideoUrl ? `
+            <div class="lesson-video" data-protected-course-content="true">
+              ${directVideo 
+                ? `<video id="course-lesson-video-player" controls playsinline preload="metadata" controlsList="nodownload noplaybackrate noremoteplayback" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" oncontextmenu="return false;" src="${escapeHtml(safeVideoUrl)}"></video>` 
+                : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>`
+              }
+            </div>
+          ` : ""}
+          
           ${isVideoLesson && safeVideoUrl && directVideo && !isComplete ? `<p class="lesson-completion-note">${canCompleteLesson ? "Video watched. You can mark this lesson complete." : "Watch the video until the end to unlock completion."}</p>` : ""}
-          ${lesson.content_html ? `<div class="lesson-content">${escapeHtml(lesson.content_html).replaceAll("\n", "<br />")}</div>` : `<p class="subtle">No text content has been added to this lesson yet.</p>`}
+          
+          ${lesson.content_html ? `
+            <div class="lesson-content">
+              ${escapeHtml(lesson.content_html).replaceAll("\n", "<br />")}
+            </div>
+          ` : `
+            <div class="lesson-content-empty">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="empty-icon"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+              <span>No additional notes or written description provided for this lesson.</span>
+            </div>
+          `}
+          
           ${resources.length ? `
             <div class="lesson-resources">
               <h3>Materials</h3>
@@ -40161,14 +40401,26 @@ function renderLessonViewer(lessonId) {
           ` : ""}
         </article>
         <aside class="card lesson-next">
-          <h3>Lesson navigation</h3>
+          <h3>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: -2px; color: var(--brand);"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+            <span>Lesson Navigation</span>
+          </h3>
           <div style="display: flex; gap: 0.5rem; width: 100%;">
-            <button class="btn ghost" style="flex: 1;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(previous?.id || "")}" ${previous ? "" : "disabled"}>Previous</button>
-            <button class="btn" style="flex: 1;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(next?.id || "")}" ${next ? "" : "disabled"}>Next</button>
+            <button class="btn ghost" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(previous?.id || "")}" ${previous ? "" : "disabled"}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              <span>Previous</span>
+            </button>
+            <button class="btn" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;" type="button" data-action="courses-open-lesson" data-course-id="${escapeHtml(lesson.course_id)}" data-lesson-id="${escapeHtml(next?.id || "")}" ${next ? "" : "disabled"}>
+              <span>Next</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
           </div>
           ${moduleLessons.length ? `
             <div class="lesson-playlist">
-              <div class="lesson-playlist-title">${escapeHtml(currentModule?.title || "Current Module")}</div>
+              <div class="lesson-playlist-title">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: -1px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span>${escapeHtml(currentModule?.title || "Current Module")}</span>
+              </div>
               ${moduleLessons.map((item) => {
                 const isCurrent = String(item.id).trim() === String(lesson.id).trim();
                 const prog = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(item.id || "").trim());
