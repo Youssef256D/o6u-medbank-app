@@ -206,4 +206,6 @@ using (
   and not private.is_app_feature_enabled('courses_coming_soon')
 );
 
+notify pgrst, 'reload schema';
+
 commit;

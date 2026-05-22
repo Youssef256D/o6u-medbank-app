@@ -217,6 +217,7 @@ const SESSION_FONT_SCALE_DEFAULT = 100;
 const SESSION_HIGHLIGHTER_DEFAULT = "yellow";
 const SESSION_HIGHLIGHTER_COLORS = new Set(["yellow", "red", "green"]);
 const COURSES_COMING_SOON_FEATURE_KEY = "courses_coming_soon";
+const COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE = "Courses availability is not installed in Supabase yet. Apply the latest database migration, then refresh the admin dashboard.";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -38916,11 +38917,18 @@ async function loadCoursesComingSoonFlag(options = {}) {
       "Courses availability check timed out.",
     ).catch((error) => {
       if (isMissingRelationError(error)) {
+        state.coursesComingSoonError = COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE;
         return null;
       }
       throw error;
     });
-    applyCoursesComingSoonFlag(Boolean(row?.enabled));
+    const changed = applyCoursesComingSoonFlag(Boolean(row?.enabled));
+    if (!row) {
+      state.coursesComingSoonError = COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE;
+      if (changed) {
+        resetStudentCoursesPlatformState();
+      }
+    }
     return true;
   } catch (error) {
     console.warn("Could not load Courses availability flag.", error?.message || error);
@@ -38948,7 +38956,13 @@ async function saveCoursesComingSoonFlag(enabled) {
     await runRelationalQueryWithTimeout(
       client.from("app_feature_flags").upsert(payload, { onConflict: "feature_key", defaultToNull: false }),
       "Courses availability update timed out.",
-    );
+    ).catch((error) => {
+      if (isMissingRelationError(error)) {
+        state.coursesComingSoonError = COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE;
+        throw new Error(COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE);
+      }
+      throw error;
+    });
     applyCoursesComingSoonFlag(Boolean(enabled));
     return true;
   } finally {
