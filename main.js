@@ -94,7 +94,7 @@ const PRIVATE_ROUTE_SET = new Set([
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"];
 const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
-const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "enrollments", "requests", "preview"]);
+const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "enrollments", "requests", "availability"]);
 const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_PAGE]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const inMemoryStorage = new Map();
@@ -25030,6 +25030,12 @@ function renderAdminCoursesPlatformSidebarNav(activeSection) {
         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
       </svg>
     `],
+    ["availability", "Availability", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        <path d="M9 12l2 2 4-4"></path>
+      </svg>
+    `],
   ];
   return items.map(([section, label, svg]) => {
     const navBadge = section === "requests" && pendingRequestCount
@@ -26787,7 +26793,7 @@ function wireAdmin() {
       }
       state.adminPage = ADMIN_COURSES_PLATFORM_PAGE;
       state.adminCoursePlatformSection = section;
-      state.adminCourseBuilderPreview = section === "preview";
+      state.adminCourseBuilderPreview = false;
       state.adminQuestionModalOpen = false;
       state.adminSelectedQuestionIds = [];
       state.adminBulkActionRunning = false;
@@ -42680,7 +42686,6 @@ function adminRenderCourseBuilder(courseId) {
       && String(request?.status || "").trim() === "pending",
   ).length;
   const activePlatformSection = getAdminCoursePlatformSection();
-  const showPlatformPreview = activePlatformSection === "preview" || Boolean(state.adminCourseBuilderPreview);
   const useCourseTableSelector = courses.length > 3;
   const showOverviewCourseTable = activePlatformSection === "overview" && !useCourseTableSelector;
   const sectionCopy = {
@@ -42708,9 +42713,9 @@ function adminRenderCourseBuilder(courseId) {
       title: "Enrollment requests",
       description: "Approve or reject student requests so approved courses move into their Enrolled Courses page.",
     },
-    preview: {
-      title: "Student preview",
-      description: "Preview how the selected course structure will look to students.",
+    availability: {
+      title: "Course availability",
+      description: "Open or pause the student Courses learning portal without changing MCQ Bank access.",
     },
   }[activePlatformSection] || {
     title: "Courses learning platform",
@@ -42726,15 +42731,13 @@ function adminRenderCourseBuilder(courseId) {
         </div>
         <div class="stack">
           <button class="btn ghost admin-btn-sm ${state.adminCoursesPlatformLoading ? "is-loading" : ""}" type="button" data-action="admin-courses-platform-refresh">${state.adminCoursesPlatformLoading ? "Refreshing..." : "Refresh platform"}</button>
-          <button class="btn ghost admin-btn-sm" type="button" data-action="admin-course-preview-toggle">${showPlatformPreview ? "Close preview" : "Preview as student"}</button>
         </div>
       </div>
 
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
-      ${renderAdminCoursesComingSoonControl()}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
       
-      ${!selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
+      ${activePlatformSection === "availability" ? renderAdminCoursesComingSoonControl() : !selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
         ${activePlatformSection !== "requests" && selectedCourse ? renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) : ""}
 
         ${activePlatformSection === "overview" && selectedCourse ? `
@@ -42857,39 +42860,6 @@ function adminRenderCourseBuilder(courseId) {
               <button class="btn danger admin-btn-sm" type="button" data-action="admin-delete-platform-course" data-course-id="${escapeHtml(selectedCourseId)}">Delete course</button>
             </div>
           </form>
-        ` : ""}
-
-        ${showPlatformPreview && selectedCourse ? `
-          <div class="card course-builder-preview">
-            <h3>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-              Student Preview: ${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}
-            </h3>
-            <p class="subtle">${escapeHtml(selectedCourse.description || "No course description yet.")}</p>
-            ${rows.modules.map((module) => `
-              <section class="course-builder-preview-module">
-                <b>${escapeHtml(module.title)}</b>
-                <ul>
-                  ${rows.lessons.filter((lesson) => lesson.module_id === module.id).map((lesson) => `
-                    <li style="display: flex; align-items: center; gap: 0.5rem;">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand-strong);">
-                        ${lesson.lesson_type === "video" 
-                          ? '<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>' 
-                          : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline>'}
-                      </svg>
-                      <span>${escapeHtml(lesson.title)}</span>
-                      <span class="${lesson.is_published ? "admin-badge-published" : "admin-badge-draft"}" style="font-size: 0.65rem; padding: 0.05rem 0.25rem; margin-left: auto;">
-                        ${lesson.is_published ? "Published" : "Draft"}
-                      </span>
-                    </li>
-                  `).join("") || "<li>No lessons yet</li>"}
-                </ul>
-              </section>
-            `).join("") || `<p class="subtle">No modules yet.</p>`}
-          </div>
         ` : ""}
 
         ${activePlatformSection === "suggestions" && selectedCourse ? `${renderAdminGlobalSuggestions()}${adminRenderSuggestionSettings(selectedCourseId)}` : ""}
@@ -43145,12 +43115,6 @@ function wireAdminCoursesPlatformBuilder() {
 
     if (action === "admin-courses-platform-refresh") {
       runAdminCourseAction("Courses platform refreshed.", () => loadAdminCoursesPlatform({ force: true }));
-    } else if (action === "admin-course-preview-toggle") {
-      const isPreviewOpen = getAdminCoursePlatformSection() === "preview" || Boolean(state.adminCourseBuilderPreview);
-      state.adminCourseBuilderPreview = !isPreviewOpen;
-      state.adminCoursePlatformSection = isPreviewOpen ? "builder" : "preview";
-      state.skipNextRouteAnimation = true;
-      render();
     } else if (action === "admin-select-course-platform-course") {
       const courseId = button.getAttribute("data-course-id") || "";
       if (!isUuidValue(courseId)) return;

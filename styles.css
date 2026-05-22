@@ -11568,49 +11568,6 @@ body.theme-comfort .admin-badge-draft {
   color: #ffb74d;
 }
 
-/* Student preview mode container */
-.course-builder-preview {
-  margin: 1.5rem 0;
-  padding: 1.75rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-medium);
-}
-
-.course-builder-preview h3 {
-  font-size: 1.25rem;
-  font-weight: 800;
-  color: var(--brand-strong);
-  margin: 0 0 0.5rem 0;
-}
-
-.course-builder-preview-module {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--line);
-}
-
-.course-builder-preview-module b {
-  font-size: 0.95rem;
-  font-weight: 800;
-  color: var(--ink);
-}
-
-.course-builder-preview-module ul {
-  margin: 0.5rem 0 0 0;
-  padding-left: 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.course-builder-preview-module li {
-  font-size: 0.88rem;
-  color: var(--ink);
-  font-weight: 600;
-}
-
 /* Layout split for admin workspace builder grids */
 .course-builder-split-layout {
   display: grid;
