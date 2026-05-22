@@ -669,6 +669,7 @@ const SUPABASE_CONFIG = {
   forceMobileAuthRedirect: window.__SUPABASE_CONFIG?.forceMobileAuthRedirect === true,
   questionImageBucket: window.__SUPABASE_CONFIG?.questionImageBucket || "question-images",
   courseVideoBucket: window.__SUPABASE_CONFIG?.courseVideoBucket || "course-videos",
+  courseCoverBucket: window.__SUPABASE_CONFIG?.courseCoverBucket || "course-covers",
   courseMaterialBucket: window.__SUPABASE_CONFIG?.courseMaterialBucket || "course-materials",
 };
 
@@ -692,6 +693,13 @@ const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/ogg",
   "video/quicktime",
   "video/x-m4v",
+]);
+const COURSE_COVER_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
+const COURSE_COVER_ALLOWED_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
 ]);
 const COURSE_MATERIAL_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
 const COURSE_MATERIAL_ALLOWED_MIME_TYPES = new Set([
@@ -38990,7 +38998,11 @@ function getCoursePlatformCourseTitle(course) {
 
 function getCoursePlatformCoverUrl(course) {
   const entered = String(course?.cover_image_url || "").trim();
-  if ((/^https?:\/\//i.test(entered) || entered.startsWith("Assets/")) && entered !== "Assets/branding/web-logo-hero.png") {
+  const renderableUploadedCover = getRenderableQuestionImageUrl(entered);
+  if (renderableUploadedCover && entered !== "Assets/branding/web-logo-hero.png") {
+    return renderableUploadedCover;
+  }
+  if (entered.startsWith("Assets/") && entered !== "Assets/branding/web-logo-hero.png") {
     return entered;
   }
   return "";
@@ -41055,6 +41067,58 @@ function getAdminCourseRequestQueue(selectedCourseId = "") {
   });
 }
 
+function renderAdminCourseCoverUploadField(draftKey, currentValue = "") {
+  const savedValue = String(getAdminCourseBuilderFieldValue(draftKey, "cover_image_url", currentValue || "") || "").trim();
+  const previewUrl = getRenderableQuestionImageUrl(savedValue);
+  const currentFile = state.adminCourseBuilderFileDrafts?.[draftKey]?.cover_image_file || null;
+  const fileName = String(currentFile?.name || "").trim();
+  return `
+    <div class="course-cover-upload-field">
+      <input name="cover_image_url" type="hidden" value="${escapeHtml(savedValue)}" />
+      <label>Cover image
+        <input name="cover_image_file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp" />
+      </label>
+      <div class="course-cover-upload-preview">
+        ${previewUrl
+          ? `<img src="${escapeHtml(previewUrl)}" alt="" loading="lazy" />`
+          : `<div class="course-cover-upload-placeholder">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+              <span>No cover uploaded</span>
+            </div>`}
+        <small>${fileName ? `Selected: ${escapeHtml(fileName)}` : "Upload PNG, JPG, or WEBP up to 8 MB."}</small>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminCourseVideoUploadField(draftKey, labelText = "Upload video") {
+  const currentFile = state.adminCourseBuilderFileDrafts?.[draftKey]?.video_file || null;
+  const fileName = String(currentFile?.name || "").trim();
+  const hasFile = !!fileName;
+  const sizeText = currentFile ? ` (${(currentFile.size / (1024 * 1024)).toFixed(1)} MB)` : "";
+  return `
+    <div class="course-video-upload-field">
+      <span class="field-label">${escapeHtml(labelText)}</span>
+      <label class="video-upload-dropzone ${hasFile ? "has-file" : ""}">
+        <svg class="video-upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 7l-7 5 7 5V7z"></path>
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          <polyline points="9 9 9 15 13 12 9 9"></polyline>
+        </svg>
+        <div class="video-upload-text">
+          <span class="video-upload-title">${hasFile ? "Change selected video" : "Choose video file"}</span>
+          <span class="video-upload-subtitle">${hasFile ? escapeHtml(fileName + sizeText) : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)"}</span>
+        </div>
+        <input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" />
+      </label>
+    </div>
+  `;
+}
+
 function coerceAdminCourseMetadataPayload(data) {
   return {
     course_code: String(data.course_code || "").trim() || null,
@@ -41074,6 +41138,70 @@ function coerceAdminCourseMetadataPayload(data) {
     is_active: data.is_active !== false,
     updated_at: nowISO(),
   };
+}
+
+function getCourseCoverUploadFile(data) {
+  const file = data?.cover_image_file;
+  if (typeof File !== "undefined" && file instanceof File && Number(file.size || 0) > 0) {
+    return file;
+  }
+  return null;
+}
+
+async function uploadCourseCoverImage(courseId, file) {
+  const client = getCoursesPlatformClient();
+  const bucket = String(SUPABASE_CONFIG.courseCoverBucket || "").trim();
+  const targetCourseId = String(courseId || "").trim();
+  if (!client?.storage || !isUuidValue(targetCourseId)) {
+    throw new Error("Cover upload needs an active Supabase session.");
+  }
+  if (!bucket) {
+    throw new Error("Course cover bucket is not configured.");
+  }
+  if (!(file instanceof File) || Number(file.size || 0) <= 0) {
+    return "";
+  }
+  if (file.size > COURSE_COVER_UPLOAD_MAX_BYTES) {
+    throw new Error("Cover image is too large. Maximum upload size is 8 MB.");
+  }
+  const normalizedType = String(file.type || "").trim().toLowerCase();
+  if (normalizedType && !COURSE_COVER_ALLOWED_MIME_TYPES.has(normalizedType)) {
+    throw new Error("Unsupported cover image type. Use PNG, JPG, or WEBP.");
+  }
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveImageFileExtension(file.name, normalizedType);
+  const fileId = sanitizeStoragePathSegment(makeId("course-cover"), "course-cover");
+  const filePath = `courses/${targetCourseId}/covers/${userScope}/${Date.now()}-${fileId}.${extension}`;
+  const uploadResult = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000),
+    "Cover image upload timed out.",
+  );
+  const uploadError = uploadResult?.error || null;
+  if (uploadError) {
+    const bucketMissing = isStorageBucketMissingError(uploadError);
+    throw new Error(
+      bucketMissing
+        ? `Storage bucket "${bucket}" was not found. Run the latest Supabase migration, then retry.`
+        : getErrorMessage(uploadError, "Could not upload course cover image."),
+    );
+  }
+  return `supabase-storage://${bucket}/${filePath}`;
+}
+
+async function resolveAdminCourseCoverUrl(courseId, data) {
+  const uploadFile = getCourseCoverUploadFile(data);
+  if (uploadFile) {
+    return uploadCourseCoverImage(courseId, uploadFile);
+  }
+  return String(data.cover_image_url || "").trim() || null;
 }
 
 async function upsertDefaultPlatformCourseSuggestion(courseId, coursePayload, data = {}) {
@@ -41144,6 +41272,7 @@ async function adminCreatePlatformCourse(data) {
   if (!courseName) throw new Error("Course name is required.");
   const payload = coerceAdminCourseMetadataPayload({
     ...data,
+    cover_image_url: null,
     is_active: true,
     is_published: data.is_published !== false,
     enrollment_mode: data.enrollment_mode || "request",
@@ -41154,6 +41283,17 @@ async function adminCreatePlatformCourse(data) {
   );
   const courseId = String(createdCourse?.id || "").trim();
   if (isUuidValue(courseId)) {
+    const coverImageUrl = await resolveAdminCourseCoverUrl(courseId, data);
+    if (coverImageUrl) {
+      payload.cover_image_url = coverImageUrl;
+      await runRelationalQueryWithTimeout(
+        client.from("platform_courses").update({
+          cover_image_url: coverImageUrl,
+          updated_at: nowISO(),
+        }).eq("id", courseId),
+        "Course cover save timed out.",
+      );
+    }
     await upsertDefaultPlatformCourseSuggestion(courseId, payload, data);
     state.adminCourseBuilderCourseId = courseId;
   }
@@ -41164,11 +41304,15 @@ async function adminCreatePlatformCourse(data) {
 async function adminSaveCourseMetadata(courseId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId)) throw new Error("Course metadata cannot be saved.");
+  const payload = coerceAdminCourseMetadataPayload({
+    ...data,
+    cover_image_url: await resolveAdminCourseCoverUrl(courseId, data),
+  });
   await runRelationalQueryWithTimeout(
-    client.from("platform_courses").update(coerceAdminCourseMetadataPayload(data)).eq("id", courseId),
+    client.from("platform_courses").update(payload).eq("id", courseId),
     "Course metadata save timed out.",
   );
-  await upsertDefaultPlatformCourseSuggestion(courseId, coerceAdminCourseMetadataPayload(data), { preserveDetails: true });
+  await upsertDefaultPlatformCourseSuggestion(courseId, payload, { preserveDetails: true });
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -42377,7 +42521,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             </select>
           </label>
           <label>Priority<input name="priority" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "priority", 0))}" /></label>
-          <label>Cover image URL<input name="cover_image_url" placeholder="https://..." value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "cover_image_url", ""))}" /></label>
+          ${renderAdminCourseCoverUploadField(dk, "")}
           <label>Instructor name<input name="instructor_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_name", ""))}" /></label>
           <label>Estimated duration<input name="estimated_duration" placeholder="Example: 2 weeks" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "estimated_duration", ""))}" /></label>
           <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", true)} /> Published</label>
@@ -42408,7 +42552,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
           <label>Suggestion year<select name="academic_year">${[1, 2, 3, 4, 5].map((year) => `<option value="${year}" ${getAdminCourseBuilderOptionSelected(dk, "academic_year", year, selectedCourse.academic_year)}>Year ${year}</option>`).join("")}</select></label>
           <label>Suggestion semester<select name="academic_semester"><option value="1" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 1, selectedCourse.academic_semester)}>Semester 1</option><option value="2" ${getAdminCourseBuilderOptionSelected(dk, "academic_semester", 2, selectedCourse.academic_semester)}>Semester 2</option></select></label>
           <label>Description<textarea name="description" rows="4">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "description", selectedCourse.description || ""))}</textarea></label>
-          <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "cover_image_url", selectedCourse.cover_image_url || ""))}" /></label>
+          ${renderAdminCourseCoverUploadField(dk, selectedCourse.cover_image_url || "")}
           <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "intro_video_url", selectedCourse.intro_video_url || ""))}" /></label>
           <label>Instructor name<input name="instructor_name" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_name", selectedCourse.instructor_name || ""))}" /></label>
           <label>Instructor bio<textarea name="instructor_bio" rows="3">${escapeHtml(getAdminCourseBuilderFieldValue(dk, "instructor_bio", selectedCourse.instructor_bio || ""))}</textarea></label>
@@ -42507,7 +42651,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
               </select>
             </label>
             <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "video_url", ""))}" /></label>
-            <label>Upload video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
+            ${renderAdminCourseVideoUploadField(dk, "Upload video")}
             <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "duration_seconds", 0))}" /></label>
             <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "position", moduleLessons.length + 1))}" /></label>
             <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${getAdminCourseBuilderCheckboxState(dk, "is_free_preview", false)} /> Free preview</label>
@@ -42545,7 +42689,7 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
               </select>
             </label>
             <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_url", lesson.video_url || ""))}" /></label>
-            <label>Replace video<input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" /></label>
+            ${renderAdminCourseVideoUploadField(dkLesson, "Replace video")}
             <label>Video provider<input name="video_provider" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_provider", lesson.video_provider || ""))}" /></label>
             <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "duration_seconds", lesson.duration_seconds || 0))}" /></label>
             <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "position", lesson.position || 0))}" /></label>
@@ -42832,7 +42976,7 @@ function adminRenderCourseBuilder(courseId) {
                   Media & Cover
                 </div>
                 <div class="course-metadata-card-body grid-2col">
-                  <label>Cover image URL<input name="cover_image_url" value="${escapeHtml(selectedCourse.cover_image_url || "")}" /></label>
+                  ${renderAdminCourseCoverUploadField("admin-course-metadata-form_" + selectedCourseId, selectedCourse.cover_image_url || "")}
                   <label>Intro video URL<input name="intro_video_url" value="${escapeHtml(selectedCourse.intro_video_url || "")}" /></label>
                 </div>
               </div>
@@ -43079,6 +43223,24 @@ function wireAdminCoursesPlatformBuilder() {
   root.addEventListener("change", (event) => {
     const target = event.target;
     if (!target || !root.contains(target)) return;
+
+    if (target.type === "file" && target.name === "video_file") {
+      const dropzone = target.closest(".video-upload-dropzone");
+      if (dropzone) {
+        const file = target.files?.[0];
+        const titleEl = dropzone.querySelector(".video-upload-title");
+        const subtitleEl = dropzone.querySelector(".video-upload-subtitle");
+        if (file) {
+          if (titleEl) titleEl.textContent = "Change selected video";
+          if (subtitleEl) subtitleEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
+          dropzone.classList.add("has-file");
+        } else {
+          if (titleEl) titleEl.textContent = "Choose video file";
+          if (subtitleEl) subtitleEl.textContent = "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)";
+          dropzone.classList.remove("has-file");
+        }
+      }
+    }
 
     if (target.id === "admin-course-builder-course-select") {
       state.adminCourseBuilderCourseId = String(target.value || "");

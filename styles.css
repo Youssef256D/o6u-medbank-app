@@ -11319,6 +11319,202 @@ body.theme-comfort .admin-course-meta-pill {
   box-shadow: 0 0 0 3px var(--brand-soft);
 }
 
+.course-cover-upload-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.course-cover-upload-field input[type="file"] {
+  cursor: pointer;
+}
+
+.course-cover-upload-preview {
+  min-height: 92px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.65rem;
+}
+
+.course-cover-upload-preview img,
+.course-cover-upload-placeholder {
+  width: 120px;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-xs);
+}
+
+.course-cover-upload-preview img {
+  display: block;
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+
+.course-cover-upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  background: var(--surface-soft);
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.course-cover-upload-placeholder svg {
+  color: var(--brand);
+}
+
+.course-cover-upload-preview small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+/* Custom Course Video Upload Field */
+.course-video-upload-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 1.25rem;
+}
+
+.course-video-upload-field .field-label {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 0.25rem;
+}
+
+.video-upload-dropzone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  min-height: 140px;
+  padding: 1.5rem;
+  background: var(--surface);
+  border: 2px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  text-align: center;
+}
+
+.video-upload-dropzone input[type="file"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.video-upload-icon {
+  width: 42px;
+  height: 42px;
+  color: var(--muted);
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  z-index: 1;
+}
+
+.video-upload-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  z-index: 1;
+}
+
+.video-upload-title {
+  font-family: var(--font-admin-display), sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+  transition: color 0.3s ease;
+}
+
+.video-upload-subtitle {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  line-height: 1.4;
+  transition: color 0.3s ease;
+  max-width: 320px;
+  word-wrap: break-word;
+}
+
+/* Hover & Focus Interactions */
+.video-upload-dropzone:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: 0 12px 24px var(--brand-soft);
+  transform: translateY(-2px);
+}
+
+.video-upload-dropzone:hover .video-upload-icon {
+  color: var(--brand);
+  transform: scale(1.15) translateY(-2px);
+}
+
+.video-upload-dropzone:hover .video-upload-title {
+  color: var(--brand);
+}
+
+/* Selected File State */
+.video-upload-dropzone.has-file {
+  border-color: var(--good);
+  background: rgba(34, 185, 96, 0.05);
+}
+
+body.theme-dark .video-upload-dropzone.has-file {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.video-upload-dropzone.has-file .video-upload-icon {
+  color: var(--good);
+  animation: pulse-green 2s infinite ease-in-out;
+}
+
+.video-upload-dropzone.has-file .video-upload-title {
+  color: var(--good);
+}
+
+.video-upload-dropzone.has-file:hover {
+  box-shadow: 0 12px 24px rgba(34, 197, 94, 0.15);
+  border-color: var(--good);
+  background: rgba(34, 185, 96, 0.08);
+}
+
+@keyframes pulse-green {
+  0% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgba(34, 197, 94, 0));
+  }
+  50% {
+    transform: scale(1.06);
+    filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.4));
+  }
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgba(34, 197, 94, 0));
+  }
+}
+
 .course-builder-check {
   flex-direction: row !important;
   align-items: center;
