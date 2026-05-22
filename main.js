@@ -216,6 +216,7 @@ const SESSION_FONT_SCALE_STEP = 2;
 const SESSION_FONT_SCALE_DEFAULT = 100;
 const SESSION_HIGHLIGHTER_DEFAULT = "yellow";
 const SESSION_HIGHLIGHTER_COLORS = new Set(["yellow", "red", "green"]);
+const COURSES_COMING_SOON_FEATURE_KEY = "courses_coming_soon";
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -319,6 +320,11 @@ const state = {
   coursesSuggestions: [],
   coursesWatchedLessonIds: new Set(),
   coursesTransitionMode: "",
+  coursesComingSoonEnabled: false,
+  coursesComingSoonLoading: false,
+  coursesComingSoonSaving: false,
+  coursesComingSoonLoadedAt: 0,
+  coursesComingSoonError: "",
   adminCoursesPlatformLoading: false,
   adminCoursesPlatformError: "",
   adminCoursesPlatformLoadedAt: 0,
@@ -15205,6 +15211,12 @@ function bindGlobalEvents() {
     }
 
     if (action === "courses-home-tab") {
+      if (shouldBlockStudentCoursesPortal()) {
+        state.userMenuOpen = false;
+        state.notificationMenuOpen = false;
+        navigate("courses");
+        return;
+      }
       const requestedTab = String(actionTarget?.getAttribute("data-tab") || "dashboard").trim();
       const previousTab = String(state.coursesHomeTab || "dashboard").trim() || "dashboard";
       const nextTab = ["dashboard", "enrolled", "suggestions"].includes(requestedTab) ? requestedTab : "dashboard";
@@ -15226,6 +15238,11 @@ function bindGlobalEvents() {
         state.skipNextRouteAnimation = true;
         render();
       }
+      return;
+    }
+
+    if (action === "courses-coming-soon-notice") {
+      toast("Courses are coming soon.");
       return;
     }
 
@@ -17936,6 +17953,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     }
     // Run notifications and Supabase state keys in parallel — they are independent.
     await Promise.all([
+      loadCoursesComingSoonFlag({ force }).catch(() => false),
       hydrateRelationalNotifications(user),
       hydrateSupabaseSyncKeys([
         STORAGE_KEYS.siteMaintenance,
@@ -18112,6 +18130,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       hydrateTasks.push(hydrateRelationalProfiles(user));
     }
     hydrateTasks.push(hydrateRelationalNotifications(user));
+    hydrateTasks.push(loadCoursesComingSoonFlag({ force }).catch(() => false));
     hydrateTasks.push(hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false })));
     await Promise.all(hydrateTasks);
 
@@ -18731,6 +18750,24 @@ function render() {
   restoreFocusState();
 }
 
+function getNotificationTimeAgo(isoStr) {
+  if (!isoStr) return "";
+  const nowMs = Date.now();
+  const diffMs = nowMs - new Date(isoStr).getTime();
+  if (!Number.isFinite(diffMs) || diffMs < 0) return "just now";
+  const secs = Math.floor(diffMs / 1000);
+  if (secs < 10) return "just now";
+  if (secs < 60) return secs + "s ago";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return mins + "m ago";
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  const days = Math.floor(hours / 24);
+  if (days < 7) return days + "d ago";
+  const date = new Date(isoStr);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotificationLabel) {
   if (!user || user.role !== "student") {
     return "";
@@ -18745,14 +18782,23 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
     const bodyText = String(notification.body || "").trim();
     const bodyPreview = bodyText.length > 110 ? `${bodyText.slice(0, 107)}...` : bodyText;
     const safeNotificationId = escapeHtml(notification.id);
+    const timeAgo = getNotificationTimeAgo(notification.createdAt);
     return `
       <article class="notification-menu-item ${isRead ? "is-read" : "is-unread"}">
         <div class="notification-menu-item-top">
           <div class="notification-menu-item-copy">
-            <p class="notification-menu-item-title">${escapeHtml(title)}</p>
+            <div class="notification-menu-item-title-row">
+              <span class="notification-menu-unread-dot" aria-hidden="true"></span>
+              <p class="notification-menu-item-title">${escapeHtml(title)}</p>
+            </div>
+            ${timeAgo ? `<span class="notification-menu-item-time">${escapeHtml(timeAgo)}</span>` : ""}
           </div>
           ${isRead
-        ? `<span class="notification-menu-item-done">Read</span>`
+        ? `<span class="notification-menu-item-done" title="Read">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle;">
+              <path d="M3 8.5L6.2 11.7 13 4.9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          </span>`
         : `<button
                   class="notification-menu-read-btn"
                   type="button"
@@ -18775,7 +18821,7 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
   return `
     <div class="notification-menu ${menuOpen ? "is-open" : ""}">
       <button
-        class="notification-bell-btn ${menuOpen ? "is-open" : ""}"
+        class="notification-bell-btn ${menuOpen ? "is-open" : ""} ${hasUnread ? "has-unread" : ""}"
         type="button"
         data-action="toggle-notification-menu"
         aria-haspopup="menu"
@@ -18791,7 +18837,10 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
       </button>
       <section class="notification-menu-panel" role="menu" aria-label="Notifications">
         <header class="notification-menu-header">
-          <p class="notification-menu-title">Notifications</p>
+          <p class="notification-menu-title">
+            Notifications
+            ${hasUnread ? `<span class="notification-count-indicator">${escapeHtml(unreadNotificationCount)}</span>` : ""}
+          </p>
           <button
             class="notification-menu-mark-all"
             type="button"
@@ -18808,6 +18857,7 @@ function renderTopbarNotificationMenu(user, unreadNotificationCount, unreadNotif
     </div>
   `;
 }
+
 
 function syncTopbar() {
   const user = getCurrentUser();
@@ -18860,6 +18910,12 @@ function syncTopbar() {
         <button data-nav="dashboard">Dashboard</button>
         <button data-nav="create-test">Create a Test</button>
         <button data-nav="analytics">Analytics</button>
+      `;
+      privateNavEl.classList.remove("hidden");
+    } else if (isCourseRoute && shouldBlockStudentCoursesPortal(user)) {
+      privateNavEl.innerHTML = `
+        <button data-nav="app-launcher">Apps</button>
+        <button data-action="open-mcq-bank">MCQ Bank</button>
       `;
       privateNavEl.classList.remove("hidden");
     } else if (isCourseRoute) {
@@ -20571,17 +20627,26 @@ function renderNotifications() {
     .map((notification) => {
       const isRead = isNotificationReadByUser(notification, user);
       const bodyHtml = escapeHtml(notification.body || "").replaceAll("\n", "<br />");
+      const timeAgo = getNotificationTimeAgo(notification.createdAt);
       return `
         <article class="card notification-card ${isRead ? "is-read" : "is-unread"}" data-notification-id="${escapeHtml(notification.id)}">
           <div class="notification-card-head">
-            <h3 class="notification-card-title">${escapeHtml(notification.title || "Notification")}</h3>
+            <div class="notification-card-title-group">
+              <h3 class="notification-card-title">${escapeHtml(notification.title || "Notification")}</h3>
+              ${timeAgo ? `<span class="notification-card-time">${escapeHtml(timeAgo)}</span>` : ""}
+            </div>
             <span class="badge ${isRead ? "neutral" : "good"}">${isRead ? "Read" : "New"}</span>
           </div>
           <p class="notification-card-body">${bodyHtml || "-"}</p>
           ${isRead
           ? ""
           : `<div class="notification-card-actions">
-                  <button class="btn ghost admin-btn-sm" type="button" data-action="notification-mark-read" data-notification-id="${escapeHtml(notification.id)}">Mark as read</button>
+                  <button class="btn ghost admin-btn-sm notification-card-read-btn" type="button" data-action="notification-mark-read" data-notification-id="${escapeHtml(notification.id)}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="width: 12px; height: 12px; margin-right: 4px; display: inline-block; vertical-align: middle;">
+                      <path d="M3 8.5L6.2 11.7 13 4.9" />
+                    </svg>
+                    Mark as read
+                  </button>
                 </div>`
         }
         </article>
@@ -20591,7 +20656,13 @@ function renderNotifications() {
 
   return `
     <section class="panel notifications-page-panel" id="student-notifications-section">
-      <button class="btn ghost notifications-back-btn" type="button" data-nav="dashboard">&lt; Back</button>
+      <button class="btn ghost notifications-back-btn" type="button" data-nav="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="width: 14px; height: 14px; margin-right: 4px; vertical-align: middle;">
+          <line x1="19" y1="12" x2="5" y2="12"></line>
+          <polyline points="12 19 5 12 12 5"></polyline>
+        </svg>
+        <span>Back</span>
+      </button>
       <div class="notifications-page-head">
         <div>
           <p class="kicker">Updates</p>
@@ -38777,6 +38848,108 @@ function getCoursesPlatformClient() {
   return getRelationalClient();
 }
 
+function resetStudentCoursesPlatformState() {
+  state.coursesLoadedAt = 0;
+  state.coursesLoading = false;
+  state.coursesError = "";
+  state.coursesCatalog = [];
+  state.coursesEnrollments = [];
+  state.coursesRequests = [];
+  state.coursesProgress = [];
+  state.coursesDetail = null;
+  state.coursesModules = [];
+  state.coursesLessons = [];
+  state.coursesResources = [];
+  state.coursesAnnouncements = [];
+  state.coursesSuggestions = [];
+  state.coursesActiveCourseId = "";
+  state.coursesActiveLessonId = "";
+  state.coursesView = "home";
+}
+
+function isCoursesComingSoonEnabled() {
+  return Boolean(state.coursesComingSoonEnabled);
+}
+
+function shouldBlockStudentCoursesPortal(user = getCurrentUser()) {
+  return user?.role === "student" && isCoursesComingSoonEnabled();
+}
+
+function applyCoursesComingSoonFlag(enabled) {
+  const nextEnabled = Boolean(enabled);
+  const changed = state.coursesComingSoonEnabled !== nextEnabled;
+  state.coursesComingSoonEnabled = nextEnabled;
+  state.coursesComingSoonLoadedAt = Date.now();
+  state.coursesComingSoonError = "";
+  if (nextEnabled && getCurrentUser()?.role === "student") {
+    resetStudentCoursesPlatformState();
+  }
+  return changed;
+}
+
+async function loadCoursesComingSoonFlag(options = {}) {
+  const force = Boolean(options?.force);
+  if (state.coursesComingSoonLoading && !force) {
+    return !state.coursesComingSoonError;
+  }
+  if (!force && state.coursesComingSoonLoadedAt && Date.now() - state.coursesComingSoonLoadedAt < STUDENT_DATA_REFRESH_MS) {
+    return true;
+  }
+  const client = getCoursesPlatformClient();
+  if (!client) {
+    return false;
+  }
+  state.coursesComingSoonLoading = true;
+  try {
+    const row = await runRelationalQueryWithTimeout(
+      client
+        .from("app_feature_flags")
+        .select("feature_key,enabled,updated_at")
+        .eq("feature_key", COURSES_COMING_SOON_FEATURE_KEY)
+        .maybeSingle(),
+      "Courses availability check timed out.",
+    ).catch((error) => {
+      if (isMissingRelationError(error)) {
+        return null;
+      }
+      throw error;
+    });
+    applyCoursesComingSoonFlag(Boolean(row?.enabled));
+    return true;
+  } catch (error) {
+    console.warn("Could not load Courses availability flag.", error?.message || error);
+    state.coursesComingSoonError = getErrorMessage(error, "Could not check Courses availability.");
+    return false;
+  } finally {
+    state.coursesComingSoonLoading = false;
+  }
+}
+
+async function saveCoursesComingSoonFlag(enabled) {
+  const client = getCoursesPlatformClient();
+  const currentUser = getCurrentUser();
+  if (!client || currentUser?.role !== "admin") {
+    throw new Error("Only admins can update Courses availability.");
+  }
+  const payload = {
+    feature_key: COURSES_COMING_SOON_FEATURE_KEY,
+    enabled: Boolean(enabled),
+    description: "When enabled, students see Coming soon instead of the Courses learning portal.",
+    updated_by: isUuidValue(getUserProfileId(currentUser)) ? getUserProfileId(currentUser) : null,
+  };
+  state.coursesComingSoonSaving = true;
+  try {
+    await runRelationalQueryWithTimeout(
+      client.from("app_feature_flags").upsert(payload, { onConflict: "feature_key", defaultToNull: false }),
+      "Courses availability update timed out.",
+    );
+    applyCoursesComingSoonFlag(Boolean(enabled));
+    return true;
+  } finally {
+    state.coursesComingSoonSaving = false;
+  }
+}
+
 function isLocalDemoCoursePlatformUser(user = getCurrentUser()) {
   return isLocalDemoAuthEnabled()
     && isLegacyDemoUser(user)
@@ -39055,6 +39228,11 @@ async function loadLocalDemoCoursesWithProgress(user = getCurrentUser()) {
 
 async function loadStudentCoursesWithProgress(options = {}) {
   const user = getCurrentUser();
+  await loadCoursesComingSoonFlag({ force: Boolean(options.force) }).catch(() => false);
+  if (shouldBlockStudentCoursesPortal(user)) {
+    resetStudentCoursesPlatformState();
+    return true;
+  }
   if (isLocalDemoCoursePlatformUser(user)) {
     return loadLocalDemoCoursesWithProgress(user);
   }
@@ -39150,6 +39328,11 @@ async function loadStudentCoursesWithProgress(options = {}) {
 }
 
 async function loadCourseModulesAndLessons(courseId) {
+  await loadCoursesComingSoonFlag().catch(() => false);
+  if (shouldBlockStudentCoursesPortal()) {
+    resetStudentCoursesPlatformState();
+    return false;
+  }
   if (isLocalDemoCoursePlatformUser()) {
     await loadLocalDemoCoursesWithProgress();
     return true;
@@ -39193,6 +39376,11 @@ async function loadCourseModulesAndLessons(courseId) {
 }
 
 async function loadCourseDetail(courseId) {
+  await loadCoursesComingSoonFlag().catch(() => false);
+  if (shouldBlockStudentCoursesPortal()) {
+    resetStudentCoursesPlatformState();
+    return false;
+  }
   if (isLocalDemoCoursePlatformUser()) {
     await loadLocalDemoCoursesWithProgress();
     const targetCourseId = String(courseId || "").trim();
@@ -39243,6 +39431,10 @@ async function loadCourseDetail(courseId) {
 }
 
 async function updateLessonProgress(lessonId, status = "in_progress", progressPercent = 0) {
+  if (shouldBlockStudentCoursesPortal()) {
+    toast("Courses are coming soon.");
+    return false;
+  }
   const userId = getCurrentCoursePlatformUserId();
   const client = getCoursesPlatformClient();
   const targetLessonId = String(lessonId || "").trim();
@@ -39311,6 +39503,10 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
 }
 
 async function requestCourseEnrollment(courseId) {
+  if (shouldBlockStudentCoursesPortal()) {
+    toast("Courses are coming soon.");
+    return false;
+  }
   const client = getCoursesPlatformClient();
   const userId = getCurrentCoursePlatformUserId();
   const targetCourseId = String(courseId || "").trim();
@@ -39944,6 +40140,32 @@ function renderCoursesTransitionStage(markup) {
   return `<div class="courses-transition-stage ${transitionClass}" data-courses-view="${escapeHtml(viewKey)}" data-protected-course-content="true">${markup}</div>`;
 }
 
+function renderCoursesComingSoonPage() {
+  if (!state.coursesComingSoonLoadedAt && !state.coursesComingSoonLoading) {
+    loadCoursesComingSoonFlag().then((ok) => {
+      if (ok && state.route === "courses") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  return `
+    <section class="panel courses-shell">
+      <div class="card courses-empty">
+        <span class="maintenance-badge">Coming soon</span>
+        <h2 class="title" style="margin-bottom: 0.4rem;">Courses are coming soon</h2>
+        <p class="subtle" style="max-width: 560px; margin-left: auto; margin-right: auto;">
+          The Courses learning portal is being prepared by the admin team. MCQ Bank practice is still available.
+        </p>
+        <div class="stack" style="justify-content: center;">
+          <button class="btn" type="button" data-action="open-mcq-bank">Open MCQ Bank</button>
+          <button class="btn ghost" type="button" data-nav="app-launcher">Back to Apps</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function setCoursesTabTransition(previousTab, nextTab) {
   const order = ["dashboard", "enrolled", "suggestions"];
   const previousIndex = order.indexOf(String(previousTab || "dashboard").trim());
@@ -40443,6 +40665,9 @@ function renderLessonViewer(lessonId) {
 }
 
 function renderCourses() {
+  if (shouldBlockStudentCoursesPortal()) {
+    return renderCoursesTransitionStage(renderCoursesComingSoonPage());
+  }
   if (!state.coursesLoadedAt && !state.coursesLoading) {
     loadStudentCoursesWithProgress().then((ok) => {
       if (state.route === "courses" && ok) {
@@ -40514,6 +40739,14 @@ function wireCourses() {
       const courseId = String(button.getAttribute("data-course-id") || state.coursesActiveCourseId || "").trim();
       const lessonId = String(button.getAttribute("data-lesson-id") || "").trim();
       const topicId = String(button.getAttribute("data-topic-id") || "").trim();
+
+      if (String(action || "").startsWith("courses-") && action !== "courses-home" && shouldBlockStudentCoursesPortal()) {
+        state.coursesTransitionMode = "back";
+        resetStudentCoursesPlatformState();
+        state.skipNextRouteAnimation = true;
+        render();
+        return;
+      }
 
       if (action === "courses-home") {
         state.coursesTransitionMode = "back";
@@ -42380,9 +42613,47 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
   `;
 }
 
+function renderAdminCoursesComingSoonControl() {
+  const enabled = isCoursesComingSoonEnabled();
+  const loading = state.coursesComingSoonLoading && !state.coursesComingSoonLoadedAt;
+  const saving = Boolean(state.coursesComingSoonSaving);
+  return `
+    <form id="admin-courses-coming-soon-form" class="course-platform-section-note" style="align-items: center;">
+      <span>
+        <b>${enabled ? "Courses are coming soon for students" : "Courses are open for students"}</b>
+        <small class="subtle" style="display: block; margin-top: 0.2rem;">
+          ${enabled
+            ? "Students see Coming soon and cannot access Courses lessons, materials, progress, or requests."
+            : "Students can open the Courses learning portal normally."}
+        </small>
+        ${state.coursesComingSoonError ? `<small class="subtle" style="display: block; color: var(--danger); margin-top: 0.25rem;">${escapeHtml(state.coursesComingSoonError)}</small>` : ""}
+      </span>
+      <label class="toggle-switch-label" style="margin: 0; min-width: 250px;">
+        <input name="enabled" type="checkbox" class="toggle-switch-input" ${enabled ? "checked" : ""} ${loading || saving ? "disabled" : ""} />
+        <span class="toggle-switch-track" aria-hidden="true">
+          <span class="toggle-switch-thumb"></span>
+        </span>
+        <span class="toggle-switch-text">
+          <b>${enabled ? "Coming soon is ON" : "Coming soon is OFF"}</b><br />
+          <span class="subtle">${saving ? "Saving..." : loading ? "Checking status..." : "Admin access stays open."}</span>
+        </span>
+      </label>
+      <button class="btn admin-btn-sm ${saving ? "is-loading" : ""}" type="submit" ${loading || saving ? "disabled" : ""}>Save availability</button>
+    </form>
+  `;
+}
+
 function adminRenderCourseBuilder(courseId) {
   if (!state.adminCoursesPlatformLoadedAt && !state.adminCoursesPlatformLoading) {
     loadAdminCoursesPlatform().then((ok) => {
+      if (ok && state.route === "admin" && state.adminPage === "course-platform") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  if (!state.coursesComingSoonLoadedAt && !state.coursesComingSoonLoading) {
+    loadCoursesComingSoonFlag().then((ok) => {
       if (ok && state.route === "admin" && state.adminPage === "course-platform") {
         state.skipNextRouteAnimation = true;
         render();
@@ -42460,6 +42731,7 @@ function adminRenderCourseBuilder(courseId) {
       </div>
 
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
+      ${renderAdminCoursesComingSoonControl()}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
       
       ${!selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
@@ -42738,7 +43010,16 @@ function wireAdminCoursesPlatformBuilder() {
     const id = form.id;
     const role = form.getAttribute("data-role");
 
-    if (id === "admin-course-create-form") {
+    if (id === "admin-courses-coming-soon-form") {
+      event.preventDefault();
+      const data = readFormDataObject(form);
+      const enabled = Boolean(data.enabled);
+      runAdminCourseAction(
+        enabled ? "Courses set to Coming soon for students." : "Courses reopened for students.",
+        () => saveCoursesComingSoonFlag(enabled),
+        null,
+      );
+    } else if (id === "admin-course-create-form") {
       event.preventDefault();
       runAdminCourseAction("Course created.", async () => {
         const newCourse = await adminCreatePlatformCourse(readFormDataObject(form));
@@ -43011,6 +43292,15 @@ function wireAdminCoursesPlatformBuilder() {
 
 function renderAppLauncher() {
   const user = getCurrentUser();
+  if (user?.role === "student" && !state.coursesComingSoonLoadedAt && !state.coursesComingSoonLoading) {
+    loadCoursesComingSoonFlag().then((ok) => {
+      if (ok && state.route === "app-launcher") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  const coursesComingSoon = shouldBlockStudentCoursesPortal(user);
   return `
     <div class="app-launcher-wrapper">
       <div class="launcher-glow-blob launcher-glow-blob-1"></div>
@@ -43037,7 +43327,7 @@ function renderAppLauncher() {
             <span class="app-launcher-badge">Practice Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg></span>
           </button>
           
-          <button class="card app-launcher-card" data-nav="courses" type="button">
+          <button class="card app-launcher-card ${coursesComingSoon ? "is-disabled" : ""}" ${coursesComingSoon ? 'data-action="courses-coming-soon-notice" aria-disabled="true"' : 'data-nav="courses"'} type="button">
             <div class="app-launcher-icon-wrapper is-courses">
               <div class="icon-pulse-ring"></div>
               <svg class="launcher-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -43046,8 +43336,8 @@ function renderAppLauncher() {
               </svg>
             </div>
             <h3>Courses</h3>
-            <p>Browse interactive syllabus modules, access lessons, and view learning resources.</p>
-            <span class="app-launcher-badge">Learning Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg></span>
+            <p>${coursesComingSoon ? "The Courses learning portal is being prepared. MCQ Bank remains available." : "Browse interactive syllabus modules, access lessons, and view learning resources."}</p>
+            <span class="app-launcher-badge">${coursesComingSoon ? "Coming soon" : "Learning Portal"} ${coursesComingSoon ? "" : '<svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>'}</span>
           </button>
         </div>
       </section>
