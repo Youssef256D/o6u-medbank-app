@@ -43432,6 +43432,13 @@ function adminRenderCourseBuilder(courseId) {
           <p class="subtle" style="margin: 0.22rem 0 0;">${escapeHtml(sectionCopy.description)}</p>
         </div>
         <div class="stack">
+          <button class="btn admin-btn-sm" type="button" data-action="admin-create-platform-course">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem; vertical-align: middle;">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            New course
+          </button>
           <button class="btn ghost admin-btn-sm ${state.adminCoursesPlatformLoading ? "is-loading" : ""}" type="button" data-action="admin-courses-platform-refresh">${state.adminCoursesPlatformLoading ? "Refreshing..." : "Refresh platform"}</button>
         </div>
       </div>
@@ -43439,7 +43446,7 @@ function adminRenderCourseBuilder(courseId) {
       ${state.adminCoursesPlatformError ? `<div class="courses-error"><b>Courses platform admin error</b><p>${escapeHtml(state.adminCoursesPlatformError)}</p></div>` : ""}
       ${state.adminCoursesPlatformLoading && !state.adminCoursesPlatformLoadedAt ? `<p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>Loading Courses platform builder...</span></p>` : ""}
       
-      ${activePlatformSection === "availability" ? renderAdminCoursesComingSoonControl() : !selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Open Course Builder to create the first course for students.</p></div>` : `
+      ${activePlatformSection === "availability" ? renderAdminCoursesComingSoonControl() : !selectedCourse && activePlatformSection !== "builder" ? `<div class="admin-course-empty-state"><h4 style="margin: 0;">No platform courses yet</h4><p class="subtle" style="margin: 0;">Create the first course for students.</p><button class="btn admin-btn-sm" type="button" data-action="admin-create-platform-course">New course</button></div>` : `
         ${activePlatformSection !== "requests" && selectedCourse ? renderAdminCourseSelector(courses, selectedCourseId, rows, pendingRequestCount) : ""}
 
         ${activePlatformSection === "overview" && selectedCourse ? `
@@ -43903,6 +43910,13 @@ function wireAdminCoursesPlatformBuilder() {
 
     if (action === "admin-courses-platform-refresh") {
       runAdminCourseAction("Courses platform refreshed.", () => loadAdminCoursesPlatform({ force: true }));
+    } else if (action === "admin-create-platform-course") {
+      state.adminCoursePlatformSection = "builder";
+      state.adminCourseBuilderActiveType = "course-create";
+      state.adminCourseBuilderActiveId = "";
+      state.adminCourseBuilderActiveParentId = "";
+      state.skipNextRouteAnimation = true;
+      render();
     } else if (action === "admin-select-course-platform-course") {
       const courseId = button.getAttribute("data-course-id") || "";
       if (!isUuidValue(courseId)) return;
