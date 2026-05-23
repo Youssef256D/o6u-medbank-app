@@ -349,6 +349,7 @@ const state = {
   adminCourseBuilderModuleCollapsed: {},
   adminCourseBuilderDrafts: {},
   adminCourseBuilderFileDrafts: {},
+  adminCourseUploadProgress: {},
   adminCourseTableSearch: "",
   adminCourseTableFilterYear: "",
   adminCourseTableFilterSemester: "",
@@ -671,6 +672,7 @@ const SUPABASE_CONFIG = {
   courseVideoBucket: window.__SUPABASE_CONFIG?.courseVideoBucket || "course-videos",
   courseCoverBucket: window.__SUPABASE_CONFIG?.courseCoverBucket || "course-covers",
   courseMaterialBucket: window.__SUPABASE_CONFIG?.courseMaterialBucket || "course-materials",
+  cloudflareStreamEnabled: window.__SUPABASE_CONFIG?.cloudflareStreamEnabled === true,
 };
 
 const QUESTION_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
@@ -687,6 +689,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/gif",
 ]);
 const COURSE_VIDEO_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+const CLOUDFLARE_STREAM_UPLOAD_MAX_BYTES = 30 * 1024 * 1024 * 1024;
 const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/webm",
@@ -694,6 +697,12 @@ const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/quicktime",
   "video/x-m4v",
 ]);
+const CLOUDFLARE_STREAM_TUS_CHUNK_SIZE = 150 * 1024 * 1024;
+const CLOUDFLARE_STREAM_MAX_DURATION_SECONDS = 3 * 60 * 60;
+const TUS_CLIENT_SCRIPT_SOURCES = [
+  "https://cdn.jsdelivr.net/npm/tus-js-client@4.3.1/dist/tus.min.js",
+  "https://unpkg.com/tus-js-client@4.3.1/dist/tus.min.js",
+];
 const COURSE_COVER_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 const COURSE_COVER_ALLOWED_MIME_TYPES = new Set([
   "image/png",
@@ -892,6 +901,11 @@ const supabaseAuthRequestRuntime = {
 const questionImageRuntime = {
   entries: new Map(),
   renderHandle: null,
+};
+const cloudflareStreamRuntime = {
+  entries: new Map(),
+  renderHandle: null,
+  tusClientPromise: null,
 };
 let notificationRealtimeChannel = null;
 let notificationRealtimeSubscriptionKey = "";
@@ -11956,6 +11970,54 @@ function convertFileToDataUrl(file) {
   });
 }
 
+function loadExternalScript(src, options = {}) {
+  const normalizedSrc = String(src || "").trim();
+  if (!normalizedSrc) {
+    return Promise.reject(new Error("Script source is required."));
+  }
+  const existing = [...document.querySelectorAll("script[src]")]
+    .find((script) => String(script.getAttribute("src") || "").trim() === normalizedSrc);
+  if (existing?.dataset.loaded === "true") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const script = existing || document.createElement("script");
+    const timeoutMs = Math.max(1000, Number(options?.timeoutMs) || 15000);
+    const timeoutId = window.setTimeout(() => {
+      script.onerror = null;
+      script.onload = null;
+      reject(new Error(`Could not load ${normalizedSrc}.`));
+    }, timeoutMs);
+    script.onload = () => {
+      window.clearTimeout(timeoutId);
+      script.dataset.loaded = "true";
+      resolve();
+    };
+    script.onerror = () => {
+      window.clearTimeout(timeoutId);
+      reject(new Error(`Could not load ${normalizedSrc}.`));
+    };
+    if (!existing) {
+      script.src = normalizedSrc;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  });
+}
+
+async function loadExternalScriptWithFallback(sources, options = {}) {
+  let lastError = null;
+  for (const source of Array.isArray(sources) ? sources : [sources]) {
+    try {
+      await loadExternalScript(source, options);
+      return true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Could not load required script.");
+}
+
 async function createInlineQuestionImageFallback(
   file,
   message,
@@ -12074,6 +12136,14 @@ function parseSupabaseStorageObjectSource(value) {
 
 function buildSupabaseStorageObjectCacheKey(bucket, objectPath) {
   return `${String(bucket || "").trim()}::${String(objectPath || "").trim()}`;
+}
+
+function encodeSupabaseStorageObjectPath(objectPath) {
+  return String(objectPath || "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
 
 function scheduleQuestionImageRuntimeRender() {
@@ -18350,6 +18420,7 @@ function clearAdminCourseBuilderDraft(form) {
   if (state.adminCourseBuilderFileDrafts) {
     delete state.adminCourseBuilderFileDrafts[draftKey];
   }
+  clearAdminCourseUploadProgress(draftKey);
 }
 
 function saveFocusState() {
@@ -38915,6 +38986,7 @@ async function loadCoursesComingSoonFlag(options = {}) {
     return false;
   }
   state.coursesComingSoonLoading = true;
+  let missingFeatureFlagTable = false;
   try {
     const row = await runRelationalQueryWithTimeout(
       client
@@ -38925,17 +38997,19 @@ async function loadCoursesComingSoonFlag(options = {}) {
       "Courses availability check timed out.",
     ).catch((error) => {
       if (isMissingRelationError(error)) {
-        state.coursesComingSoonError = COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE;
+        missingFeatureFlagTable = true;
         return null;
       }
       throw error;
     });
     const changed = applyCoursesComingSoonFlag(Boolean(row?.enabled));
-    if (!row) {
+    if (missingFeatureFlagTable) {
       state.coursesComingSoonError = COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE;
       if (changed) {
         resetStudentCoursesPlatformState();
       }
+    } else {
+      state.coursesComingSoonError = "";
     }
     return true;
   } catch (error) {
@@ -40496,9 +40570,132 @@ function isUploadedCourseVideoSource(value) {
   return Boolean(descriptor && descriptor.bucket === String(SUPABASE_CONFIG.courseVideoBucket || "").trim());
 }
 
+function parseCloudflareStreamVideoSource(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^cloudflare-stream:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      return String(parsed.hostname || parsed.pathname.replace(/^\/+/, "") || "").trim();
+    } catch {
+      return "";
+    }
+  }
+  const match = raw.match(/(?:cloudflarestream\.com|videodelivery\.net)\/([a-zA-Z0-9_-]{16,})/);
+  return String(match?.[1] || "").trim();
+}
+
+function isCloudflareStreamVideoSource(value) {
+  return Boolean(parseCloudflareStreamVideoSource(value));
+}
+
+function buildVideoWatermarkLabel(user = getCurrentUser()) {
+  const name = String(user?.name || user?.full_name || "").trim();
+  if (name) return name;
+  return String(user?.role || "").trim() === "admin" ? "Admin preview" : "Student";
+}
+
+function getCloudflareStreamRuntimeEntry(lessonId) {
+  const key = String(lessonId || "").trim();
+  return key ? cloudflareStreamRuntime.entries.get(key) || null : null;
+}
+
+function scheduleCloudflareStreamRuntimeRender() {
+  if (cloudflareStreamRuntime.renderHandle) return;
+  cloudflareStreamRuntime.renderHandle = window.setTimeout(() => {
+    cloudflareStreamRuntime.renderHandle = null;
+    state.skipNextRouteAnimation = true;
+    render();
+  }, 0);
+}
+
+async function requestCloudflareStreamPlaybackUrl(lessonId) {
+  const key = String(lessonId || "").trim();
+  if (!isUuidValue(key)) {
+    return "";
+  }
+  const cachedEntry = getCloudflareStreamRuntimeEntry(key);
+  if (cachedEntry?.iframeUrl && cachedEntry.expiresAt > Date.now() + 60000) {
+    return cachedEntry.iframeUrl;
+  }
+  if (cachedEntry?.promise) {
+    return cachedEntry.promise;
+  }
+  if (cachedEntry?.lastAttemptAt && Date.now() - cachedEntry.lastAttemptAt < 15000) {
+    return "";
+  }
+
+  const authClient = getSupabaseAuthClient();
+  const tokenResult = await getValidSupabaseAccessToken(authClient);
+  if (!tokenResult.ok) {
+    cloudflareStreamRuntime.entries.set(key, {
+      iframeUrl: "",
+      expiresAt: 0,
+      promise: null,
+      lastAttemptAt: Date.now(),
+      error: tokenResult.message || "Could not verify video access.",
+    });
+    return "";
+  }
+
+  const endpoint = `${SUPABASE_CONFIG.url}/functions/v1/cloudflare-stream-token`;
+  const entry = {
+    iframeUrl: "",
+    expiresAt: 0,
+    promise: null,
+    lastAttemptAt: Date.now(),
+    error: "",
+  };
+  const promise = fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${tokenResult.token}`,
+      apikey: SUPABASE_CONFIG.legacyAnonKey || SUPABASE_CONFIG.anonKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ lessonId: key }),
+  }, ADMIN_REQUEST_TIMEOUT_MS)
+    .then(async (response) => {
+      const payload = await readJsonResponseSafe(response);
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(String(payload?.error || payload?.message || `Video token request failed (${response.status}).`));
+      }
+      const iframeUrl = String(payload?.iframeUrl || "").trim();
+      if (!iframeUrl) {
+        throw new Error("Secure video URL was not returned.");
+      }
+      const expiresInSeconds = Math.max(60, Number(payload?.expiresInSeconds) || 3600);
+      const nextEntry = cloudflareStreamRuntime.entries.get(key) || entry;
+      nextEntry.iframeUrl = iframeUrl;
+      nextEntry.expiresAt = Date.now() + (expiresInSeconds * 1000);
+      nextEntry.promise = null;
+      nextEntry.lastAttemptAt = Date.now();
+      nextEntry.error = "";
+      cloudflareStreamRuntime.entries.set(key, nextEntry);
+      scheduleCloudflareStreamRuntimeRender();
+      return iframeUrl;
+    })
+    .catch((error) => {
+      const nextEntry = cloudflareStreamRuntime.entries.get(key) || entry;
+      nextEntry.iframeUrl = "";
+      nextEntry.expiresAt = 0;
+      nextEntry.promise = null;
+      nextEntry.lastAttemptAt = Date.now();
+      nextEntry.error = getErrorMessage(error, "Could not prepare secure video.");
+      cloudflareStreamRuntime.entries.set(key, nextEntry);
+      scheduleCloudflareStreamRuntimeRender();
+      return "";
+    });
+
+  entry.promise = promise;
+  cloudflareStreamRuntime.entries.set(key, entry);
+  return promise;
+}
+
 function isDirectCourseVideoUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return false;
+  if (isCloudflareStreamVideoSource(raw)) return false;
   if (isUploadedCourseVideoSource(raw)) return true;
   try {
     const parsed = new URL(raw);
@@ -40513,6 +40710,9 @@ function getRenderableCourseLessonVideoUrl(value) {
   if (!raw) return "";
   if (isUploadedCourseVideoSource(raw)) {
     return getRenderableQuestionImageUrl(raw);
+  }
+  if (isCloudflareStreamVideoSource(raw)) {
+    return "";
   }
   return /^https?:\/\//i.test(raw) ? raw : "";
 }
@@ -40561,7 +40761,14 @@ function renderLessonViewer(lessonId) {
   const progressRow = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === String(lesson.id || "").trim());
   const isComplete = String(progressRow?.status || "").trim() === "completed" || Number(progressRow?.progress_percent) >= 100;
   const rawVideoUrl = String(lesson.video_url || "").trim();
-  const safeVideoUrl = getRenderableCourseLessonVideoUrl(rawVideoUrl);
+  const isCloudflareVideo = isCloudflareStreamVideoSource(rawVideoUrl);
+  const cloudflareEntry = isCloudflareVideo ? getCloudflareStreamRuntimeEntry(lesson.id) : null;
+  if (isCloudflareVideo && !cloudflareEntry?.iframeUrl && !cloudflareEntry?.promise) {
+    requestCloudflareStreamPlaybackUrl(lesson.id).catch(() => { });
+  }
+  const safeVideoUrl = isCloudflareVideo
+    ? String(cloudflareEntry?.iframeUrl || "").trim()
+    : getRenderableCourseLessonVideoUrl(rawVideoUrl);
   const directVideo = isDirectCourseVideoUrl(rawVideoUrl);
   const isVideoLesson = String(lesson.lesson_type || "").trim().toLowerCase() === "video" || Boolean(rawVideoUrl);
   const requiresVideoWatch = isVideoLesson && directVideo && Boolean(rawVideoUrl);
@@ -40614,18 +40821,19 @@ function renderLessonViewer(lessonId) {
           
           ${lesson.description && lesson.description !== currentModule?.title ? `<p class="lesson-description-text">${escapeHtml(lesson.description)}</p>` : ""}
 
-          ${rawVideoUrl && !safeVideoUrl && isUploadedCourseVideoSource(rawVideoUrl) ? `
+          ${rawVideoUrl && !safeVideoUrl && (isUploadedCourseVideoSource(rawVideoUrl) || isCloudflareVideo) ? `
             <div class="lesson-video-placeholder">
               <span class="lesson-video-loader" aria-hidden="true"></span>
-              <span>Preparing secure video stream...</span>
+              <span>${escapeHtml(cloudflareEntry?.error || "Preparing secure video stream...")}</span>
             </div>
           ` : ""}
           
           ${safeVideoUrl ? `
             <div class="lesson-video" data-protected-course-content="true">
+              <div class="lesson-video-watermark">${escapeHtml(buildVideoWatermarkLabel())}</div>
               ${directVideo 
                 ? `<video id="course-lesson-video-player" controls playsinline preload="metadata" controlsList="nodownload noplaybackrate noremoteplayback" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" oncontextmenu="return false;" src="${escapeHtml(safeVideoUrl)}"></video>` 
-                : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>`
+                : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>`
               }
             </div>
           ` : ""}
@@ -41100,6 +41308,12 @@ function renderAdminCourseVideoUploadField(draftKey, labelText = "Upload video")
   const fileName = String(currentFile?.name || "").trim();
   const hasFile = !!fileName;
   const sizeText = currentFile ? ` (${(currentFile.size / (1024 * 1024)).toFixed(1)} MB)` : "";
+  const progress = state.adminCourseUploadProgress?.[draftKey] || null;
+  const progressPercent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent) || 0)));
+  const progressStatus = String(progress?.status || "").trim();
+  const showProgress = progressStatus && progressStatus !== "idle";
+  const progressMessage = String(progress?.message || "").trim()
+    || (progressStatus === "done" ? "Upload complete" : progressStatus === "saving" ? "Saving lesson..." : "Uploading video...");
   return `
     <div class="course-video-upload-field">
       <span class="field-label">${escapeHtml(labelText)}</span>
@@ -41111,10 +41325,19 @@ function renderAdminCourseVideoUploadField(draftKey, labelText = "Upload video")
         </svg>
         <div class="video-upload-text">
           <span class="video-upload-title">${hasFile ? "Change selected video" : "Choose video file"}</span>
-          <span class="video-upload-subtitle">${hasFile ? escapeHtml(fileName + sizeText) : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)"}</span>
+          <span class="video-upload-subtitle">${hasFile ? escapeHtml(fileName + sizeText) : (SUPABASE_CONFIG.cloudflareStreamEnabled ? "Drag & drop or click to browse long lecture videos" : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)")}</span>
         </div>
         <input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" />
       </label>
+      <div class="course-upload-progress ${showProgress ? "is-visible" : ""} ${progressStatus ? `is-${escapeHtml(progressStatus)}` : ""}" data-upload-progress="${escapeHtml(draftKey)}" role="status" aria-live="polite">
+        <div class="course-upload-progress-meta">
+          <span class="course-upload-progress-label">${escapeHtml(progressMessage)}</span>
+          <span class="course-upload-progress-percent">${progressPercent}%</span>
+        </div>
+        <div class="course-upload-progress-track" aria-label="${progressPercent}% uploaded">
+          <span style="width: ${progressPercent}%;"></span>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -41454,7 +41677,250 @@ function getCourseVideoUploadFile(data) {
   return null;
 }
 
-async function uploadCourseLessonVideo(courseId, file) {
+function getAdminCourseUploadProgress(draftKey) {
+  const key = String(draftKey || "").trim();
+  return key && state.adminCourseUploadProgress ? state.adminCourseUploadProgress[key] || null : null;
+}
+
+function setAdminCourseUploadProgress(draftKey, patch = {}) {
+  const key = String(draftKey || "").trim();
+  if (!key) return;
+  if (!state.adminCourseUploadProgress) {
+    state.adminCourseUploadProgress = {};
+  }
+  const previous = state.adminCourseUploadProgress[key] || {};
+  const next = {
+    status: "uploading",
+    percent: 0,
+    message: "Uploading video...",
+    ...previous,
+    ...patch,
+  };
+  next.percent = Math.max(0, Math.min(100, Math.round(Number(next.percent) || 0)));
+  state.adminCourseUploadProgress[key] = next;
+  updateAdminCourseUploadProgressElement(key, next);
+}
+
+function clearAdminCourseUploadProgress(draftKey) {
+  const key = String(draftKey || "").trim();
+  if (!key || !state.adminCourseUploadProgress) return;
+  delete state.adminCourseUploadProgress[key];
+  updateAdminCourseUploadProgressElement(key, { status: "idle", percent: 0, message: "" });
+}
+
+function updateAdminCourseUploadProgressElement(draftKey, progress = {}) {
+  const key = String(draftKey || "").trim();
+  if (!key || typeof document === "undefined") return;
+  const progressEl = [...document.querySelectorAll("[data-upload-progress]")]
+    .find((entry) => String(entry.getAttribute("data-upload-progress") || "") === key);
+  if (!progressEl) return;
+  const status = String(progress?.status || "").trim();
+  const visible = status && status !== "idle";
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent) || 0)));
+  const message = String(progress?.message || "").trim()
+    || (status === "done" ? "Upload complete" : status === "saving" ? "Saving lesson..." : "Uploading video...");
+  progressEl.classList.toggle("is-visible", Boolean(visible));
+  ["is-starting", "is-uploading", "is-saving", "is-done", "is-error"].forEach((className) => {
+    progressEl.classList.remove(className);
+  });
+  if (/^[a-z-]+$/.test(status)) {
+    progressEl.classList.add(`is-${status}`);
+  }
+  const labelEl = progressEl.querySelector(".course-upload-progress-label");
+  const percentEl = progressEl.querySelector(".course-upload-progress-percent");
+  const barEl = progressEl.querySelector(".course-upload-progress-track span");
+  if (labelEl) labelEl.textContent = message;
+  if (percentEl) percentEl.textContent = `${percent}%`;
+  if (barEl) barEl.style.width = `${percent}%`;
+  progressEl.setAttribute("aria-label", `${message} ${percent}%`);
+}
+
+function getAdminCourseStorageUploadSession(client) {
+  if (!client?.auth?.getSession) {
+    return Promise.resolve(null);
+  }
+  return runWithTimeoutResult(
+    client.auth.getSession(),
+    SUPABASE_SESSION_TIMEOUT_MS,
+    "Supabase session lookup timed out.",
+  ).then((result) => {
+    if (result?.error) {
+      throw result.error;
+    }
+    return result?.data?.session || null;
+  });
+}
+
+function uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file, options = {}) {
+  return new Promise((resolve, reject) => {
+    if (typeof XMLHttpRequest === "undefined") {
+      reject(new Error("This browser cannot report upload progress."));
+      return;
+    }
+
+    const baseUrl = normalizeApiBaseUrl(SUPABASE_CONFIG.url || "");
+    const token = String(options?.accessToken || "").trim();
+    const anonKey = String(SUPABASE_CONFIG.anonKey || SUPABASE_CONFIG.legacyAnonKey || "").trim();
+    const encodedPath = encodeSupabaseStorageObjectPath(filePath);
+    if (!client?.storage || !baseUrl || !bucket || !encodedPath || !token || !anonKey) {
+      reject(new Error("Video upload needs an active Supabase session."));
+      return;
+    }
+
+    const xhr = new XMLHttpRequest();
+    const timeoutMs = Math.max(SUPABASE_QUERY_TIMEOUT_MS, Number(options?.timeoutMs) || 120000);
+    xhr.open("POST", `${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${encodedPath}`, true);
+    xhr.timeout = timeoutMs;
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.setRequestHeader("apikey", anonKey);
+    xhr.setRequestHeader("x-upsert", options?.upsert ? "true" : "false");
+    xhr.setRequestHeader("cache-control", String(options?.cacheControl || "3600"));
+    if (options?.contentType) {
+      xhr.setRequestHeader("content-type", String(options.contentType));
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || typeof options?.onProgress !== "function") return;
+      options.onProgress({
+        loaded: event.loaded,
+        total: event.total,
+        percent: Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100))),
+      });
+    };
+
+    xhr.onload = () => {
+      let responsePayload = null;
+      try {
+        responsePayload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        responsePayload = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve({ data: responsePayload || { path: filePath }, error: null });
+        return;
+      }
+      const message = String(responsePayload?.message || responsePayload?.error || xhr.statusText || "Could not upload course video.");
+      const error = new Error(message);
+      error.status = xhr.status;
+      error.statusCode = xhr.status;
+      error.payload = responsePayload;
+      reject(error);
+    };
+    xhr.onerror = () => reject(new Error("Network error while uploading course video."));
+    xhr.ontimeout = () => reject(new Error("Video upload timed out."));
+    xhr.onabort = () => reject(new Error("Video upload was cancelled."));
+    xhr.send(file);
+  });
+}
+
+async function getTusClient() {
+  if (window.tus?.Upload) {
+    return window.tus;
+  }
+  if (cloudflareStreamRuntime.tusClientPromise) {
+    return cloudflareStreamRuntime.tusClientPromise;
+  }
+  cloudflareStreamRuntime.tusClientPromise = loadExternalScriptWithFallback(TUS_CLIENT_SCRIPT_SOURCES, { timeoutMs: 20000 })
+    .then(() => {
+      if (!window.tus?.Upload) {
+        throw new Error("Video uploader could not start.");
+      }
+      return window.tus;
+    })
+    .finally(() => {
+      cloudflareStreamRuntime.tusClientPromise = null;
+    });
+  return cloudflareStreamRuntime.tusClientPromise;
+}
+
+function extractCloudflareStreamUidFromUploadUrl(uploadUrl) {
+  const raw = String(uploadUrl || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const candidate = segments[segments.length - 1] || parsed.hostname;
+    return String(candidate || "").trim();
+  } catch {
+    const match = raw.match(/\/([a-zA-Z0-9_-]{16,})(?:$|\?)/);
+    return String(match?.[1] || "").trim();
+  }
+}
+
+async function uploadCourseLessonVideoToCloudflareStream(courseId, file, options = {}) {
+  const client = getCoursesPlatformClient();
+  if (!client?.auth || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.legacyAnonKey) {
+    throw new Error("Cloudflare video upload needs an active Supabase session.");
+  }
+  const tokenResult = await getValidSupabaseAccessToken(client);
+  if (!tokenResult.ok) {
+    throw new Error(tokenResult.message || "Could not verify upload permission.");
+  }
+  const tusClient = await getTusClient();
+  const uploadEndpoint = `${SUPABASE_CONFIG.url}/functions/v1/cloudflare-stream-tus-upload`;
+  const maxDurationSeconds = Math.max(60, Math.min(36000, Number(options?.maxDurationSeconds) || CLOUDFLARE_STREAM_MAX_DURATION_SECONDS));
+  const expiry = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+  const targetCourseId = String(courseId || "").trim();
+
+  if (typeof options?.onProgress === "function") {
+    options.onProgress({ percent: 1, loaded: 0, total: file.size });
+  }
+
+  return new Promise((resolve, reject) => {
+    const upload = new tusClient.Upload(file, {
+      endpoint: uploadEndpoint,
+      chunkSize: CLOUDFLARE_STREAM_TUS_CHUNK_SIZE,
+      retryDelays: [0, 3000, 5000, 10000, 20000],
+      removeFingerprintOnSuccess: true,
+      headers: {
+        Authorization: `Bearer ${tokenResult.token}`,
+        apikey: SUPABASE_CONFIG.legacyAnonKey,
+      },
+      metadata: {
+        name: String(file.name || "course-video"),
+        filetype: String(file.type || "video/mp4"),
+        maxDurationSeconds: String(maxDurationSeconds),
+        expiry,
+        requiresignedurls: "true",
+        courseId: targetCourseId,
+      },
+      onError(error) {
+        reject(new Error(getErrorMessage(error, "Cloudflare video upload failed.")));
+      },
+      onProgress(bytesUploaded, bytesTotal) {
+        if (typeof options?.onProgress !== "function") return;
+        const percent = bytesTotal > 0
+          ? Math.max(1, Math.min(99, Math.round((bytesUploaded / bytesTotal) * 100)))
+          : 1;
+        options.onProgress({ percent, loaded: bytesUploaded, total: bytesTotal });
+      },
+      onSuccess() {
+        const videoUid = extractCloudflareStreamUidFromUploadUrl(upload.url);
+        if (!videoUid) {
+          reject(new Error("Cloudflare upload finished, but the video ID was not returned."));
+          return;
+        }
+        if (typeof options?.onProgress === "function") {
+          options.onProgress({ percent: 100, loaded: file.size, total: file.size });
+        }
+        resolve(`cloudflare-stream://${videoUid}`);
+      },
+    });
+
+    upload.findPreviousUploads()
+      .then((previousUploads) => {
+        if (previousUploads.length) {
+          upload.resumeFromPreviousUpload(previousUploads[0]);
+        }
+        upload.start();
+      })
+      .catch(() => {
+        upload.start();
+      });
+  });
+}
+
+async function uploadCourseLessonVideo(courseId, file, options = {}) {
   const client = getCoursesPlatformClient();
   const bucket = String(SUPABASE_CONFIG.courseVideoBucket || "").trim();
   const targetCourseId = String(courseId || "").trim();
@@ -41467,29 +41933,52 @@ async function uploadCourseLessonVideo(courseId, file) {
   if (!(file instanceof File) || Number(file.size || 0) <= 0) {
     return "";
   }
-  if (file.size > COURSE_VIDEO_UPLOAD_MAX_BYTES) {
-    throw new Error("Video is too large. Maximum upload size is 500 MB.");
+  const maxVideoBytes = SUPABASE_CONFIG.cloudflareStreamEnabled ? CLOUDFLARE_STREAM_UPLOAD_MAX_BYTES : COURSE_VIDEO_UPLOAD_MAX_BYTES;
+  if (file.size > maxVideoBytes) {
+    throw new Error(SUPABASE_CONFIG.cloudflareStreamEnabled
+      ? "Video is too large. Cloudflare Stream accepts files up to 30 GB."
+      : "Video is too large. Maximum upload size is 500 MB.");
   }
   const normalizedType = String(file.type || "").trim().toLowerCase();
   if (normalizedType && !COURSE_VIDEO_ALLOWED_MIME_TYPES.has(normalizedType)) {
     throw new Error("Unsupported video type. Use MP4, WebM, OGG, MOV, or M4V.");
+  }
+  if (SUPABASE_CONFIG.cloudflareStreamEnabled) {
+    return uploadCourseLessonVideoToCloudflareStream(targetCourseId, file, options);
   }
   const currentUser = getCurrentUser();
   const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
   const extension = resolveVideoFileExtension(file.name, normalizedType);
   const fileId = sanitizeStoragePathSegment(makeId("lesson-video"), "lesson-video");
   const filePath = `courses/${targetCourseId}/${userScope}/${Date.now()}-${fileId}.${extension}`;
-  const uploadResult = await runWithTimeoutResult(
-    client.storage
-      .from(bucket)
-      .upload(filePath, file, {
+  if (typeof options?.onProgress === "function") {
+    options.onProgress({ percent: 1, loaded: 0, total: file.size });
+  }
+  const session = await getAdminCourseStorageUploadSession(client);
+  const accessToken = String(session?.access_token || "").trim();
+  const uploadResult = accessToken
+    ? await uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file, {
+        accessToken,
         cacheControl: "3600",
         upsert: false,
         contentType: normalizedType || undefined,
-      }),
-    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
-    "Video upload timed out.",
-  );
+        timeoutMs: Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
+        onProgress: options?.onProgress,
+      }).catch((error) => ({ data: null, error }))
+    : await runWithTimeoutResult(
+        client.storage
+          .from(bucket)
+          .upload(filePath, file, {
+            cacheControl: "3600",
+            upsert: false,
+            contentType: normalizedType || undefined,
+          }),
+        Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
+        "Video upload timed out.",
+      );
+  if (typeof options?.onProgress === "function" && !uploadResult?.error) {
+    options.onProgress({ percent: 100, loaded: file.size, total: file.size });
+  }
   const uploadError = uploadResult?.error || null;
   if (uploadError) {
     const bucketMissing = isStorageBucketMissingError(uploadError);
@@ -41505,7 +41994,9 @@ async function uploadCourseLessonVideo(courseId, file) {
 async function resolveAdminLessonVideoUrl(courseId, data) {
   const uploadFile = getCourseVideoUploadFile(data);
   if (uploadFile) {
-    return uploadCourseLessonVideo(courseId, uploadFile);
+    return uploadCourseLessonVideo(courseId, uploadFile, {
+      onProgress: typeof data?._uploadProgress === "function" ? data._uploadProgress : null,
+    });
   }
   return String(data.video_url || "").trim() || null;
 }
@@ -43118,6 +43609,13 @@ function wireAdminCoursesPlatformBuilder() {
 
   const runAdminCourseAction = async (label, task, form) => {
     try {
+      if (form) {
+        form.classList.add("is-saving");
+        form.querySelectorAll("button").forEach((button) => {
+          button.dataset.wasDisabledBeforeSave = button.disabled ? "true" : "false";
+          button.disabled = true;
+        });
+      }
       await task();
       if (form) {
         clearAdminCourseBuilderDraft(form);
@@ -43127,8 +43625,47 @@ function wireAdminCoursesPlatformBuilder() {
       render();
     } catch (error) {
       console.warn("Courses platform admin action failed.", error?.message || error);
+      const draftKey = form ? getAdminCourseBuilderDraftKey(form) : "";
+      if (draftKey && state.adminCourseUploadProgress?.[draftKey]) {
+        setAdminCourseUploadProgress(draftKey, {
+          status: "error",
+          percent: Number(state.adminCourseUploadProgress[draftKey]?.percent) || 0,
+          message: getErrorMessage(error, "Video upload failed."),
+        });
+      }
       toast(getErrorMessage(error, "Action failed."));
+    } finally {
+      if (form && document.body.contains(form)) {
+        form.classList.remove("is-saving");
+        form.querySelectorAll("button").forEach((button) => {
+          button.disabled = button.dataset.wasDisabledBeforeSave === "true";
+          delete button.dataset.wasDisabledBeforeSave;
+        });
+      }
     }
+  };
+
+  const readAdminCourseActionData = (form) => {
+    const data = readFormDataObject(form);
+    const draftKey = getAdminCourseBuilderDraftKey(form);
+    if (draftKey && getCourseVideoUploadFile(data)) {
+      setAdminCourseUploadProgress(draftKey, {
+        status: "starting",
+        percent: 1,
+        message: "Starting video upload...",
+      });
+      data._uploadProgress = (progress = {}) => {
+        const percent = Math.max(1, Math.min(100, Math.round(Number(progress.percent) || 1)));
+        setAdminCourseUploadProgress(draftKey, {
+          status: percent >= 100 ? "saving" : "uploading",
+          percent,
+          message: percent >= 100 ? "Video uploaded. Saving lesson..." : `Uploading video... ${percent}%`,
+        });
+      };
+    } else if (draftKey) {
+      clearAdminCourseUploadProgress(draftKey);
+    }
+    return data;
   };
 
   // Delegated form submissions
@@ -43186,7 +43723,7 @@ function wireAdminCoursesPlatformBuilder() {
       event.preventDefault();
       const moduleId = form.closest("[data-module-id]")?.getAttribute("data-module-id") || "";
       runAdminCourseAction("Lesson created.", async () => {
-        const newLesson = await adminCreateLesson(state.adminCourseBuilderCourseId, moduleId, readFormDataObject(form));
+        const newLesson = await adminCreateLesson(state.adminCourseBuilderCourseId, moduleId, readAdminCourseActionData(form));
         if (newLesson && newLesson.id) {
           state.adminCourseBuilderActiveType = "lesson-edit";
           state.adminCourseBuilderActiveId = newLesson.id;
@@ -43200,7 +43737,7 @@ function wireAdminCoursesPlatformBuilder() {
     } else if (role === "admin-lesson-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
-      runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readFormDataObject(form)), form);
+      runAdminCourseAction("Lesson updated.", () => adminUpdateLesson(lessonId, readAdminCourseActionData(form)), form);
     } else if (role === "admin-resource-create-form") {
       event.preventDefault();
       const lessonId = form.closest("[data-lesson-id]")?.getAttribute("data-lesson-id") || "";
@@ -43236,7 +43773,9 @@ function wireAdminCoursesPlatformBuilder() {
           dropzone.classList.add("has-file");
         } else {
           if (titleEl) titleEl.textContent = "Choose video file";
-          if (subtitleEl) subtitleEl.textContent = "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)";
+          if (subtitleEl) subtitleEl.textContent = SUPABASE_CONFIG.cloudflareStreamEnabled
+            ? "Drag & drop or click to browse long lecture videos"
+            : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)";
           dropzone.classList.remove("has-file");
         }
       }

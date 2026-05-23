@@ -179,6 +179,37 @@ How it works with this app:
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
 
+## Protected long course videos with Cloudflare Stream
+
+Long course videos should use Cloudflare Stream, not Supabase Storage. Supabase still stores the lesson row, course access, progress, and the `cloudflare-stream://<video_uid>` reference.
+
+For a temporary free setup, keep `cloudflareStreamEnabled: false` in `supabase.config.js`. The app will upload lesson videos to the private Supabase Storage bucket and show the student-name watermark in the lesson player. This is useful for quick testing, but it is not as secure or scalable as Cloudflare Stream for 30 minute to 3 hour videos.
+
+Required Supabase Edge Function secrets:
+
+```bash
+supabase secrets set CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id
+supabase secrets set CLOUDFLARE_STREAM_API_TOKEN=your_stream_api_token
+supabase secrets set CLOUDFLARE_STREAM_CUSTOMER_CODE=your_customer_code
+supabase secrets set ALLOWED_ORIGIN=https://youssef256d.github.io
+```
+
+The Cloudflare token should have Stream permissions. The customer code is the value in Stream player URLs like `customer-<CODE>.cloudflarestream.com`.
+
+Deploy the video functions:
+
+```bash
+supabase functions deploy cloudflare-stream-tus-upload
+supabase functions deploy cloudflare-stream-token
+```
+
+Protection model:
+
+- Admin uploads go through a TUS resumable upload URL created server-side.
+- Uploaded videos require Cloudflare signed URLs.
+- Students request a short-lived playback token only after Supabase confirms access.
+- The player shows a visible student watermark to discourage screen-recorded leaks.
+
 ## Hosted SQL database
 
 The real PostgreSQL schema lives in hosted Supabase. Keep database changes in migrations:

@@ -10606,6 +10606,24 @@ body.theme-dark .course-lesson-status {
   background: #000000;
 }
 
+.lesson-video-watermark {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 2;
+  max-width: min(82%, 520px);
+  padding: 0.38rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.48);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.25;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
 .lesson-video video::-internal-media-controls-download-button {
   display: none;
 }
@@ -11498,6 +11516,71 @@ body.theme-dark .video-upload-dropzone.has-file {
   box-shadow: 0 12px 24px rgba(34, 197, 94, 0.15);
   border-color: var(--good);
   background: rgba(34, 185, 96, 0.08);
+}
+
+.course-upload-progress {
+  display: none;
+  gap: 0.45rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.course-upload-progress.is-visible {
+  display: grid;
+}
+
+.course-upload-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 750;
+  color: var(--ink);
+}
+
+.course-upload-progress-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.course-upload-progress-percent {
+  color: var(--brand);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.course-upload-progress.is-error .course-upload-progress-label,
+.course-upload-progress.is-error .course-upload-progress-percent {
+  color: var(--danger);
+}
+
+.course-upload-progress-track {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.course-upload-progress-track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--good));
+  transition: width 180ms ease;
+}
+
+.course-upload-progress.is-error .course-upload-progress-track span {
+  background: var(--danger);
+}
+
+.course-builder-form.is-saving {
+  opacity: 0.86;
 }
 
 @keyframes pulse-green {

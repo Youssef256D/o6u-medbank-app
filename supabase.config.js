@@ -27,4 +27,7 @@ window.__SUPABASE_CONFIG = {
   courseCoverBucket: "course-covers",
   // Optional private storage bucket for uploaded lesson materials.
   courseMaterialBucket: "course-materials",
+  // Free fallback: use private Supabase Storage for course videos.
+  // Set this to true later when Cloudflare Stream billing is available.
+  cloudflareStreamEnabled: false,
 };
