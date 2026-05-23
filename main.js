@@ -39157,6 +39157,46 @@ function formatCourseDurationLabel(seconds, fallback = "") {
   return rest ? `${hours}h ${rest}m` : `${hours}h`;
 }
 
+function readVideoFileDurationSeconds(file, options = {}) {
+  if (
+    !(typeof File !== "undefined" && file instanceof File)
+    || typeof document === "undefined"
+    || typeof URL === "undefined"
+    || typeof URL.createObjectURL !== "function"
+  ) {
+    return Promise.resolve(0);
+  }
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    const timeoutMs = Math.max(1000, Number(options?.timeoutMs) || 10000);
+    let objectUrl = "";
+    let settled = false;
+    const finish = (seconds) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      video.removeAttribute("src");
+      video.load();
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+      resolve(Number.isFinite(safeSeconds) ? safeSeconds : 0);
+    };
+    const timeoutId = window.setTimeout(() => finish(0), timeoutMs);
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = () => finish(video.duration);
+    video.onerror = () => finish(0);
+    try {
+      objectUrl = URL.createObjectURL(file);
+      video.src = objectUrl;
+    } catch {
+      finish(0);
+    }
+  });
+}
+
 function getCourseEnrollmentState(course, enrollments = state.coursesEnrollments, requests = state.coursesRequests) {
   const courseId = String(course?.id || course || "").trim();
   const isEnrolled = (Array.isArray(enrollments) ? enrollments : []).some((row) => String(row?.course_id || "").trim() === courseId);
@@ -41308,6 +41348,8 @@ function renderAdminCourseVideoUploadField(draftKey, labelText = "Upload video")
   const fileName = String(currentFile?.name || "").trim();
   const hasFile = !!fileName;
   const sizeText = currentFile ? ` (${(currentFile.size / (1024 * 1024)).toFixed(1)} MB)` : "";
+  const detectedDuration = hasFile ? Math.max(0, Number(getAdminCourseBuilderFieldValue(draftKey, "duration_seconds", 0)) || 0) : 0;
+  const durationText = detectedDuration ? ` - ${formatCourseDurationLabel(detectedDuration)}` : "";
   const progress = state.adminCourseUploadProgress?.[draftKey] || null;
   const progressPercent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent) || 0)));
   const progressStatus = String(progress?.status || "").trim();
@@ -41325,7 +41367,7 @@ function renderAdminCourseVideoUploadField(draftKey, labelText = "Upload video")
         </svg>
         <div class="video-upload-text">
           <span class="video-upload-title">${hasFile ? "Change selected video" : "Choose video file"}</span>
-          <span class="video-upload-subtitle">${hasFile ? escapeHtml(fileName + sizeText) : (SUPABASE_CONFIG.cloudflareStreamEnabled ? "Drag & drop or click to browse long lecture videos" : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)")}</span>
+          <span class="video-upload-subtitle">${hasFile ? escapeHtml(fileName + sizeText + durationText) : (SUPABASE_CONFIG.cloudflareStreamEnabled ? "Drag & drop or click to browse long lecture videos" : "Drag & drop or click to browse (MP4, WebM, OGG up to 500 MB)")}</span>
         </div>
         <input name="video_file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-m4v" />
       </label>
@@ -41677,6 +41719,17 @@ function getCourseVideoUploadFile(data) {
   return null;
 }
 
+async function resolveAdminLessonDurationSeconds(data, fallbackSeconds = 0) {
+  const uploadFile = getCourseVideoUploadFile(data);
+  if (uploadFile) {
+    const detectedSeconds = await readVideoFileDurationSeconds(uploadFile);
+    if (detectedSeconds > 0) {
+      return detectedSeconds;
+    }
+  }
+  return Math.max(0, Number(data?.duration_seconds ?? fallbackSeconds) || 0);
+}
+
 function getAdminCourseUploadProgress(draftKey) {
   const key = String(draftKey || "").trim();
   return key && state.adminCourseUploadProgress ? state.adminCourseUploadProgress[key] || null : null;
@@ -42004,6 +42057,7 @@ async function resolveAdminLessonVideoUrl(courseId, data) {
 async function adminCreateLesson(courseId, moduleId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(courseId) || !isUuidValue(moduleId)) throw new Error("Lesson cannot be created.");
+  const durationSeconds = await resolveAdminLessonDurationSeconds(data, 0);
   const videoUrl = await resolveAdminLessonVideoUrl(courseId, data);
   await runRelationalQueryWithTimeout(
     client.from("platform_course_lessons").insert({
@@ -42014,7 +42068,7 @@ async function adminCreateLesson(courseId, moduleId, data) {
       lesson_type: String(data.lesson_type || "video").trim() || "video",
       video_url: videoUrl,
       video_provider: String(data.video_provider || "").trim() || null,
-      duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
+      duration_seconds: durationSeconds,
       content_html: String(data.content_html || "").trim() || null,
       position: Number(data.position) || 0,
       is_free_preview: Boolean(data.is_free_preview),
@@ -42030,6 +42084,7 @@ async function adminUpdateLesson(lessonId, data) {
   const client = getCoursesPlatformClient();
   if (!client || !isUuidValue(lessonId)) throw new Error("Lesson cannot be updated.");
   const lesson = (state.adminCoursesPlatformLessons || []).find((entry) => String(entry?.id || "").trim() === String(lessonId || "").trim());
+  const durationSeconds = await resolveAdminLessonDurationSeconds(data, lesson?.duration_seconds || 0);
   const videoUrl = await resolveAdminLessonVideoUrl(lesson?.course_id || state.adminCourseBuilderCourseId, data);
   await runRelationalQueryWithTimeout(
     client.from("platform_course_lessons").update({
@@ -42038,7 +42093,7 @@ async function adminUpdateLesson(lessonId, data) {
       lesson_type: String(data.lesson_type || "video").trim() || "video",
       video_url: videoUrl,
       video_provider: String(data.video_provider || "").trim() || null,
-      duration_seconds: Math.max(0, Number(data.duration_seconds) || 0),
+      duration_seconds: durationSeconds,
       content_html: String(data.content_html || "").trim() || null,
       position: Number(data.position) || 0,
       is_free_preview: Boolean(data.is_free_preview),
@@ -43143,7 +43198,6 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             </label>
             <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "video_url", ""))}" /></label>
             ${renderAdminCourseVideoUploadField(dk, "Upload video")}
-            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "duration_seconds", 0))}" /></label>
             <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dk, "position", moduleLessons.length + 1))}" /></label>
             <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${getAdminCourseBuilderCheckboxState(dk, "is_free_preview", false)} /> Free preview</label>
             <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dk, "is_published", false)} /> Published</label>
@@ -43182,7 +43236,6 @@ function renderFocusedEditorPanel(selectedCourse, rows) {
             <label>Video URL<input name="video_url" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_url", lesson.video_url || ""))}" /></label>
             ${renderAdminCourseVideoUploadField(dkLesson, "Replace video")}
             <label>Video provider<input name="video_provider" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "video_provider", lesson.video_provider || ""))}" /></label>
-            <label>Duration seconds<input name="duration_seconds" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "duration_seconds", lesson.duration_seconds || 0))}" /></label>
             <label>Position<input name="position" type="number" value="${escapeHtml(getAdminCourseBuilderFieldValue(dkLesson, "position", lesson.position || 0))}" /></label>
             <label class="course-builder-check"><input type="checkbox" name="is_free_preview" ${getAdminCourseBuilderCheckboxState(dkLesson, "is_free_preview", lesson.is_free_preview)} /> Free preview</label>
             <label class="course-builder-check"><input type="checkbox" name="is_published" ${getAdminCourseBuilderCheckboxState(dkLesson, "is_published", lesson.is_published)} /> Published</label>
@@ -43771,6 +43824,26 @@ function wireAdminCoursesPlatformBuilder() {
           if (titleEl) titleEl.textContent = "Change selected video";
           if (subtitleEl) subtitleEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
           dropzone.classList.add("has-file");
+          readVideoFileDurationSeconds(file).then((seconds) => {
+            if (!target.files?.[0] || target.files[0] !== file) return;
+            const durationSeconds = Math.max(0, Number(seconds) || 0);
+            if (durationSeconds > 0) {
+              const form = target.closest("form");
+              const draftKey = form ? getAdminCourseBuilderDraftKey(form) : "";
+              if (draftKey) {
+                if (!state.adminCourseBuilderDrafts) {
+                  state.adminCourseBuilderDrafts = {};
+                }
+                state.adminCourseBuilderDrafts[draftKey] = {
+                  ...(state.adminCourseBuilderDrafts[draftKey] || {}),
+                  duration_seconds: durationSeconds,
+                };
+              }
+              if (subtitleEl) {
+                subtitleEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB) - ${formatCourseDurationLabel(durationSeconds)}`;
+              }
+            }
+          }).catch(() => {});
         } else {
           if (titleEl) titleEl.textContent = "Choose video file";
           if (subtitleEl) subtitleEl.textContent = SUPABASE_CONFIG.cloudflareStreamEnabled
