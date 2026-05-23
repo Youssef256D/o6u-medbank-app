@@ -10760,6 +10760,7 @@ body.theme-dark .course-lesson-status {
 
 .courses-admin-builder {
   margin-top: 0;
+  overflow: clip;
 }
 
 .courses-builder-selector {
@@ -10950,6 +10951,8 @@ body.theme-comfort .admin-course-meta-pill {
   border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 360px;
 }
 
 .admin-course-table-wrap.is-compact {
@@ -11256,6 +11259,9 @@ body.theme-comfort .admin-course-meta-pill {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+  min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 520px;
 }
 
 .course-builder-form h4 {
@@ -11850,7 +11856,7 @@ body.theme-comfort .admin-badge-draft {
 /* Layout split for admin workspace builder grids */
 .course-builder-split-layout {
   display: grid;
-  grid-template-columns: 360px 1fr;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
   gap: 1.5rem;
   margin-top: 1.25rem;
   align-items: start;
@@ -11860,6 +11866,9 @@ body.theme-comfort .admin-badge-draft {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  min-width: 0;
+  position: sticky;
+  top: 0.85rem;
 }
 
 .course-builder-outline-title {
@@ -11877,7 +11886,7 @@ body.theme-comfort .admin-badge-draft {
 }
 
 .course-builder-outline-scroll {
-  max-height: 70vh;
+  max-height: min(70vh, 720px);
   overflow-y: auto;
   padding-right: 0.25rem;
 }
@@ -12058,6 +12067,7 @@ body.theme-comfort .admin-badge-draft {
   box-shadow: var(--shadow-soft);
   padding: 1.5rem;
   transition: all 0.25s ease;
+  min-width: 0;
 }
 
 .course-builder-editor:hover {
@@ -12943,6 +12953,14 @@ body.theme-comfort .courses-toolbar-card {
   .course-builder-split-layout {
     grid-template-columns: 1fr;
   }
+
+  .course-builder-outline {
+    position: static;
+  }
+
+  .course-builder-outline-scroll {
+    max-height: 420px;
+  }
 }
 
 /* ── Course Metadata Grid & Cards ── */
@@ -12961,6 +12979,8 @@ body.theme-comfort .courses-toolbar-card {
   overflow: hidden;
   box-shadow: var(--shadow-soft);
   transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
 }
 
 .course-metadata-card:hover {
@@ -12993,6 +13013,92 @@ body.theme-comfort .courses-toolbar-card {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 1.25rem;
+}
+
+@media (max-width: 760px) {
+  .courses-admin-builder {
+    padding: 0.85rem;
+  }
+
+  .admin-courses-minimal-head {
+    align-items: stretch;
+  }
+
+  .admin-courses-minimal-head > div:last-child,
+  .admin-courses-minimal-head .stack {
+    width: 100%;
+  }
+
+  .admin-courses-minimal-head .btn {
+    flex: 1 1 150px;
+    min-height: 42px;
+  }
+
+  .admin-course-table-scroll {
+    margin-inline: -0.35rem;
+    padding-inline: 0.35rem;
+  }
+
+  .admin-course-table {
+    min-width: 640px;
+  }
+
+  .course-builder-split-layout {
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+
+  .course-builder-outline,
+  .course-builder-editor {
+    border-radius: var(--radius-sm);
+  }
+
+  .course-builder-outline-title {
+    gap: 0.65rem;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .course-builder-outline-title .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .course-builder-outline-scroll {
+    max-height: 52vh;
+  }
+
+  .outline-module-header,
+  .outline-lesson-item {
+    align-items: flex-start;
+  }
+
+  .outline-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 96px;
+  }
+
+  .course-builder-editor {
+    padding: 1rem;
+  }
+
+  .course-builder-form {
+    margin: 1rem 0;
+    padding: 1rem;
+    gap: 1rem;
+  }
+
+  .course-builder-grid,
+  .course-builder-grid.compact,
+  .grid-2col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .course-metadata-card-body,
+  .course-metadata-card-header {
+    padding: 0.9rem;
+  }
 }
 
 /* ── Initials Avatar Bubble ── */

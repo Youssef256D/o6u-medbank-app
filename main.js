@@ -43622,10 +43622,8 @@ function wireAdminCoursesPlatformBuilder() {
   const root = document.getElementById("admin-courses-platform-builder");
   if (!root) return;
 
-  const handleFormDraftInput = (event) => {
-    const target = event.target;
-    if (!target) return;
-    const form = target.closest("form");
+  const draftInputTimers = new WeakMap();
+  const persistAdminCourseBuilderDraft = (form) => {
     if (!form || !root.contains(form)) return;
     const draftKey = getAdminCourseBuilderDraftKey(form);
     if (!draftKey) return;
@@ -43649,6 +43647,20 @@ function wireAdminCoursesPlatformBuilder() {
     });
 
     state.adminCourseBuilderDrafts[draftKey] = currentData;
+  };
+
+  const handleFormDraftInput = (event) => {
+    const target = event.target;
+    if (!target) return;
+    const form = target.closest("form");
+    if (!form || !root.contains(form)) return;
+    if (event.type === "input") {
+      window.clearTimeout(draftInputTimers.get(form));
+      draftInputTimers.set(form, window.setTimeout(() => persistAdminCourseBuilderDraft(form), 140));
+      return;
+    }
+    window.clearTimeout(draftInputTimers.get(form));
+    persistAdminCourseBuilderDraft(form);
   };
 
   root.addEventListener("input", handleFormDraftInput);
