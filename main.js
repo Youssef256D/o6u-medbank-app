@@ -38902,6 +38902,7 @@ const COURSE_PLATFORM_TABLES = new Set([
 ]);
 
 const COURSE_PLATFORM_COURSE_SELECT = "id,course_code,course_name,academic_year,academic_semester,is_active,description,cover_image_url,intro_video_url,instructor_name,instructor_bio,level,estimated_duration,is_published,enrollment_mode,price,updated_at";
+const COURSE_PLATFORM_LESSON_SELECT = "id,course_id,module_id,is_published,is_free_preview,position,title,description,lesson_type,duration_seconds,video_url,video_provider,content_html,created_at,updated_at";
 const LOCAL_DEMO_PLATFORM_IDS = {
   enrolledCourse: "11111111-1111-4111-8111-111111111111",
   suggestedCourse: "22222222-2222-4222-8222-222222222222",
@@ -39425,7 +39426,7 @@ async function loadStudentCoursesWithProgress(options = {}) {
         throw error;
       }),
       runRelationalQueryWithTimeout(
-        client.from("platform_course_lessons").select("id,course_id,module_id,is_published,position,title,description,lesson_type,duration_seconds,created_at,updated_at").order("position", { ascending: true }),
+        client.from("platform_course_lessons").select(COURSE_PLATFORM_LESSON_SELECT).order("position", { ascending: true }),
         "Lesson summary query timed out.",
       ).catch((error) => {
         if (isMissingRelationError(error)) return [];
@@ -40860,6 +40861,12 @@ function renderLessonViewer(lessonId) {
           </div>
           
           ${lesson.description && lesson.description !== currentModule?.title ? `<p class="lesson-description-text">${escapeHtml(lesson.description)}</p>` : ""}
+
+          ${isVideoLesson && !rawVideoUrl ? `
+            <div class="lesson-video-placeholder">
+              <span>No video file is attached to this lesson yet.</span>
+            </div>
+          ` : ""}
 
           ${rawVideoUrl && !safeVideoUrl && (isUploadedCourseVideoSource(rawVideoUrl) || isCloudflareVideo) ? `
             <div class="lesson-video-placeholder">
