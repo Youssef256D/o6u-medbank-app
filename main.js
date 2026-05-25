@@ -92,11 +92,18 @@ const PRIVATE_ROUTE_SET = new Set([
   "admin",
 ]);
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
-const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "activity", "logs"];
+const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "ai-agents", "activity", "logs"];
 const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
 const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "enrollments", "requests", "availability"]);
 const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_PAGE]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
+const ADMIN_AGENT_PERMISSION_OPTIONS = [
+  ["read_dashboard", "View dashboard summary"],
+  ["draft_announcements", "Create unpublished announcement drafts"],
+  ["request_content_publish", "Request publishing approval"],
+  ["manage_content_drafts", "Manage content drafts (reserved)"],
+  ["review_enrollments", "Review enrollment queue (reserved)"],
+];
 const inMemoryStorage = new Map();
 let sessionVaultDbPromise = null;
 const storageQuotaRetryThresholds = new Map();
@@ -397,6 +404,15 @@ const state = {
   adminPresenceError: "",
   adminPresenceLastSyncAt: 0,
   adminActivityReportRunning: false,
+  adminAgentsLoading: false,
+  adminAgentsError: "",
+  adminAgentsLoadedAt: 0,
+  adminAgents: [],
+  adminAgentPermissions: [],
+  adminAgentActions: [],
+  adminAgentApprovals: [],
+  adminAgentNewToken: null,
+  adminAgentSaving: false,
   adminImportRunning: false,
   adminImportStatus: "",
   adminImportStatusTone: "neutral",
@@ -18502,6 +18518,15 @@ function render() {
     state.adminPresenceRows = [];
     state.adminPresenceLastSyncAt = 0;
     state.adminActivityReportRunning = false;
+    state.adminAgentsLoading = false;
+    state.adminAgentsError = "";
+    state.adminAgentsLoadedAt = 0;
+    state.adminAgents = [];
+    state.adminAgentPermissions = [];
+    state.adminAgentActions = [];
+    state.adminAgentApprovals = [];
+    state.adminAgentNewToken = null;
+    state.adminAgentSaving = false;
     adminQuestionsLastHydratedAt = 0;
     clearAdminPresencePolling();
     clearAdminDashboardPolling();
@@ -25045,6 +25070,314 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   return true;
 }
 
+function getAdminAgentPermissionLabel(permissionKey) {
+  const entry = ADMIN_AGENT_PERMISSION_OPTIONS.find(([key]) => key === String(permissionKey || "").trim());
+  return entry ? entry[1] : String(permissionKey || "").trim();
+}
+
+function getAdminAgentRowsByAgentId(rows, agentId) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => String(row?.agent_id || "").trim() === String(agentId || "").trim());
+}
+
+async function loadAdminAgents(options = {}) {
+  const client = getCoursesPlatformClient();
+  if (!client) {
+    state.adminAgentsError = "No active Supabase admin session.";
+    state.adminAgentsLoadedAt = Date.now();
+    return false;
+  }
+  if (state.adminAgentsLoading && !options.force) {
+    return false;
+  }
+  state.adminAgentsLoading = true;
+  state.adminAgentsError = "";
+  try {
+    const [agents, permissions, actions, approvals] = await Promise.all([
+      runRelationalQueryWithTimeout(
+        client.from("admin_agents").select("id,name,description,status,token_hint,last_used_at,created_at,updated_at").order("created_at", { ascending: false }),
+        "Agent list query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("admin_agent_permissions").select("agent_id,permission_key,created_at"),
+        "Agent permission query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("admin_agent_action_log").select("id,agent_id,action_key,action_status,response_summary,created_at").order("created_at", { ascending: false }).limit(40),
+        "Agent activity query timed out.",
+      ),
+      runRelationalQueryWithTimeout(
+        client.from("admin_agent_approval_requests").select("id,agent_id,action_key,request_payload,reason,status,created_at,reviewed_at").order("created_at", { ascending: false }).limit(40),
+        "Agent approval query timed out.",
+      ),
+    ]);
+    state.adminAgents = Array.isArray(agents) ? agents : [];
+    state.adminAgentPermissions = Array.isArray(permissions) ? permissions : [];
+    state.adminAgentActions = Array.isArray(actions) ? actions : [];
+    state.adminAgentApprovals = Array.isArray(approvals) ? approvals : [];
+    state.adminAgentsLoadedAt = Date.now();
+    return true;
+  } catch (error) {
+    state.adminAgentsError = isMissingRelationError(error)
+      ? "AI Agents is not installed in Supabase yet. Apply the latest database migration, then refresh."
+      : getErrorMessage(error, "Could not load AI agents.");
+    state.adminAgentsLoadedAt = Date.now();
+    return false;
+  } finally {
+    state.adminAgentsLoading = false;
+  }
+}
+
+function generateAdminAgentToken() {
+  const bytes = new Uint8Array(36);
+  window.crypto.getRandomValues(bytes);
+  const encoded = window.btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  return `mba_${encoded}`;
+}
+
+async function hashAdminAgentToken(token) {
+  const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(token || "")));
+  return Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function createAdminAgentFromForm(form) {
+  const client = getCoursesPlatformClient();
+  const currentUserId = getCurrentCoursePlatformUserId();
+  if (!client || !form) throw new Error("AI agent cannot be created.");
+  const formData = new FormData(form);
+  const name = String(formData.get("name") || "").trim();
+  const description = String(formData.get("description") || "").trim();
+  if (name.length < 2) throw new Error("Enter a name for the assistant.");
+  const permissionKeys = formData.getAll("permissions")
+    .map((value) => String(value || "").trim())
+    .filter((value) => ADMIN_AGENT_PERMISSION_OPTIONS.some(([key]) => key === value));
+  if (!permissionKeys.length) throw new Error("Choose at least one permission.");
+  const token = generateAdminAgentToken();
+  const tokenHash = await hashAdminAgentToken(token);
+  const rows = await runRelationalQueryWithTimeout(
+    client.from("admin_agents").insert({
+      name,
+      description: description || null,
+      token_hash: tokenHash,
+      token_hint: token.slice(-8),
+      created_by: isUuidValue(currentUserId) ? currentUserId : null,
+    }).select("id,name").limit(1),
+    "Agent creation timed out.",
+  );
+  const agent = Array.isArray(rows) ? rows[0] : null;
+  if (!agent?.id) throw new Error("AI agent could not be created.");
+  await runRelationalQueryWithTimeout(
+    client.from("admin_agent_permissions").insert(permissionKeys.map((permissionKey) => ({
+      agent_id: agent.id,
+      permission_key: permissionKey,
+      created_by: isUuidValue(currentUserId) ? currentUserId : null,
+    }))),
+    "Agent permission save timed out.",
+  );
+  state.adminAgentNewToken = { name, token };
+  await loadAdminAgents({ force: true });
+}
+
+async function rotateAdminAgentToken(agentId, agentName) {
+  const client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(agentId)) throw new Error("Agent token cannot be rotated.");
+  const token = generateAdminAgentToken();
+  const tokenHash = await hashAdminAgentToken(token);
+  await runRelationalQueryWithTimeout(
+    client.from("admin_agents").update({ token_hash: tokenHash, token_hint: token.slice(-8) }).eq("id", agentId),
+    "Agent token rotation timed out.",
+  );
+  state.adminAgentNewToken = { name: agentName || "AI agent", token };
+  await loadAdminAgents({ force: true });
+}
+
+async function setAdminAgentStatus(agentId, status) {
+  const client = getCoursesPlatformClient();
+  const nextStatus = status === "active" ? "active" : "disabled";
+  if (!client || !isUuidValue(agentId)) throw new Error("Agent status cannot be changed.");
+  await runRelationalQueryWithTimeout(
+    client.from("admin_agents").update({ status: nextStatus }).eq("id", agentId),
+    "Agent status update timed out.",
+  );
+  await loadAdminAgents({ force: true });
+}
+
+async function resolveAdminAgentApproval(approvalId, decision) {
+  const client = getCoursesPlatformClient();
+  const adminId = getCurrentCoursePlatformUserId();
+  const approval = (state.adminAgentApprovals || []).find((row) => String(row?.id || "").trim() === String(approvalId || "").trim());
+  if (!client || !approval || !isUuidValue(approvalId)) throw new Error("Approval request cannot be updated.");
+  if (String(approval.status || "").trim() !== "pending") throw new Error("This request has already been reviewed.");
+  const reviewedAt = nowISO();
+  if (decision === "approve" && approval.action_key === "request_publish_announcement") {
+    const announcementId = String(approval.request_payload?.announcementId || "").trim();
+    if (!isUuidValue(announcementId)) throw new Error("This request has no valid announcement draft.");
+    await runRelationalQueryWithTimeout(
+      client.from("platform_course_announcements").update({ is_published: true }).eq("id", announcementId),
+      "Announcement publish timed out.",
+    );
+    await runRelationalQueryWithTimeout(
+      client.from("admin_agent_approval_requests").update({
+        status: "executed",
+        reviewed_by: isUuidValue(adminId) ? adminId : null,
+        reviewed_at: reviewedAt,
+      }).eq("id", approvalId),
+      "Approval completion timed out.",
+    );
+  } else {
+    await runRelationalQueryWithTimeout(
+      client.from("admin_agent_approval_requests").update({
+        status: decision === "approve" ? "approved" : "rejected",
+        reviewed_by: isUuidValue(adminId) ? adminId : null,
+        reviewed_at: reviewedAt,
+      }).eq("id", approvalId),
+      "Approval review timed out.",
+    );
+  }
+  await loadAdminAgents({ force: true });
+}
+
+function renderAdminAgentsSection() {
+  if (!state.adminAgentsLoadedAt && !state.adminAgentsLoading) {
+    loadAdminAgents().then(() => {
+      if (state.route === "admin" && state.adminPage === "ai-agents") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    });
+  }
+  const tokenPanel = state.adminAgentNewToken
+    ? `
+      <article class="admin-agent-token-card" role="status">
+        <b>Token created for ${escapeHtml(state.adminAgentNewToken.name)}</b>
+        <p>Show this once to your Hermes configuration. It will not be stored in readable form.</p>
+        <code>${escapeHtml(state.adminAgentNewToken.token)}</code>
+        <button class="btn ghost admin-btn-sm" type="button" data-action="admin-agent-hide-token">Hide token</button>
+      </article>
+    `
+    : "";
+  const agentRows = (state.adminAgents || []).map((agent) => {
+    const permissions = getAdminAgentRowsByAgentId(state.adminAgentPermissions, agent.id)
+      .map((entry) => getAdminAgentPermissionLabel(entry.permission_key))
+      .join(", ");
+    const active = agent.status === "active";
+    return `
+      <tr>
+        <td><b>${escapeHtml(agent.name)}</b><small class="subtle admin-agent-detail">${escapeHtml(agent.description || "No description")}</small></td>
+        <td><span class="badge ${active ? "good" : "bad"}">${active ? "Active" : "Disabled"}</span></td>
+        <td><small>${escapeHtml(permissions || "No permissions")}</small></td>
+        <td><small>Ends ...${escapeHtml(agent.token_hint || "")}</small></td>
+        <td><small>${agent.last_used_at ? escapeHtml(new Date(agent.last_used_at).toLocaleString()) : "Never"}</small></td>
+        <td>
+          <div class="stack">
+            <button class="btn ghost admin-btn-sm" type="button" data-action="admin-agent-rotate-token" data-agent-id="${escapeHtml(agent.id)}" data-agent-name="${escapeHtml(agent.name)}">Rotate token</button>
+            <button class="btn ${active ? "danger" : "ghost"} admin-btn-sm" type="button" data-action="admin-agent-set-status" data-agent-id="${escapeHtml(agent.id)}" data-next-status="${active ? "disabled" : "active"}">${active ? "Disable" : "Enable"}</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+  const approvalRows = (state.adminAgentApprovals || []).map((request) => {
+    const agent = (state.adminAgents || []).find((row) => row.id === request.agent_id);
+    const pending = request.status === "pending";
+    const targetTitle = String(request.request_payload?.title || "").trim();
+    const rawTargetBody = String(request.request_payload?.body || "").trim();
+    const targetBody = rawTargetBody.length > 180 ? `${rawTargetBody.slice(0, 177)}...` : rawTargetBody;
+    const requestReason = String(request.reason || "").trim();
+    const requestDetail = [targetTitle, targetBody, requestReason].filter(Boolean).join(" - ");
+    return `
+      <tr>
+        <td>${escapeHtml(agent?.name || "Removed agent")}</td>
+        <td>
+          ${escapeHtml(request.action_key)}
+          ${requestDetail ? `<small class="subtle admin-agent-detail">${escapeHtml(requestDetail)}</small>` : ""}
+        </td>
+        <td><span class="badge ${pending ? "bad" : "good"}">${escapeHtml(request.status)}</span></td>
+        <td><small>${escapeHtml(new Date(request.created_at).toLocaleString())}</small></td>
+        <td>
+          ${pending ? `
+            <div class="stack">
+              <button class="btn admin-btn-sm" type="button" data-action="admin-agent-approve-request" data-request-id="${escapeHtml(request.id)}">Approve</button>
+              <button class="btn ghost admin-btn-sm" type="button" data-action="admin-agent-reject-request" data-request-id="${escapeHtml(request.id)}">Reject</button>
+            </div>
+          ` : "-"}
+        </td>
+      </tr>
+    `;
+  }).join("");
+  const actionRows = (state.adminAgentActions || []).map((action) => {
+    const agent = (state.adminAgents || []).find((row) => row.id === action.agent_id);
+    return `
+      <tr>
+        <td><small>${escapeHtml(new Date(action.created_at).toLocaleString())}</small></td>
+        <td>${escapeHtml(agent?.name || "Removed agent")}</td>
+        <td>${escapeHtml(action.action_key)}</td>
+        <td><span class="badge ${action.action_status === "success" ? "good" : "bad"}">${escapeHtml(action.action_status)}</span></td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <section class="card admin-section admin-agent-section" id="admin-agents-section">
+      <div class="flex-between">
+        <div>
+          <h3 style="margin:0;">AI Agents</h3>
+          <p class="subtle">Create an admin assistant identity with tightly defined abilities and a revocable token.</p>
+        </div>
+        <button class="btn ghost admin-btn-sm ${state.adminAgentsLoading ? "is-loading" : ""}" type="button" data-action="admin-agents-refresh">${state.adminAgentsLoading ? "Refreshing..." : "Refresh"}</button>
+      </div>
+      ${state.adminAgentsError ? `<p class="subtle import-status is-error">${escapeHtml(state.adminAgentsError)}</p>` : ""}
+      ${tokenPanel}
+      <form id="admin-agent-create-form" class="admin-agent-create-form" autocomplete="off">
+        <h4>Create admin assistant</h4>
+        <div class="form-row">
+          <label>Name <input name="name" required minlength="2" maxlength="80" placeholder="MedBank Admin Assistant" /></label>
+          <label>Description <input name="description" maxlength="240" placeholder="Prepares content drafts and reports" /></label>
+        </div>
+        <div class="admin-agent-permission-grid">
+          ${ADMIN_AGENT_PERMISSION_OPTIONS.map(([key, label], index) => `
+            <label class="admin-course-check">
+              <input type="checkbox" name="permissions" value="${escapeHtml(key)}" ${index < 3 ? "checked" : ""} />
+              <span>${escapeHtml(label)}</span>
+            </label>
+          `).join("")}
+        </div>
+        <button class="btn ${state.adminAgentSaving ? "is-loading" : ""}" type="submit" ${state.adminAgentSaving ? "disabled" : ""}>${state.adminAgentSaving ? "Creating assistant..." : "Create assistant and token"}</button>
+      </form>
+      <h4>Configured agents</h4>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Agent</th><th>Status</th><th>Permissions</th><th>Token</th><th>Last used</th><th>Actions</th></tr></thead>
+          <tbody>${agentRows || `<tr><td colspan="6" class="subtle">No assistants created yet.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="admin-agent-review-grid">
+        <div>
+          <h4>Approval requests</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Agent</th><th>Action</th><th>Status</th><th>Requested</th><th>Review</th></tr></thead>
+              <tbody>${approvalRows || `<tr><td colspan="5" class="subtle">No requests pending.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h4>Recent activity</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Agent</th><th>Action</th><th>Result</th></tr></thead>
+              <tbody>${actionRows || `<tr><td colspan="4" class="subtle">No agent activity yet.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderAdminDataSidebarNav(activeAdminPage) {
   const items = [
     ["dashboard", "Dashboard"],
@@ -25054,6 +25387,7 @@ function renderAdminDataSidebarNav(activeAdminPage) {
     ["bulk-import", "Bulk Import"],
     ["notifications", "Notifications"],
     ["site-access", "Site Access"],
+    ["ai-agents", "AI Agents"],
     ["activity", "Activity"],
     ["logs", "Logs"],
   ];
@@ -26437,6 +26771,10 @@ function renderAdmin() {
     `;
   }
 
+  if (activeAdminPage === "ai-agents") {
+    pageContent = renderAdminAgentsSection();
+  }
+
   if (activeAdminPage === "logs") {
     const logs = getSystemLogs().slice(0, 800);
     const logRows = logs
@@ -26846,6 +27184,9 @@ function wireAdmin() {
         state.adminCourseTopicGroupCreateModalOpen = false;
         state.adminCourseTopicInlineCreateOpen = false;
       }
+      if (page !== "ai-agents") {
+        state.adminAgentNewToken = null;
+      }
       if (page === "activity") {
         refreshAdminPresenceSnapshot({ force: true })
           .then((ok) => {
@@ -26937,6 +27278,101 @@ function wireAdmin() {
     state.skipNextRouteAnimation = true;
     render();
     flushPendingSyncInBackground();
+  });
+
+  appEl.querySelector("#admin-agent-create-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.adminAgentSaving) {
+      return;
+    }
+    const submittedForm = event.currentTarget;
+    state.adminAgentSaving = true;
+    state.skipNextRouteAnimation = true;
+    render();
+    try {
+      await createAdminAgentFromForm(submittedForm);
+      appendSystemLog("admin.agent_created", "AI admin assistant created.", {});
+      toast("Assistant created. Store the displayed token in Hermes.");
+    } catch (error) {
+      toast(getErrorMessage(error, "Could not create assistant."));
+    } finally {
+      state.adminAgentSaving = false;
+      if (state.route === "admin" && state.adminPage === "ai-agents") {
+        state.skipNextRouteAnimation = true;
+        render();
+      }
+    }
+  });
+
+  appEl.querySelector("[data-action='admin-agents-refresh']")?.addEventListener("click", async () => {
+    await loadAdminAgents({ force: true });
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelector("[data-action='admin-agent-hide-token']")?.addEventListener("click", () => {
+    state.adminAgentNewToken = null;
+    state.skipNextRouteAnimation = true;
+    render();
+  });
+
+  appEl.querySelectorAll("[data-action='admin-agent-rotate-token']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!window.confirm("Rotate this agent token? Its current Hermes connection will stop working immediately.")) {
+        return;
+      }
+      try {
+        await rotateAdminAgentToken(
+          String(button.getAttribute("data-agent-id") || "").trim(),
+          String(button.getAttribute("data-agent-name") || "").trim(),
+        );
+        appendSystemLog("admin.agent_token_rotated", "AI admin assistant token rotated.", {});
+        toast("New token generated. Update Hermes with the displayed token.");
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not rotate token."));
+      }
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='admin-agent-set-status']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nextStatus = String(button.getAttribute("data-next-status") || "").trim();
+      const message = nextStatus === "disabled"
+        ? "Disable this agent now? Its token will immediately stop working."
+        : "Enable this agent again?";
+      if (!window.confirm(message)) {
+        return;
+      }
+      try {
+        await setAdminAgentStatus(String(button.getAttribute("data-agent-id") || "").trim(), nextStatus);
+        appendSystemLog("admin.agent_status", `AI admin assistant ${nextStatus}.`, { status: nextStatus });
+        toast(nextStatus === "active" ? "Assistant enabled." : "Assistant disabled.");
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not change assistant status."));
+      }
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='admin-agent-approve-request'], [data-action='admin-agent-reject-request']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const approve = button.getAttribute("data-action") === "admin-agent-approve-request";
+      if (!window.confirm(approve ? "Approve and execute this agent request?" : "Reject this agent request?")) {
+        return;
+      }
+      try {
+        await resolveAdminAgentApproval(String(button.getAttribute("data-request-id") || "").trim(), approve ? "approve" : "reject");
+        appendSystemLog("admin.agent_approval", approve ? "AI agent request approved." : "AI agent request rejected.", {});
+        toast(approve ? "Request approved and completed." : "Request rejected.");
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not review request."));
+      }
+      state.skipNextRouteAnimation = true;
+      render();
+    });
   });
 
   appEl.querySelector("[data-action='refresh-admin-data']")?.addEventListener("click", async () => {

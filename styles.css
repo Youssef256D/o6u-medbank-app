@@ -2301,6 +2301,73 @@ body.theme-comfort .maintenance-badge {
   padding: 0.95rem;
 }
 
+.admin-agent-section {
+  display: grid;
+  gap: 1rem;
+}
+
+.admin-agent-create-form {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-soft);
+}
+
+.admin-agent-create-form h4,
+.admin-agent-section h4 {
+  margin: 0;
+}
+
+.admin-agent-permission-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+}
+
+.admin-agent-token-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(23, 126, 137, 0.34);
+  border-radius: 16px;
+  background: var(--brand-soft);
+}
+
+.admin-agent-token-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.admin-agent-token-card code {
+  overflow-wrap: anywhere;
+  padding: 0.7rem;
+  border-radius: 10px;
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+
+.admin-agent-token-card .btn {
+  justify-self: start;
+}
+
+.admin-agent-detail {
+  display: block;
+  margin-top: 0.25rem;
+}
+
+.admin-agent-review-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 1100px) {
+  .admin-agent-review-grid {
+    grid-template-columns: minmax(340px, 1fr) minmax(340px, 1fr);
+  }
+}
+
 .admin-users-table {
   table-layout: fixed;
 }

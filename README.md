@@ -179,6 +179,41 @@ How it works with this app:
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
 
+## AI admin assistants
+
+The Admin Dashboard now includes an `AI Agents` page for issuing limited, revocable credentials to an external assistant such as Hermes.
+
+Security model:
+
+- The browser displays a new agent token only once; Supabase stores only its SHA-256 hash.
+- Agent calls use the `admin-agent-tool` Edge Function, which holds the server-only service credential.
+- Every authorized tool attempt is saved in `admin_agent_action_log`.
+- Publishing is approval-gated through `admin_agent_approval_requests`.
+- An admin can disable an agent or rotate its token immediately.
+
+Initial tools:
+
+- `get_dashboard_summary` requires `read_dashboard`.
+- `create_announcement_draft` requires `draft_announcements` and always creates an unpublished draft.
+- `request_publish_announcement` requires `request_content_publish` and queues an approval in the dashboard.
+
+Deploy the function after applying the latest migration:
+
+```bash
+supabase functions deploy admin-agent-tool
+```
+
+Request format for an agent integration or future MCP adapter:
+
+```bash
+curl -X POST "https://<project-ref>.supabase.co/functions/v1/admin-agent-tool" \
+  -H "X-Agent-Token: mba_<token-shown-in-dashboard>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"get_dashboard_summary","input":{}}'
+```
+
+Do not place an agent token, `SUPABASE_SERVICE_ROLE_KEY`, or an LLM provider key in `main.js`, `supabase.config.js`, or any deployed frontend file.
+
 ## Protected long course videos with Cloudflare Stream
 
 Long course videos should use Cloudflare Stream, not Supabase Storage. Supabase still stores the lesson row, course access, progress, and the `cloudflare-stream://<video_uid>` reference.
