@@ -179,9 +179,9 @@ How it works with this app:
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
 
-## AI admin assistants
+## Hermes admin assistant
 
-The Admin Dashboard includes an `AI Agents` page for issuing revocable credentials to an external assistant such as Hermes. An assistant can start with narrow tools or be granted `Full administrator tools` from the dashboard.
+The Admin Dashboard includes a `Hermes Assistant` page for one permanent external administrator connection. Set up Hermes once, then rotate its token or disable the connection when needed; the dashboard does not create additional assistant identities.
 
 Security model:
 
@@ -189,7 +189,7 @@ Security model:
 - Agent calls use the `admin-agent-tool` Edge Function, which holds the server-only service credential.
 - Every authorized tool attempt is saved in `admin_agent_action_log`.
 - Assistants without full administrator tools request approval before publishing announcements through `admin_agent_approval_requests`.
-- An admin can disable an agent or rotate its token immediately.
+- An admin can disable Hermes or rotate its token immediately.
 
 Scoped tools:
 
@@ -199,7 +199,7 @@ Scoped tools:
 
 Full administrator tools:
 
-- `get_tool_catalog`, `list_admin_records`, and `manage_admin_record` cover the dashboard's allowlisted relational data areas: MCQ courses/topics/questions, course-platform content, enrollments, announcements, notifications, feature availability, and agent records.
+- `get_tool_catalog`, `list_admin_records`, and `manage_admin_record` cover the dashboard's allowlisted relational data areas: MCQ courses/topics/questions, course-platform content, enrollments, announcements, notifications, and feature availability. Hermes can view its connection records for visibility but cannot create or edit assistant identities through the API.
 - `create_user`, `update_user_profile`, `set_user_access`, `set_user_password`, and `delete_user` cover user administration. `delete_user` requires an explicit `confirm: "DELETE_USER"` input.
 - `read_shared_setting` and `write_shared_setting` control the dashboard's shared site-maintenance, refresh, auto-approval, course-link, feedback, invite, and log settings.
 - `resolve_platform_enrollment_request` applies course access decisions.

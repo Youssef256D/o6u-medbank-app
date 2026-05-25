@@ -2306,7 +2306,7 @@ body.theme-comfort .maintenance-badge {
   gap: 1rem;
 }
 
-.admin-agent-create-form {
+.admin-agent-setup-card {
   display: grid;
   gap: 0.8rem;
   padding: 1rem;
@@ -2315,15 +2315,9 @@ body.theme-comfort .maintenance-badge {
   background: var(--surface-soft);
 }
 
-.admin-agent-create-form h4,
+.admin-agent-setup-card h4,
 .admin-agent-section h4 {
   margin: 0;
-}
-
-.admin-agent-permission-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem 1rem;
 }
 
 .admin-agent-token-card {

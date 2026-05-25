@@ -155,13 +155,13 @@ const ADMIN_RESOURCES: Record<string, ResourceSpec> = {
   agents: {
     table: "admin_agents",
     readFields: ["id", "name", "description", "status", "token_hint", "last_used_at", "created_at", "updated_at"],
-    writeFields: ["name", "description", "status"],
+    writeFields: [],
     matchFields: ["id"],
   },
   agent_permissions: {
     table: "admin_agent_permissions",
     readFields: ["agent_id", "permission_key", "created_by", "created_at"],
-    writeFields: ["agent_id", "permission_key", "created_by"],
+    writeFields: [],
     matchFields: ["agent_id", "permission_key"],
     conflict: "agent_id,permission_key",
   },

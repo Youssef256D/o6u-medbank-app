@@ -97,6 +97,8 @@ const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
 const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "enrollments", "requests", "availability"]);
 const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_PAGE]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
+const PRIMARY_ADMIN_ASSISTANT_NAME = "Hermes Admin Assistant";
+const PRIMARY_ADMIN_ASSISTANT_DESCRIPTION = "Single connected administrator for Hermes";
 const ADMIN_AGENT_PERMISSION_OPTIONS = [
   ["read_dashboard", "View dashboard summary"],
   ["draft_announcements", "Create unpublished announcement drafts"],
@@ -25119,8 +25121,8 @@ async function loadAdminAgents(options = {}) {
     return true;
   } catch (error) {
     state.adminAgentsError = isMissingRelationError(error)
-      ? "AI Agents is not installed in Supabase yet. Apply the latest database migration, then refresh."
-      : getErrorMessage(error, "Could not load AI agents.");
+      ? "Hermes Assistant is not installed in Supabase yet. Apply the latest database migration, then refresh."
+      : getErrorMessage(error, "Could not load Hermes Assistant.");
     state.adminAgentsLoadedAt = Date.now();
     return false;
   } finally {
@@ -25145,24 +25147,29 @@ async function hashAdminAgentToken(token) {
     .join("");
 }
 
-async function createAdminAgentFromForm(form) {
+function getPrimaryAdminAssistant() {
+  const assistants = Array.isArray(state.adminAgents) ? state.adminAgents : [];
+  return assistants.find((assistant) => assistant.name === PRIMARY_ADMIN_ASSISTANT_NAME) || assistants[0] || null;
+}
+
+async function initializePrimaryAdminAssistant() {
   const client = getCoursesPlatformClient();
   const currentUserId = getCurrentCoursePlatformUserId();
-  if (!client || !form) throw new Error("AI agent cannot be created.");
-  const formData = new FormData(form);
-  const name = String(formData.get("name") || "").trim();
-  const description = String(formData.get("description") || "").trim();
-  if (name.length < 2) throw new Error("Enter a name for the assistant.");
-  const permissionKeys = formData.getAll("permissions")
-    .map((value) => String(value || "").trim())
-    .filter((value) => ADMIN_AGENT_PERMISSION_OPTIONS.some(([key]) => key === value));
-  if (!permissionKeys.length) throw new Error("Choose at least one permission.");
+  if (!client) throw new Error("Hermes connection cannot be created.");
+  const existingRows = await runRelationalQueryWithTimeout(
+    client.from("admin_agents").select("id").limit(1),
+    "Hermes connection check timed out.",
+  );
+  if (Array.isArray(existingRows) && existingRows.length) {
+    throw new Error("Hermes is already connected. Rotate its token to issue a new credential.");
+  }
+  const permissionKeys = ["read_dashboard", "draft_announcements", "request_content_publish", "full_admin"];
   const token = generateAdminAgentToken();
   const tokenHash = await hashAdminAgentToken(token);
   const rows = await runRelationalQueryWithTimeout(
     client.from("admin_agents").insert({
-      name,
-      description: description || null,
+      name: PRIMARY_ADMIN_ASSISTANT_NAME,
+      description: PRIMARY_ADMIN_ASSISTANT_DESCRIPTION,
       token_hash: tokenHash,
       token_hint: token.slice(-8),
       created_by: isUuidValue(currentUserId) ? currentUserId : null,
@@ -25170,7 +25177,7 @@ async function createAdminAgentFromForm(form) {
     "Agent creation timed out.",
   );
   const agent = Array.isArray(rows) ? rows[0] : null;
-  if (!agent?.id) throw new Error("AI agent could not be created.");
+  if (!agent?.id) throw new Error("Hermes connection could not be created.");
   await runRelationalQueryWithTimeout(
     client.from("admin_agent_permissions").insert(permissionKeys.map((permissionKey) => ({
       agent_id: agent.id,
@@ -25179,7 +25186,7 @@ async function createAdminAgentFromForm(form) {
     }))),
     "Agent permission save timed out.",
   );
-  state.adminAgentNewToken = { name, token };
+  state.adminAgentNewToken = { name: PRIMARY_ADMIN_ASSISTANT_NAME, token };
   await loadAdminAgents({ force: true });
 }
 
@@ -25283,6 +25290,8 @@ function renderAdminAgentsSection() {
       </article>
     `
     : "";
+  const hasAssistant = Boolean(getPrimaryAdminAssistant());
+  const hasLoadedAssistants = Boolean(state.adminAgentsLoadedAt);
   const agentRows = (state.adminAgents || []).map((agent) => {
     const agentPermissions = getAdminAgentRowsByAgentId(state.adminAgentPermissions, agent.id);
     const hasFullAccess = agentPermissions.some((entry) => entry.permission_key === "full_admin");
@@ -25350,34 +25359,25 @@ function renderAdminAgentsSection() {
     <section class="card admin-section admin-agent-section" id="admin-agents-section">
       <div class="flex-between">
         <div>
-          <h3 style="margin:0;">AI Agents</h3>
-          <p class="subtle">Create an admin assistant identity with revocable access. Full administrator tools can be granted or removed per assistant.</p>
+          <h3 style="margin:0;">Hermes Assistant</h3>
+          <p class="subtle">One permanent administrator connection for Hermes. Set it up once, then rotate its token or disable it when needed.</p>
         </div>
         <button class="btn ghost admin-btn-sm ${state.adminAgentsLoading ? "is-loading" : ""}" type="button" data-action="admin-agents-refresh">${state.adminAgentsLoading ? "Refreshing..." : "Refresh"}</button>
       </div>
       ${state.adminAgentsError ? `<p class="subtle import-status is-error">${escapeHtml(state.adminAgentsError)}</p>` : ""}
       ${tokenPanel}
-      <form id="admin-agent-create-form" class="admin-agent-create-form" autocomplete="off">
-        <h4>Create admin assistant</h4>
-        <div class="form-row">
-          <label>Name <input name="name" required minlength="2" maxlength="80" placeholder="MedBank Admin Assistant" /></label>
-          <label>Description <input name="description" maxlength="240" placeholder="Prepares content drafts and reports" /></label>
-        </div>
-        <div class="admin-agent-permission-grid">
-          ${ADMIN_AGENT_PERMISSION_OPTIONS.map(([key, label], index) => `
-            <label class="admin-course-check">
-              <input type="checkbox" name="permissions" value="${escapeHtml(key)}" ${index < 3 ? "checked" : ""} />
-              <span>${escapeHtml(label)}</span>
-            </label>
-          `).join("")}
-        </div>
-        <button class="btn ${state.adminAgentSaving ? "is-loading" : ""}" type="submit" ${state.adminAgentSaving ? "disabled" : ""}>${state.adminAgentSaving ? "Creating assistant..." : "Create assistant and token"}</button>
-      </form>
-      <h4>Configured agents</h4>
+      ${hasLoadedAssistants && !hasAssistant ? `
+        <article class="admin-agent-setup-card">
+          <h4>Connect Hermes</h4>
+          <p class="subtle">Create the single administrator connection and receive its token once.</p>
+          <button class="btn ${state.adminAgentSaving ? "is-loading" : ""}" type="button" data-action="admin-assistant-initialize" ${state.adminAgentSaving ? "disabled" : ""}>${state.adminAgentSaving ? "Setting up..." : "Set up Hermes connection"}</button>
+        </article>
+      ` : ""}
+      <h4>Connected assistant</h4>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Agent</th><th>Status</th><th>Permissions</th><th>Token</th><th>Last used</th><th>Actions</th></tr></thead>
-          <tbody>${agentRows || `<tr><td colspan="6" class="subtle">No assistants created yet.</td></tr>`}</tbody>
+          <thead><tr><th>Assistant</th><th>Status</th><th>Permissions</th><th>Token</th><th>Last used</th><th>Actions</th></tr></thead>
+          <tbody>${agentRows || `<tr><td colspan="6" class="subtle">Hermes has not been connected yet.</td></tr>`}</tbody>
         </table>
       </div>
       <div class="admin-agent-review-grid">
@@ -25413,7 +25413,7 @@ function renderAdminDataSidebarNav(activeAdminPage) {
     ["bulk-import", "Bulk Import"],
     ["notifications", "Notifications"],
     ["site-access", "Site Access"],
-    ["ai-agents", "AI Agents"],
+    ["ai-agents", "Hermes Assistant"],
     ["activity", "Activity"],
     ["logs", "Logs"],
   ];
@@ -27306,21 +27306,19 @@ function wireAdmin() {
     flushPendingSyncInBackground();
   });
 
-  appEl.querySelector("#admin-agent-create-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  appEl.querySelector("[data-action='admin-assistant-initialize']")?.addEventListener("click", async () => {
     if (state.adminAgentSaving) {
       return;
     }
-    const submittedForm = event.currentTarget;
     state.adminAgentSaving = true;
     state.skipNextRouteAnimation = true;
     render();
     try {
-      await createAdminAgentFromForm(submittedForm);
-      appendSystemLog("admin.agent_created", "AI admin assistant created.", {});
-      toast("Assistant created. Store the displayed token in Hermes.");
+      await initializePrimaryAdminAssistant();
+      appendSystemLog("admin.agent_created", "Hermes admin assistant connection created.", {});
+      toast("Hermes connection created. Store the displayed token in Hermes.");
     } catch (error) {
-      toast(getErrorMessage(error, "Could not create assistant."));
+      toast(getErrorMessage(error, "Could not set up Hermes connection."));
     } finally {
       state.adminAgentSaving = false;
       if (state.route === "admin" && state.adminPage === "ai-agents") {
