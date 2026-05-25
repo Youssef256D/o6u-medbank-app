@@ -1,15 +1,182 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const TOKEN_PATTERN = /^mba_[A-Za-z0-9_-]{32,128}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 4000;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX_REQUESTS = 30;
+const RATE_LIMIT_MAX_REQUESTS = 60;
+const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
+const FULL_ADMIN_PERMISSION = "full_admin";
 const rateLimitByAgent = new Map<string, { count: number; startedAt: number }>();
+
 const ACTION_PERMISSIONS: Record<string, string> = {
   get_dashboard_summary: "read_dashboard",
   create_announcement_draft: "draft_announcements",
   request_publish_announcement: "request_content_publish",
+};
+
+const FULL_ADMIN_ACTIONS = new Set([
+  "get_tool_catalog",
+  "list_admin_records",
+  "manage_admin_record",
+  "create_user",
+  "update_user_profile",
+  "set_user_access",
+  "set_user_password",
+  "delete_user",
+  "read_shared_setting",
+  "write_shared_setting",
+  "resolve_platform_enrollment_request",
+]);
+
+type ResourceSpec = {
+  table: string;
+  readFields: string[];
+  writeFields: string[];
+  matchFields: string[];
+  conflict?: string;
+};
+
+const ADMIN_RESOURCES: Record<string, ResourceSpec> = {
+  profiles: {
+    table: "profiles",
+    readFields: ["id", "full_name", "email", "phone", "role", "approved", "academic_year", "academic_semester", "created_at", "updated_at"],
+    writeFields: [],
+    matchFields: ["id"],
+  },
+  user_presence: {
+    table: "user_presence",
+    readFields: ["user_id", "full_name", "email", "role", "current_route", "is_online", "is_solving", "last_seen_at"],
+    writeFields: [],
+    matchFields: ["user_id"],
+  },
+  user_activity_sessions: {
+    table: "user_activity_sessions",
+    readFields: ["id", "user_id", "session_key", "full_name", "email", "role", "entry_route", "current_route", "exit_route", "page_views", "started_at", "last_seen_at", "ended_at"],
+    writeFields: [],
+    matchFields: ["id"],
+  },
+  mcq_courses: {
+    table: "courses",
+    readFields: ["id", "course_code", "course_name", "academic_year", "academic_semester", "is_active", "created_at", "updated_at"],
+    writeFields: ["course_code", "course_name", "academic_year", "academic_semester", "is_active"],
+    matchFields: ["id"],
+  },
+  mcq_topics: {
+    table: "course_topics",
+    readFields: ["id", "course_id", "topic_name", "sort_order", "is_active", "created_at", "updated_at"],
+    writeFields: ["course_id", "topic_name", "sort_order", "is_active"],
+    matchFields: ["id"],
+  },
+  mcq_questions: {
+    table: "questions",
+    readFields: ["id", "external_id", "course_id", "topic_id", "author_id", "stem", "explanation", "objective", "difficulty", "status", "created_at", "updated_at"],
+    writeFields: ["external_id", "course_id", "topic_id", "author_id", "stem", "explanation", "objective", "difficulty", "status"],
+    matchFields: ["id"],
+    conflict: "external_id",
+  },
+  mcq_question_choices: {
+    table: "question_choices",
+    readFields: ["id", "question_id", "choice_label", "choice_text", "is_correct"],
+    writeFields: ["question_id", "choice_label", "choice_text", "is_correct"],
+    matchFields: ["id"],
+  },
+  mcq_enrollments: {
+    table: "user_course_enrollments",
+    readFields: ["user_id", "course_id", "assigned_by", "assigned_at"],
+    writeFields: ["user_id", "course_id", "assigned_by"],
+    matchFields: ["user_id", "course_id"],
+    conflict: "user_id,course_id",
+  },
+  platform_courses: {
+    table: "platform_courses",
+    readFields: ["id", "course_code", "course_name", "academic_year", "academic_semester", "description", "cover_image_url", "intro_video_url", "instructor_name", "instructor_bio", "level", "estimated_duration", "is_active", "is_published", "enrollment_mode", "price", "created_by", "created_at", "updated_at"],
+    writeFields: ["course_code", "course_name", "academic_year", "academic_semester", "description", "cover_image_url", "intro_video_url", "instructor_name", "instructor_bio", "level", "estimated_duration", "is_active", "is_published", "enrollment_mode", "price", "created_by"],
+    matchFields: ["id"],
+  },
+  platform_modules: {
+    table: "platform_course_modules",
+    readFields: ["id", "course_id", "title", "description", "position", "is_published", "created_at", "updated_at"],
+    writeFields: ["course_id", "title", "description", "position", "is_published"],
+    matchFields: ["id"],
+  },
+  platform_lessons: {
+    table: "platform_course_lessons",
+    readFields: ["id", "course_id", "module_id", "title", "description", "lesson_type", "video_url", "video_provider", "duration_seconds", "content_html", "position", "is_free_preview", "is_published", "created_at", "updated_at"],
+    writeFields: ["course_id", "module_id", "title", "description", "lesson_type", "video_url", "video_provider", "duration_seconds", "content_html", "position", "is_free_preview", "is_published"],
+    matchFields: ["id"],
+  },
+  platform_resources: {
+    table: "platform_course_resources",
+    readFields: ["id", "course_id", "module_id", "lesson_id", "title", "resource_type", "file_url", "external_url", "description", "position", "is_published", "created_at"],
+    writeFields: ["course_id", "module_id", "lesson_id", "title", "resource_type", "file_url", "external_url", "description", "position", "is_published"],
+    matchFields: ["id"],
+  },
+  platform_announcements: {
+    table: "platform_course_announcements",
+    readFields: ["id", "course_id", "title", "body", "is_published", "created_by", "created_at"],
+    writeFields: ["course_id", "title", "body", "is_published", "created_by"],
+    matchFields: ["id"],
+  },
+  platform_suggestions: {
+    table: "platform_course_suggestions",
+    readFields: ["id", "course_id", "target_academic_year", "target_semester", "title", "reason", "priority", "is_active", "starts_at", "ends_at", "created_by", "created_at", "updated_at"],
+    writeFields: ["course_id", "target_academic_year", "target_semester", "title", "reason", "priority", "is_active", "starts_at", "ends_at", "created_by"],
+    matchFields: ["id"],
+  },
+  platform_enrollments: {
+    table: "platform_course_enrollments",
+    readFields: ["user_id", "course_id", "assigned_by", "assigned_at"],
+    writeFields: ["user_id", "course_id", "assigned_by"],
+    matchFields: ["user_id", "course_id"],
+    conflict: "user_id,course_id",
+  },
+  platform_enrollment_requests: {
+    table: "platform_course_enrollment_requests",
+    readFields: ["id", "user_id", "course_id", "status", "created_at", "updated_at"],
+    writeFields: ["user_id", "course_id", "status"],
+    matchFields: ["id"],
+  },
+  notifications: {
+    table: "notifications",
+    readFields: ["id", "external_id", "recipient_user_id", "title", "message", "created_by", "created_by_name", "is_active", "created_at", "updated_at"],
+    writeFields: ["external_id", "recipient_user_id", "title", "message", "created_by", "created_by_name", "is_active"],
+    matchFields: ["id"],
+    conflict: "external_id",
+  },
+  feature_flags: {
+    table: "app_feature_flags",
+    readFields: ["feature_key", "enabled", "description", "updated_by", "created_at", "updated_at"],
+    writeFields: ["feature_key", "enabled", "description", "updated_by"],
+    matchFields: ["feature_key"],
+    conflict: "feature_key",
+  },
+  agents: {
+    table: "admin_agents",
+    readFields: ["id", "name", "description", "status", "token_hint", "last_used_at", "created_at", "updated_at"],
+    writeFields: ["name", "description", "status"],
+    matchFields: ["id"],
+  },
+  agent_permissions: {
+    table: "admin_agent_permissions",
+    readFields: ["agent_id", "permission_key", "created_by", "created_at"],
+    writeFields: ["agent_id", "permission_key", "created_by"],
+    matchFields: ["agent_id", "permission_key"],
+    conflict: "agent_id,permission_key",
+  },
+};
+
+const SHARED_SETTINGS: Record<string, string> = {
+  site_maintenance: "g:mcq_site_maintenance",
+  auto_approve_student_access: "g:mcq_auto_approve_student_access",
+  student_refresh_trigger: "g:mcq_student_refresh_trigger",
+  course_notebook_links: "g:mcq_course_notebook_links",
+  course_topic_groups: "g:mcq_course_topic_groups",
+  topic_new_catalog: "g:mcq_topic_new_catalog",
+  invites: "g:mcq_invites",
+  feedback: "g:mcq_feedback",
+  system_logs: "g:mcq_system_logs",
 };
 
 function parseAllowedOrigins(): string[] {
@@ -55,9 +222,24 @@ function readAgentToken(req: Request): string {
     : "";
 }
 
+function isUuid(value: unknown): boolean {
+  return UUID_PATTERN.test(String(value || "").trim());
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function assertPayloadSize(value: unknown): void {
+  if (JSON.stringify(value ?? null).length > 120000) {
+    throw new Error("Payload is too large.");
+  }
+}
+
 async function sha256Hex(value: string): Promise<string> {
-  const encoded = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest))
     .map((entry) => entry.toString(16).padStart(2, "0"))
     .join("");
@@ -71,13 +253,14 @@ async function logAction(
   requestPayload: Record<string, unknown>,
   responseSummary: Record<string, unknown>,
 ) {
-  await adminClient.from("admin_agent_action_log").insert({
+  const { error } = await adminClient.from("admin_agent_action_log").insert({
     agent_id: agentId,
     action_key: actionKey,
     action_status: actionStatus,
     request_payload: requestPayload,
     response_summary: responseSummary,
   });
+  if (error) console.error("Agent audit insert failed.", error.message);
 }
 
 function isRateLimited(agentId: string): boolean {
@@ -92,40 +275,327 @@ function isRateLimited(agentId: string): boolean {
 }
 
 function summarizeRequestPayload(action: string, input: Record<string, unknown>): Record<string, unknown> {
+  if (action === "set_user_password") {
+    return { targetUserId: String(input.targetUserId || "").trim(), passwordChanged: true };
+  }
+  if (action === "manage_admin_record") {
+    return {
+      resource: String(input.resource || "").trim(),
+      operation: String(input.operation || "").trim(),
+      match: asRecord(input.match),
+    };
+  }
+  if (action === "write_shared_setting") {
+    return { setting: String(input.setting || "").trim() };
+  }
+  const safe = { ...input };
+  delete safe.password;
+  assertPayloadSize(safe);
+  return safe;
+}
+
+function pickFields(
+  raw: unknown,
+  allowed: string[],
+  label: string,
+): Record<string, unknown> {
+  const data = asRecord(raw);
+  const invalid = Object.keys(data).filter((key) => !allowed.includes(key));
+  if (invalid.length) {
+    throw new Error(`${label} contains unsupported field(s): ${invalid.join(", ")}.`);
+  }
+  return Object.fromEntries(Object.entries(data).filter(([key]) => allowed.includes(key)));
+}
+
+function validateRecordInput(resource: string, record: Record<string, unknown>): void {
+  assertPayloadSize(record);
+  if (resource === "mcq_questions" && "status" in record && !["draft", "published", "archived"].includes(String(record.status))) {
+    throw new Error("Question status must be draft, published, or archived.");
+  }
+  if (resource === "platform_enrollment_requests" && "status" in record && !["pending", "approved", "rejected"].includes(String(record.status))) {
+    throw new Error("Request status must be pending, approved, or rejected.");
+  }
+  if (resource === "platform_courses" && "enrollment_mode" in record && !["assigned", "request"].includes(String(record.enrollment_mode))) {
+    throw new Error("Course enrollment mode must be assigned or request.");
+  }
+  if (resource === "agent_permissions" && "permission_key" in record && ![
+    "read_dashboard",
+    "manage_content_drafts",
+    "request_content_publish",
+    "review_enrollments",
+    "draft_announcements",
+    FULL_ADMIN_PERMISSION,
+  ].includes(String(record.permission_key))) {
+    throw new Error("Unknown agent permission.");
+  }
+  if (resource === "notifications") {
+    if ("title" in record && String(record.title || "").trim().length > MAX_TITLE_LENGTH) throw new Error("Notification title is too long.");
+    if ("message" in record && String(record.message || "").trim().length > MAX_BODY_LENGTH) throw new Error("Notification message is too long.");
+  }
+}
+
+function applyExactMatch(query: any, match: Record<string, unknown>): any {
+  let nextQuery = query;
+  Object.entries(match).forEach(([key, value]) => {
+    nextQuery = value === null ? nextQuery.is(key, null) : nextQuery.eq(key, value);
+  });
+  return nextQuery;
+}
+
+function buildRequiredMatch(spec: ResourceSpec, raw: unknown): Record<string, unknown> {
+  const match = pickFields(raw, spec.matchFields, "match");
+  const missing = spec.matchFields.filter((key) => !(key in match) || String(match[key] ?? "").trim() === "");
+  if (missing.length) {
+    throw new Error(`match must include ${spec.matchFields.join(" and ")}.`);
+  }
+  return match;
+}
+
+async function listAdminRecords(adminClient: ReturnType<typeof createClient>, input: Record<string, unknown>) {
+  const resource = String(input.resource || "").trim();
+  const spec = ADMIN_RESOURCES[resource];
+  if (!spec) throw new Error("Unknown admin resource.");
+  const filters = pickFields(input.filters, [...new Set([...spec.readFields, ...spec.matchFields])], "filters");
+  const limit = Math.min(Math.max(Number(input.limit) || 25, 1), 100);
+  let query: any = adminClient.from(spec.table).select(spec.readFields.join(",")).limit(limit);
+  query = applyExactMatch(query, filters);
+  const orderBy = String(input.orderBy || "").trim();
+  if (orderBy && spec.readFields.includes(orderBy)) {
+    query = query.order(orderBy, { ascending: input.ascending === true });
+  }
+  const { data, error } = await query;
+  if (error) throw error;
+  return { resource, rows: Array.isArray(data) ? data : [] };
+}
+
+async function manageAdminRecord(adminClient: ReturnType<typeof createClient>, input: Record<string, unknown>) {
+  const resource = String(input.resource || "").trim();
+  const operation = String(input.operation || "").trim();
+  const spec = ADMIN_RESOURCES[resource];
+  if (!spec || !spec.writeFields.length) throw new Error("This resource cannot be modified through the agent.");
+  if (!["insert", "upsert", "update", "delete"].includes(operation)) throw new Error("Operation must be insert, upsert, update, or delete.");
+  if (operation === "insert" || operation === "upsert") {
+    const record = pickFields(input.record, spec.writeFields, "record");
+    if (!Object.keys(record).length) throw new Error("record is required.");
+    validateRecordInput(resource, record);
+    let query: any = operation === "upsert"
+      ? adminClient.from(spec.table).upsert(record, spec.conflict ? { onConflict: spec.conflict, defaultToNull: false } : undefined)
+      : adminClient.from(spec.table).insert(record);
+    const { data, error } = await query.select(spec.readFields.join(",")).limit(1);
+    if (error) throw error;
+    return { resource, operation, rows: data || [] };
+  }
+  const match = buildRequiredMatch(spec, input.match);
+  if (operation === "delete") {
+    const { data, error } = await applyExactMatch(adminClient.from(spec.table).delete(), match).select(spec.readFields.join(","));
+    if (error) throw error;
+    return { resource, operation, rows: data || [] };
+  }
+  const changes = pickFields(input.changes, spec.writeFields, "changes");
+  if (!Object.keys(changes).length) throw new Error("changes is required.");
+  validateRecordInput(resource, changes);
+  const { data, error } = await applyExactMatch(adminClient.from(spec.table).update(changes), match).select(spec.readFields.join(","));
+  if (error) throw error;
+  return { resource, operation, rows: data || [] };
+}
+
+async function getDashboardSummary(adminClient: ReturnType<typeof createClient>) {
+  const [courses, requests, students, questions, platformCourses] = await Promise.all([
+    adminClient.from("courses").select("id", { count: "exact", head: true }),
+    adminClient.from("platform_course_enrollment_requests").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    adminClient.from("profiles").select("id", { count: "exact", head: true }).eq("role", "student"),
+    adminClient.from("questions").select("id", { count: "exact", head: true }),
+    adminClient.from("platform_courses").select("id", { count: "exact", head: true }),
+  ]);
+  return {
+    mcqCourses: courses.count || 0,
+    platformCourses: platformCourses.count || 0,
+    questions: questions.count || 0,
+    pendingEnrollmentRequests: requests.count || 0,
+    students: students.count || 0,
+  };
+}
+
+async function executeAdminAction(
+  adminClient: ReturnType<typeof createClient>,
+  agent: { id: string; name: string },
+  action: string,
+  input: Record<string, unknown>,
+) {
+  if (action === "get_tool_catalog") {
+    return {
+      scopedActions: Object.keys(ACTION_PERMISSIONS),
+      fullAdminActions: [...FULL_ADMIN_ACTIONS],
+      resources: Object.keys(ADMIN_RESOURCES),
+      sharedSettings: Object.keys(SHARED_SETTINGS),
+    };
+  }
+  if (action === "get_dashboard_summary") {
+    return await getDashboardSummary(adminClient);
+  }
+  if (action === "list_admin_records") {
+    return await listAdminRecords(adminClient, input);
+  }
+  if (action === "manage_admin_record") {
+    return await manageAdminRecord(adminClient, input);
+  }
+  if (action === "create_user") {
+    const email = String(input.email || "").trim().toLowerCase();
+    const password = String(input.password || "");
+    const fullName = String(input.fullName || "").trim();
+    const role = String(input.role || "student").trim();
+    const approved = input.approved === true;
+    if (!email || !fullName || password.length < 6 || password.length > 128 || !["student", "admin"].includes(role)) {
+      throw new Error("Provide email, fullName, a password between 6 and 128 characters, and role student or admin.");
+    }
+    const { data: authData, error: authError } = await adminClient.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { full_name: fullName },
+    });
+    if (authError || !authData.user?.id) throw authError || new Error("User account could not be created.");
+    const profileId = authData.user.id;
+    const { data: profile, error: profileError } = await adminClient.from("profiles").upsert({
+      id: profileId,
+      full_name: fullName,
+      email,
+      role,
+      approved,
+      phone: String(input.phone || "").trim() || null,
+      academic_year: input.academicYear ?? null,
+      academic_semester: input.academicSemester ?? null,
+    }, { onConflict: "id", defaultToNull: false }).select("id,full_name,email,role,approved").single();
+    if (profileError) throw profileError;
+    if (!approved) {
+      const { error: banError } = await adminClient.auth.admin.updateUserById(profileId, {
+        ban_duration: ACCOUNT_DEACTIVATION_BAN_DURATION,
+      });
+      if (banError) throw banError;
+    }
+    return { profile };
+  }
+  if (action === "update_user_profile") {
+    const targetUserId = String(input.targetUserId || "").trim();
+    if (!isUuid(targetUserId)) throw new Error("targetUserId must be a valid UUID.");
+    const changes = pickFields(input.changes, ["full_name", "phone", "role", "approved", "academic_year", "academic_semester"], "changes");
+    if ("role" in changes && !["student", "admin"].includes(String(changes.role))) throw new Error("Role must be student or admin.");
+    const { data, error } = await adminClient.from("profiles").update(changes).eq("id", targetUserId).select("id,full_name,email,role,approved,academic_year,academic_semester").maybeSingle();
+    if (error) throw error;
+    return { profile: data };
+  }
+  if (action === "set_user_access") {
+    const targetUserId = String(input.targetUserId || "").trim();
+    const approved = input.approved;
+    if (!isUuid(targetUserId) || typeof approved !== "boolean") throw new Error("Provide targetUserId and approved.");
+    const { data: profile, error: profileError } = await adminClient.from("profiles").update({ approved }).eq("id", targetUserId).select("id,role,approved").maybeSingle();
+    if (profileError) throw profileError;
+    const { error: authError } = await adminClient.auth.admin.updateUserById(targetUserId, {
+      ban_duration: approved ? "none" : ACCOUNT_DEACTIVATION_BAN_DURATION,
+    });
+    if (authError) throw authError;
+    return { profile, accessEnabled: approved };
+  }
+  if (action === "set_user_password") {
+    const targetUserId = String(input.targetUserId || "").trim();
+    const password = String(input.password || "");
+    if (!isUuid(targetUserId) || password.length < 6 || password.length > 128) throw new Error("Provide a valid targetUserId and password between 6 and 128 characters.");
+    const { error } = await adminClient.auth.admin.updateUserById(targetUserId, { password });
+    if (error) throw error;
+    return { targetUserId, passwordChanged: true };
+  }
+  if (action === "delete_user") {
+    const targetUserId = String(input.targetUserId || "").trim();
+    if (!isUuid(targetUserId) || String(input.confirm || "") !== "DELETE_USER") throw new Error("Provide targetUserId and confirm DELETE_USER.");
+    const { data: target } = await adminClient.from("profiles").select("role,approved").eq("id", targetUserId).maybeSingle();
+    if (target?.role === "admin" && String(input.confirmAdmin || "") !== "DELETE_ADMIN_USER") {
+      throw new Error("Deleting an admin also requires confirmAdmin DELETE_ADMIN_USER.");
+    }
+    const { error } = await adminClient.auth.admin.deleteUser(targetUserId);
+    if (error && !/not found/i.test(String(error.message || ""))) throw error;
+    return { targetUserId, deleted: true };
+  }
+  if (action === "read_shared_setting") {
+    const setting = String(input.setting || "").trim();
+    const storageKey = SHARED_SETTINGS[setting];
+    if (!storageKey) throw new Error("Unknown shared setting.");
+    const { data, error } = await adminClient.from("app_state").select("storage_key,payload,updated_at").eq("storage_key", storageKey).maybeSingle();
+    if (error) throw error;
+    return { setting, row: data };
+  }
+  if (action === "write_shared_setting") {
+    const setting = String(input.setting || "").trim();
+    const storageKey = SHARED_SETTINGS[setting];
+    if (!storageKey) throw new Error("Unknown shared setting.");
+    if (input.payload === undefined || input.payload === null) throw new Error("payload is required.");
+    assertPayloadSize(input.payload);
+    const { data, error } = await adminClient.from("app_state").upsert({
+      storage_key: storageKey,
+      payload: input.payload ?? null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "storage_key", defaultToNull: false }).select("storage_key,updated_at").single();
+    if (error) throw error;
+    return { setting, updatedAt: data.updated_at };
+  }
+  if (action === "resolve_platform_enrollment_request") {
+    const requestId = String(input.requestId || "").trim();
+    const status = String(input.status || "").trim();
+    if (!isUuid(requestId) || !["approved", "rejected"].includes(status)) throw new Error("Provide requestId and status approved or rejected.");
+    const { data: request, error: findError } = await adminClient.from("platform_course_enrollment_requests").select("id,user_id,course_id,status").eq("id", requestId).maybeSingle();
+    if (findError || !request) throw findError || new Error("Enrollment request not found.");
+    const { error: updateError } = await adminClient.from("platform_course_enrollment_requests").update({ status }).eq("id", requestId);
+    if (updateError) throw updateError;
+    if (status === "approved") {
+      const { error: enrollError } = await adminClient.from("platform_course_enrollments").upsert({
+        user_id: request.user_id,
+        course_id: request.course_id,
+      }, { onConflict: "user_id,course_id", defaultToNull: false });
+      if (enrollError) throw enrollError;
+    }
+    return { requestId, status };
+  }
   if (action === "create_announcement_draft") {
-    return {
-      courseId: String(input.courseId || "").trim(),
-      title: String(input.title || "").trim().slice(0, MAX_TITLE_LENGTH),
-    };
+    const courseId = String(input.courseId || "").trim();
+    const title = String(input.title || "").trim();
+    const body = String(input.body || "").trim();
+    if (!isUuid(courseId) || !title || title.length > MAX_TITLE_LENGTH || !body || body.length > MAX_BODY_LENGTH) {
+      throw new Error("Provide a courseId, a short title, and body text under 4000 characters.");
+    }
+    const { data, error } = await adminClient.from("platform_course_announcements").insert({
+      course_id: courseId,
+      title,
+      body,
+      is_published: false,
+    }).select("id,course_id,title,is_published,created_at").single();
+    if (error) throw error;
+    return data;
   }
-  if (action === "request_publish_announcement") {
-    return {
-      announcementId: String(input.announcementId || "").trim(),
-      reason: String(input.reason || "").trim().slice(0, 240),
-    };
-  }
-  return {};
+  const announcementId = String(input.announcementId || "").trim();
+  if (!isUuid(announcementId)) throw new Error("announcementId is required.");
+  const { data: draft, error: draftError } = await adminClient.from("platform_course_announcements")
+    .select("id,course_id,title,body,is_published").eq("id", announcementId).maybeSingle();
+  if (draftError || !draft || draft.is_published) throw new Error("Only an existing unpublished announcement can be submitted for approval.");
+  const { data, error } = await adminClient.from("admin_agent_approval_requests").insert({
+    agent_id: agent.id,
+    action_key: action,
+    request_payload: { announcementId, courseId: draft.course_id, title: draft.title, body: draft.body },
+    reason: String(input.reason || "").trim() || null,
+  }).select("id,status,created_at").single();
+  if (error) throw error;
+  return { approvalRequired: true, approval: data };
 }
 
 Deno.serve(async (req) => {
   const requestOrigin = String(req.headers.get("origin") || "").trim();
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: buildCorsHeaders(requestOrigin) });
-  }
-  if (req.method !== "POST") {
-    return jsonResponse(405, { ok: false, error: "Method not allowed." }, requestOrigin);
-  }
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: buildCorsHeaders(requestOrigin) });
+  if (req.method !== "POST") return jsonResponse(405, { ok: false, error: "Method not allowed." }, requestOrigin);
 
   const supabaseUrl = String(Deno.env.get("SUPABASE_URL") || "").trim().replace(/\/+$/, "");
   const serviceRoleKey = String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "").trim();
-  if (!supabaseUrl || !serviceRoleKey) {
-    return jsonResponse(500, { ok: false, error: "Agent service is not configured." }, requestOrigin);
-  }
+  if (!supabaseUrl || !serviceRoleKey) return jsonResponse(500, { ok: false, error: "Agent service is not configured." }, requestOrigin);
 
   const token = readAgentToken(req);
-  if (!TOKEN_PATTERN.test(token)) {
-    return jsonResponse(401, { ok: false, error: "Invalid agent token." }, requestOrigin);
-  }
+  if (!TOKEN_PATTERN.test(token)) return jsonResponse(401, { ok: false, error: "Invalid agent token." }, requestOrigin);
 
   let body: { action?: string; input?: Record<string, unknown> } = {};
   try {
@@ -134,125 +604,44 @@ Deno.serve(async (req) => {
     return jsonResponse(400, { ok: false, error: "Invalid JSON payload." }, requestOrigin);
   }
   const action = String(body.action || "").trim();
-  const input = body.input && typeof body.input === "object" ? body.input : {};
+  const input = asRecord(body.input);
   const auditInput = summarizeRequestPayload(action, input);
-  const requiredPermission = ACTION_PERMISSIONS[action];
-  if (!requiredPermission) {
+  if (!ACTION_PERMISSIONS[action] && !FULL_ADMIN_ACTIONS.has(action)) {
     return jsonResponse(400, { ok: false, error: "Unknown agent action." }, requestOrigin);
   }
 
-  const adminClient = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const adminClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const tokenHash = await sha256Hex(token);
-  const { data: agent, error: agentError } = await adminClient
-    .from("admin_agents")
-    .select("id,name,status")
-    .eq("token_hash", tokenHash)
-    .maybeSingle();
-  if (agentError || !agent || agent.status !== "active") {
-    return jsonResponse(401, { ok: false, error: "Agent is not authorized." }, requestOrigin);
-  }
+  const { data: agent, error: agentError } = await adminClient.from("admin_agents").select("id,name,status").eq("token_hash", tokenHash).maybeSingle();
+  if (agentError || !agent || agent.status !== "active") return jsonResponse(401, { ok: false, error: "Agent is not authorized." }, requestOrigin);
   if (isRateLimited(agent.id)) {
     await logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Rate limit exceeded." });
     return jsonResponse(429, { ok: false, error: "Agent request limit reached. Try again shortly." }, requestOrigin);
   }
 
-  const { data: permission } = await adminClient
-    .from("admin_agent_permissions")
-    .select("permission_key")
-    .eq("agent_id", agent.id)
-    .eq("permission_key", requiredPermission)
-    .maybeSingle();
-  if (!permission) {
+  const { data: permissionRows, error: permissionsError } = await adminClient.from("admin_agent_permissions").select("permission_key").eq("agent_id", agent.id);
+  if (permissionsError) return jsonResponse(500, { ok: false, error: "Could not check agent permissions." }, requestOrigin);
+  const permissions = new Set((permissionRows || []).map((row) => String(row.permission_key || "")));
+  const authorized = permissions.has(FULL_ADMIN_PERMISSION) || (
+    Boolean(ACTION_PERMISSIONS[action]) && permissions.has(ACTION_PERMISSIONS[action])
+  );
+  if (!authorized) {
     await logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Missing permission." });
     return jsonResponse(403, { ok: false, error: "Agent is not permitted to perform this action." }, requestOrigin);
   }
 
   await adminClient.from("admin_agents").update({ last_used_at: new Date().toISOString() }).eq("id", agent.id);
-
   try {
-    if (action === "get_dashboard_summary") {
-      const [coursesResult, requestsResult, profilesResult] = await Promise.all([
-        adminClient.from("platform_courses").select("id", { count: "exact", head: true }),
-        adminClient.from("platform_course_enrollment_requests").select("id", { count: "exact", head: true }).eq("status", "pending"),
-        adminClient.from("profiles").select("id", { count: "exact", head: true }).eq("role", "student"),
-      ]);
-      const result = {
-        courses: coursesResult.count || 0,
-        pendingEnrollmentRequests: requestsResult.count || 0,
-        students: profilesResult.count || 0,
-      };
-      await logAction(adminClient, agent.id, action, "success", {}, result);
-      return jsonResponse(200, { ok: true, agent: agent.name, result }, requestOrigin);
-    }
-
-    if (action === "create_announcement_draft") {
-      const courseId = String(input.courseId || "").trim();
-      const title = String(input.title || "").trim();
-      const announcementBody = String(input.body || "").trim();
-      if (
-        !/^[0-9a-f-]{36}$/i.test(courseId)
-        || !title
-        || title.length > MAX_TITLE_LENGTH
-        || !announcementBody
-        || announcementBody.length > MAX_BODY_LENGTH
-      ) {
-        await logAction(adminClient, agent.id, action, "failed", auditInput, { error: "Missing required draft fields." });
-        return jsonResponse(400, { ok: false, error: "Provide a courseId, a short title, and body text under 4000 characters." }, requestOrigin);
-      }
-      const { data: announcement, error } = await adminClient
-        .from("platform_course_announcements")
-        .insert({ course_id: courseId, title, body: announcementBody, is_published: false })
-        .select("id,course_id,title,is_published,created_at")
-        .single();
-      if (error) throw error;
-      await logAction(adminClient, agent.id, action, "success", { courseId, title }, {
-        announcementId: announcement.id,
-        published: false,
-      });
-      return jsonResponse(200, { ok: true, result: announcement }, requestOrigin);
-    }
-
-    const announcementId = String(input.announcementId || "").trim();
-    if (!/^[0-9a-f-]{36}$/i.test(announcementId)) {
-      await logAction(adminClient, agent.id, action, "failed", auditInput, { error: "Missing announcement id." });
-      return jsonResponse(400, { ok: false, error: "announcementId is required." }, requestOrigin);
-    }
-    const { data: announcementDraft, error: draftError } = await adminClient
-      .from("platform_course_announcements")
-      .select("id,course_id,title,body,is_published")
-      .eq("id", announcementId)
-      .maybeSingle();
-    if (draftError || !announcementDraft || announcementDraft.is_published) {
-      await logAction(adminClient, agent.id, action, "failed", { announcementId }, {
-        error: "Only an existing unpublished announcement can be submitted for approval.",
-      });
-      return jsonResponse(400, { ok: false, error: "Only an existing unpublished announcement can be submitted for approval." }, requestOrigin);
-    }
-    const { data: approval, error } = await adminClient
-      .from("admin_agent_approval_requests")
-      .insert({
-        agent_id: agent.id,
-        action_key: action,
-        request_payload: {
-          announcementId,
-          courseId: announcementDraft.course_id,
-          title: announcementDraft.title,
-          body: announcementDraft.body,
-        },
-        reason: String(input.reason || "").trim() || null,
-      })
-      .select("id,status,created_at")
-      .single();
-    if (error) throw error;
-    await logAction(adminClient, agent.id, action, "approval_requested", { announcementId, title: announcementDraft.title }, {
-      approvalRequestId: approval.id,
+    const result = await executeAdminAction(adminClient, agent, action, input);
+    const status = action === "request_publish_announcement" ? "approval_requested" : "success";
+    await logAction(adminClient, agent.id, action, status, auditInput, {
+      resource: String(input.resource || "").trim() || undefined,
+      successful: true,
     });
-    return jsonResponse(202, { ok: true, approvalRequired: true, result: approval }, requestOrigin);
+    return jsonResponse(action === "request_publish_announcement" ? 202 : 200, { ok: true, agent: agent.name, result }, requestOrigin);
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error || "").trim() || "Agent action failed.";
     await logAction(adminClient, agent.id, action, "failed", auditInput, { error: message });
-    return jsonResponse(500, { ok: false, error: message }, requestOrigin);
+    return jsonResponse(400, { ok: false, error: message }, requestOrigin);
   }
 });

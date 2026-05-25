@@ -181,21 +181,29 @@ How it works with this app:
 
 ## AI admin assistants
 
-The Admin Dashboard now includes an `AI Agents` page for issuing limited, revocable credentials to an external assistant such as Hermes.
+The Admin Dashboard includes an `AI Agents` page for issuing revocable credentials to an external assistant such as Hermes. An assistant can start with narrow tools or be granted `Full administrator tools` from the dashboard.
 
 Security model:
 
 - The browser displays a new agent token only once; Supabase stores only its SHA-256 hash.
 - Agent calls use the `admin-agent-tool` Edge Function, which holds the server-only service credential.
 - Every authorized tool attempt is saved in `admin_agent_action_log`.
-- Publishing is approval-gated through `admin_agent_approval_requests`.
+- Assistants without full administrator tools request approval before publishing announcements through `admin_agent_approval_requests`.
 - An admin can disable an agent or rotate its token immediately.
 
-Initial tools:
+Scoped tools:
 
 - `get_dashboard_summary` requires `read_dashboard`.
 - `create_announcement_draft` requires `draft_announcements` and always creates an unpublished draft.
 - `request_publish_announcement` requires `request_content_publish` and queues an approval in the dashboard.
+
+Full administrator tools:
+
+- `get_tool_catalog`, `list_admin_records`, and `manage_admin_record` cover the dashboard's allowlisted relational data areas: MCQ courses/topics/questions, course-platform content, enrollments, announcements, notifications, feature availability, and agent records.
+- `create_user`, `update_user_profile`, `set_user_access`, `set_user_password`, and `delete_user` cover user administration. `delete_user` requires an explicit `confirm: "DELETE_USER"` input.
+- `read_shared_setting` and `write_shared_setting` control the dashboard's shared site-maintenance, refresh, auto-approval, course-link, feedback, invite, and log settings.
+- `resolve_platform_enrollment_request` applies course access decisions.
+- These tools require `full_admin`, are server-side only, and every attempted action is written to `admin_agent_action_log`.
 
 Deploy the function after applying the latest migration:
 

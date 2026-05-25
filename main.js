@@ -103,6 +103,7 @@ const ADMIN_AGENT_PERMISSION_OPTIONS = [
   ["request_content_publish", "Request publishing approval"],
   ["manage_content_drafts", "Manage content drafts (reserved)"],
   ["review_enrollments", "Review enrollment queue (reserved)"],
+  ["full_admin", "Full administrator tools"],
 ];
 const inMemoryStorage = new Map();
 let sessionVaultDbPromise = null;
@@ -25206,6 +25207,28 @@ async function setAdminAgentStatus(agentId, status) {
   await loadAdminAgents({ force: true });
 }
 
+async function setAdminAgentFullAccess(agentId, enabled) {
+  const client = getCoursesPlatformClient();
+  const currentUserId = getCurrentCoursePlatformUserId();
+  if (!client || !isUuidValue(agentId)) throw new Error("Agent permissions cannot be changed.");
+  if (enabled) {
+    await runRelationalQueryWithTimeout(
+      client.from("admin_agent_permissions").upsert({
+        agent_id: agentId,
+        permission_key: "full_admin",
+        created_by: isUuidValue(currentUserId) ? currentUserId : null,
+      }, { onConflict: "agent_id,permission_key", defaultToNull: false }),
+      "Full administrator permission update timed out.",
+    );
+  } else {
+    await runRelationalQueryWithTimeout(
+      client.from("admin_agent_permissions").delete().eq("agent_id", agentId).eq("permission_key", "full_admin"),
+      "Full administrator permission removal timed out.",
+    );
+  }
+  await loadAdminAgents({ force: true });
+}
+
 async function resolveAdminAgentApproval(approvalId, decision) {
   const client = getCoursesPlatformClient();
   const adminId = getCurrentCoursePlatformUserId();
@@ -25261,7 +25284,9 @@ function renderAdminAgentsSection() {
     `
     : "";
   const agentRows = (state.adminAgents || []).map((agent) => {
-    const permissions = getAdminAgentRowsByAgentId(state.adminAgentPermissions, agent.id)
+    const agentPermissions = getAdminAgentRowsByAgentId(state.adminAgentPermissions, agent.id);
+    const hasFullAccess = agentPermissions.some((entry) => entry.permission_key === "full_admin");
+    const permissions = agentPermissions
       .map((entry) => getAdminAgentPermissionLabel(entry.permission_key))
       .join(", ");
     const active = agent.status === "active";
@@ -25274,6 +25299,7 @@ function renderAdminAgentsSection() {
         <td><small>${agent.last_used_at ? escapeHtml(new Date(agent.last_used_at).toLocaleString()) : "Never"}</small></td>
         <td>
           <div class="stack">
+            <button class="btn ${hasFullAccess ? "danger" : "ghost"} admin-btn-sm" type="button" data-action="admin-agent-set-full-access" data-agent-id="${escapeHtml(agent.id)}" data-agent-name="${escapeHtml(agent.name)}" data-enable="${hasFullAccess ? "false" : "true"}">${hasFullAccess ? "Remove full admin" : "Grant full admin"}</button>
             <button class="btn ghost admin-btn-sm" type="button" data-action="admin-agent-rotate-token" data-agent-id="${escapeHtml(agent.id)}" data-agent-name="${escapeHtml(agent.name)}">Rotate token</button>
             <button class="btn ${active ? "danger" : "ghost"} admin-btn-sm" type="button" data-action="admin-agent-set-status" data-agent-id="${escapeHtml(agent.id)}" data-next-status="${active ? "disabled" : "active"}">${active ? "Disable" : "Enable"}</button>
           </div>
@@ -25325,7 +25351,7 @@ function renderAdminAgentsSection() {
       <div class="flex-between">
         <div>
           <h3 style="margin:0;">AI Agents</h3>
-          <p class="subtle">Create an admin assistant identity with tightly defined abilities and a revocable token.</p>
+          <p class="subtle">Create an admin assistant identity with revocable access. Full administrator tools can be granted or removed per assistant.</p>
         </div>
         <button class="btn ghost admin-btn-sm ${state.adminAgentsLoading ? "is-loading" : ""}" type="button" data-action="admin-agents-refresh">${state.adminAgentsLoading ? "Refreshing..." : "Refresh"}</button>
       </div>
@@ -27351,6 +27377,28 @@ function wireAdmin() {
         toast(nextStatus === "active" ? "Assistant enabled." : "Assistant disabled.");
       } catch (error) {
         toast(getErrorMessage(error, "Could not change assistant status."));
+      }
+      state.skipNextRouteAnimation = true;
+      render();
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='admin-agent-set-full-access']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const enable = String(button.getAttribute("data-enable") || "").trim() === "true";
+      const agentName = String(button.getAttribute("data-agent-name") || "this assistant").trim();
+      const message = enable
+        ? `Grant full administrator tools to ${agentName}? It will be able to manage users, content, courses, notifications, and site access.`
+        : `Remove full administrator tools from ${agentName}?`;
+      if (!window.confirm(message)) {
+        return;
+      }
+      try {
+        await setAdminAgentFullAccess(String(button.getAttribute("data-agent-id") || "").trim(), enable);
+        appendSystemLog("admin.agent_full_access", enable ? "AI assistant granted full administrator tools." : "AI assistant full administrator tools removed.", { enabled: enable });
+        toast(enable ? "Full administrator tools granted." : "Full administrator tools removed.");
+      } catch (error) {
+        toast(getErrorMessage(error, "Could not change full administrator tools."));
       }
       state.skipNextRouteAnimation = true;
       render();
