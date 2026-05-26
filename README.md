@@ -200,6 +200,7 @@ Scoped tools:
 Full administrator tools:
 
 - `get_tool_catalog`, `list_admin_records`, and `manage_admin_record` cover the dashboard's allowlisted relational data areas: MCQ courses/topics/questions, course-platform content, enrollments, announcements, notifications, and feature availability. Hermes can view its connection records for visibility but cannot create or edit assistant identities through the API.
+- `bulk_import_mcqs` imports up to 100 structured MCQ rows at a time, creates missing course topics when requested, and replaces question choices when a stable `externalId` is imported again. Imports are drafts by default.
 - `create_user`, `update_user_profile`, `set_user_access`, `set_user_password`, and `delete_user` cover user administration. `delete_user` requires an explicit `confirm: "DELETE_USER"` input.
 - `read_shared_setting` and `write_shared_setting` control the dashboard's shared site-maintenance, refresh, auto-approval, course-link, feedback, invite, and log settings.
 - `resolve_platform_enrollment_request` applies course access decisions.
@@ -219,6 +220,35 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/admin-agent-tool" \
   -H "Content-Type: application/json" \
   -d '{"action":"get_dashboard_summary","input":{}}'
 ```
+
+Bulk MCQ import request format:
+
+```json
+{
+  "action": "bulk_import_mcqs",
+  "input": {
+    "defaultCourse": "Exact course name from mcq_courses",
+    "defaultTopic": "Topic name",
+    "importAsDraft": true,
+    "createMissingTopics": true,
+    "records": [
+      {
+        "externalId": "hermes-source-file-row-001",
+        "stem": "Question text",
+        "choiceA": "Option A",
+        "choiceB": "Option B",
+        "choiceC": "Option C",
+        "choiceD": "Option D",
+        "correct": "A",
+        "explanation": "Explanation",
+        "difficulty": "Medium"
+      }
+    ]
+  }
+}
+```
+
+Use a stable unique `externalId` for each question so repeated automation updates that question instead of creating a duplicate. To publish deliberately, set `importAsDraft` to `false` and provide `"status": "published"` on the records being published.
 
 Do not place an agent token, `SUPABASE_SERVICE_ROLE_KEY`, or an LLM provider key in `main.js`, `supabase.config.js`, or any deployed frontend file.
 

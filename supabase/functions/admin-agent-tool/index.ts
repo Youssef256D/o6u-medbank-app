@@ -6,6 +6,7 @@ const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 4000;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 60;
+const MAX_BULK_IMPORT_QUESTIONS = 100;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
 const FULL_ADMIN_PERMISSION = "full_admin";
 const rateLimitByAgent = new Map<string, { count: number; startedAt: number }>();
@@ -20,6 +21,7 @@ const FULL_ADMIN_ACTIONS = new Set([
   "get_tool_catalog",
   "list_admin_records",
   "manage_admin_record",
+  "bulk_import_mcqs",
   "create_user",
   "update_user_profile",
   "set_user_access",
@@ -285,6 +287,20 @@ function summarizeRequestPayload(action: string, input: Record<string, unknown>)
       match: asRecord(input.match),
     };
   }
+  if (action === "bulk_import_mcqs") {
+    const records = Array.isArray(input.records) ? input.records : [];
+    return {
+      recordCount: records.length,
+      importAsDraft: input.importAsDraft !== false,
+      createMissingTopics: input.createMissingTopics !== false,
+      defaultCourseId: String(input.defaultCourseId || "").trim() || undefined,
+      defaultCourse: String(input.defaultCourse || "").trim() || undefined,
+      externalIds: records.slice(0, 20).map((row) => {
+        const record = asRecord(row);
+        return String(record.externalId || record.external_id || "").trim();
+      }).filter(Boolean),
+    };
+  }
   if (action === "write_shared_setting") {
     return { setting: String(input.setting || "").trim() };
   }
@@ -399,6 +415,237 @@ async function manageAdminRecord(adminClient: ReturnType<typeof createClient>, i
   return { resource, operation, rows: data || [] };
 }
 
+function normalizeBulkDifficulty(value: unknown): number {
+  if ([1, 2, 3].includes(Number(value))) return Number(value);
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "easy") return 1;
+  if (normalized === "hard") return 3;
+  return 2;
+}
+
+function normalizeBulkCorrectLabels(value: unknown): Set<string> {
+  const tokens = Array.isArray(value) ? value : String(value || "").split(/[\s,|;/]+/);
+  const numberedLabels: Record<string, string> = { "1": "A", "2": "B", "3": "C", "4": "D", "5": "E" };
+  return new Set(tokens.map((token) => {
+    const label = String(token || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return numberedLabels[label] || label;
+  }).filter((label) => /^[A-E]$/.test(label)));
+}
+
+function normalizeBulkChoices(record: Record<string, unknown>): Array<{ choice_label: string; choice_text: string; is_correct: boolean }> {
+  const rawChoices = Array.isArray(record.choices) ? record.choices : [];
+  const choiceTextByLabel = new Map<string, string>();
+  const markedCorrect = new Set<string>();
+
+  rawChoices.forEach((rawChoice, index) => {
+    const choice = asRecord(rawChoice);
+    const fallbackLabel = ["A", "B", "C", "D", "E"][index] || "";
+    const label = String(choice.label || choice.id || fallbackLabel).trim().toUpperCase();
+    const text = String(choice.text || choice.choice_text || rawChoice || "").trim();
+    if (/^[A-E]$/.test(label) && text) {
+      choiceTextByLabel.set(label, text);
+      if (choice.isCorrect === true || choice.is_correct === true) markedCorrect.add(label);
+    }
+  });
+
+  ["A", "B", "C", "D", "E"].forEach((label) => {
+    const text = String(record[`choice${label}`] || record[`choice_${label.toLowerCase()}`] || "").trim();
+    if (text) choiceTextByLabel.set(label, text);
+  });
+  const correctLabels = normalizeBulkCorrectLabels(record.correct ?? record.correctAnswer ?? record.correct_answer);
+  markedCorrect.forEach((label) => correctLabels.add(label));
+
+  if (choiceTextByLabel.size < 2) throw new Error("At least two non-empty choices are required.");
+  if (!correctLabels.size) throw new Error("At least one correct answer label is required.");
+  if ([...correctLabels].some((label) => !choiceTextByLabel.has(label))) {
+    throw new Error("Correct answer labels must refer to provided choices.");
+  }
+
+  return ["A", "B", "C", "D", "E"]
+    .filter((label) => choiceTextByLabel.has(label))
+    .map((label) => ({
+      choice_label: label,
+      choice_text: choiceTextByLabel.get(label) || "",
+      is_correct: correctLabels.has(label),
+    }));
+}
+
+async function bulkImportMcqs(adminClient: ReturnType<typeof createClient>, input: Record<string, unknown>) {
+  const rawRecords = Array.isArray(input.records) ? input.records : [];
+  if (!rawRecords.length) throw new Error("Provide records with at least one MCQ row.");
+  if (rawRecords.length > MAX_BULK_IMPORT_QUESTIONS) {
+    throw new Error(`Import a maximum of ${MAX_BULK_IMPORT_QUESTIONS} questions per request.`);
+  }
+  assertPayloadSize(rawRecords);
+
+  const importAsDraft = input.importAsDraft !== false;
+  const createMissingTopics = input.createMissingTopics !== false;
+  const defaultCourseId = String(input.defaultCourseId || "").trim();
+  const defaultCourse = String(input.defaultCourse || "").trim();
+  const defaultTopicId = String(input.defaultTopicId || "").trim();
+  const defaultTopic = String(input.defaultTopic || "").trim();
+  const errors: Array<{ row: number; externalId?: string; error: string }> = [];
+  const normalizedRows: Array<{
+    row: number;
+    externalId: string;
+    courseId: string;
+    course: string;
+    topicId: string;
+    topic: string;
+    stem: string;
+    explanation: string;
+    objective: string | null;
+    difficulty: number;
+    status: string;
+    choices: Array<{ choice_label: string; choice_text: string; is_correct: boolean }>;
+  }> = [];
+  const seenExternalIds = new Set<string>();
+
+  rawRecords.forEach((rawRecord, index) => {
+    const rowNumber = index + 1;
+    const record = asRecord(rawRecord);
+    const externalId = String(record.externalId || record.external_id || "").trim();
+    try {
+      if (!externalId || externalId.length > 180) throw new Error("externalId is required and must be 180 characters or fewer.");
+      if (seenExternalIds.has(externalId)) throw new Error("externalId is duplicated in this import batch.");
+      seenExternalIds.add(externalId);
+      const stem = String(record.stem || record.question || "").trim();
+      if (!stem) throw new Error("stem is required.");
+      const requestedStatus = String(record.status || (importAsDraft ? "draft" : "published")).trim().toLowerCase();
+      if (!["draft", "published", "archived"].includes(requestedStatus)) {
+        throw new Error("status must be draft, published, or archived.");
+      }
+      normalizedRows.push({
+        row: rowNumber,
+        externalId,
+        courseId: String(record.courseId || record.course_id || defaultCourseId).trim(),
+        course: String(record.course || record.courseName || defaultCourse).trim(),
+        topicId: String(record.topicId || record.topic_id || defaultTopicId).trim(),
+        topic: String(record.topic || record.topicName || defaultTopic).trim(),
+        stem,
+        explanation: String(record.explanation || "").trim() || "No explanation provided.",
+        objective: String(record.objective || "").trim() || null,
+        difficulty: normalizeBulkDifficulty(record.difficulty),
+        status: importAsDraft ? "draft" : requestedStatus,
+        choices: normalizeBulkChoices(record),
+      });
+    } catch (error) {
+      errors.push({ row: rowNumber, externalId: externalId || undefined, error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
+  const { data: courses, error: courseError } = await adminClient
+    .from("courses")
+    .select("id,course_name,is_active");
+  if (courseError) throw courseError;
+  const courseById = new Map((courses || []).map((course) => [String(course.id), course]));
+  const coursesByName = new Map<string, any[]>();
+  (courses || []).forEach((course) => {
+    const key = String(course.course_name || "").trim().toLowerCase();
+    coursesByName.set(key, [...(coursesByName.get(key) || []), course]);
+  });
+
+  const courseResolvedRows = normalizedRows.flatMap((record) => {
+    let course = record.courseId ? courseById.get(record.courseId) : null;
+    if (!course && record.course) {
+      const matches = coursesByName.get(record.course.toLowerCase()) || [];
+      if (matches.length === 1) course = matches[0];
+      if (matches.length > 1) {
+        errors.push({ row: record.row, externalId: record.externalId, error: "Course name is not unique. Supply courseId." });
+        return [];
+      }
+    }
+    if (!course) {
+      errors.push({ row: record.row, externalId: record.externalId, error: "A matching courseId or exact course name is required." });
+      return [];
+    }
+    return [{ ...record, courseId: String(course.id), course: String(course.course_name) }];
+  });
+  const relevantCourseIds = [...new Set(courseResolvedRows.map((record) => record.courseId))];
+  const { data: topics, error: topicError } = relevantCourseIds.length
+    ? await adminClient.from("course_topics").select("id,course_id,topic_name").in("course_id", relevantCourseIds)
+    : { data: [], error: null };
+  if (topicError) throw topicError;
+  const topicById = new Map((topics || []).map((topic) => [String(topic.id), topic]));
+  const topicByCourseAndName = new Map(
+    (topics || []).map((topic) => [`${topic.course_id}::${String(topic.topic_name || "").trim().toLowerCase()}`, topic]),
+  );
+  const createdTopics: Array<{ id: string; courseId: string; topic: string }> = [];
+  const readyRows: typeof courseResolvedRows = [];
+
+  for (const record of courseResolvedRows) {
+    try {
+      let topic = record.topicId ? topicById.get(record.topicId) : null;
+      if (topic && String(topic.course_id) !== record.courseId) {
+        throw new Error("topicId does not belong to the selected course.");
+      }
+      const topicName = record.topic.trim();
+      if (!topic && topicName) {
+        topic = topicByCourseAndName.get(`${record.courseId}::${topicName.toLowerCase()}`) || null;
+      }
+      if (!topic && topicName && createMissingTopics) {
+        const { data: created, error: createTopicError } = await adminClient.from("course_topics").insert({
+          course_id: record.courseId,
+          topic_name: topicName,
+          sort_order: 999,
+          is_active: true,
+        }).select("id,course_id,topic_name").single();
+        if (createTopicError) throw createTopicError;
+        topic = created;
+        topicById.set(String(created.id), created);
+        topicByCourseAndName.set(`${record.courseId}::${String(created.topic_name).trim().toLowerCase()}`, created);
+        createdTopics.push({ id: String(created.id), courseId: record.courseId, topic: String(created.topic_name) });
+      }
+      if (!topic) throw new Error("A matching topicId or topic name is required.");
+      readyRows.push({ ...record, topicId: String(topic.id), topic: String(topic.topic_name) });
+    } catch (error) {
+      errors.push({ row: record.row, externalId: record.externalId, error: String(error instanceof Error ? error.message : error) });
+    }
+  }
+
+  const imported: Array<{ externalId: string; id: string; course: string; topic: string; status: string }> = [];
+  for (const record of readyRows) {
+    try {
+      const { data: question, error: questionError } = await adminClient.from("questions").upsert({
+        external_id: record.externalId,
+        course_id: record.courseId,
+        topic_id: record.topicId,
+        stem: record.stem,
+        explanation: record.explanation,
+        objective: record.objective,
+        difficulty: record.difficulty,
+        status: record.status,
+      }, { onConflict: "external_id", defaultToNull: false }).select("id,external_id,status").single();
+      if (questionError || !question?.id) throw questionError || new Error("Question could not be saved.");
+      const { error: removeChoicesError } = await adminClient.from("question_choices").delete().eq("question_id", question.id);
+      if (removeChoicesError) throw removeChoicesError;
+      const { error: choiceError } = await adminClient.from("question_choices").insert(
+        record.choices.map((choice) => ({ ...choice, question_id: question.id })),
+      );
+      if (choiceError) throw choiceError;
+      imported.push({
+        externalId: record.externalId,
+        id: String(question.id),
+        course: record.course,
+        topic: record.topic,
+        status: record.status,
+      });
+    } catch (error) {
+      errors.push({ row: record.row, externalId: record.externalId, error: String(error instanceof Error ? error.message : error) });
+    }
+  }
+
+  return {
+    requested: rawRecords.length,
+    imported: imported.length,
+    failed: errors.length,
+    importAsDraft,
+    createdTopics,
+    questions: imported,
+    errors,
+  };
+}
+
 async function getDashboardSummary(adminClient: ReturnType<typeof createClient>) {
   const [courses, requests, students, questions, platformCourses] = await Promise.all([
     adminClient.from("courses").select("id", { count: "exact", head: true }),
@@ -428,6 +675,15 @@ async function executeAdminAction(
       fullAdminActions: [...FULL_ADMIN_ACTIONS],
       resources: Object.keys(ADMIN_RESOURCES),
       sharedSettings: Object.keys(SHARED_SETTINGS),
+      bulkImportMcqs: {
+        action: "bulk_import_mcqs",
+        maxRecordsPerRequest: MAX_BULK_IMPORT_QUESTIONS,
+        behavior: "Imports structured MCQ records directly into the question bank. Defaults to draft visibility and creates missing topics unless disabled.",
+        requiredPerRecord: ["externalId", "stem", "correct", "choiceA", "choiceB"],
+        identifyCourseAndTopicWith: ["courseId or exact course name", "topicId or topic name"],
+        optionalInput: ["defaultCourseId", "defaultCourse", "defaultTopicId", "defaultTopic", "importAsDraft", "createMissingTopics"],
+        publishRule: "Set input.importAsDraft to false and record.status to published only when publication is intended.",
+      },
     };
   }
   if (action === "get_dashboard_summary") {
@@ -438,6 +694,9 @@ async function executeAdminAction(
   }
   if (action === "manage_admin_record") {
     return await manageAdminRecord(adminClient, input);
+  }
+  if (action === "bulk_import_mcqs") {
+    return await bulkImportMcqs(adminClient, input);
   }
   if (action === "create_user") {
     const email = String(input.email || "").trim().toLowerCase();
