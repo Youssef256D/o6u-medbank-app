@@ -40335,7 +40335,7 @@ function renderCoursePlatformCard(row, options = {}) {
   }
 
   return `
-    <article class="card course-card ${hasNoContent ? "course-card-empty-content" : ""}">
+    <article class="card course-card ${isSuggestion ? "course-card-suggestion" : ""} ${hasNoContent ? "course-card-empty-content" : ""}">
       <button class="course-card-cover" type="button" data-action="courses-open-course" data-course-id="${escapeHtml(course.id)}">
         ${renderCourseCoverHtml(course)}
         
@@ -40374,7 +40374,13 @@ function renderCoursePlatformCard(row, options = {}) {
           </div>
 
           ${hasNoContent ? `<div class="course-card-empty-note">Course content is being prepared.</div>` : `
-            <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+            <div class="course-progress-container">
+              <div class="course-progress-info">
+                <span class="course-progress-label">Progress</span>
+                <span class="course-progress-val">${progress}%</span>
+              </div>
+              <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
+            </div>
           `}
 
           ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>Last opened: ${escapeHtml(lastLesson.title)}</span></small>` : ""}
