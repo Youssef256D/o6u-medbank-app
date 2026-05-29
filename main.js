@@ -207,7 +207,7 @@ const ENROLLMENT_SYNC_QUERY_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 150
 const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
 const ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS = 60000;
 const ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
-const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = true;
+const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = false;
 const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
 const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
 const AUTO_APPROVAL_ACTOR = "system:auto";
@@ -3790,28 +3790,7 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
   const role = isForcedAdminEmail(email) ? "admin" : "student";
   const studentYear = role === "student" ? (metadataYear ?? fallbackYear) : null;
   const studentSemester = role === "student" ? (metadataSemester ?? fallbackSemester) : null;
-  const canPreserveFallbackApproval = role !== "admin"
-    && fallbackUser?.isApproved === true
-    && hasCompleteStudentProfile({
-      role: "student",
-      phone: normalizedPhone,
-      academicYear: studentYear,
-      academicSemester: studentSemester,
-      assignedCourses: metadataCourses,
-    });
-  const approved = role === "admin"
-    ? true
-    : (
-      canPreserveFallbackApproval
-        ? true
-        : shouldAutoApproveStudentAccess({
-          role: "student",
-          phone: normalizedPhone,
-          academicYear: studentYear,
-          academicSemester: studentSemester,
-          assignedCourses: metadataCourses,
-        })
-    );
+  const approved = role === "admin";
 
   return {
     id: profileId,
@@ -4115,23 +4094,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     academicSemester: semester,
     assignedCourses: resolvedAssignedCourses,
   });
-  const shouldTrustCompleteLocalApproval = (
-    role === "student"
-    && profileApproved === false
-    && (localApproval === true || autoApprovalFallback)
-    && hasCompleteStudentProfile({
-      role: "student",
-      phone: resolvedPhone,
-      academicYear: year,
-      academicSemester: semester,
-      assignedCourses: resolvedAssignedCourses,
-    })
-    && (
-      profileYear === null
-      || profileSemester === null
-      || relationalAssignedCourses.length === 0
-    )
-  );
+  const shouldTrustCompleteLocalApproval = false;
   const resolvedApproval = role === "admin"
     ? true
     : (
@@ -4203,12 +4166,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       && sanitizeCourseAssignments(updatedUser?.assignedCourses || []).length > 0
     )
   );
-  const shouldBackfillStudentApproval = (
-    role === "student"
-    && profileApproved === false
-    && resolvedApproval === true
-    && hasCompleteStudentProfile(updatedUser)
-  );
+  const shouldBackfillStudentApproval = false;
   if (shouldBackfillProfilePhone) {
     client
       .from("profiles")
@@ -4867,11 +4825,8 @@ function matchesAdminUserSearchTerm(account, term) {
 }
 
 function isAutoApproveStudentAccessEnabled() {
-  const savedSetting = load(STORAGE_KEYS.autoApproveStudentAccess, null);
-  if (typeof savedSetting === "boolean") {
-    return savedSetting;
-  }
-  return DEFAULT_AUTO_APPROVE_STUDENT_ACCESS;
+  // Manual admin approval is required for student access.
+  return false;
 }
 
 function normalizeSiteMaintenanceConfig(rawValue) {
@@ -4970,10 +4925,9 @@ function resolveHydratedSiteMaintenanceConfig(remotePayload, options = {}) {
 }
 
 function shouldAutoApproveStudentAccess(user) {
-  if (!isAutoApproveStudentAccessEnabled() || !user || user.role !== "student") {
-    return false;
-  }
-  return hasCompleteStudentApprovalProfile(user);
+  // Student accounts must be approved by an admin. Keep this hard-disabled so
+  // stale synced auto-approval settings cannot grant access to new signups.
+  return false;
 }
 
 function buildStudentEnrollmentAuthMetadata(user = {}, options = {}) {
@@ -18588,9 +18542,13 @@ function render() {
     && user
     && !isUserAccessApproved(user)
     && !studentProfileCompletionRoute
-    && !hasSupabaseManagedIdentity(user)
   ) {
     removeStorageKey(STORAGE_KEYS.currentUserId);
+    if (hasSupabaseManagedIdentity(user) && supabaseAuth.client) {
+      queueSupabaseAuthRequest(supabaseAuth.client, () => supabaseAuth.client.auth.signOut()).catch((signOutError) => {
+        console.warn("Supabase sign-out failed for unapproved account.", signOutError?.message || signOutError);
+      });
+    }
     state.route = "login";
     toast("Your account is pending admin approval.");
   }
@@ -20435,7 +20393,7 @@ function renderCompleteProfile() {
   return `
     <section class="panel" style="max-width: 680px; margin-inline: auto;">
       <h2 class="title">Complete Your Account</h2>
-      <p class="subtle">Add your phone number, choose your year and semester, and pick one or more courses first. If auto-approval is enabled, access starts immediately. Otherwise, your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+      <p class="subtle">Add your phone number, choose your year and semester, and pick one or more courses first. Your account stays pending until an admin approves it. Use 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
       <form id="complete-profile-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
         <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required minlength="8" maxlength="20" /></label>
         <div class="form-row">
@@ -25667,7 +25625,6 @@ function renderAdmin() {
     const partiallyVisibleSelected = selectedUserCount > 0 && !allVisibleSelected;
     const bulkDeactivateRunning = Boolean(state.adminUserBulkActionRunning);
     const resetUserFiltersDisabled = !String(userSearchQuery || "").trim() && userFilterYear === null && userFilterSemester === null;
-    const autoApprovalEnabled = isAutoApproveStudentAccessEnabled();
     const addUserDraft = normalizeAdminAddUserDraft(state.adminAddUserDraft);
     const pendingCount = users.filter((entry) => entry.role === "student" && !isUserAccessApproved(entry)).length;
     const approveAllPendingRunning = Boolean(state.adminApproveAllPendingRunning);
@@ -25797,13 +25754,7 @@ function renderAdmin() {
                 ${approveAllPendingRunning ? `<span class="inline-loader" aria-hidden="true"></span><span>Approving...</span>` : "Approve all pending"}
               </button>
             </div>
-            <label class="toggle-switch-label" style="margin: 0;">
-              <input id="admin-auto-approval-toggle" type="checkbox" class="toggle-switch-input" ${autoApprovalEnabled ? "checked" : ""} />
-              <span class="toggle-switch-track" aria-hidden="true">
-                <span class="toggle-switch-thumb"></span>
-              </span>
-              <span class="toggle-switch-text subtle">Auto-approve new complete student accounts</span>
-            </label>
+            <span class="subtle">New student accounts require admin approval.</span>
           </div>
         </div>
         <details id="admin-add-user-disclosure" class="admin-user-create-panel" style="margin-top: 0.85rem;" ${state.adminAddUserPanelOpen ? "open" : ""}>
@@ -28879,21 +28830,6 @@ function wireAdmin() {
       toast(`User added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       render();
     }
-  });
-
-  const autoApprovalToggle = document.getElementById("admin-auto-approval-toggle");
-  autoApprovalToggle?.addEventListener("change", async (e) => {
-    e.stopPropagation();
-    const enabled = Boolean(autoApprovalToggle.checked);
-    save(STORAGE_KEYS.autoApproveStudentAccess, enabled);
-    try {
-      await flushPendingSyncNow({ throwOnRelationalFailure: false });
-    } catch {
-      // Keep local state even if sync fails.
-    }
-    toast(enabled ? "Auto-approval enabled for new complete student accounts." : "Auto-approval disabled.");
-    state.skipNextRouteAnimation = true;
-    render();
   });
 
   appEl.querySelector("[data-action='approve-all-pending']")?.addEventListener("click", async () => {
@@ -40423,7 +40359,7 @@ function renderCoursePlatformCard(row, options = {}) {
         </div>
 
         <p class="course-card-desc">${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
-        ${isSuggestion ? `<p class="course-suggestion-reason-row">${escapeHtml(suggestionReason || "Recommended by your course admin.")}</p>` : ""}
+        ${isSuggestion ? `<p class="course-suggestion-reason-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>${escapeHtml(suggestionReason || "Recommended by your course admin.")}</span></p>` : ""}
 
         <div class="course-card-footer">
           <div class="course-card-facts-row">
@@ -40441,7 +40377,7 @@ function renderCoursePlatformCard(row, options = {}) {
             <div class="course-progress-track" aria-label="${progress}% complete"><span style="width: ${Math.max(0, Math.min(100, progress))}%;"></span></div>
           `}
 
-          ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last">Last opened: ${escapeHtml(lastLesson.title)}</small>` : ""}
+          ${lastLesson && enrollment.isEnrolled ? `<small class="subtle course-card-last"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>Last opened: ${escapeHtml(lastLesson.title)}</span></small>` : ""}
           ${Number(newLessons?.length || 0) || Number(newAnnouncements?.length || 0) ? `
             <div class="course-card-badges" style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
               ${Number(newLessons?.length || 0) ? `<span class="badge good">${newLessons.length} new lesson${newLessons.length === 1 ? "" : "s"}</span>` : ""}
@@ -40450,7 +40386,7 @@ function renderCoursePlatformCard(row, options = {}) {
           ` : ""}
 
           <div class="course-card-actions">
-            <button class="btn admin-btn-sm course-card-primary" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>
+            <button class="btn admin-btn-sm course-card-primary ${enrollment.isEnrolled ? "is-enrolled-btn" : "is-suggestion-btn"}" type="button" data-action="${primaryAction}" data-course-id="${escapeHtml(course.id)}" ${lastLesson && enrollment.isEnrolled ? `data-lesson-id="${escapeHtml(lastLesson.id)}"` : ""}>
               ${buttonIcon}
               <span>${escapeHtml(actionLabel)}</span>
             </button>
