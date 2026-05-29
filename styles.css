@@ -13811,7 +13811,6 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
   box-shadow: 0 0 6px rgba(43, 147, 72, 0.2);
 }
 
-/* Back Button Styles */
 .course-back-btn {
   margin-bottom: 1.25rem;
   display: inline-flex;
@@ -13827,6 +13826,13 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
   cursor: pointer;
   box-shadow: var(--shadow-soft);
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.course-back-btn span {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
 }
 
 .course-back-btn:hover {
