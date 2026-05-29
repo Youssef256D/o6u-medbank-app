@@ -41624,7 +41624,7 @@ async function loadAdminCoursesPlatform(options = {}) {
     let profiles = [];
     for (const batch of splitIntoBatches(userIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const rows = await runRelationalQueryWithTimeout(
-        client.from("profiles").select("id,full_name,email,academic_year,academic_semester,role,approved").in("id", batch),
+        client.from("profiles").select("id,full_name,email,phone,academic_year,academic_semester,role,approved").in("id", batch),
         "Enrollment profile query timed out.",
       ).catch(() => []);
       profiles.push(...(Array.isArray(rows) ? rows : []));
@@ -41696,6 +41696,22 @@ function getAdminCourseBuilderProfileLabel(userId) {
   return profile
     ? `${String(profile.full_name || profile.email || userId).trim()}${profile.email ? ` (${profile.email})` : ""}`
     : String(userId || "Unknown student").trim();
+}
+
+function getAdminCourseBuilderEnrollmentSearchText(userId) {
+  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const label = normalizeNotificationTargetSearchText(getAdminCourseBuilderProfileLabel(userId));
+  const phone = normalizeNotificationTargetPhoneSearchText(profile?.phone);
+  const phoneVariants = new Set([phone].filter(Boolean));
+  if (phone.startsWith("20")) {
+    phoneVariants.add(`0${phone.slice(2)}`);
+  } else if (phone.startsWith("0")) {
+    phoneVariants.add(`20${phone.slice(1)}`);
+  }
+  return {
+    label,
+    phone: [...phoneVariants].join(" "),
+  };
 }
 
 function getProfileInitials(userId) {
@@ -43173,12 +43189,14 @@ function renderAdminAnnouncementsSection(courses, selectedCourseId, rows) {
 }
 
 function renderAdminEnrollmentsSection(selectedCourse, rows) {
-  const search = String(state.adminEnrollmentSearch || "").trim().toLowerCase();
+  const search = normalizeNotificationTargetSearchText(state.adminEnrollmentSearch);
+  const phoneSearch = normalizeNotificationTargetPhoneSearchText(state.adminEnrollmentSearch);
   const limit = Math.max(25, Number(state.adminEnrollmentListLimit) || 25);
   const filteredEnrollments = rows.enrollments.filter((enrollment) => {
     if (!search) return true;
-    const label = getAdminCourseBuilderProfileLabel(enrollment.user_id).toLowerCase();
-    return label.includes(search);
+    const searchText = getAdminCourseBuilderEnrollmentSearchText(enrollment.user_id);
+    return searchText.label.includes(search)
+      || (phoneSearch && searchText.phone.includes(phoneSearch));
   });
   const visibleEnrollments = filteredEnrollments.slice(0, limit);
   const hasMore = filteredEnrollments.length > visibleEnrollments.length;
@@ -43231,7 +43249,7 @@ function renderAdminEnrollmentsSection(selectedCourse, rows) {
         </div>
 
         <div class="admin-enrollment-search" style="margin-top: 0.5rem;">
-          <input type="search" id="admin-enrollment-search" placeholder="Search enrolled students by name or email..." value="${escapeHtml(state.adminEnrollmentSearch || "")}" style="width: 100%;" />
+          <input type="search" id="admin-enrollment-search" placeholder="Search enrolled students by name, email, or phone..." value="${escapeHtml(state.adminEnrollmentSearch || "")}" style="width: 100%;" />
         </div>
 
         <div class="course-enrollment-admin-list">
