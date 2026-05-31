@@ -7,6 +7,7 @@ const MAX_BODY_LENGTH = 4000;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 60;
 const MAX_BULK_IMPORT_QUESTIONS = 100;
+const MAX_PROFILE_PHONE_SCAN_ROWS = 5000;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
 const FULL_ADMIN_PERMISSION = "full_admin";
 const rateLimitByAgent = new Map<string, { count: number; startedAt: number }>();
@@ -358,6 +359,47 @@ function applyExactMatch(query: any, match: Record<string, unknown>): any {
   return nextQuery;
 }
 
+function normalizePhoneDigits(value: unknown): string {
+  const digits = String(value || "").replace(/\D+/g, "");
+  return digits.startsWith("00") ? digits.slice(2) : digits;
+}
+
+function buildPhoneLookupKeys(value: unknown): Set<string> {
+  const digits = normalizePhoneDigits(value);
+  const keys = new Set<string>();
+  if (!digits) return keys;
+  keys.add(digits);
+
+  if (digits.startsWith("20") && digits.length === 12 && digits[2] === "1") {
+    keys.add(`0${digits.slice(2)}`);
+    keys.add(`0020${digits.slice(2)}`);
+  } else if (digits.startsWith("0") && digits.length === 11 && digits[1] === "1") {
+    keys.add(`20${digits.slice(1)}`);
+    keys.add(`0020${digits.slice(1)}`);
+  } else if (digits.length === 10 && digits[0] === "1") {
+    keys.add(`0${digits}`);
+    keys.add(`20${digits}`);
+    keys.add(`0020${digits}`);
+  }
+
+  return keys;
+}
+
+function phoneValuesMatch(storedPhone: unknown, searchPhone: unknown): boolean {
+  const storedKeys = buildPhoneLookupKeys(storedPhone);
+  const searchKeys = buildPhoneLookupKeys(searchPhone);
+  if (!storedKeys.size || !searchKeys.size) return false;
+  for (const key of searchKeys) {
+    if (storedKeys.has(key)) return true;
+  }
+
+  const storedDigits = normalizePhoneDigits(storedPhone);
+  const searchDigits = normalizePhoneDigits(searchPhone);
+  return storedDigits.length >= 8
+    && searchDigits.length >= 8
+    && (storedDigits.endsWith(searchDigits) || searchDigits.endsWith(storedDigits));
+}
+
 function buildRequiredMatch(spec: ResourceSpec, raw: unknown): Record<string, unknown> {
   const match = pickFields(raw, spec.matchFields, "match");
   const missing = spec.matchFields.filter((key) => !(key in match) || String(match[key] ?? "").trim() === "");
@@ -371,11 +413,43 @@ async function listAdminRecords(adminClient: ReturnType<typeof createClient>, in
   const resource = String(input.resource || "").trim();
   const spec = ADMIN_RESOURCES[resource];
   if (!spec) throw new Error("Unknown admin resource.");
-  const filters = pickFields(input.filters, [...new Set([...spec.readFields, ...spec.matchFields])], "filters");
+  const rawFilters = pickFields(input.filters, [...new Set([...spec.readFields, ...spec.matchFields])], "filters");
+  const filters = { ...rawFilters };
+  const shouldNormalizePhoneFilter = resource === "profiles"
+    && Object.prototype.hasOwnProperty.call(filters, "phone")
+    && filters.phone !== null
+    && normalizePhoneDigits(filters.phone).length > 0;
+  const phoneFilter = shouldNormalizePhoneFilter
+    ? filters.phone
+    : undefined;
+  if (shouldNormalizePhoneFilter) {
+    delete filters.phone;
+  }
   const limit = Math.min(Math.max(Number(input.limit) || 25, 1), 100);
+  const orderBy = String(input.orderBy || "").trim();
+
+  if (phoneFilter !== undefined) {
+    const rows: any[] = [];
+    for (let offset = 0; offset < MAX_PROFILE_PHONE_SCAN_ROWS && rows.length < limit; offset += 1000) {
+      let pageQuery: any = adminClient
+        .from(spec.table)
+        .select(spec.readFields.join(","))
+        .range(offset, Math.min(offset + 999, MAX_PROFILE_PHONE_SCAN_ROWS - 1));
+      pageQuery = applyExactMatch(pageQuery, filters);
+      if (orderBy && spec.readFields.includes(orderBy)) {
+        pageQuery = pageQuery.order(orderBy, { ascending: input.ascending === true });
+      }
+      const { data, error } = await pageQuery;
+      if (error) throw error;
+      const pageRows = Array.isArray(data) ? data : [];
+      rows.push(...pageRows.filter((row) => phoneValuesMatch(row?.phone, phoneFilter)).slice(0, limit - rows.length));
+      if (pageRows.length < 1000) break;
+    }
+    return { resource, rows };
+  }
+
   let query: any = adminClient.from(spec.table).select(spec.readFields.join(",")).limit(limit);
   query = applyExactMatch(query, filters);
-  const orderBy = String(input.orderBy || "").trim();
   if (orderBy && spec.readFields.includes(orderBy)) {
     query = query.order(orderBy, { ascending: input.ascending === true });
   }
