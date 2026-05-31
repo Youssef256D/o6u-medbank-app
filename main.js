@@ -629,6 +629,9 @@ function getAdminUserEnrollmentViewModel(account) {
       assignedCourses: account.role === "student"
         ? (draftYear !== null && draftSemester !== null ? getCurriculumCourses(draftYear, draftSemester) : [])
         : [...sanitizeCourseAssignments(account.assignedCourses || Object.keys(QBANK_COURSE_TOPICS))],
+      enrolledCourses: account.role === "student"
+        ? (draftYear !== null && draftSemester !== null ? getCurriculumCourses(draftYear, draftSemester) : [])
+        : [],
     },
     draft,
     hasUnsavedChanges: true,
@@ -3893,7 +3896,7 @@ function shouldRepairEnrollmentRowsFromProfile(profile, enrollmentSnapshot, prof
     && enrolledSemester !== null
     && (enrolledYear !== year || enrolledSemester !== semester)
   );
-  return hasNoActiveEnrollment || hasInactiveOnly || hasTermMismatch || Boolean(diagnostics.mixedTerms);
+  return hasNoActiveEnrollment || hasInactiveOnly || hasTermMismatch;
 }
 
 async function repairRelationalEnrollmentRowsForProfileRows(profileRows = []) {
@@ -4046,6 +4049,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     )
     : sanitizeCourseAssignments(localUser?.assignedCourses || []);
   if (role === "student") {
+    const shouldPreserveRelationalCourses = relationalAssignedCourses.length > 0;
     const normalizedEnrollment = normalizeStudentEnrollmentProfile({
       academicYear: year,
       academicSemester: semester,
@@ -4053,7 +4057,9 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     });
     year = normalizedEnrollment.academicYear;
     semester = normalizedEnrollment.academicSemester;
-    resolvedAssignedCourses = normalizedEnrollment.assignedCourses;
+    resolvedAssignedCourses = shouldPreserveRelationalCourses
+      ? relationalAssignedCourses
+      : normalizedEnrollment.assignedCourses;
   }
   let studentAccessIssue = null;
   if (role === "student") {
@@ -4071,12 +4077,6 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
       studentAccessIssue = createStudentAccessIssue(
         "inactive_enrollment",
         "Your enrollment points to inactive or unavailable courses. Ask an admin to check your semester assignment.",
-        { ...profileTermDetails, rawEnrollmentCount, activeEnrollmentCount },
-      );
-    } else if (Boolean(diagnostics.mixedTerms)) {
-      studentAccessIssue = createStudentAccessIssue(
-        "mixed_enrollment_terms",
-        "Your database enrollment contains courses from more than one semester. Ask an admin to save your year and semester again.",
         { ...profileTermDetails, rawEnrollmentCount, activeEnrollmentCount },
       );
     } else if (profileApproved === true && canUseProfileEnrollmentTerm && !hasActiveEnrollmentRows) {
@@ -4135,6 +4135,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     academicYear: year,
     academicSemester: semester,
     assignedCourses: resolvedAssignedCourses,
+    enrolledCourses: role === "student" ? relationalAssignedCourses : [],
     isApproved: resolvedApproval,
     approvedAt: resolvedApproval ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: resolvedApproval ? localUser?.approvedBy || "admin" : null,
@@ -5380,6 +5381,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const hasExplicitAcademicYear = Object.prototype.hasOwnProperty.call(profileOverrides, "academicYear");
   const hasExplicitAcademicSemester = Object.prototype.hasOwnProperty.call(profileOverrides, "academicSemester");
   const hasExplicitAssignedCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "assignedCourses");
+  const hasExplicitEnrolledCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "enrolledCourses");
   const hasExplicitStudentAccessIssue = Object.prototype.hasOwnProperty.call(profileOverrides, "studentAccessIssue");
   const metadataAcademicYear = normalizeAcademicYearOrNull(
     authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
@@ -5409,19 +5411,29 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const nextSemester = nextRole === "student" ? normalizeAcademicSemesterOrNull(nextSemesterInput) : null;
 
   let nextCourses;
+  const overrideEnrolledCourses = hasExplicitEnrolledCourses && Array.isArray(profileOverrides.enrolledCourses)
+    ? sanitizeCourseAssignments(profileOverrides.enrolledCourses)
+    : [];
   if (nextRole === "student") {
-    const overrideCourses = hasExplicitAssignedCourses && Array.isArray(profileOverrides.assignedCourses)
-      ? profileOverrides.assignedCourses
-      : null;
-    const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
-    const requestedCourses = overrideCourses ?? (previousCourses.length ? previousCourses : metadataAssignedCourses);
-    if (nextYear !== null && nextSemester !== null) {
+    if (overrideEnrolledCourses.length) {
+      nextCourses = [...overrideEnrolledCourses];
+    } else if (nextYear !== null && nextSemester !== null) {
+      const overrideCourses = hasExplicitAssignedCourses && Array.isArray(profileOverrides.assignedCourses)
+        ? profileOverrides.assignedCourses
+        : null;
+      const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
+      const requestedCourses = overrideCourses ?? (previousCourses.length ? previousCourses : metadataAssignedCourses);
       const allowedCourses = getCurriculumCourses(nextYear, nextSemester);
       nextCourses = sanitizeCourseAssignments(requestedCourses.filter((course) => allowedCourses.includes(course)));
       if (!nextCourses.length) {
         nextCourses = [...allowedCourses];
       }
     } else {
+      const overrideCourses = hasExplicitAssignedCourses && Array.isArray(profileOverrides.assignedCourses)
+        ? profileOverrides.assignedCourses
+        : null;
+      const previousCourses = Array.isArray(previous?.assignedCourses) ? previous.assignedCourses : [];
+      const requestedCourses = overrideCourses ?? (previousCourses.length ? previousCourses : metadataAssignedCourses);
       nextCourses = sanitizeCourseAssignments(requestedCourses);
     }
   } else {
@@ -5490,6 +5502,13 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
       ? profileOverrides.approvedBy || previous?.approvedBy || (nextRole === "admin" ? "system" : AUTO_APPROVAL_ACTOR)
       : null,
     assignedCourses: nextCourses,
+    enrolledCourses: nextRole === "student"
+      ? (
+        hasExplicitEnrolledCourses
+          ? overrideEnrolledCourses
+          : sanitizeCourseAssignments(previous?.enrolledCourses || [])
+      )
+      : [],
     academicYear: nextRole === "student" ? nextYear : null,
     academicSemester: nextRole === "student" ? nextSemester : null,
     createdAt: previous?.createdAt || nowISO(),
@@ -8594,12 +8613,13 @@ async function hydrateRelationalProfiles(currentUser) {
       : [];
     let assignedCourses = role !== "student"
       ? [...allCourses]
-      : serverTermCourses.length
-          ? serverTermCourses
-          : enrolledCourses.length
-            ? enrolledCourses
-          : [];
+      : enrolledCourses.length
+          ? enrolledCourses
+          : serverTermCourses.length
+            ? serverTermCourses
+            : [];
     if (role === "student") {
+      const shouldPreserveEnrolledCourses = enrolledCourses.length > 0;
       const repairedEnrollment = normalizeStudentEnrollmentProfile({
         academicYear: year,
         academicSemester: semester,
@@ -8607,7 +8627,9 @@ async function hydrateRelationalProfiles(currentUser) {
       });
       year = repairedEnrollment.academicYear;
       semester = repairedEnrollment.academicSemester;
-        assignedCourses = repairedEnrollment.assignedCourses;
+      assignedCourses = shouldPreserveEnrolledCourses
+        ? enrolledCourses
+        : repairedEnrollment.assignedCourses;
     }
     let studentAccessIssue = null;
     if (role === "student" && Boolean(profile.approved)) {
@@ -8626,12 +8648,6 @@ async function hydrateRelationalProfiles(currentUser) {
         studentAccessIssue = createStudentAccessIssue(
           "inactive_enrollment",
           "This approved student's enrollment points to inactive or unavailable courses.",
-          { profileId: profile.id, rawEnrollmentCount, activeEnrollmentCount },
-        );
-      } else if (Boolean(enrollmentDiagnostics.mixedTerms)) {
-        studentAccessIssue = createStudentAccessIssue(
-          "mixed_enrollment_terms",
-          "This approved student's enrollment contains courses from more than one semester.",
           { profileId: profile.id, rawEnrollmentCount, activeEnrollmentCount },
         );
       } else if (!hasActiveEnrollmentRows) {
@@ -8665,6 +8681,7 @@ async function hydrateRelationalProfiles(currentUser) {
       approvedAt: serverApproved ? (existing?.approvedAt || profile.created_at || nowISO()) : null,
       approvedBy: serverApproved ? (existing?.approvedBy || "admin") : null,
       assignedCourses,
+      enrolledCourses,
       academicYear: year,
       academicSemester: semester,
       authProvider: normalizeAuthProvider(profile.auth_provider || existing?.authProvider),
@@ -24926,6 +24943,10 @@ function getAdminVisibleCoursesForUser(account, allCourses = Object.keys(QBANK_C
   if (!account) {
     return [];
   }
+  const enrolledCourses = sanitizeCourseAssignments(account.enrolledCourses || []);
+  if (account.role === "student" && enrolledCourses.length) {
+    return enrolledCourses;
+  }
   const year = account.role === "student" ? normalizeAcademicYearOrNull(account.academicYear) : null;
   const semester = account.role === "student" ? normalizeAcademicSemesterOrNull(account.academicSemester) : null;
   if (account.role === "student") {
@@ -29526,6 +29547,7 @@ function wireAdmin() {
         users[idx].academicYear = year;
         users[idx].academicSemester = semester;
         users[idx].assignedCourses = getCurriculumCourses(year, semester);
+        users[idx].enrolledCourses = [...users[idx].assignedCourses];
         didEnrollmentTermChange = previousYear !== year || previousSemester !== semester;
         const hasCompleteApprovalProfile = hasCompleteStudentApprovalProfile(users[idx]);
         if (!hasCompleteApprovalProfile && previousApproved) {
@@ -29545,6 +29567,7 @@ function wireAdmin() {
         users[idx].academicYear = null;
         users[idx].academicSemester = null;
         users[idx].assignedCourses = [...allCourses];
+        users[idx].enrolledCourses = [];
         users[idx].isApproved = true;
         users[idx].approvedAt = users[idx].approvedAt || nowISO();
         users[idx].approvedBy = users[idx].approvedBy || "admin";
@@ -29873,6 +29896,7 @@ function wireAdmin() {
         users[idx].academicYear = sanitizeAcademicYear(users[idx].academicYear || 1);
         users[idx].academicSemester = sanitizeAcademicSemester(users[idx].academicSemester || 1);
         users[idx].assignedCourses = getCurriculumCourses(users[idx].academicYear, users[idx].academicSemester);
+        users[idx].enrolledCourses = [...users[idx].assignedCourses];
         const studentAutoApproved = shouldAutoApproveStudentAccess({
           role: "student",
           phone: String(users[idx].phone || "").trim(),
@@ -29887,6 +29911,7 @@ function wireAdmin() {
         users[idx].academicYear = null;
         users[idx].academicSemester = null;
         users[idx].assignedCourses = [...allCourses];
+        users[idx].enrolledCourses = [];
         users[idx].isApproved = true;
         users[idx].approvedAt = nowISO();
         users[idx].approvedBy = current?.email || "admin";
@@ -36700,6 +36725,10 @@ function getAvailableCoursesForUser(user) {
     return all;
   }
   if (user.role === "student") {
+    const enrolledCourses = sanitizeCourseAssignments(user.enrolledCourses || []);
+    if (enrolledCourses.length) {
+      return enrolledCourses;
+    }
     const year = normalizeAcademicYearOrNull(user.academicYear);
     const semester = normalizeAcademicSemesterOrNull(user.academicSemester);
     const byEnrollment = year !== null && semester !== null

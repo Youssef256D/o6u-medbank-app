@@ -12285,12 +12285,21 @@ body.theme-comfort .courses-page-stat-icon {
 
 @media (max-width: 560px) {
   .courses-tabs {
+    display: flex !important;
     width: 100%;
-    border-radius: var(--radius-md);
+    border-radius: 999px;
+    padding: 0.25rem;
   }
 
   .courses-tabs button {
-    flex: 1 1 100%;
+    flex: 1 1 0px !important;
+    min-height: 34px;
+    padding: 0.4rem 0.25rem !important;
+    font-size: 0.78rem !important;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .courses-hero-stats {
