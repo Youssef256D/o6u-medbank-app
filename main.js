@@ -40900,9 +40900,9 @@ function renderCourseDetail(courseId) {
       </div>
 
       ${course.instructor_bio ? `
-        <article class="card course-instructor-card" style="display: flex; gap: 1.25rem; align-items: start; flex-wrap: wrap;">
+        <article class="card course-instructor-card">
           ${renderInstructorAvatarBubble(course.instructor_name)}
-          <div style="flex: 1 1 300px; display: flex; flex-direction: column; gap: 0.35rem;">
+          <div class="course-instructor-info">
             <span class="instructor-role-badge">Instructor</span>
             <h3 class="instructor-name">${escapeHtml(course.instructor_name || "Instructor")}</h3>
             <p class="subtle" style="margin: 0; font-size: 0.88rem; line-height: 1.5;">${escapeHtml(course.instructor_bio)}</p>
@@ -43256,7 +43256,7 @@ function renderAdminEnrollmentsSection(selectedCourse, rows) {
           ${visibleEnrollments.length ? visibleEnrollments.map((enrollment) => {
             const label = getAdminCourseBuilderProfileLabel(enrollment.user_id);
             return `
-              <div class="course-request-row course-enrollment-row" style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1rem;">
+              <div class="course-request-row course-enrollment-row">
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
                   ${renderAdminAvatarBubble(enrollment.user_id)}
                   <span style="display: flex; flex-direction: column; gap: 0.15rem;">
@@ -43352,7 +43352,7 @@ function renderAdminRequestsSection(courses) {
                 }
 
                 return `
-                  <div class="course-request-row" style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1rem;">
+                  <div class="course-request-row">
                     <div style="display: flex; align-items: center; gap: 0.75rem;">
                       ${renderAdminAvatarBubble(request.user_id)}
                       <span style="display: flex; flex-direction: column; gap: 0.15rem;">

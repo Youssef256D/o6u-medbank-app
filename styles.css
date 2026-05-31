@@ -13586,6 +13586,16 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
   border: 1px solid var(--line);
   box-shadow: var(--shadow-soft);
   margin-top: 1.5rem;
+  display: flex;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.course-instructor-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
 .instructor-avatar-bubble-el {
@@ -13792,6 +13802,7 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
   .course-detail-hero {
     flex-direction: column;
     padding: 1.5rem;
+    gap: 1.25rem;
   }
   .course-detail-hero > img,
   .course-detail-hero > .course-cover-container {
@@ -13799,6 +13810,61 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
     max-width: none;
     height: 200px;
     flex: none;
+  }
+}
+
+@media (max-width: 560px) {
+  /* Enrolled Students Roster & Request list columns */
+  .course-request-row {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 0.85rem;
+    padding: 1rem !important;
+  }
+  .course-request-row > div {
+    width: 100%;
+  }
+  .course-request-row .stack {
+    width: 100%;
+    justify-content: stretch;
+    gap: 0.5rem;
+  }
+  .course-request-row .stack .btn {
+    flex: 1 1 auto;
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Instructor card on mobile */
+  .course-instructor-card {
+    flex-direction: column !important;
+    align-items: center !important;
+    text-align: center;
+    gap: 1rem !important;
+  }
+  .course-instructor-card .course-instructor-info {
+    width: 100%;
+  }
+  
+  /* Lesson topbar on mobile */
+  .lesson-topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+  .lesson-topbar-breadcrumb {
+    width: 100%;
+  }
+
+  /* Lesson viewer head on mobile */
+  .lesson-viewer-head {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 1rem;
+  }
+  .lesson-viewer-head .btn {
+    width: 100%;
+    justify-content: center;
   }
 }
 
