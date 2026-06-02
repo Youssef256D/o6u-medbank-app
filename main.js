@@ -910,9 +910,11 @@ let supabaseBootstrapRetryHandle = null;
 let supabaseBootstrapRetries = 0;
 let supabaseBootstrapInFlight = false;
 let supabaseSyncInitPromise = null;
+let supabaseAuthInitPromise = null;
 let supabaseSyncBootstrapRetryHandle = null;
 let supabaseSyncBootstrapRetries = 0;
 let supabaseAuthStateUnsubscribe = null;
+const supabaseSdkReadyWaiters = new Set();
 const supabaseAuthStateRuntime = {
   chain: Promise.resolve(),
   subscriptionVersion: 0,
@@ -2497,6 +2499,58 @@ function scheduleSupabaseBootstrapRetry() {
   }, SUPABASE_BOOTSTRAP_RETRY_MS);
 }
 
+function notifySupabaseSdkAvailable() {
+  if (!window.supabase?.createClient) {
+    return;
+  }
+  supabaseSdkReadyWaiters.forEach((resolve) => {
+    try {
+      resolve(true);
+    } catch {
+      // Ignore stale waiter failures.
+    }
+  });
+  supabaseSdkReadyWaiters.clear();
+}
+
+function waitForSupabaseSdkReady(timeoutMs = AUTH_SIGNIN_TIMEOUT_MS) {
+  if (window.supabase?.createClient) {
+    return Promise.resolve(true);
+  }
+  if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || isBrowserOffline()) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let waiter = null;
+    const settle = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (waiter) {
+        supabaseSdkReadyWaiters.delete(waiter);
+      }
+      window.clearInterval(pollHandle);
+      window.clearTimeout(timeoutHandle);
+      resolve(value);
+    };
+    waiter = () => settle(true);
+    supabaseSdkReadyWaiters.add(waiter);
+    const pollHandle = window.setInterval(() => {
+      if (window.supabase?.createClient) {
+        settle(true);
+      } else if (isBrowserOffline()) {
+        settle(false);
+      }
+    }, 120);
+    const timeoutHandle = window.setTimeout(() => {
+      settle(Boolean(window.supabase?.createClient));
+    }, Math.max(1, Number(timeoutMs) || AUTH_SIGNIN_TIMEOUT_MS));
+  });
+}
+
 function ensureSupabaseCloudReconnect(user = null, options = {}) {
   const currentUser = user || getCurrentUser();
   if (!shouldAttemptSupabaseReconnect(currentUser)) {
@@ -2527,6 +2581,7 @@ function ensureSupabaseCloudReconnect(user = null, options = {}) {
 }
 
 window.__MCQ_ON_SUPABASE_SDK_READY__ = function handleSupabaseSdkReady() {
+  notifySupabaseSdkAvailable();
   if (!SUPABASE_CONFIG.enabled || !window.supabase?.createClient) {
     return;
   }
@@ -3381,6 +3436,16 @@ async function handleSupabaseAuthStateChange(event, session) {
 }
 
 async function initSupabaseAuth() {
+  if (supabaseAuthInitPromise) {
+    return supabaseAuthInitPromise;
+  }
+  supabaseAuthInitPromise = initSupabaseAuthNow().finally(() => {
+    supabaseAuthInitPromise = null;
+  });
+  return supabaseAuthInitPromise;
+}
+
+async function initSupabaseAuthNow() {
   supabaseAuth.initializing = true;
   if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey || !window.supabase?.createClient) {
     if (isGoogleOAuthPendingState()) {
@@ -19334,6 +19399,41 @@ function getAuthRedirectToUrl() {
   return currentUrl.toString();
 }
 
+async function getSupabaseAuthClientForInteractiveSignIn() {
+  if (!SUPABASE_CONFIG.enabled || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
+    return {
+      client: null,
+      message: "Supabase auth is not configured. Google sign-in is unavailable.",
+    };
+  }
+  if (isBrowserOffline()) {
+    return {
+      client: null,
+      message: "You appear to be offline. Reconnect and try Google sign-in again.",
+    };
+  }
+
+  if (!window.supabase?.createClient) {
+    const sdkReady = await waitForSupabaseSdkReady(AUTH_SIGNIN_TIMEOUT_MS);
+    if (!sdkReady) {
+      return {
+        client: null,
+        message: "Could not load Google sign-in. Check your connection and try again.",
+      };
+    }
+  }
+
+  await initSupabaseAuth();
+  const client = getSupabaseAuthClient();
+  if (!client) {
+    return {
+      client: null,
+      message: "Could not start Google sign-in. Check your connection and try again.",
+    };
+  }
+  return { client, message: "" };
+}
+
 async function startGoogleOAuthSignIn(authClient) {
   if (!authClient) {
     return { ok: false, message: "Supabase auth is not configured. Google sign-in is unavailable." };
@@ -19599,15 +19699,19 @@ function wireAuth(mode) {
       if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
         return;
       }
-      const authClient = getSupabaseAuthClient();
-      if (!authClient) {
-        toast("Supabase auth is not configured. Google login is unavailable.");
-        return;
-      }
       googleButton.dataset.submitting = "1";
-      lockAuthActionButton(googleButton, true, "Redirecting...");
-      setGoogleOAuthPendingState(true);
+      lockAuthActionButton(googleButton, true, "Checking...");
       try {
+        const authReady = await getSupabaseAuthClientForInteractiveSignIn();
+        const authClient = authReady.client;
+        if (!authClient) {
+          googleButton.dataset.submitting = "0";
+          lockAuthActionButton(googleButton, false);
+          toast(authReady.message || "Google login is unavailable. Please try again.");
+          return;
+        }
+        lockAuthActionButton(googleButton, true, "Redirecting...");
+        setGoogleOAuthPendingState(true);
         const outcome = await startGoogleOAuthSignIn(authClient);
         if (!outcome.ok) {
           setGoogleOAuthPendingState(false);
@@ -19801,15 +19905,19 @@ function wireAuth(mode) {
         if (form?.dataset.submitting === "1" || googleButton.dataset.submitting === "1") {
           return;
         }
-        const authClient = getSupabaseAuthClient();
-        if (!authClient) {
-          toast("Supabase auth is not configured. Google signup is unavailable.");
-          return;
-        }
         googleButton.dataset.submitting = "1";
-        lockAuthActionButton(googleButton, true, "Redirecting...");
-        setGoogleOAuthPendingState(true);
+        lockAuthActionButton(googleButton, true, "Checking...");
         try {
+          const authReady = await getSupabaseAuthClientForInteractiveSignIn();
+          const authClient = authReady.client;
+          if (!authClient) {
+            googleButton.dataset.submitting = "0";
+            lockAuthActionButton(googleButton, false);
+            toast(authReady.message || "Google signup is unavailable. Please try again.");
+            return;
+          }
+          lockAuthActionButton(googleButton, true, "Redirecting...");
+          setGoogleOAuthPendingState(true);
           const outcome = await startGoogleOAuthSignIn(authClient);
           if (!outcome.ok) {
             setGoogleOAuthPendingState(false);
