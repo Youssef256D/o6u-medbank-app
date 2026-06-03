@@ -6207,6 +6207,16 @@ function getCompletedSessionsForRelationalHistorySync(sessionsPayload = null) {
     ));
 }
 
+function getSessionsForSupabaseStateBackup(sessionsPayload = null) {
+  const sourceSessions = Array.isArray(sessionsPayload) ? sessionsPayload : getSessions();
+  return sourceSessions.filter((session) => {
+    if (!isReviewableCompletedSession(session)) {
+      return true;
+    }
+    return !isUuidValue(String(session?.dbId || "").trim());
+  });
+}
+
 function queueSessionStateForCloud() {
   if (!sessionSyncRuntime.dirty) {
     return false;
@@ -6214,9 +6224,10 @@ function queueSessionStateForCloud() {
 
   const sessions = getSessions();
   const completedHistorySessions = getCompletedSessionsForRelationalHistorySync(sessions);
+  const backupSessions = getSessionsForSupabaseStateBackup(sessions);
   const queuedRelational = !completedHistorySessions.length
     || scheduleRelationalWrite(STORAGE_KEYS.sessions, completedHistorySessions);
-  const queuedBackup = scheduleSupabaseWrite(STORAGE_KEYS.sessions, sessions);
+  const queuedBackup = scheduleSupabaseWrite(STORAGE_KEYS.sessions, backupSessions);
   if (!queuedRelational && !queuedBackup) {
     return false;
   }
@@ -11177,7 +11188,10 @@ function scheduleSupabaseWrite(storageKey, value) {
     return false;
   }
 
-  const payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
+  let payload = sanitizeUserScopedPayload(storageKey, value, currentUser);
+  if (storageKey === STORAGE_KEYS.sessions) {
+    payload = getSessionsForSupabaseStateBackup(payload);
+  }
   const nextSignature = getSyncPayloadSignature(payload);
   const pendingWrite = supabaseSync.pendingWrites.get(remoteKey);
   if (pendingWrite && getSyncPayloadSignature(pendingWrite.payload) === nextSignature) {
