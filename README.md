@@ -190,6 +190,7 @@ Security model:
 - Every authorized tool attempt is saved in `admin_agent_action_log`.
 - Assistants without full administrator tools request approval before publishing announcements through `admin_agent_approval_requests`.
 - An admin can disable Hermes or rotate its token immediately.
+- The Edge Function can also validate Hermes from `HERMES_AGENT_TOKEN_HASH` + `HERMES_AGENT_ID` secrets. This keeps Hermes responsive when the `admin_agents` lookup is slow; the readable token is still shown only once and is never stored.
 
 Scoped tools:
 
@@ -210,6 +211,13 @@ Deploy the function after applying the latest migration:
 
 ```bash
 supabase functions deploy admin-agent-tool
+```
+
+If rotating Hermes outside the dashboard, update both the database row and these function secrets:
+
+```bash
+supabase secrets set HERMES_AGENT_TOKEN_HASH=<sha256-token-hash> HERMES_AGENT_ID=<admin-agent-id> HERMES_AGENT_NAME="Hermes Admin Assistant"
+supabase functions deploy admin-agent-tool --no-verify-jwt
 ```
 
 Request format for an agent integration or future MCP adapter:

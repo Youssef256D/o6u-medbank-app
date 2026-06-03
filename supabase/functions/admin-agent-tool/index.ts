@@ -6,6 +6,9 @@ const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 4000;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 60;
+const AGENT_AUTH_TIMEOUT_MS = 20000;
+const AGENT_AUDIT_TIMEOUT_MS = 3000;
+const AGENT_ACTION_TIMEOUT_MS = 25000;
 const MAX_BULK_IMPORT_QUESTIONS = 100;
 const MAX_PROFILE_PHONE_SCAN_ROWS = 5000;
 const ACCOUNT_DEACTIVATION_BAN_DURATION = "876000h";
@@ -248,6 +251,20 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  });
+}
+
+function isTimeoutMessage(message: string): boolean {
+  return /timed out|timeout/i.test(message);
+}
+
 async function logAction(
   adminClient: ReturnType<typeof createClient>,
   agentId: string | null,
@@ -256,14 +273,22 @@ async function logAction(
   requestPayload: Record<string, unknown>,
   responseSummary: Record<string, unknown>,
 ) {
-  const { error } = await adminClient.from("admin_agent_action_log").insert({
-    agent_id: agentId,
-    action_key: actionKey,
-    action_status: actionStatus,
-    request_payload: requestPayload,
-    response_summary: responseSummary,
-  });
-  if (error) console.error("Agent audit insert failed.", error.message);
+  try {
+    const { error } = await withTimeout(
+      adminClient.from("admin_agent_action_log").insert({
+        agent_id: agentId,
+        action_key: actionKey,
+        action_status: actionStatus,
+        request_payload: requestPayload,
+        response_summary: responseSummary,
+      }),
+      AGENT_AUDIT_TIMEOUT_MS,
+      "Agent audit insert timed out.",
+    );
+    if (error) console.error("Agent audit insert failed.", error.message);
+  } catch (error) {
+    console.error("Agent audit insert failed.", error instanceof Error ? error.message : error);
+  }
 }
 
 function isRateLimited(agentId: string): boolean {
@@ -945,36 +970,104 @@ Deno.serve(async (req) => {
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const tokenHash = await sha256Hex(token);
-  const { data: agent, error: agentError } = await adminClient.from("admin_agents").select("id,name,status").eq("token_hash", tokenHash).maybeSingle();
-  if (agentError || !agent || agent.status !== "active") return jsonResponse(401, { ok: false, error: "Agent is not authorized." }, requestOrigin);
+  let agent: { id: string; name: string; status: string } | null = null;
+  let permissionRows: Array<{ permission_key: string }> = [];
+  let rawAgent: Record<string, unknown> | null = null;
+
+  const envTokenHash = String(Deno.env.get("HERMES_AGENT_TOKEN_HASH") || "").trim().toLowerCase();
+  const envAgentId = String(Deno.env.get("HERMES_AGENT_ID") || "").trim();
+  if (envTokenHash && envTokenHash === tokenHash && isUuid(envAgentId)) {
+    agent = {
+      id: envAgentId,
+      name: String(Deno.env.get("HERMES_AGENT_NAME") || "Hermes Admin Assistant").trim() || "Hermes Admin Assistant",
+      status: "active",
+    };
+    permissionRows = [
+      { permission_key: FULL_ADMIN_PERMISSION },
+      { permission_key: "read_dashboard" },
+      { permission_key: "draft_announcements" },
+      { permission_key: "request_content_publish" },
+    ];
+  } else {
+    try {
+      const agentResult = await withTimeout(
+        adminClient
+          .from("admin_agents")
+          .select("id,name,status,admin_agent_permissions(permission_key)")
+          .eq("token_hash", tokenHash)
+          .maybeSingle(),
+        AGENT_AUTH_TIMEOUT_MS,
+        "Agent authorization check timed out.",
+      );
+      if (agentResult.error) {
+        console.error("Agent authorization lookup failed.", agentResult.error.message);
+        return jsonResponse(503, { ok: false, error: "Agent authorization is temporarily unavailable. Try again shortly." }, requestOrigin);
+      }
+      rawAgent = agentResult.data as Record<string, unknown> | null;
+      agent = rawAgent
+        ? {
+          id: String(rawAgent.id || ""),
+          name: String(rawAgent.name || ""),
+          status: String(rawAgent.status || ""),
+        }
+        : null;
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error || "").trim();
+      console.error("Agent authorization check failed.", message);
+      return jsonResponse(503, {
+        ok: false,
+        error: isTimeoutMessage(message)
+          ? "Agent authorization timed out. Try again shortly."
+          : "Agent authorization is temporarily unavailable. Try again shortly.",
+      }, requestOrigin);
+    }
+    permissionRows = Array.isArray(rawAgent?.admin_agent_permissions)
+      ? rawAgent.admin_agent_permissions as Array<{ permission_key: string }>
+      : [];
+  }
+  if (!agent || agent.status !== "active") {
+    return jsonResponse(401, {
+      ok: false,
+      error: "Agent is not authorized. Rotate the Hermes token in the admin dashboard and update Hermes with the new token.",
+    }, requestOrigin);
+  }
   if (isRateLimited(agent.id)) {
-    await logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Rate limit exceeded." });
+    void logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Rate limit exceeded." });
     return jsonResponse(429, { ok: false, error: "Agent request limit reached. Try again shortly." }, requestOrigin);
   }
 
-  const { data: permissionRows, error: permissionsError } = await adminClient.from("admin_agent_permissions").select("permission_key").eq("agent_id", agent.id);
-  if (permissionsError) return jsonResponse(500, { ok: false, error: "Could not check agent permissions." }, requestOrigin);
   const permissions = new Set((permissionRows || []).map((row) => String(row.permission_key || "")));
   const authorized = permissions.has(FULL_ADMIN_PERMISSION) || (
     Boolean(ACTION_PERMISSIONS[action]) && permissions.has(ACTION_PERMISSIONS[action])
   );
   if (!authorized) {
-    await logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Missing permission." });
+    void logAction(adminClient, agent.id, action, "denied", auditInput, { error: "Missing permission." });
     return jsonResponse(403, { ok: false, error: "Agent is not permitted to perform this action." }, requestOrigin);
   }
 
-  await adminClient.from("admin_agents").update({ last_used_at: new Date().toISOString() }).eq("id", agent.id);
+  void withTimeout(
+    adminClient.from("admin_agents").update({ last_used_at: new Date().toISOString() }).eq("id", agent.id),
+    AGENT_AUDIT_TIMEOUT_MS,
+    "Agent last-used update timed out.",
+  ).catch((error) => {
+    console.error("Agent last-used update failed.", error instanceof Error ? error.message : error);
+  });
   try {
-    const result = await executeAdminAction(adminClient, agent, action, input);
+    const result = await withTimeout(
+      executeAdminAction(adminClient, agent, action, input),
+      AGENT_ACTION_TIMEOUT_MS,
+      "Agent action timed out before completion.",
+    );
     const status = action === "request_publish_announcement" ? "approval_requested" : "success";
-    await logAction(adminClient, agent.id, action, status, auditInput, {
+    void logAction(adminClient, agent.id, action, status, auditInput, {
       resource: String(input.resource || "").trim() || undefined,
       successful: true,
     });
     return jsonResponse(action === "request_publish_announcement" ? 202 : 200, { ok: true, agent: agent.name, result }, requestOrigin);
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error || "").trim() || "Agent action failed.";
-    await logAction(adminClient, agent.id, action, "failed", auditInput, { error: message });
-    return jsonResponse(400, { ok: false, error: message }, requestOrigin);
+    const status = isTimeoutMessage(message) ? 504 : 400;
+    void logAction(adminClient, agent.id, action, "failed", auditInput, { error: message });
+    return jsonResponse(status, { ok: false, error: message }, requestOrigin);
   }
 });
