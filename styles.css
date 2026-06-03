@@ -12808,9 +12808,17 @@ body.theme-dark .admin-request-filter-tabs .btn:hover {
 }
 
 .admin-request-filter-tabs .btn.is-active {
-  background: var(--brand);
+  background: var(--brand) !important;
+  border-color: var(--brand) !important;
   color: #ffffff !important;
   box-shadow: 0 2px 6px rgba(17, 85, 93, 0.2);
+}
+
+.admin-request-filter-tabs .btn.is-active:hover {
+  background: var(--brand-strong) !important;
+  border-color: var(--brand-strong) !important;
+  color: #ffffff !important;
+  transform: none;
 }
 
 /* ── Status Badges for Requests ── */
