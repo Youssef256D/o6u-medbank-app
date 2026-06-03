@@ -46,6 +46,7 @@ const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
 const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
 const ACTIVE_SESSION_ID_KEY = "mcq_active_session_id";
 const ACTIVE_SESSION_ID_LOCAL_KEY = "mcq_active_session_id_local";
+const GOOGLE_OAUTH_PENDING_STARTED_AT_KEY = "mcq_google_oauth_pending_started_at";
 const SESSION_VAULT_DB_NAME = "o6u_medbank_session_vault";
 const SESSION_VAULT_DB_VERSION = 1;
 const SESSION_VAULT_STORE_NAME = "payloads";
@@ -113,6 +114,7 @@ const storageQuotaRetryThresholds = new Map();
 let storageFallbackWarned = false;
 let largeQuestionStorageWarned = false;
 let largeSessionStorageWarned = false;
+let googleOAuthPendingExpiryTimer = null;
 const INITIAL_ROUTE = resolveInitialRoute();
 const INITIAL_ADMIN_PAGE = resolveInitialAdminPage();
 const RELATIONAL_READY_CACHE_MS = 45000;
@@ -173,6 +175,8 @@ const ADMIN_REQUEST_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 12000);
 const ADMIN_ACCESS_SYNC_BATCH_SIZE = 50;
 const ADMIN_ACCESS_SYNC_BATCH_REQUEST_TIMEOUT_MS = Math.max(ADMIN_REQUEST_TIMEOUT_MS, 20000);
 const AUTH_SIGNIN_TIMEOUT_MS = 35000;
+const GOOGLE_OAUTH_START_TIMEOUT_MS = 15000;
+const GOOGLE_OAUTH_PENDING_MAX_AGE_MS = 2 * 60 * 1000;
 const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
 const PROFILE_LOOKUP_TIMEOUT_MS = 12000;
 const STUDENT_AUTH_CATALOG_PRIME_TIMEOUT_MS = 4500;
@@ -2946,7 +2950,54 @@ function getFriendlyOAuthCallbackErrorMessage(rawMessage) {
 }
 
 function isGoogleOAuthPendingState() {
-  return readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) === "1";
+  if (readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) !== "1") {
+    return false;
+  }
+  if (hasOAuthCallbackParams()) {
+    return true;
+  }
+  const startedAt = Number(readSessionStorageKey(GOOGLE_OAUTH_PENDING_STARTED_AT_KEY));
+  if (
+    Number.isFinite(startedAt)
+    && startedAt > 0
+    && (Date.now() - startedAt) > GOOGLE_OAUTH_PENDING_MAX_AGE_MS
+  ) {
+    setGoogleOAuthPendingState(false);
+    return false;
+  }
+  return true;
+}
+
+function clearGoogleOAuthPendingExpiryTimer() {
+  if (!googleOAuthPendingExpiryTimer) {
+    return;
+  }
+  window.clearTimeout(googleOAuthPendingExpiryTimer);
+  googleOAuthPendingExpiryTimer = null;
+}
+
+function getGoogleOAuthPendingRemainingMs() {
+  const startedAt = Number(readSessionStorageKey(GOOGLE_OAUTH_PENDING_STARTED_AT_KEY));
+  if (!Number.isFinite(startedAt) || startedAt <= 0) {
+    return GOOGLE_OAUTH_PENDING_MAX_AGE_MS;
+  }
+  return Math.max(0, GOOGLE_OAUTH_PENDING_MAX_AGE_MS - (Date.now() - startedAt));
+}
+
+function scheduleGoogleOAuthPendingExpiryCheck() {
+  clearGoogleOAuthPendingExpiryTimer();
+  if (readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) !== "1" || hasOAuthCallbackParams()) {
+    return;
+  }
+  googleOAuthPendingExpiryTimer = window.setTimeout(() => {
+    googleOAuthPendingExpiryTimer = null;
+    if (readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) !== "1" || hasOAuthCallbackParams()) {
+      syncGoogleOAuthLoadingUi();
+      return;
+    }
+    setGoogleOAuthPendingState(false);
+    toast("Google sign-in did not open. Please try again, or use email login for now.");
+  }, getGoogleOAuthPendingRemainingMs() + 250);
 }
 
 function syncGoogleOAuthLoadingUi() {
@@ -2957,13 +3008,20 @@ function syncGoogleOAuthLoadingUi() {
   googleAuthLoadingEl.classList.toggle("hidden", !pending);
   googleAuthLoadingEl.setAttribute("aria-hidden", pending ? "false" : "true");
   document.body.classList.toggle("is-google-auth-loading", pending);
+  if (pending) {
+    scheduleGoogleOAuthPendingExpiryCheck();
+  } else {
+    clearGoogleOAuthPendingExpiryTimer();
+  }
 }
 
 function setGoogleOAuthPendingState(isPending) {
   if (isPending) {
     writeSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY, "1");
+    writeSessionStorageKey(GOOGLE_OAUTH_PENDING_STARTED_AT_KEY, String(Date.now()));
   } else {
     removeSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY);
+    removeSessionStorageKey(GOOGLE_OAUTH_PENDING_STARTED_AT_KEY);
   }
   syncGoogleOAuthLoadingUi();
 }
@@ -3018,6 +3076,18 @@ function getOAuthCallbackParams(url) {
     }
   });
   return params;
+}
+
+function hasOAuthCallbackParams() {
+  let currentUrl;
+  try {
+    currentUrl = new URL(window.location.href);
+  } catch {
+    return false;
+  }
+
+  const callbackParams = getOAuthCallbackParams(currentUrl);
+  return [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackParams.has(key));
 }
 
 function clearAuthCallbackParams() {
@@ -19461,18 +19531,37 @@ async function startGoogleOAuthSignIn(authClient) {
     };
   }
 
-  const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.signInWithOAuth({
-    provider: "google",
-    options: {
-      redirectTo,
-      queryParams: {
-        prompt: "select_account",
+  const { data, error } = await queueSupabaseAuthRequest(
+    authClient,
+    () => authClient.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo,
+        skipBrowserRedirect: true,
+        queryParams: {
+          prompt: "select_account",
+        },
       },
+    }),
+    {
+      timeoutMs: GOOGLE_OAUTH_START_TIMEOUT_MS,
+      timeoutMessage: "Google sign-in redirect timed out. Please try again.",
     },
-  }));
+  );
 
   if (error) {
     return { ok: false, message: error.message || "Could not start Google sign-in." };
+  }
+
+  const providerUrl = String(data?.url || "").trim();
+  if (!providerUrl) {
+    return { ok: false, message: "Could not open Google sign-in. Please try again." };
+  }
+
+  try {
+    window.location.assign(providerUrl);
+  } catch (error) {
+    return { ok: false, message: error?.message || "Could not open Google sign-in. Please try again." };
   }
 
   return { ok: true };
