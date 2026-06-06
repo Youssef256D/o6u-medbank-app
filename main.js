@@ -370,6 +370,8 @@ const state = {
   adminCourseTableFilterStatus: "all",
   adminCourseEnrollmentSearch: "",
   adminCourseEnrollmentAddSearch: "",
+  adminCourseEnrollmentPickerOpen: false,
+  adminCourseEnrollmentPickerSelected: {},
   adminRequestFilterStatus: "all",
   adminRequestGroupCollapsed: {},
   adminAnnouncementCourseFilter: "all",
@@ -43380,6 +43382,47 @@ async function adminEnrollPlatformCourseUser(courseId, userId) {
   return true;
 }
 
+async function adminEnrollPlatformCourseUsers(courseId, userIds) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  const targetUserIds = Array.from(new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .map((userId) => String(userId || "").trim())
+      .filter(isUuidValue),
+  ));
+  if (!client || !isUuidValue(targetCourseId) || !targetUserIds.length) {
+    throw new Error("Choose at least one user to enroll.");
+  }
+  const assignedBy = isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null;
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_enrollments").upsert(
+      targetUserIds.map((userId) => ({
+        user_id: userId,
+        course_id: targetCourseId,
+        assigned_by: assignedBy,
+      })),
+      { onConflict: "user_id,course_id", defaultToNull: false },
+    ),
+    "Course enrollments save timed out.",
+  );
+  const matchingPendingRequests = (state.adminCoursesPlatformRequests || [])
+    .filter((request) => String(request?.course_id || "").trim() === targetCourseId
+      && targetUserIds.includes(String(request?.user_id || "").trim())
+      && String(request?.status || "pending").trim() === "pending")
+    .map((request) => String(request?.id || "").trim())
+    .filter(isUuidValue);
+  if (matchingPendingRequests.length) {
+    await runRelationalQueryWithTimeout(
+      client.from("platform_course_enrollment_requests").update({ status: "approved", updated_at: nowISO() }).in("id", matchingPendingRequests),
+      "Enrollment request status sync timed out.",
+    ).catch((error) => {
+      console.warn("Could not sync matching enrollment request statuses.", error?.message || error);
+    });
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return targetUserIds.length;
+}
+
 async function adminRemovePlatformCourseUser(courseId, userId) {
   const client = getCoursesPlatformClient();
   const targetCourseId = String(courseId || "").trim();
@@ -43910,7 +43953,7 @@ function getAdminCourseEnrollmentCandidateProfiles(courseId) {
     .filter((profile) => {
       const profileId = String(profile?.id || "").trim();
       if (!isUuidValue(profileId) || enrolledUserIds.has(profileId)) return false;
-      return String(profile?.role || "student").trim() === "student";
+      return true;
     })
     .sort((left, right) => getAdminPlatformProfileDisplayName(left).localeCompare(getAdminPlatformProfileDisplayName(right)));
 }
@@ -43949,18 +43992,104 @@ function renderAdminCourseEnrollmentProfileRow(profile, options = {}) {
   `;
 }
 
+function getAdminCourseEnrollmentPickerSelectedIds(courseId) {
+  const targetCourseId = String(courseId || "").trim();
+  const selected = state.adminCourseEnrollmentPickerSelected || {};
+  const rawIds = selected[targetCourseId];
+  return new Set(Array.isArray(rawIds) ? rawIds.map((id) => String(id || "").trim()).filter(isUuidValue) : []);
+}
+
+function setAdminCourseEnrollmentPickerSelectedIds(courseId, selectedIds) {
+  const targetCourseId = String(courseId || "").trim();
+  if (!targetCourseId) return;
+  if (!state.adminCourseEnrollmentPickerSelected || typeof state.adminCourseEnrollmentPickerSelected !== "object") {
+    state.adminCourseEnrollmentPickerSelected = {};
+  }
+  state.adminCourseEnrollmentPickerSelected[targetCourseId] = Array.from(selectedIds || []).map((id) => String(id || "").trim()).filter(isUuidValue);
+}
+
+function renderAdminCourseEnrollmentPickerRow(profile, selectedIds) {
+  const profileId = String(profile?.id || "").trim();
+  const isSelected = selectedIds.has(profileId);
+  const role = String(profile?.role || "student").trim();
+  const accessEnabled = role === "admin" || profile?.courses_access_enabled !== false;
+  const statusBadges = [
+    `<span class="status-badge ${profile?.approved === false ? "is-pending" : "is-approved"}">${profile?.approved === false ? "Pending account" : "Approved"}</span>`,
+    `<span class="status-badge ${accessEnabled ? "is-approved" : "is-rejected"}">Courses ${accessEnabled ? "on" : "off"}</span>`,
+  ];
+  if (role === "admin") {
+    statusBadges.push(`<span class="status-badge is-approved">Admin</span>`);
+  }
+  return `
+    <label class="admin-enrollment-picker-row ${isSelected ? "is-selected" : ""}">
+      <input type="checkbox" data-action="admin-course-enrollment-pick-user" value="${escapeHtml(profileId)}" ${isSelected ? "checked" : ""} />
+      <span class="admin-enrollment-picker-user">
+        ${renderAdminAvatarBubble(profileId)}
+        <span>
+          <b>${escapeHtml(getAdminPlatformProfileDisplayName(profile))}</b>
+          <small>${escapeHtml(getAdminPlatformProfileMeta(profile) || "No contact details")}</small>
+        </span>
+      </span>
+      <span class="admin-enrollment-picker-badges">${statusBadges.join("")}</span>
+    </label>
+  `;
+}
+
+function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
+  if (!state.adminCourseEnrollmentPickerOpen) {
+    return "";
+  }
+  const addSearch = String(state.adminCourseEnrollmentAddSearch || "");
+  const selectedIds = getAdminCourseEnrollmentPickerSelectedIds(selectedCourseId);
+  const candidateProfiles = getAdminCourseEnrollmentCandidateProfiles(selectedCourseId)
+    .filter((profile) => matchesAdminCourseEnrollmentQuery(profile, addSearch));
+  const selectedCount = selectedIds.size;
+  const candidateLimit = 80;
+  const visibleCandidates = candidateProfiles.slice(0, candidateLimit);
+  return `
+    <div class="admin-enrollment-picker-modal">
+      <button class="admin-enrollment-picker-backdrop" type="button" data-action="admin-close-course-enrollment-picker" aria-label="Close user enrollment picker"></button>
+      <section class="admin-enrollment-picker-card" role="dialog" aria-modal="true" aria-label="Enroll users">
+        <div class="admin-enrollment-picker-head">
+          <div>
+            <h4>Add users to course</h4>
+            <p class="subtle">Search by phone, email, or name, then select one or more users to enroll.</p>
+          </div>
+          <button class="icon-btn" type="button" data-action="admin-close-course-enrollment-picker" aria-label="Close user enrollment picker">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="admin-enrollment-picker-toolbar">
+          <input id="admin-course-enrollment-add-search" type="search" value="${escapeHtml(addSearch)}" placeholder="Search by phone, email, or name..." autocomplete="off" />
+          <span class="admin-enrollment-count-badge"><b>${selectedCount}</b> selected</span>
+        </div>
+        <div class="admin-enrollment-picker-actions">
+          <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-course-enrollment-selection" ${selectedCount ? "" : "disabled"}>Clear selection</button>
+          <button class="btn admin-btn-sm" type="button" data-action="admin-enroll-selected-course-users" ${selectedCount ? "" : "disabled"}>
+            Enroll selected${selectedCount ? ` (${selectedCount})` : ""}
+          </button>
+        </div>
+        <div class="admin-enrollment-picker-list">
+          ${visibleCandidates.length
+            ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentPickerRow(profile, selectedIds)).join("")
+            : `<p class="subtle">No available users match this search.</p>`}
+        </div>
+        ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
+      </section>
+    </div>
+  `;
+}
+
 function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
   const enrolledSearch = String(state.adminCourseEnrollmentSearch || "");
-  const addSearch = String(state.adminCourseEnrollmentAddSearch || "");
   const enrollmentRows = getAdminCourseEnrollmentProfileRows(selectedCourseId)
     .filter(({ profile, enrollment }) => {
       if (profile) return matchesAdminCourseEnrollmentQuery(profile, enrolledSearch);
       return !String(enrolledSearch || "").trim() || String(enrollment?.user_id || "").includes(String(enrolledSearch || "").trim());
     });
-  const candidateProfiles = getAdminCourseEnrollmentCandidateProfiles(selectedCourseId)
-    .filter((profile) => matchesAdminCourseEnrollmentQuery(profile, addSearch));
-  const candidateLimit = 40;
-  const visibleCandidates = candidateProfiles.slice(0, candidateLimit);
   const selectedCourse = getAdminCourseBuilderCourse(selectedCourseId);
   return `
     <div class="course-builder-form admin-course-enrollments-panel">
@@ -43969,7 +44098,15 @@ function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
           <h4>Enrolled users</h4>
           <p class="subtle">Selected course: ${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}</p>
         </div>
-        <span class="admin-enrollment-count-badge"><b>${rows.enrollments.length}</b> enrolled</span>
+        <div class="admin-enrollment-head-actions">
+          <button class="admin-enrollment-add-btn" type="button" data-action="admin-open-course-enrollment-picker" aria-label="Add users to this course" title="Add users to this course">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
+          <span class="admin-enrollment-count-badge"><b>${rows.enrollments.length}</b> enrolled</span>
+        </div>
       </div>
       <div class="admin-enrollment-search">
         <input id="admin-course-enrollment-search" type="search" value="${escapeHtml(enrolledSearch)}" placeholder="Search enrolled users..." autocomplete="off" />
@@ -43984,24 +44121,7 @@ function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
           : `<p class="subtle">No enrolled users match this course and search.</p>`}
       </div>
     </div>
-    <div class="course-builder-form admin-course-enrollments-panel">
-      <div class="admin-requests-head">
-        <div>
-          <h4>Add users to course</h4>
-          <p class="subtle">Search student profiles, then enroll them into the selected course.</p>
-        </div>
-        <span class="admin-enrollment-count-badge"><b>${candidateProfiles.length}</b> available</span>
-      </div>
-      <div class="admin-enrollment-search">
-        <input id="admin-course-enrollment-add-search" type="search" value="${escapeHtml(addSearch)}" placeholder="Search by name, email, phone, year, or semester..." autocomplete="off" />
-      </div>
-      <div class="course-builder-list">
-        ${visibleCandidates.length
-          ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentProfileRow(profile, { action: "add" })).join("")
-          : `<p class="subtle">No available student profiles match this search.</p>`}
-      </div>
-      ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
-    </div>
+    ${renderAdminCourseEnrollmentPickerModal(selectedCourseId)}
   `;
 }
 
@@ -44974,15 +45094,46 @@ function wireAdminCoursesPlatformBuilder() {
   root.addEventListener("input", (event) => {
     const target = event.target;
     if (!target || !root.contains(target)) return;
+    const rerenderAndRestoreFocus = (inputId) => {
+      const cursorStart = typeof target.selectionStart === "number" ? target.selectionStart : null;
+      const cursorEnd = typeof target.selectionEnd === "number" ? target.selectionEnd : cursorStart;
+      rerenderAdminCourses();
+      window.requestAnimationFrame(() => {
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        input.focus();
+        if (cursorStart !== null && typeof input.setSelectionRange === "function") {
+          input.setSelectionRange(cursorStart, cursorEnd ?? cursorStart);
+        }
+      });
+    };
 
     if (target.id === "admin-course-table-search") {
       state.adminCourseTableSearch = String(target.value || "");
       rerenderAdminCourses();
     } else if (target.id === "admin-course-enrollment-search") {
       state.adminCourseEnrollmentSearch = String(target.value || "");
-      rerenderAdminCourses();
+      rerenderAndRestoreFocus("admin-course-enrollment-search");
     } else if (target.id === "admin-course-enrollment-add-search") {
       state.adminCourseEnrollmentAddSearch = String(target.value || "");
+      rerenderAndRestoreFocus("admin-course-enrollment-add-search");
+    }
+  });
+
+  root.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || !root.contains(target)) return;
+    const action = target.getAttribute("data-action") || "";
+    if (action === "admin-course-enrollment-pick-user") {
+      const userId = String(target.value || "").trim();
+      if (!isUuidValue(userId)) return;
+      const selectedIds = getAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId);
+      if (target.checked) {
+        selectedIds.add(userId);
+      } else {
+        selectedIds.delete(userId);
+      }
+      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, selectedIds);
       rerenderAdminCourses();
     }
   });
@@ -45069,6 +45220,32 @@ function wireAdminCoursesPlatformBuilder() {
       runAdminCourseAction("Enrollment request approved.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "approved"));
     } else if (action === "admin-reject-course-request") {
       runAdminCourseAction("Enrollment request rejected.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "rejected"));
+    } else if (action === "admin-open-course-enrollment-picker") {
+      state.adminCourseEnrollmentPickerOpen = true;
+      state.adminCourseEnrollmentAddSearch = "";
+      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+      rerenderAdminCourses();
+    } else if (action === "admin-close-course-enrollment-picker") {
+      state.adminCourseEnrollmentPickerOpen = false;
+      state.adminCourseEnrollmentAddSearch = "";
+      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+      rerenderAdminCourses();
+    } else if (action === "admin-clear-course-enrollment-selection") {
+      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+      rerenderAdminCourses();
+    } else if (action === "admin-enroll-selected-course-users") {
+      const selectedIds = Array.from(getAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId));
+      if (!selectedIds.length) {
+        toast("Select at least one user to enroll.");
+        return;
+      }
+      runAdminCourseAction(`Enrolled ${selectedIds.length} user${selectedIds.length === 1 ? "" : "s"}.`, async () => {
+        const count = await adminEnrollPlatformCourseUsers(state.adminCourseBuilderCourseId, selectedIds);
+        state.adminCourseEnrollmentPickerOpen = false;
+        state.adminCourseEnrollmentAddSearch = "";
+        setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+        return count;
+      });
     } else if (action === "admin-enroll-course-user") {
       const userId = button.getAttribute("data-user-id") || "";
       const profileLabel = getAdminCourseBuilderProfileLabel(userId);

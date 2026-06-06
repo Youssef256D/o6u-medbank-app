@@ -10983,6 +10983,34 @@ body.theme-comfort .admin-course-meta-pill {
   color: var(--brand-strong);
 }
 
+.admin-enrollment-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.admin-enrollment-add-btn {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--brand-strong);
+  border-radius: 999px;
+  background: var(--brand-strong);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 10px 22px rgba(23, 126, 137, 0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.admin-enrollment-add-btn:hover,
+.admin-enrollment-add-btn:focus-visible {
+  background: var(--brand);
+  box-shadow: 0 14px 28px rgba(23, 126, 137, 0.24);
+  transform: translateY(-1px);
+}
+
 .admin-course-enrollments-panel {
   gap: 0.85rem;
 }
@@ -11012,6 +11040,126 @@ body.theme-comfort .admin-course-meta-pill {
   flex-direction: row;
   align-self: flex-end;
   white-space: nowrap;
+}
+
+.admin-enrollment-picker-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+}
+
+.admin-enrollment-picker-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(15, 23, 42, 0.42);
+  cursor: pointer;
+}
+
+.admin-enrollment-picker-card {
+  position: relative;
+  z-index: 1;
+  width: min(860px, 100%);
+  max-height: min(760px, calc(100vh - 2.5rem));
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.26);
+}
+
+.admin-enrollment-picker-head,
+.admin-enrollment-picker-toolbar,
+.admin-enrollment-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.admin-enrollment-picker-head h4,
+.admin-enrollment-picker-head p {
+  margin: 0;
+}
+
+.admin-enrollment-picker-toolbar input {
+  flex: 1 1 260px;
+  height: 42px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 0.9rem;
+}
+
+.admin-enrollment-picker-list {
+  min-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 0.55rem;
+  padding-right: 0.25rem;
+}
+
+.admin-enrollment-picker-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.admin-enrollment-picker-row:hover,
+.admin-enrollment-picker-row:focus-within,
+.admin-enrollment-picker-row.is-selected {
+  border-color: rgba(23, 126, 137, 0.42);
+  background: var(--brand-soft);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
+}
+
+.admin-enrollment-picker-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--brand-strong);
+}
+
+.admin-enrollment-picker-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.admin-enrollment-picker-user > span {
+  min-width: 0;
+}
+
+.admin-enrollment-picker-user b,
+.admin-enrollment-picker-user small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.admin-enrollment-picker-user small {
+  color: var(--muted);
+}
+
+.admin-enrollment-picker-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
 }
 
 .admin-announcement-feed {
