@@ -162,6 +162,7 @@ const SUPABASE_BOOTSTRAP_RETRY_LIMIT = 10;
 const SUPABASE_QUERY_TIMEOUT_MS = 12000;
 const SUPABASE_STORAGE_SHAPE_TIMEOUT_MS = 6000;
 const NOTIFICATION_HYDRATE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 25000);
+const COURSE_PLATFORM_WRITE_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
 const SUPABASE_BACKUP_WRITE_TIMEOUT_MS = 15000;
 const SUPABASE_BACKUP_WARNING_THROTTLE_MS = 5 * 60 * 1000;
 const SUPABASE_SESSION_TIMEOUT_MS = 30000;
@@ -717,6 +718,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/gif",
 ]);
 const COURSE_VIDEO_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+const SUPABASE_FREE_STORAGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const CLOUDFLARE_STREAM_UPLOAD_MAX_BYTES = 30 * 1024 * 1024 * 1024;
 const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
@@ -39889,6 +39891,29 @@ function getCoursesPlatformClient() {
   return getRelationalClient();
 }
 
+function patchAdminCoursePlatformCourse(courseId, patch = {}) {
+  const targetCourseId = String(courseId || "").trim();
+  if (!isUuidValue(targetCourseId) || !patch || typeof patch !== "object") {
+    return;
+  }
+  const courses = Array.isArray(state.adminCoursesPlatformCourses)
+    ? state.adminCoursesPlatformCourses
+    : [];
+  const index = courses.findIndex((course) => String(course?.id || "").trim() === targetCourseId);
+  if (index < 0) {
+    return;
+  }
+  state.adminCoursesPlatformCourses = [
+    ...courses.slice(0, index),
+    {
+      ...courses[index],
+      ...patch,
+      id: targetCourseId,
+    },
+    ...courses.slice(index + 1),
+  ];
+}
+
 function resetStudentCoursesPlatformState() {
   state.coursesLoadedAt = 0;
   state.coursesLoading = false;
@@ -40544,7 +40569,7 @@ async function loadCourseDetail(courseId) {
   }
 }
 
-async function updateLessonProgress(lessonId, status = "in_progress", progressPercent = 0) {
+async function updateLessonProgress(lessonId, status = "in_progress", progressPercent = 0, options = {}) {
   if (shouldBlockStudentCoursesPortal()) {
     toast("Courses are coming soon.");
     return false;
@@ -40559,7 +40584,12 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
       return false;
     }
     const existingIndex = state.coursesProgress.findIndex((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
-    const normalizedStatus = String(status || "").trim() === "completed" ? "completed" : "in_progress";
+    const existingProgress = existingIndex >= 0 ? state.coursesProgress[existingIndex] : null;
+    const alreadyComplete = String(existingProgress?.status || "").trim() === "completed" || Number(existingProgress?.progress_percent) >= 100;
+    const requestedStatus = String(status || "").trim() === "completed" ? "completed" : "in_progress";
+    const normalizedStatus = alreadyComplete && requestedStatus !== "completed" && !options?.allowUncomplete
+      ? "completed"
+      : requestedStatus;
     const payload = {
       user_id: userId,
       course_id: lesson.course_id,
@@ -40583,7 +40613,10 @@ async function updateLessonProgress(lessonId, status = "in_progress", progressPe
   }
   const existingProgress = state.coursesProgress.find((row) => String(row?.lesson_id || "").trim() === targetLessonId && String(row?.user_id || "").trim() === userId);
   const alreadyComplete = String(existingProgress?.status || "").trim() === "completed" || Number(existingProgress?.progress_percent) >= 100;
-  const normalizedStatus = alreadyComplete || String(status || "").trim() === "completed" ? "completed" : "in_progress";
+  const requestedStatus = String(status || "").trim() === "completed" ? "completed" : "in_progress";
+  const normalizedStatus = alreadyComplete && requestedStatus !== "completed" && !options?.allowUncomplete
+    ? "completed"
+    : requestedStatus;
   const safeProgress = normalizedStatus === "completed"
     ? 100
     : Math.max(0, Math.min(99, Math.round(Number(progressPercent) || 0)));
@@ -42092,9 +42125,11 @@ function wireCourses() {
           toast("Watch the video to the end before marking complete.");
           return;
         }
-        const ok = await updateLessonProgress(lessonId, "completed", 100);
+        const ok = alreadyComplete
+          ? await updateLessonProgress(lessonId, "in_progress", 0, { allowUncomplete: true })
+          : await updateLessonProgress(lessonId, "completed", 100);
         if (ok) {
-          toast("Lesson marked complete.");
+          toast(alreadyComplete ? "Lesson unmarked." : "Lesson marked complete.");
           state.skipNextRouteAnimation = true;
           render();
         }
@@ -42538,6 +42573,7 @@ async function upsertDefaultPlatformCourseSuggestion(courseId, coursePayload, da
       .limit(1)
       .maybeSingle(),
     "Course suggestion lookup timed out.",
+    COURSE_PLATFORM_WRITE_TIMEOUT_MS,
   ).catch((error) => {
     if (isMissingRelationError(error)) return null;
     throw error;
@@ -42549,6 +42585,7 @@ async function upsertDefaultPlatformCourseSuggestion(courseId, coursePayload, da
     await runRelationalQueryWithTimeout(
       client.from("platform_course_suggestions").update(updatePayload).eq("id", existingSuggestion.id),
       "Course suggestion update timed out.",
+      COURSE_PLATFORM_WRITE_TIMEOUT_MS,
     );
     return true;
   }
@@ -42562,6 +42599,7 @@ async function upsertDefaultPlatformCourseSuggestion(courseId, coursePayload, da
       created_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
     }),
     "Course suggestion create timed out.",
+    COURSE_PLATFORM_WRITE_TIMEOUT_MS,
   ).catch((error) => {
     if (!isMissingRelationError(error)) throw error;
   });
@@ -42583,19 +42621,26 @@ async function adminCreatePlatformCourse(data) {
   const createdCourse = await runRelationalQueryWithTimeout(
     client.from("platform_courses").insert(payload).select("id").single(),
     "Course create timed out.",
+    COURSE_PLATFORM_WRITE_TIMEOUT_MS,
   );
   const courseId = String(createdCourse?.id || "").trim();
   if (isUuidValue(courseId)) {
     const coverImageUrl = await resolveAdminCourseCoverUrl(courseId, data);
     if (coverImageUrl) {
+      const coverUpdatedAt = nowISO();
       payload.cover_image_url = coverImageUrl;
       await runRelationalQueryWithTimeout(
         client.from("platform_courses").update({
           cover_image_url: coverImageUrl,
-          updated_at: nowISO(),
+          updated_at: coverUpdatedAt,
         }).eq("id", courseId),
         "Course cover save timed out.",
+        COURSE_PLATFORM_WRITE_TIMEOUT_MS,
       );
+      patchAdminCoursePlatformCourse(courseId, {
+        cover_image_url: coverImageUrl,
+        updated_at: coverUpdatedAt,
+      });
     }
     await upsertDefaultPlatformCourseSuggestion(courseId, payload, data);
     state.adminCourseBuilderCourseId = courseId;
@@ -42614,7 +42659,9 @@ async function adminSaveCourseMetadata(courseId, data) {
   await runRelationalQueryWithTimeout(
     client.from("platform_courses").update(payload).eq("id", courseId),
     "Course metadata save timed out.",
+    COURSE_PLATFORM_WRITE_TIMEOUT_MS,
   );
+  patchAdminCoursePlatformCourse(courseId, payload);
   await upsertDefaultPlatformCourseSuggestion(courseId, payload, { preserveDetails: true });
   await loadAdminCoursesPlatform({ force: true });
   return true;
@@ -42842,6 +42889,36 @@ function getAdminCourseStorageUploadSession(client) {
   });
 }
 
+function formatUploadSizeLabel(bytes) {
+  const safeBytes = Math.max(0, Number(bytes) || 0);
+  if (safeBytes >= 1024 * 1024 * 1024) {
+    return `${(safeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (safeBytes >= 1024 * 1024) {
+    return `${(safeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (safeBytes >= 1024) {
+    return `${(safeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${safeBytes} bytes`;
+}
+
+function isSupabaseStorageSizeLimitError(error) {
+  const message = getErrorMessage(error, "").toLowerCase();
+  const code = String(error?.code || error?.payload?.code || error?.payload?.error || "").trim().toLowerCase();
+  return message.includes("exceeded the maximum allowed size")
+    || message.includes("maximum allowed size")
+    || code.includes("entitytoolarge")
+    || code.includes("payload too large");
+}
+
+function getCourseVideoStorageSizeLimitMessage(bucket, file, maxVideoBytes) {
+  const selectedSize = formatUploadSizeLabel(file?.size || 0);
+  const configuredSize = formatUploadSizeLabel(maxVideoBytes);
+  const freeSize = formatUploadSizeLabel(SUPABASE_FREE_STORAGE_UPLOAD_MAX_BYTES);
+  return `Supabase rejected this ${selectedSize} video because the live Storage limit for "${bucket}" is lower than the selected file. Increase the Supabase Storage global file size limit and the "${bucket}" bucket limit to at least ${configuredSize}, or enable Cloudflare Stream for large lecture videos. Free Supabase projects are capped at ${freeSize}.`;
+}
+
 function uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file, options = {}) {
   return new Promise((resolve, reject) => {
     if (typeof XMLHttpRequest === "undefined") {
@@ -43067,9 +43144,12 @@ async function uploadCourseLessonVideo(courseId, file, options = {}) {
   const uploadError = uploadResult?.error || null;
   if (uploadError) {
     const bucketMissing = isStorageBucketMissingError(uploadError);
+    const sizeLimitExceeded = isSupabaseStorageSizeLimitError(uploadError);
     throw new Error(
       bucketMissing
         ? `Storage bucket "${bucket}" was not found. Run the latest Supabase migration, then retry.`
+        : sizeLimitExceeded
+          ? getCourseVideoStorageSizeLimitMessage(bucket, file, maxVideoBytes)
         : getErrorMessage(uploadError, "Could not upload course video."),
     );
   }
