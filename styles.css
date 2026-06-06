@@ -10462,7 +10462,8 @@ body.is-lesson-video-fullscreen {
 .lesson-video.is-pseudo-fullscreen {
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: 2147483647;
+  margin: 0 !important;
   width: 100vw;
   height: 100vh;
   width: 100dvw;
@@ -10473,6 +10474,7 @@ body.is-lesson-video-fullscreen {
   border-radius: 0;
   border: 0;
   box-shadow: none;
+  background: #000000;
 }
 
 .lesson-video.is-pseudo-fullscreen video,
@@ -10511,20 +10513,20 @@ body.is-lesson-video-fullscreen {
 
 .lesson-video-watermark-layer span {
   position: absolute;
-  left: 52%;
-  top: 16%;
-  max-width: min(78%, 620px);
-  padding: 0.45rem 0.72rem;
+  left: 50%;
+  top: 14%;
+  max-width: min(72%, 560px);
+  padding: 0.36rem 0.62rem;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.32);
-  color: rgba(255, 255, 255, 0.68);
-  font-size: clamp(0.86rem, 1.45vw, 1.24rem);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.64);
+  font-size: clamp(0.72rem, 1.2vw, 1.06rem);
   font-weight: 750;
   line-height: 1.25;
   overflow-wrap: anywhere;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.62);
   transform: translate3d(-50%, 0, 0);
-  animation: lesson-watermark-drift 38s ease-in-out infinite alternate;
+  animation: lesson-watermark-drift 34s ease-in-out infinite alternate;
   user-select: none;
 }
 
@@ -10604,10 +10606,14 @@ body.is-lesson-video-fullscreen {
 
 @keyframes lesson-watermark-drift {
   from {
+    left: 50%;
+    top: 14%;
     transform: translate3d(-50%, 0, 0);
   }
   to {
-    transform: translate3d(-50%, 54vh, 0);
+    left: 50%;
+    top: 56%;
+    transform: translate3d(-50%, 0, 0);
   }
 }
 

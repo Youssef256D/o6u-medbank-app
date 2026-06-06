@@ -937,6 +937,7 @@ const questionImageRuntime = {
 };
 const courseVideoRuntime = {
   entries: new Map(),
+  fullscreenPlaceholder: null,
 };
 const cloudflareStreamRuntime = {
   entries: new Map(),
@@ -42165,7 +42166,18 @@ function getActiveLessonVideoFullscreenContainer() {
 function requestLessonVideoFullscreen(container) {
   if (!container) return false;
   try {
-    getActiveLessonVideoFullscreenContainer()?.classList.remove("is-pseudo-fullscreen");
+    const activeContainer = getActiveLessonVideoFullscreenContainer();
+    if (activeContainer && activeContainer !== container) {
+      exitLessonVideoFullscreen();
+    }
+    if (!courseVideoRuntime.fullscreenPlaceholder || !courseVideoRuntime.fullscreenPlaceholder.isConnected) {
+      const placeholder = document.createComment("lesson-video-fullscreen-placeholder");
+      container.parentNode?.insertBefore(placeholder, container);
+      courseVideoRuntime.fullscreenPlaceholder = placeholder;
+    }
+    if (container.parentNode !== document.body) {
+      document.body.appendChild(container);
+    }
     container.classList.add("is-pseudo-fullscreen");
     document.body.classList.add("is-lesson-video-fullscreen");
     return true;
@@ -42177,8 +42189,15 @@ function requestLessonVideoFullscreen(container) {
 
 function exitLessonVideoFullscreen() {
   try {
-    getActiveLessonVideoFullscreenContainer()?.classList.remove("is-pseudo-fullscreen");
+    const container = getActiveLessonVideoFullscreenContainer();
+    container?.classList.remove("is-pseudo-fullscreen");
     document.body.classList.remove("is-lesson-video-fullscreen");
+    const placeholder = courseVideoRuntime.fullscreenPlaceholder;
+    if (container && placeholder?.parentNode) {
+      placeholder.parentNode.insertBefore(container, placeholder);
+      placeholder.remove();
+    }
+    courseVideoRuntime.fullscreenPlaceholder = null;
     return true;
   } catch (error) {
     console.warn("Could not exit lesson video fullscreen.", error?.message || error);
@@ -42243,10 +42262,7 @@ function wireLessonVideoPlayerControls() {
   video.addEventListener("click", togglePlay);
   video.addEventListener("play", syncControls);
   video.addEventListener("pause", syncControls);
-  video.addEventListener("loadedmetadata", () => {
-    video.currentTime = 0;
-    syncControls();
-  }, { once: true });
+  video.addEventListener("loadedmetadata", syncControls, { once: true });
   video.addEventListener("durationchange", syncControls);
   video.addEventListener("timeupdate", syncControls);
   video.addEventListener("ended", syncControls);
@@ -42295,10 +42311,6 @@ function wireLessonVideoPlayerControls() {
   document.addEventListener("fullscreenchange", syncControls, { once: true });
   document.addEventListener("webkitfullscreenchange", syncControls, { once: true });
   syncControls();
-  if (video.readyState >= 1 && Number(video.currentTime || 0) > 0) {
-    video.currentTime = 0;
-    syncControls();
-  }
 }
 
 function wireCourses() {
