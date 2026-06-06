@@ -10435,6 +10435,10 @@ body.theme-dark .course-lesson-status {
   background: #000000;
 }
 
+body.is-lesson-video-fullscreen {
+  overflow: hidden;
+}
+
 .lesson-video iframe {
   position: absolute;
   inset: 0;
@@ -10454,14 +10458,27 @@ body.theme-dark .course-lesson-status {
 }
 
 .lesson-video:fullscreen,
-.lesson-video:-webkit-full-screen {
+.lesson-video:-webkit-full-screen,
+.lesson-video.is-pseudo-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
   width: 100vw;
   height: 100vh;
+  width: 100dvw;
+  height: 100dvh;
   max-width: 100vw;
   max-height: 100vh;
   aspect-ratio: auto;
   border-radius: 0;
   border: 0;
+  box-shadow: none;
+}
+
+.lesson-video.is-pseudo-fullscreen video,
+.lesson-video:fullscreen video,
+.lesson-video:-webkit-full-screen video {
+  object-fit: contain;
 }
 
 .lesson-video-watermark,
@@ -10494,20 +10511,20 @@ body.theme-dark .course-lesson-status {
 
 .lesson-video-watermark-layer span {
   position: absolute;
-  right: clamp(0.7rem, 2.2vw, 1.4rem);
-  top: clamp(0.7rem, 2.2vw, 1.4rem);
-  max-width: min(82%, 560px);
-  padding: 0.32rem 0.52rem;
+  left: 52%;
+  top: 16%;
+  max-width: min(78%, 620px);
+  padding: 0.45rem 0.72rem;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.28);
-  color: rgba(255, 255, 255, 0.56);
-  font-size: clamp(0.66rem, 1vw, 0.88rem);
+  background: rgba(0, 0, 0, 0.32);
+  color: rgba(255, 255, 255, 0.68);
+  font-size: clamp(0.86rem, 1.45vw, 1.24rem);
   font-weight: 750;
   line-height: 1.25;
   overflow-wrap: anywhere;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.62);
-  transform: translate3d(0, 0, 0);
-  animation: lesson-watermark-drift 42s ease-in-out infinite alternate;
+  transform: translate3d(-50%, 0, 0);
+  animation: lesson-watermark-drift 38s ease-in-out infinite alternate;
   user-select: none;
 }
 
@@ -10587,10 +10604,10 @@ body.theme-dark .course-lesson-status {
 
 @keyframes lesson-watermark-drift {
   from {
-    transform: translate3d(0, 0, 0);
+    transform: translate3d(-50%, 0, 0);
   }
   to {
-    transform: translate3d(-42vw, 48vh, 0);
+    transform: translate3d(-50%, 54vh, 0);
   }
 }
 

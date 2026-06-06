@@ -18720,7 +18720,6 @@ function restoreFocusState() {
 }
 
 function render() {
-  rememberActiveLessonVideoState();
   saveFocusState();
   document.body.classList.remove("no-panel-animations");
   clearTimer();
@@ -41666,32 +41665,6 @@ function isCloudflareStreamVideoSource(value) {
   return Boolean(parseCloudflareStreamVideoSource(value));
 }
 
-function rememberActiveLessonVideoState() {
-  const video = appEl?.querySelector?.("#course-lesson-video-player");
-  if (!video) return;
-  const lessonId = String(state.coursesActiveLessonId || "").trim();
-  const src = String(video.currentSrc || video.src || "").trim();
-  const key = lessonId || src;
-  if (!key) return;
-  courseVideoRuntime.entries.set(key, {
-    currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
-    paused: Boolean(video.paused),
-    playbackRate: Number(video.playbackRate) || 1,
-    muted: Boolean(video.muted),
-    volume: Number.isFinite(video.volume) ? video.volume : 1,
-    src,
-    savedAt: Date.now(),
-  });
-}
-
-function getRememberedLessonVideoState(video) {
-  const lessonId = String(state.coursesActiveLessonId || "").trim();
-  const src = String(video?.currentSrc || video?.src || "").trim();
-  return (lessonId && courseVideoRuntime.entries.get(lessonId))
-    || (src && courseVideoRuntime.entries.get(src))
-    || null;
-}
-
 function buildVideoWatermarkLabel(user = getCurrentUser()) {
   const name = String(user?.name || user?.full_name || "").trim();
   const phone = String(user?.phone || user?.telephone || user?.mobile || "").trim();
@@ -42185,45 +42158,28 @@ function getActiveFullscreenElement() {
   return document.fullscreenElement || document.webkitFullscreenElement || null;
 }
 
-async function requestLessonVideoFullscreen(container, video) {
+function getActiveLessonVideoFullscreenContainer() {
+  return document.querySelector(".lesson-video.is-pseudo-fullscreen");
+}
+
+function requestLessonVideoFullscreen(container) {
   if (!container) return false;
   try {
-    if (container.requestFullscreen) {
-      await container.requestFullscreen();
-      return true;
-    }
-    if (video?.requestFullscreen) {
-      await video.requestFullscreen();
-      return true;
-    }
-    if (container.webkitRequestFullscreen) {
-      container.webkitRequestFullscreen();
-      return true;
-    }
-    if (video?.webkitRequestFullscreen) {
-      video.webkitRequestFullscreen();
-      return true;
-    }
-    if (video?.webkitEnterFullscreen) {
-      video.webkitEnterFullscreen();
-      return true;
-    }
+    getActiveLessonVideoFullscreenContainer()?.classList.remove("is-pseudo-fullscreen");
+    container.classList.add("is-pseudo-fullscreen");
+    document.body.classList.add("is-lesson-video-fullscreen");
+    return true;
   } catch (error) {
     console.warn("Could not enter lesson video fullscreen.", error?.message || error);
   }
   return false;
 }
 
-async function exitLessonVideoFullscreen() {
+function exitLessonVideoFullscreen() {
   try {
-    if (document.exitFullscreen) {
-      await document.exitFullscreen();
-      return true;
-    }
-    if (document.webkitExitFullscreen) {
-      document.webkitExitFullscreen();
-      return true;
-    }
+    getActiveLessonVideoFullscreenContainer()?.classList.remove("is-pseudo-fullscreen");
+    document.body.classList.remove("is-lesson-video-fullscreen");
+    return true;
   } catch (error) {
     console.warn("Could not exit lesson video fullscreen.", error?.message || error);
   }
@@ -42243,8 +42199,6 @@ function wireLessonVideoPlayerControls() {
   const muteButton = container?.querySelector("[data-video-control='mute']");
   const muteIcon = container?.querySelector("[data-video-mute-icon]");
   const fullscreenButton = container?.querySelector("[data-video-control='fullscreen']");
-  const savedPlaybackState = getRememberedLessonVideoState(video);
-  let restoredPlaybackState = false;
 
   const playSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"></polygon></svg>`;
   const pauseSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14"></rect><rect x="14" y="5" width="4" height="14"></rect></svg>`;
@@ -42253,7 +42207,7 @@ function wireLessonVideoPlayerControls() {
 
   const syncControls = () => {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    const current = video.ended && duration ? duration : (Number.isFinite(video.currentTime) ? video.currentTime : 0);
     if (playIcon) playIcon.innerHTML = video.paused ? playSvg : pauseSvg;
     if (playButton) playButton.setAttribute("aria-label", video.paused ? "Play video" : "Pause video");
     if (muteIcon) muteIcon.innerHTML = video.muted || video.volume === 0 ? mutedSvg : volumeSvg;
@@ -42261,7 +42215,13 @@ function wireLessonVideoPlayerControls() {
     if (currentTimeEl) currentTimeEl.textContent = formatLessonVideoClock(current);
     if (durationEl) durationEl.textContent = duration ? formatLessonVideoClock(duration) : "0:00";
     if (seek && duration) {
-      seek.value = String(Math.max(0, Math.min(1000, Math.round((current / duration) * 1000))));
+      seek.value = video.ended ? "1000" : String(Math.max(0, Math.min(1000, Math.round((current / duration) * 1000))));
+    }
+    if (fullscreenButton) {
+      fullscreenButton.setAttribute(
+        "aria-label",
+        getActiveLessonVideoFullscreenContainer() === container ? "Exit fullscreen video" : "Fullscreen video",
+      );
     }
   };
 
@@ -42275,27 +42235,6 @@ function wireLessonVideoPlayerControls() {
     }
   };
 
-  const restorePlaybackState = () => {
-    if (restoredPlaybackState || !savedPlaybackState) return;
-    const savedAt = Number(savedPlaybackState.savedAt) || 0;
-    if (savedAt && Date.now() - savedAt > 10 * 60 * 1000) return;
-    restoredPlaybackState = true;
-    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    const savedTime = Math.max(0, Number(savedPlaybackState.currentTime) || 0);
-    if (savedTime > 0.25) {
-      video.currentTime = duration ? Math.min(savedTime, Math.max(0, duration - 0.25)) : savedTime;
-    }
-    video.playbackRate = Math.max(0.25, Math.min(3, Number(savedPlaybackState.playbackRate) || 1));
-    video.muted = Boolean(savedPlaybackState.muted);
-    if (Number.isFinite(savedPlaybackState.volume)) {
-      video.volume = Math.max(0, Math.min(1, Number(savedPlaybackState.volume)));
-    }
-    if (!savedPlaybackState.paused && savedTime > 0.25) {
-      video.play().catch(() => { });
-    }
-    syncControls();
-  };
-
   playButton?.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -42304,11 +42243,13 @@ function wireLessonVideoPlayerControls() {
   video.addEventListener("click", togglePlay);
   video.addEventListener("play", syncControls);
   video.addEventListener("pause", syncControls);
-  video.addEventListener("loadedmetadata", syncControls);
-  video.addEventListener("loadedmetadata", restorePlaybackState, { once: true });
+  video.addEventListener("loadedmetadata", () => {
+    video.currentTime = 0;
+    syncControls();
+  }, { once: true });
   video.addEventListener("durationchange", syncControls);
   video.addEventListener("timeupdate", syncControls);
-  video.addEventListener("timeupdate", rememberActiveLessonVideoState);
+  video.addEventListener("ended", syncControls);
   video.addEventListener("volumechange", syncControls);
 
   seek?.addEventListener("input", () => {
@@ -42333,22 +42274,30 @@ function wireLessonVideoPlayerControls() {
   fullscreenButton?.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const activeFullscreen = getActiveFullscreenElement();
-    if (activeFullscreen === container || activeFullscreen === video) {
-      await exitLessonVideoFullscreen();
+    if (getActiveLessonVideoFullscreenContainer() === container) {
+      exitLessonVideoFullscreen();
     } else {
-      const didEnterFullscreen = await requestLessonVideoFullscreen(container, video);
+      const didEnterFullscreen = requestLessonVideoFullscreen(container);
       if (!didEnterFullscreen) {
         toast("Fullscreen is not available in this browser view.");
       }
     }
+    syncControls();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || getActiveLessonVideoFullscreenContainer() !== container) return;
+    event.preventDefault();
+    exitLessonVideoFullscreen();
+    syncControls();
   });
 
   document.addEventListener("fullscreenchange", syncControls, { once: true });
   document.addEventListener("webkitfullscreenchange", syncControls, { once: true });
   syncControls();
-  if (video.readyState >= 1) {
-    restorePlaybackState();
+  if (video.readyState >= 1 && Number(video.currentTime || 0) > 0) {
+    video.currentTime = 0;
+    syncControls();
   }
 }
 
@@ -42394,10 +42343,18 @@ function wireCourses() {
       state.coursesWatchedLessonIds = new Set();
     }
     state.coursesWatchedLessonIds.add(lessonId);
-    await updateLessonProgress(lessonId, "in_progress", 95);
+    const progressSaved = await updateLessonProgress(lessonId, "in_progress", 95);
+    if (!progressSaved) return;
     toast("Video watched. You can mark this lesson complete.");
-    state.skipNextRouteAnimation = true;
-    render();
+    const completeButton = [...appEl.querySelectorAll("[data-action='courses-complete-lesson']")]
+      .find((button) => String(button.getAttribute("data-lesson-id") || "").trim() === lessonId);
+    if (completeButton) {
+      completeButton.disabled = false;
+    }
+    const completionNote = appEl.querySelector(".lesson-completion-note");
+    if (completionNote) {
+      completionNote.textContent = "Video watched. You can mark this lesson complete.";
+    }
   });
 
   appEl.querySelectorAll("[data-action]").forEach((button) => {
