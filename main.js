@@ -12047,6 +12047,14 @@ async function fetchRowsPaged(fetchPage, options = {}) {
   return { data: rows, error: null };
 }
 
+async function fetchRowsPagedOrThrow(fetchPage, options = {}) {
+  const result = await fetchRowsPaged(fetchPage, options);
+  if (result.error) {
+    throw result.error;
+  }
+  return Array.isArray(result.data) ? result.data : [];
+}
+
 async function runRelationalQueryWithTimeout(
   queryPromise,
   timeoutMessage = "Supabase query timed out.",
@@ -42614,11 +42622,22 @@ async function loadAdminCoursesPlatform(options = {}) {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("platform_course_enrollment_requests").select("*").order("created_at", { ascending: false }), "Admin requests query timed out.").catch((error) => {
+      fetchRowsPagedOrThrow((from, to) => (
+        client
+          .from("platform_course_enrollment_requests")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .range(from, to)
+      ), { timeoutMessage: "Admin requests query timed out." }).catch((error) => {
         if (isMissingRelationError(error)) return [];
         throw error;
       }),
-      runRelationalQueryWithTimeout(client.from("platform_course_enrollments").select("user_id,course_id,assigned_at"), "Admin enrollment query timed out.").catch(() => []),
+      fetchRowsPagedOrThrow((from, to) => (
+        client
+          .from("platform_course_enrollments")
+          .select("user_id,course_id,assigned_at")
+          .range(from, to)
+      ), { timeoutMessage: "Admin enrollment query timed out." }).catch(() => []),
       Promise.resolve([]),
     ]);
 
@@ -42626,14 +42645,15 @@ async function loadAdminCoursesPlatform(options = {}) {
       ...(Array.isArray(requests) ? requests : []).map((row) => String(row?.user_id || "").trim()),
       ...(Array.isArray(enrollments) ? enrollments : []).map((row) => String(row?.user_id || "").trim()),
     ].filter(isUuidValue))];
-    let profiles = await runRelationalQueryWithTimeout(
+    let profiles = await fetchRowsPagedOrThrow((from, to) => (
       client
         .from("profiles")
         .select("id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled")
         .eq("role", "student")
-        .order("full_name", { ascending: true }),
-      "Student profile query timed out.",
-    ).catch(() => []);
+        .order("full_name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    ), { timeoutMessage: "Student profile query timed out." }).catch(() => []);
     profiles = Array.isArray(profiles) ? profiles : [];
     const loadedProfileIds = new Set(profiles.map((profile) => String(profile?.id || "").trim()).filter(isUuidValue));
     const missingReferencedUserIds = referencedUserIds.filter((id) => !loadedProfileIds.has(id));
@@ -44630,8 +44650,6 @@ function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
   const candidateProfiles = getAdminCourseEnrollmentCandidateProfiles(selectedCourseId)
     .filter((profile) => matchesAdminCourseEnrollmentQuery(profile, addSearch));
   const selectedCount = selectedIds.size;
-  const candidateLimit = 60;
-  const visibleCandidates = candidateProfiles.slice(0, candidateLimit);
   return `
     <div class="admin-enrollment-picker-modal" data-admin-course-enrollment-picker-portal="true">
       <button class="admin-enrollment-picker-backdrop" type="button" data-action="admin-close-course-enrollment-picker" aria-label="Close user enrollment picker"></button>
@@ -44653,10 +44671,9 @@ function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
           <span class="admin-enrollment-count-badge"><b>${selectedCount}</b> selected</span>
         </div>
         <div class="admin-enrollment-picker-list">
-          ${visibleCandidates.length
-            ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentPickerRow(profile, selectedIds)).join("")
+          ${candidateProfiles.length
+            ? candidateProfiles.map((profile) => renderAdminCourseEnrollmentPickerRow(profile, selectedIds)).join("")
             : `<p class="subtle">No available users match this search.</p>`}
-          ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
         </div>
         <div class="admin-enrollment-picker-actions">
           <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-course-enrollment-selection" ${selectedCount ? "" : "disabled"}>Clear selection</button>
