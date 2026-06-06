@@ -11042,10 +11042,14 @@ body.theme-comfort .admin-course-meta-pill {
   white-space: nowrap;
 }
 
+body.is-admin-course-enrollment-picker-open {
+  overflow: hidden;
+}
+
 .admin-enrollment-picker-modal {
   position: fixed;
   inset: 0;
-  z-index: 1200;
+  z-index: 10000;
   display: grid;
   place-items: center;
   width: 100vw;
@@ -11058,7 +11062,6 @@ body.theme-comfort .admin-course-meta-pill {
   inset: 0;
   border: 0;
   background: rgba(15, 23, 42, 0.58);
-  backdrop-filter: blur(2px);
   cursor: pointer;
 }
 
@@ -11075,6 +11078,10 @@ body.theme-comfort .admin-course-meta-pill {
   border-radius: var(--radius-lg);
   background: var(--surface-strong);
   box-shadow: 0 28px 80px rgba(15, 23, 42, 0.34);
+}
+
+.admin-enrollment-picker-card * {
+  box-sizing: border-box;
 }
 
 .admin-enrollment-picker-head,

@@ -19043,6 +19043,7 @@ function render() {
   wasAdminCourseTopicModalOpen = isAdminCourseTopicModalOpen;
   wasAdminCourseTopicGroupCreateModalOpen = Boolean(state.adminCourseTopicGroupCreateModalOpen);
   wasAdminCourseTopicInlineCreateOpen = Boolean(state.adminCourseTopicInlineCreateOpen);
+  syncAdminCourseEnrollmentPickerPortal();
 
   persistRouteState();
   const currentSessionPointer = getSessionRenderPointer(user);
@@ -44044,10 +44045,10 @@ function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
   const candidateProfiles = getAdminCourseEnrollmentCandidateProfiles(selectedCourseId)
     .filter((profile) => matchesAdminCourseEnrollmentQuery(profile, addSearch));
   const selectedCount = selectedIds.size;
-  const candidateLimit = 80;
+  const candidateLimit = 60;
   const visibleCandidates = candidateProfiles.slice(0, candidateLimit);
   return `
-    <div class="admin-enrollment-picker-modal">
+    <div class="admin-enrollment-picker-modal" data-admin-course-enrollment-picker-portal="true">
       <button class="admin-enrollment-picker-backdrop" type="button" data-action="admin-close-course-enrollment-picker" aria-label="Close user enrollment picker"></button>
       <section class="admin-enrollment-picker-card" role="dialog" aria-modal="true" aria-label="Enroll users">
         <div class="admin-enrollment-picker-head">
@@ -44081,6 +44082,122 @@ function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
       </section>
     </div>
   `;
+}
+
+function getAdminCourseEnrollmentPickerPortalCourseId() {
+  if (
+    state.route !== "admin"
+    || state.adminPage !== ADMIN_COURSES_PLATFORM_PAGE
+    || getAdminCoursePlatformSection() !== "enrollments"
+  ) {
+    return "";
+  }
+  const selectedCourseId = String(state.adminCourseBuilderCourseId || "").trim();
+  return isUuidValue(selectedCourseId) ? selectedCourseId : "";
+}
+
+function removeAdminCourseEnrollmentPickerPortal() {
+  document.querySelectorAll("[data-admin-course-enrollment-picker-portal='true']").forEach((node) => node.remove());
+  document.body.classList.remove("is-admin-course-enrollment-picker-open");
+}
+
+function syncAdminCourseEnrollmentPickerPortal(options = {}) {
+  removeAdminCourseEnrollmentPickerPortal();
+  const selectedCourseId = getAdminCourseEnrollmentPickerPortalCourseId();
+  if (!selectedCourseId) {
+    state.adminCourseEnrollmentPickerOpen = false;
+    return;
+  }
+  if (!state.adminCourseEnrollmentPickerOpen) {
+    return;
+  }
+  const holder = document.createElement("div");
+  holder.innerHTML = renderAdminCourseEnrollmentPickerModal(selectedCourseId).trim();
+  const modal = holder.firstElementChild;
+  if (!modal) return;
+  document.body.appendChild(modal);
+  document.body.classList.add("is-admin-course-enrollment-picker-open");
+  wireAdminCourseEnrollmentPickerPortal(modal);
+  if (options.focusSearch) {
+    window.requestAnimationFrame(() => {
+      const input = document.getElementById("admin-course-enrollment-add-search");
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      if (typeof input.setSelectionRange === "function") {
+        const start = Number.isFinite(options.selectionStart) ? options.selectionStart : input.value.length;
+        const end = Number.isFinite(options.selectionEnd) ? options.selectionEnd : start;
+        input.setSelectionRange(start, end);
+      }
+    });
+  }
+}
+
+function closeAdminCourseEnrollmentPickerPortal() {
+  state.adminCourseEnrollmentPickerOpen = false;
+  state.adminCourseEnrollmentAddSearch = "";
+  setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+  removeAdminCourseEnrollmentPickerPortal();
+}
+
+function wireAdminCourseEnrollmentPickerPortal(modal) {
+  modal.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!target || target.id !== "admin-course-enrollment-add-search") return;
+    const selectionStart = typeof target.selectionStart === "number" ? target.selectionStart : null;
+    const selectionEnd = typeof target.selectionEnd === "number" ? target.selectionEnd : selectionStart;
+    state.adminCourseEnrollmentAddSearch = String(target.value || "");
+    syncAdminCourseEnrollmentPickerPortal({
+      focusSearch: true,
+      selectionStart,
+      selectionEnd,
+    });
+  });
+
+  modal.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || target.getAttribute("data-action") !== "admin-course-enrollment-pick-user") return;
+    const userId = String(target.value || "").trim();
+    if (!isUuidValue(userId)) return;
+    const selectedIds = getAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId);
+    if (target.checked) {
+      selectedIds.add(userId);
+    } else {
+      selectedIds.delete(userId);
+    }
+    setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, selectedIds);
+    syncAdminCourseEnrollmentPickerPortal();
+  });
+
+  modal.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button || !modal.contains(button)) return;
+    const action = button.getAttribute("data-action") || "";
+    if (action === "admin-close-course-enrollment-picker") {
+      closeAdminCourseEnrollmentPickerPortal();
+    } else if (action === "admin-clear-course-enrollment-selection") {
+      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
+      syncAdminCourseEnrollmentPickerPortal();
+    } else if (action === "admin-enroll-selected-course-users") {
+      const selectedIds = Array.from(getAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId));
+      if (!selectedIds.length) {
+        toast("Select at least one user to enroll.");
+        return;
+      }
+      button.disabled = true;
+      button.classList.add("is-loading");
+      button.textContent = "Enrolling...";
+      adminEnrollPlatformCourseUsers(state.adminCourseBuilderCourseId, selectedIds).then(() => {
+        closeAdminCourseEnrollmentPickerPortal();
+        toast(`Enrolled ${selectedIds.length} user${selectedIds.length === 1 ? "" : "s"}.`);
+        state.skipNextRouteAnimation = true;
+        render();
+      }).catch((error) => {
+        console.warn("Courses platform admin action failed.", error?.message || error);
+        toast(getErrorMessage(error, "Action failed."));
+        syncAdminCourseEnrollmentPickerPortal();
+      });
+    }
+  });
 }
 
 function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
@@ -44121,7 +44238,6 @@ function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
           : `<p class="subtle">No enrolled users match this course and search.</p>`}
       </div>
     </div>
-    ${renderAdminCourseEnrollmentPickerModal(selectedCourseId)}
   `;
 }
 
@@ -45224,15 +45340,12 @@ function wireAdminCoursesPlatformBuilder() {
       state.adminCourseEnrollmentPickerOpen = true;
       state.adminCourseEnrollmentAddSearch = "";
       setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
-      rerenderAdminCourses();
+      syncAdminCourseEnrollmentPickerPortal({ focusSearch: true });
     } else if (action === "admin-close-course-enrollment-picker") {
-      state.adminCourseEnrollmentPickerOpen = false;
-      state.adminCourseEnrollmentAddSearch = "";
-      setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
-      rerenderAdminCourses();
+      closeAdminCourseEnrollmentPickerPortal();
     } else if (action === "admin-clear-course-enrollment-selection") {
       setAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId, new Set());
-      rerenderAdminCourses();
+      syncAdminCourseEnrollmentPickerPortal();
     } else if (action === "admin-enroll-selected-course-users") {
       const selectedIds = Array.from(getAdminCourseEnrollmentPickerSelectedIds(state.adminCourseBuilderCourseId));
       if (!selectedIds.length) {
