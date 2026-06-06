@@ -44066,18 +44066,18 @@ function renderAdminCourseEnrollmentPickerModal(selectedCourseId) {
           <input id="admin-course-enrollment-add-search" type="search" value="${escapeHtml(addSearch)}" placeholder="Search by phone, email, or name..." autocomplete="off" />
           <span class="admin-enrollment-count-badge"><b>${selectedCount}</b> selected</span>
         </div>
+        <div class="admin-enrollment-picker-list">
+          ${visibleCandidates.length
+            ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentPickerRow(profile, selectedIds)).join("")
+            : `<p class="subtle">No available users match this search.</p>`}
+          ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
+        </div>
         <div class="admin-enrollment-picker-actions">
           <button class="btn ghost admin-btn-sm" type="button" data-action="admin-clear-course-enrollment-selection" ${selectedCount ? "" : "disabled"}>Clear selection</button>
           <button class="btn admin-btn-sm" type="button" data-action="admin-enroll-selected-course-users" ${selectedCount ? "" : "disabled"}>
             Enroll selected${selectedCount ? ` (${selectedCount})` : ""}
           </button>
         </div>
-        <div class="admin-enrollment-picker-list">
-          ${visibleCandidates.length
-            ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentPickerRow(profile, selectedIds)).join("")
-            : `<p class="subtle">No available users match this search.</p>`}
-        </div>
-        ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
       </section>
     </div>
   `;
