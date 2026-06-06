@@ -2715,7 +2715,27 @@ function scheduleSupabaseSessionRecoveryRetry() {
   }, SUPABASE_SESSION_RECOVERY_RETRY_MS);
 }
 
-function getSupabaseFetchTimeoutMs(resource) {
+function isCourseVideoStorageUploadRequest(resource, options = {}) {
+  const rawUrl = typeof resource === "string"
+    ? resource
+    : String(resource?.url || "");
+  const method = String(options?.method || resource?.method || "GET").trim().toUpperCase();
+  if (method !== "POST" && method !== "PUT") {
+    return false;
+  }
+  const bucket = String(SUPABASE_CONFIG.courseVideoBucket || "").trim();
+  if (!bucket) {
+    return false;
+  }
+  const encodedBucket = encodeURIComponent(bucket);
+  return new RegExp(`/storage/v1/object/${encodedBucket}/`, "i").test(rawUrl)
+    || new RegExp(`/storage/v1/object/${bucket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`, "i").test(rawUrl);
+}
+
+function getSupabaseFetchTimeoutMs(resource, options = {}) {
+  if (isCourseVideoStorageUploadRequest(resource, options)) {
+    return 0;
+  }
   const rawUrl = typeof resource === "string"
     ? resource
     : String(resource?.url || "");
@@ -2754,7 +2774,10 @@ function createSupabaseFetchWithTimeout() {
       return baseFetch(resource, options);
     }
 
-    const timeoutMs = Math.max(1, Number(getSupabaseFetchTimeoutMs(resource)) || SUPABASE_CLIENT_FETCH_TIMEOUT_MS);
+    const timeoutMs = Number(getSupabaseFetchTimeoutMs(resource, options));
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return baseFetch(resource, options);
+    }
     const controller = new AbortController();
     const externalSignal = options?.signal;
     if (externalSignal?.aborted) {
@@ -42836,9 +42859,8 @@ function uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file,
     }
 
     const xhr = new XMLHttpRequest();
-    const timeoutMs = Math.max(SUPABASE_QUERY_TIMEOUT_MS, Number(options?.timeoutMs) || 120000);
     xhr.open("POST", `${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${encodedPath}`, true);
-    xhr.timeout = timeoutMs;
+    xhr.timeout = 0;
     xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.setRequestHeader("apikey", anonKey);
     xhr.setRequestHeader("x-upsert", options?.upsert ? "true" : "false");
@@ -43030,20 +43052,15 @@ async function uploadCourseLessonVideo(courseId, file, options = {}) {
         cacheControl: "3600",
         upsert: false,
         contentType: normalizedType || undefined,
-        timeoutMs: Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
         onProgress: options?.onProgress,
       }).catch((error) => ({ data: null, error }))
-    : await runWithTimeoutResult(
-        client.storage
-          .from(bucket)
-          .upload(filePath, file, {
-            cacheControl: "3600",
-            upsert: false,
-            contentType: normalizedType || undefined,
-          }),
-        Math.max(SUPABASE_QUERY_TIMEOUT_MS, 120000),
-        "Video upload timed out.",
-      );
+    : await client.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: normalizedType || undefined,
+      });
   if (typeof options?.onProgress === "function" && !uploadResult?.error) {
     options.onProgress({ percent: 100, loaded: file.size, total: file.size });
   }
