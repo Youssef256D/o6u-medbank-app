@@ -719,6 +719,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
 ]);
 const COURSE_VIDEO_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 const SUPABASE_FREE_STORAGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const SUPABASE_TUS_CHUNK_SIZE = 6 * 1024 * 1024;
 const CLOUDFLARE_STREAM_UPLOAD_MAX_BYTES = 30 * 1024 * 1024 * 1024;
 const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
@@ -40056,7 +40057,7 @@ function getCurrentCoursePlatformUserId() {
   if (isLocalDemoCoursePlatformUser(user)) {
     return String(user?.id || "").trim();
   }
-  return String(getUserProfileId(user) || "").trim();
+  return String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
 }
 
 function getCoursePlatformCourseTitle(course) {
@@ -40375,11 +40376,19 @@ async function loadStudentCoursesWithProgress(options = {}) {
   if (isLocalDemoCoursePlatformUser(user)) {
     return loadLocalDemoCoursesWithProgress(user);
   }
-  const userId = String(getUserProfileId(user) || "").trim();
-  const client = getCoursesPlatformClient();
+  let userId = getCurrentCoursePlatformUserId();
+  let client = getCoursesPlatformClient();
+  if (!client || !isUuidValue(userId)) {
+    ensureSupabaseCloudReconnect(user, { preferBootstrap: true });
+    await tryRecoverSupabaseSessionInBackground().catch(() => false);
+    userId = getCurrentCoursePlatformUserId();
+    client = getCoursesPlatformClient();
+  }
   if (!client || !isUuidValue(userId)) {
     state.coursesLoading = false;
-    state.coursesError = "Sign in with your student account to load courses.";
+    state.coursesError = isBrowserOffline()
+      ? "Courses need an internet connection. Reconnect and try again."
+      : "Your cloud session is still reconnecting. Tap Retry in a moment.";
     return false;
   }
   if (state.coursesLoading && !options.force) {
@@ -41655,8 +41664,55 @@ function isCloudflareStreamVideoSource(value) {
 
 function buildVideoWatermarkLabel(user = getCurrentUser()) {
   const name = String(user?.name || user?.full_name || "").trim();
-  if (name) return name;
-  return String(user?.role || "").trim() === "admin" ? "Admin preview" : "Student";
+  const phone = String(user?.phone || user?.telephone || user?.mobile || "").trim();
+  const fallback = String(user?.role || "").trim() === "admin" ? "Admin preview" : "Student";
+  return [name || fallback, phone].filter(Boolean).join(" | ");
+}
+
+function renderVideoWatermarkLayer(label) {
+  const safeLabel = escapeHtml(label || buildVideoWatermarkLabel());
+  return `
+    <div class="lesson-video-watermark-layer" aria-hidden="true">
+      <span style="--wm-x-start: 3%; --wm-y-start: 12%; --wm-x-end: 64%; --wm-y-end: 70%; --wm-delay: 0s;">${safeLabel}</span>
+      <span style="--wm-x-start: 58%; --wm-y-start: 18%; --wm-x-end: 10%; --wm-y-end: 76%; --wm-delay: -7s;">${safeLabel}</span>
+      <span style="--wm-x-start: 18%; --wm-y-start: 74%; --wm-x-end: 72%; --wm-y-end: 20%; --wm-delay: -14s;">${safeLabel}</span>
+      <span style="--wm-x-start: 70%; --wm-y-start: 58%; --wm-x-end: 6%; --wm-y-end: 28%; --wm-delay: -21s;">${safeLabel}</span>
+    </div>
+  `;
+}
+
+function renderDirectLessonVideoPlayer(safeVideoUrl, watermarkLabel) {
+  return `
+    <video id="course-lesson-video-player" playsinline preload="metadata" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" oncontextmenu="return false;" src="${escapeHtml(safeVideoUrl)}"></video>
+    ${renderVideoWatermarkLayer(watermarkLabel)}
+    <div class="lesson-video-controls" data-video-controls>
+      <button class="lesson-video-control-btn" type="button" data-video-control="play" aria-label="Play video">
+        <span data-video-play-icon>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"></polygon></svg>
+        </span>
+      </button>
+      <span class="lesson-video-time" data-video-time-current>0:00</span>
+      <input class="lesson-video-seek" type="range" min="0" max="1000" value="0" step="1" data-video-control="seek" aria-label="Video progress" />
+      <span class="lesson-video-time" data-video-time-duration>0:00</span>
+      <select class="lesson-video-speed" data-video-control="speed" aria-label="Playback speed">
+        <option value="0.5">0.5x</option>
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2x</option>
+      </select>
+      <button class="lesson-video-control-btn" type="button" data-video-control="mute" aria-label="Mute video">
+        <span data-video-mute-icon>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg>
+        </span>
+      </button>
+      <button class="lesson-video-control-btn" type="button" data-video-control="fullscreen" aria-label="Fullscreen video">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="8 3 3 3 3 8"></polyline><polyline points="16 3 21 3 21 8"></polyline><polyline points="21 16 21 21 16 21"></polyline><polyline points="3 16 3 21 8 21"></polyline></svg>
+      </button>
+    </div>
+  `;
 }
 
 function getCloudflareStreamRuntimeEntry(lessonId) {
@@ -41900,9 +41956,9 @@ function renderLessonViewer(lessonId) {
           
           ${safeVideoUrl ? `
             <div class="lesson-video" data-protected-course-content="true">
-              <div class="lesson-video-watermark">${escapeHtml(buildVideoWatermarkLabel())}</div>
+              ${directVideo ? "" : renderVideoWatermarkLayer(buildVideoWatermarkLabel())}
               ${directVideo 
-                ? `<video id="course-lesson-video-player" controls playsinline preload="metadata" controlsList="nodownload noplaybackrate noremoteplayback" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" oncontextmenu="return false;" src="${escapeHtml(safeVideoUrl)}"></video>` 
+                ? renderDirectLessonVideoPlayer(safeVideoUrl, buildVideoWatermarkLabel())
                 : `<iframe src="${escapeHtml(safeVideoUrl)}" title="${escapeHtml(lesson.title)}" allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>`
               }
             </div>
@@ -42002,6 +42058,148 @@ function renderCourses() {
   return renderCoursesTransitionStage(markup);
 }
 
+function formatLessonVideoClock(seconds) {
+  const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const rest = safe % 60;
+  if (hours) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function getActiveFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+async function requestLessonVideoFullscreen(container, video) {
+  if (!container) return false;
+  try {
+    if (container.requestFullscreen) {
+      await container.requestFullscreen();
+      return true;
+    }
+    if (container.webkitRequestFullscreen) {
+      container.webkitRequestFullscreen();
+      return true;
+    }
+    if (video?.webkitEnterFullscreen) {
+      video.webkitEnterFullscreen();
+      return true;
+    }
+  } catch (error) {
+    console.warn("Could not enter lesson video fullscreen.", error?.message || error);
+  }
+  return false;
+}
+
+async function exitLessonVideoFullscreen() {
+  try {
+    if (document.exitFullscreen) {
+      await document.exitFullscreen();
+      return true;
+    }
+    if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+      return true;
+    }
+  } catch (error) {
+    console.warn("Could not exit lesson video fullscreen.", error?.message || error);
+  }
+  return false;
+}
+
+function wireLessonVideoPlayerControls() {
+  const video = appEl.querySelector("#course-lesson-video-player");
+  if (!video) return;
+  const container = video.closest(".lesson-video");
+  const playButton = container?.querySelector("[data-video-control='play']");
+  const playIcon = container?.querySelector("[data-video-play-icon]");
+  const seek = container?.querySelector("[data-video-control='seek']");
+  const currentTimeEl = container?.querySelector("[data-video-time-current]");
+  const durationEl = container?.querySelector("[data-video-time-duration]");
+  const speedSelect = container?.querySelector("[data-video-control='speed']");
+  const muteButton = container?.querySelector("[data-video-control='mute']");
+  const muteIcon = container?.querySelector("[data-video-mute-icon]");
+  const fullscreenButton = container?.querySelector("[data-video-control='fullscreen']");
+
+  const playSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"></polygon></svg>`;
+  const pauseSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14"></rect><rect x="14" y="5" width="4" height="14"></rect></svg>`;
+  const volumeSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path></svg>`;
+  const mutedSvg = `<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="22" y1="9" x2="16" y2="15"></line><line x1="16" y1="9" x2="22" y2="15"></line></svg>`;
+
+  const syncControls = () => {
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    if (playIcon) playIcon.innerHTML = video.paused ? playSvg : pauseSvg;
+    if (playButton) playButton.setAttribute("aria-label", video.paused ? "Play video" : "Pause video");
+    if (muteIcon) muteIcon.innerHTML = video.muted || video.volume === 0 ? mutedSvg : volumeSvg;
+    if (muteButton) muteButton.setAttribute("aria-label", video.muted || video.volume === 0 ? "Unmute video" : "Mute video");
+    if (currentTimeEl) currentTimeEl.textContent = formatLessonVideoClock(current);
+    if (durationEl) durationEl.textContent = duration ? formatLessonVideoClock(duration) : "0:00";
+    if (seek && duration) {
+      seek.value = String(Math.max(0, Math.min(1000, Math.round((current / duration) * 1000))));
+    }
+  };
+
+  const togglePlay = () => {
+    if (video.paused) {
+      video.play().catch((error) => {
+        toast(getErrorMessage(error, "Video could not start."));
+      });
+    } else {
+      video.pause();
+    }
+  };
+
+  playButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    togglePlay();
+  });
+  video.addEventListener("click", togglePlay);
+  video.addEventListener("play", syncControls);
+  video.addEventListener("pause", syncControls);
+  video.addEventListener("loadedmetadata", syncControls);
+  video.addEventListener("durationchange", syncControls);
+  video.addEventListener("timeupdate", syncControls);
+  video.addEventListener("volumechange", syncControls);
+
+  seek?.addEventListener("input", () => {
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (!duration) return;
+    video.currentTime = (Number(seek.value) / 1000) * duration;
+    syncControls();
+  });
+
+  speedSelect?.addEventListener("change", () => {
+    const nextRate = Math.max(0.25, Math.min(3, Number(speedSelect.value) || 1));
+    video.playbackRate = nextRate;
+  });
+
+  muteButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    video.muted = !video.muted;
+    syncControls();
+  });
+
+  fullscreenButton?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (getActiveFullscreenElement() === container) {
+      await exitLessonVideoFullscreen();
+    } else {
+      await requestLessonVideoFullscreen(container, video);
+    }
+  });
+
+  document.addEventListener("fullscreenchange", syncControls, { once: true });
+  document.addEventListener("webkitfullscreenchange", syncControls, { once: true });
+  syncControls();
+}
+
 function wireCourses() {
   document.getElementById("courses-search")?.addEventListener("input", (event) => {
     state.coursesSearch = String(event.target?.value || "");
@@ -42034,6 +42232,8 @@ function wireCourses() {
     state.skipNextRouteAnimation = true;
     render();
   });
+
+  wireLessonVideoPlayerControls();
 
   appEl.querySelector("#course-lesson-video-player")?.addEventListener("ended", async () => {
     const lessonId = String(state.coursesActiveLessonId || "").trim();
@@ -42919,6 +43119,96 @@ function getCourseVideoStorageSizeLimitMessage(bucket, file, maxVideoBytes) {
   return `Supabase rejected this ${selectedSize} video because the live Storage limit for "${bucket}" is lower than the selected file. Increase the Supabase Storage global file size limit and the "${bucket}" bucket limit to at least ${configuredSize}, or enable Cloudflare Stream for large lecture videos. Free Supabase projects are capped at ${freeSize}.`;
 }
 
+function getSupabaseStorageProjectId() {
+  try {
+    const url = new URL(normalizeApiBaseUrl(SUPABASE_CONFIG.url || ""));
+    const match = url.hostname.match(/^([a-z0-9-]+)\.supabase\.co$/i);
+    return String(match?.[1] || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function getSupabaseStorageResumableEndpoint() {
+  const projectId = getSupabaseStorageProjectId();
+  if (projectId) {
+    return `https://${projectId}.storage.supabase.co/storage/v1/upload/resumable`;
+  }
+  const baseUrl = normalizeApiBaseUrl(SUPABASE_CONFIG.url || "");
+  return baseUrl ? `${baseUrl}/storage/v1/upload/resumable` : "";
+}
+
+function buildStableCourseVideoObjectPath(courseId, file, normalizedType) {
+  const targetCourseId = String(courseId || "").trim();
+  const currentUser = getCurrentUser();
+  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
+  const extension = resolveVideoFileExtension(file.name, normalizedType);
+  const baseName = sanitizeStoragePathSegment(
+    String(file.name || "lesson-video").replace(/\.[a-z0-9]+$/i, ""),
+    "lesson-video",
+  );
+  const sizePart = Math.max(0, Number(file.size || 0));
+  const modifiedPart = Math.max(0, Number(file.lastModified || 0));
+  return `courses/${targetCourseId}/${userScope}/resumable/${sizePart}-${modifiedPart}-${baseName}.${extension}`;
+}
+
+async function uploadSupabaseStorageObjectResumable(bucket, filePath, file, options = {}) {
+  const tusClient = await getTusClient();
+  const endpoint = getSupabaseStorageResumableEndpoint();
+  const token = String(options?.accessToken || "").trim();
+  if (!tusClient?.Upload || !endpoint || !bucket || !filePath || !token) {
+    throw new Error("Resumable video upload needs an active Supabase session.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const upload = new tusClient.Upload(file, {
+      endpoint,
+      chunkSize: SUPABASE_TUS_CHUNK_SIZE,
+      retryDelays: [0, 3000, 5000, 10000, 20000],
+      uploadDataDuringCreation: true,
+      removeFingerprintOnSuccess: true,
+      headers: {
+        authorization: `Bearer ${token}`,
+        apikey: String(SUPABASE_CONFIG.anonKey || SUPABASE_CONFIG.legacyAnonKey || "").trim(),
+        "x-upsert": options?.upsert ? "true" : "false",
+      },
+      metadata: {
+        bucketName: bucket,
+        objectName: filePath,
+        contentType: String(options?.contentType || file.type || "video/mp4"),
+        cacheControl: String(options?.cacheControl || "3600"),
+      },
+      onError(error) {
+        reject(error);
+      },
+      onProgress(bytesUploaded, bytesTotal) {
+        if (typeof options?.onProgress !== "function") return;
+        const percent = bytesTotal > 0
+          ? Math.max(1, Math.min(99, Math.round((bytesUploaded / bytesTotal) * 100)))
+          : 1;
+        options.onProgress({ percent, loaded: bytesUploaded, total: bytesTotal });
+      },
+      onSuccess() {
+        resolve({ data: { path: filePath }, error: null });
+      },
+    });
+
+    upload.findPreviousUploads()
+      .then((previousUploads) => {
+        if (previousUploads.length) {
+          if (typeof options?.onProgress === "function") {
+            options.onProgress({ percent: 1, loaded: 0, total: file.size, message: "Resuming video upload..." });
+          }
+          upload.resumeFromPreviousUpload(previousUploads[0]);
+        }
+        upload.start();
+      })
+      .catch(() => {
+        upload.start();
+      });
+  });
+}
+
 function uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file, options = {}) {
   return new Promise((resolve, reject) => {
     if (typeof XMLHttpRequest === "undefined") {
@@ -43113,29 +43403,28 @@ async function uploadCourseLessonVideo(courseId, file, options = {}) {
   if (SUPABASE_CONFIG.cloudflareStreamEnabled) {
     return uploadCourseLessonVideoToCloudflareStream(targetCourseId, file, options);
   }
-  const currentUser = getCurrentUser();
-  const userScope = sanitizeStoragePathSegment(currentUser?.supabaseAuthId || currentUser?.id || "admin", "admin");
-  const extension = resolveVideoFileExtension(file.name, normalizedType);
-  const fileId = sanitizeStoragePathSegment(makeId("lesson-video"), "lesson-video");
-  const filePath = `courses/${targetCourseId}/${userScope}/${Date.now()}-${fileId}.${extension}`;
+  const filePath = buildStableCourseVideoObjectPath(targetCourseId, file, normalizedType);
   if (typeof options?.onProgress === "function") {
     options.onProgress({ percent: 1, loaded: 0, total: file.size });
   }
   const session = await getAdminCourseStorageUploadSession(client);
   const accessToken = String(session?.access_token || "").trim();
   const uploadResult = accessToken
-    ? await uploadSupabaseStorageObjectWithProgress(client, bucket, filePath, file, {
+    ? await uploadSupabaseStorageObjectResumable(bucket, filePath, file, {
         accessToken,
         cacheControl: "3600",
-        upsert: false,
+        upsert: true,
         contentType: normalizedType || undefined,
         onProgress: options?.onProgress,
-      }).catch((error) => ({ data: null, error }))
+      }).catch(async (resumableError) => {
+        console.warn("Resumable course video upload failed.", resumableError?.message || resumableError);
+        return { data: null, error: resumableError };
+      })
     : await client.storage
       .from(bucket)
       .upload(filePath, file, {
         cacheControl: "3600",
-        upsert: false,
+        upsert: true,
         contentType: normalizedType || undefined,
       });
   if (typeof options?.onProgress === "function" && !uploadResult?.error) {
@@ -45140,10 +45429,11 @@ function wireAdminCoursesPlatformBuilder() {
       });
       data._uploadProgress = (progress = {}) => {
         const percent = Math.max(1, Math.min(100, Math.round(Number(progress.percent) || 1)));
+        const progressMessage = String(progress.message || "").trim();
         setAdminCourseUploadProgress(draftKey, {
           status: percent >= 100 ? "saving" : "uploading",
           percent,
-          message: percent >= 100 ? "Video uploaded. Saving lesson..." : `Uploading video... ${percent}%`,
+          message: progressMessage || (percent >= 100 ? "Video uploaded. Saving lesson..." : `Uploading video... ${percent}%`),
         });
       };
     } else if (draftKey) {
