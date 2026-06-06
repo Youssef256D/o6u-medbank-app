@@ -3688,6 +3688,76 @@ body.theme-comfort .maintenance-badge {
   box-shadow: none;
 }
 
+.admin-access-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  min-width: 126px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.admin-access-switch:not(:disabled):hover {
+  border-color: rgba(37, 99, 235, 0.35);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.admin-access-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.admin-access-switch-text,
+.admin-access-switch-state {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.admin-access-switch-state {
+  min-width: 22px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.admin-access-switch-track {
+  position: relative;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.26);
+  transition: background 0.2s ease;
+}
+
+.admin-access-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.24);
+  transition: transform 0.2s ease;
+}
+
+.admin-access-switch[aria-checked="true"] .admin-access-switch-track {
+  background: var(--brand);
+}
+
+.admin-access-switch[aria-checked="true"] .admin-access-switch-thumb {
+  transform: translateX(16px);
+}
+
 #admin-notification-form {
   margin-top: 0.8rem;
 }
@@ -10911,6 +10981,37 @@ body.theme-comfort .admin-course-meta-pill {
 
 .admin-enrollment-count-badge b {
   color: var(--brand-strong);
+}
+
+.admin-course-enrollments-panel {
+  gap: 0.85rem;
+}
+
+.admin-course-enrollment-row {
+  margin-top: 0;
+}
+
+.admin-course-enrollment-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.admin-course-enrollment-user > span {
+  min-width: 0;
+}
+
+.admin-course-enrollment-user b,
+.admin-course-enrollment-user small {
+  overflow-wrap: anywhere;
+}
+
+.course-request-row .status-badge {
+  display: inline-flex;
+  flex-direction: row;
+  align-self: flex-end;
+  white-space: nowrap;
 }
 
 .admin-announcement-feed {

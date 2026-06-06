@@ -95,7 +95,7 @@ const PRIVATE_ROUTE_SET = new Set([
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "ai-agents", "activity", "logs"];
 const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
-const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "suggestions", "announcements", "requests", "availability"]);
+const ADMIN_COURSES_PLATFORM_SECTIONS = new Set(["overview", "builder", "enrollments", "suggestions", "announcements", "requests", "availability"]);
 const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_PAGE]);
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const PRIMARY_ADMIN_ASSISTANT_NAME = "Hermes Admin Assistant";
@@ -368,6 +368,8 @@ const state = {
   adminCourseTableFilterYear: "",
   adminCourseTableFilterSemester: "",
   adminCourseTableFilterStatus: "all",
+  adminCourseEnrollmentSearch: "",
+  adminCourseEnrollmentAddSearch: "",
   adminRequestFilterStatus: "all",
   adminRequestGroupCollapsed: {},
   adminAnnouncementCourseFilter: "all",
@@ -3967,7 +3969,7 @@ async function bootstrapRelationalProfileFromAuth(authUser, fallbackUser = null)
   const profileResult = await runWithTimeoutResult(
     client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
+      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,courses_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", profileRow.id)
       .maybeSingle(),
     PROFILE_LOOKUP_TIMEOUT_MS,
@@ -4064,7 +4066,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
   const profileResult = await runWithTimeoutResult(
     client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
+      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,courses_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", authUser.id)
       .maybeSingle(),
     PROFILE_LOOKUP_TIMEOUT_MS,
@@ -4271,6 +4273,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     enrolledCourses: role === "student" ? relationalAssignedCourses : [],
     isApproved: resolvedApproval,
     mcqAccessEnabled: role === "admin" ? true : profile.mcq_access_enabled !== false,
+    coursesAccessEnabled: role === "admin" ? true : profile.courses_access_enabled !== false,
     approvedAt: resolvedApproval ? localUser?.approvedAt || profile.created_at || nowISO() : null,
     approvedBy: resolvedApproval ? localUser?.approvedBy || "admin" : null,
     authProvider,
@@ -4387,8 +4390,22 @@ function isUserMcqAccessEnabled(user) {
   return isUserAccessApproved(user) && user.mcqAccessEnabled !== false;
 }
 
+function isUserCoursesAccessEnabled(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.role === "admin") {
+    return true;
+  }
+  return user.coursesAccessEnabled !== false;
+}
+
 function getMcqAccessBlockedMessage() {
   return "MCQ Bank access is disabled for this account. Courses remain available if you are enrolled.";
+}
+
+function getCoursesAccessBlockedMessage() {
+  return "Courses access is unavailable for this account. Contact the admin if you need access.";
 }
 
 function getAuthProviderFromAuthUser(authUser) {
@@ -4621,7 +4638,7 @@ async function revalidateApprovedStudentAccess(user = null, options = {}) {
     const { data, error } = await runWithTimeoutResult(
       client
         .from("profiles")
-        .select("id,full_name,email,phone,role,approved,mcq_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
+        .select("id,full_name,email,phone,role,approved,mcq_access_enabled,courses_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
         .eq("id", profileId)
         .maybeSingle(),
       PROFILE_LOOKUP_TIMEOUT_MS,
@@ -4665,6 +4682,7 @@ async function revalidateApprovedStudentAccess(user = null, options = {}) {
         role: "student",
         isApproved: true,
         mcqAccessEnabled: data.mcq_access_enabled !== false,
+        coursesAccessEnabled: data.courses_access_enabled !== false,
         approvedAt: existing?.approvedAt || data.created_at || nowISO(),
         approvedBy: existing?.approvedBy || "admin",
         academicYear: normalizedEnrollment.academicYear,
@@ -4864,6 +4882,7 @@ function snapshotUserApprovalState(user) {
   return {
     isApproved: Boolean(user?.isApproved),
     mcqAccessEnabled: user?.mcqAccessEnabled !== false,
+    coursesAccessEnabled: user?.coursesAccessEnabled !== false,
     approvedAt: user?.approvedAt || null,
     approvedBy: user?.approvedBy || null,
     authAccessKnownActive: typeof user?.authAccessKnownActive === "boolean"
@@ -4878,6 +4897,7 @@ function restoreUserApprovalState(user, snapshot) {
   }
   user.isApproved = Boolean(snapshot.isApproved);
   user.mcqAccessEnabled = snapshot.mcqAccessEnabled !== false;
+  user.coursesAccessEnabled = snapshot.coursesAccessEnabled !== false;
   user.approvedAt = snapshot.approvedAt || null;
   user.approvedBy = snapshot.approvedBy || null;
   user.authAccessKnownActive = typeof snapshot.authAccessKnownActive === "boolean"
@@ -5535,6 +5555,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
   const hasExplicitEnrolledCourses = Object.prototype.hasOwnProperty.call(profileOverrides, "enrolledCourses");
   const hasExplicitStudentAccessIssue = Object.prototype.hasOwnProperty.call(profileOverrides, "studentAccessIssue");
   const hasExplicitMcqAccessEnabled = typeof profileOverrides.mcqAccessEnabled === "boolean";
+  const hasExplicitCoursesAccessEnabled = typeof profileOverrides.coursesAccessEnabled === "boolean";
   const metadataAcademicYear = normalizeAcademicYearOrNull(
     authUser?.user_metadata?.academic_year ?? authUser?.user_metadata?.academicYear,
   );
@@ -5619,6 +5640,11 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
     : hasExplicitMcqAccessEnabled
       ? Boolean(profileOverrides.mcqAccessEnabled)
       : previous?.mcqAccessEnabled !== false;
+  const nextCoursesAccessEnabled = nextRole === "admin"
+    ? true
+    : hasExplicitCoursesAccessEnabled
+      ? Boolean(profileOverrides.coursesAccessEnabled)
+      : previous?.coursesAccessEnabled !== false;
   const inferredStudentProfileCompletion = nextRole !== "student"
     ? true
     : !isStudentProfileCompletionRequired({
@@ -5655,6 +5681,7 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
     verified: Boolean(authUser.email_confirmed_at || authUser.confirmed_at || profileOverrides.verified || false),
     isApproved: nextIsApproved,
     mcqAccessEnabled: nextMcqAccessEnabled,
+    coursesAccessEnabled: nextCoursesAccessEnabled,
     approvedAt: nextIsApproved ? profileOverrides.approvedAt || previous?.approvedAt || nowISO() : null,
     approvedBy: nextIsApproved
       ? profileOverrides.approvedBy || previous?.approvedBy || (nextRole === "admin" ? "system" : AUTO_APPROVAL_ACTOR)
@@ -8670,7 +8697,7 @@ async function hydrateRelationalProfiles(currentUser) {
     const profilesResult = await fetchRowsPaged((from, to) => (
       client
         .from("profiles")
-        .select("id,full_name,email,phone,role,approved,mcq_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
+        .select("id,full_name,email,phone,role,approved,mcq_access_enabled,courses_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
         .order("created_at", { ascending: true })
         .order("id", { ascending: true })
         .range(from, to)
@@ -8682,7 +8709,7 @@ async function hydrateRelationalProfiles(currentUser) {
   } else {
     const { data: profile, error } = await client
       .from("profiles")
-      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
+      .select("id,full_name,email,phone,role,approved,mcq_access_enabled,courses_access_enabled,academic_year,academic_semester,auth_provider,created_at,updated_at")
       .eq("id", currentUser.supabaseAuthId)
       .maybeSingle();
     if (error) {
@@ -8848,6 +8875,7 @@ async function hydrateRelationalProfiles(currentUser) {
       verified: true,
       isApproved: serverApproved,
       mcqAccessEnabled: role === "admin" ? true : profile.mcq_access_enabled !== false,
+      coursesAccessEnabled: role === "admin" ? true : profile.courses_access_enabled !== false,
       approvedAt: serverApproved ? (existing?.approvedAt || profile.created_at || nowISO()) : null,
       approvedBy: serverApproved ? (existing?.approvedBy || "admin") : null,
       assignedCourses,
@@ -10183,6 +10211,9 @@ function mergeUserRecord(remoteUser, localUser) {
     mcqAccessEnabled: preferLocal && typeof localUser?.mcqAccessEnabled === "boolean"
       ? localUser.mcqAccessEnabled
       : (typeof remoteUser?.mcqAccessEnabled === "boolean" ? remoteUser.mcqAccessEnabled : localUser?.mcqAccessEnabled !== false),
+    coursesAccessEnabled: preferLocal && typeof localUser?.coursesAccessEnabled === "boolean"
+      ? localUser.coursesAccessEnabled
+      : (typeof remoteUser?.coursesAccessEnabled === "boolean" ? remoteUser.coursesAccessEnabled : localUser?.coursesAccessEnabled !== false),
     createdAt: String(remoteUser?.createdAt || localUser?.createdAt || nowISO()).trim(),
     approvedAt: preferLocal
       ? (localUser?.approvedAt || remoteUser?.approvedAt || null)
@@ -13291,6 +13322,7 @@ async function syncProfilesToRelational(usersPayload, options = {}) {
         baseRow.role = user.role === "admin" ? "admin" : "student";
         baseRow.approved = Boolean(user.isApproved);
         baseRow.mcq_access_enabled = user.role === "admin" ? true : user.mcqAccessEnabled !== false;
+        baseRow.courses_access_enabled = user.role === "admin" ? true : user.coursesAccessEnabled !== false;
       }
       return {
         user,
@@ -15488,7 +15520,8 @@ function bindGlobalEvents() {
     }
 
     if (action === "courses-coming-soon-notice") {
-      toast("Courses are coming soon.");
+      const reason = getStudentCoursesPortalBlockReason(getCurrentUser());
+      toast(reason === "courses_access_disabled" ? getCoursesAccessBlockedMessage() : "Courses are coming soon.");
       return;
     }
 
@@ -18745,14 +18778,21 @@ function render() {
     && !isUserAccessApproved(user)
     && !studentProfileCompletionRoute
   ) {
-    removeStorageKey(STORAGE_KEYS.currentUserId);
-    if (hasSupabaseManagedIdentity(user) && supabaseAuth.client) {
-      queueSupabaseAuthRequest(supabaseAuth.client, () => supabaseAuth.client.auth.signOut()).catch((signOutError) => {
-        console.warn("Supabase sign-out failed for unapproved account.", signOutError?.message || signOutError);
-      });
+    const pendingStudentAllowedRoute = user.role === "student"
+      && (
+        state.route === "app-launcher"
+        || (state.route === "courses" && isUserCoursesAccessEnabled(user))
+      );
+    if (!pendingStudentAllowedRoute) {
+      removeStorageKey(STORAGE_KEYS.currentUserId);
+      if (hasSupabaseManagedIdentity(user) && supabaseAuth.client) {
+        queueSupabaseAuthRequest(supabaseAuth.client, () => supabaseAuth.client.auth.signOut()).catch((signOutError) => {
+          console.warn("Supabase sign-out failed for unapproved account.", signOutError?.message || signOutError);
+        });
+      }
+      state.route = "login";
+      toast("Your account is pending admin approval.");
     }
-    state.route = "login";
-    toast("Your account is pending admin approval.");
   }
 
   if (user && AUTH_ENTRY_ROUTE_SET.has(state.route) && !(state.route === "signup" && googleSignupOnboarding)) {
@@ -18771,6 +18811,15 @@ function render() {
   ) {
     state.route = "app-launcher";
     toast(getMcqAccessBlockedMessage());
+  }
+
+  if (
+    user?.role === "student"
+    && state.route === "courses"
+    && !isUserCoursesAccessEnabled(user)
+  ) {
+    state.route = "app-launcher";
+    toast(getCoursesAccessBlockedMessage());
   }
 
   if (
@@ -25248,7 +25297,8 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const year = displayAccount.role === "student" ? normalizeAcademicYearOrNull(displayAccount.academicYear) : null;
   const semester = displayAccount.role === "student" ? normalizeAcademicSemesterOrNull(displayAccount.academicSemester) : null;
   const isApproved = isUserAccessApproved(account);
-  const mcqAccessEnabled = isUserMcqAccessEnabled(account);
+  const mcqAccessEnabled = account.role === "admin" || account.mcqAccessEnabled !== false;
+  const coursesAccessEnabled = isUserCoursesAccessEnabled(account);
   const visibleCourses = getAdminVisibleCoursesForUser(displayAccount);
   const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
   const phoneInput = row.querySelector("input[data-field='phone']");
@@ -25294,6 +25344,12 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
     mcqStatusBadge.textContent = `MCQ ${mcqAccessEnabled ? "on" : "off"}`;
   }
 
+  const coursesStatusBadge = row.querySelector("[data-user-courses-status-badge]");
+  if (coursesStatusBadge) {
+    coursesStatusBadge.className = `badge ${coursesAccessEnabled ? "good" : "neutral"}`;
+    coursesStatusBadge.textContent = `Courses ${coursesAccessEnabled ? "on" : "off"}`;
+  }
+
   const approvalButton = row.querySelector("[data-action='toggle-user-approval']");
   if (approvalButton) {
     const isBusy = approvalButton.dataset.busy === "1";
@@ -25307,8 +25363,19 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   if (mcqAccessButton) {
     const isBusy = mcqAccessButton.dataset.busy === "1";
     mcqAccessButton.disabled = isBusy || account.role === "admin";
+    mcqAccessButton.setAttribute("aria-checked", mcqAccessEnabled ? "true" : "false");
     if (!isBusy) {
-      mcqAccessButton.textContent = `MCQ ${mcqAccessEnabled ? "Off" : "On"}`;
+      mcqAccessButton.innerHTML = renderAdminAccessSwitchContent("MCQs", mcqAccessEnabled);
+    }
+  }
+
+  const coursesAccessButton = row.querySelector("[data-action='toggle-user-courses-access']");
+  if (coursesAccessButton) {
+    const isBusy = coursesAccessButton.dataset.busy === "1";
+    coursesAccessButton.disabled = isBusy || account.role === "admin";
+    coursesAccessButton.setAttribute("aria-checked", coursesAccessEnabled ? "true" : "false");
+    if (!isBusy) {
+      coursesAccessButton.innerHTML = renderAdminAccessSwitchContent("Courses", coursesAccessEnabled);
     }
   }
 
@@ -25323,6 +25390,16 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
 
   patchAdminUsersPendingSummaryUi();
   return true;
+}
+
+function renderAdminAccessSwitchContent(label, enabled) {
+  return `
+    <span class="admin-access-switch-text">${escapeHtml(label)}</span>
+    <span class="admin-access-switch-track" aria-hidden="true">
+      <span class="admin-access-switch-thumb"></span>
+    </span>
+    <span class="admin-access-switch-state">${enabled ? "On" : "Off"}</span>
+  `;
 }
 
 function getAdminAgentPermissionLabel(permissionKey) {
@@ -25696,6 +25773,13 @@ function renderAdminCoursesPlatformSidebarNav(activeSection) {
         <line x1="9" y1="15" x2="21" y2="15"></line>
       </svg>
     `],
+    ["enrollments", "Enrolled Users", `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+        <circle cx="9" cy="7" r="4"></circle>
+        <path d="M22 11l-3 3-2-2"></path>
+      </svg>
+    `],
     ["suggestions", "Suggestions", `
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
@@ -25919,7 +26003,8 @@ function renderAdmin() {
         const year = displayAccount.role === "student" ? normalizeAcademicYearOrNull(displayAccount.academicYear) : null;
         const semester = displayAccount.role === "student" ? normalizeAcademicSemesterOrNull(displayAccount.academicSemester) : null;
         const isApproved = isUserAccessApproved(account);
-        const mcqAccessEnabled = isUserMcqAccessEnabled(account);
+        const mcqAccessEnabled = account.role === "admin" || account.mcqAccessEnabled !== false;
+        const coursesAccessEnabled = isUserCoursesAccessEnabled(account);
         const isGoogleAuthUser = getAuthProviderFromUser(account) === "google";
         const resetPasswordAction = isGoogleAuthUser
           ? ""
@@ -25982,6 +26067,7 @@ function renderAdmin() {
               <small>
                 <span class="badge ${isApproved ? "good" : "bad"}" data-user-status-badge>${isApproved ? "approved" : "pending"}</span>
                 ${account.role === "student" ? `<span class="badge ${mcqAccessEnabled ? "good" : "neutral"}" data-user-mcq-status-badge>MCQ ${mcqAccessEnabled ? "on" : "off"}</span>` : ""}
+                ${account.role === "student" ? `<span class="badge ${coursesAccessEnabled ? "good" : "neutral"}" data-user-courses-status-badge>Courses ${coursesAccessEnabled ? "on" : "off"}</span>` : ""}
               </small>
             </td>
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
@@ -26016,8 +26102,11 @@ function renderAdmin() {
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-approval" ${account.role === "admin" ? "disabled" : ""}>
                   ${isApproved ? "Suspend" : "Approve"}
                 </button>
-                <button class="btn ghost admin-btn-sm" data-action="toggle-user-mcq-access" ${account.role === "admin" ? "disabled" : ""}>
-                  MCQ ${mcqAccessEnabled ? "Off" : "On"}
+                <button class="admin-access-switch admin-btn-sm" type="button" data-action="toggle-user-mcq-access" role="switch" aria-checked="${mcqAccessEnabled ? "true" : "false"}" ${account.role === "admin" ? "disabled" : ""}>
+                  ${renderAdminAccessSwitchContent("MCQs", mcqAccessEnabled)}
+                </button>
+                <button class="admin-access-switch admin-btn-sm" type="button" data-action="toggle-user-courses-access" role="switch" aria-checked="${coursesAccessEnabled ? "true" : "false"}" ${account.role === "admin" ? "disabled" : ""}>
+                  ${renderAdminAccessSwitchContent("Courses", coursesAccessEnabled)}
                 </button>
                 <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
                   ${account.role === "admin" ? "Make student" : "Make admin"}
@@ -30370,6 +30459,64 @@ function wireAdmin() {
         } else {
           button.disabled = false;
           button.textContent = nextEnabled ? "MCQ Off" : "MCQ On";
+        }
+      }
+    });
+  });
+
+  appEl.querySelectorAll("[data-action='toggle-user-courses-access']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.dataset.busy === "1") {
+        return;
+      }
+      const row = button.closest("tr[data-user-id]");
+      const userId = row?.getAttribute("data-user-id");
+      if (!userId) {
+        return;
+      }
+
+      const users = getUsers();
+      const idx = users.findIndex((entry) => entry.id === userId);
+      if (idx === -1) {
+        toast("Account not found.");
+        return;
+      }
+      if (users[idx].role === "admin") {
+        toast("Admin accounts always keep Courses access.");
+        return;
+      }
+
+      const nextEnabled = users[idx].coursesAccessEnabled === false;
+      button.dataset.busy = "1";
+      button.disabled = true;
+      button.classList.add("is-loading");
+      button.textContent = nextEnabled ? "Enabling..." : "Disabling...";
+      try {
+        users[idx].coursesAccessEnabled = nextEnabled;
+        if (!nextEnabled && String(getCurrentUser()?.id || "").trim() === String(users[idx].id || "").trim() && state.route === "courses") {
+          resetStudentCoursesPlatformState();
+        }
+        save(STORAGE_KEYS.users, users, {
+          userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
+          profileSyncIds: [getUserProfileId(users[idx])],
+        });
+        await flushAdminUserAccountSyncNow();
+        patchAdminUserRowUi(row, users[idx], getCurrentUser());
+        toast(nextEnabled ? "Courses access enabled." : "Courses access disabled. MCQ Bank access is unchanged.");
+      } catch (error) {
+        users[idx].coursesAccessEnabled = !nextEnabled;
+        saveLocalOnly(STORAGE_KEYS.users, users);
+        toast(`Could not update Courses access: ${getErrorMessage(error, "Action failed.")}`);
+      } finally {
+        button.dataset.busy = "0";
+        button.classList.remove("is-loading");
+        const refreshedUsers = getUsers();
+        const refreshedUser = refreshedUsers.find((entry) => entry.id === userId);
+        if (refreshedUser) {
+          patchAdminUserRowUi(row, refreshedUser, getCurrentUser());
+        } else {
+          button.disabled = false;
+          button.textContent = nextEnabled ? "Courses Off" : "Courses On";
         }
       }
     });
@@ -36739,6 +36886,16 @@ function syncUsersWithCurriculum() {
       user.isApproved = shouldApprove;
       changed = true;
     }
+    const expectedMcqAccess = user.role === "admin" ? true : user.mcqAccessEnabled !== false;
+    if (user.mcqAccessEnabled !== expectedMcqAccess) {
+      user.mcqAccessEnabled = expectedMcqAccess;
+      changed = true;
+    }
+    const expectedCoursesAccess = user.role === "admin" ? true : user.coursesAccessEnabled !== false;
+    if (user.coursesAccessEnabled !== expectedCoursesAccess) {
+      user.coursesAccessEnabled = expectedCoursesAccess;
+      changed = true;
+    }
     if (user.isApproved) {
       const approvedAt = String(user.approvedAt || "").trim();
       if (!approvedAt) {
@@ -39730,7 +39887,20 @@ function isCoursesComingSoonEnabled() {
 }
 
 function shouldBlockStudentCoursesPortal(user = getCurrentUser()) {
-  return user?.role === "student" && isCoursesComingSoonEnabled();
+  return Boolean(getStudentCoursesPortalBlockReason(user));
+}
+
+function getStudentCoursesPortalBlockReason(user = getCurrentUser()) {
+  if (user?.role !== "student") {
+    return "";
+  }
+  if (!isUserCoursesAccessEnabled(user)) {
+    return "courses_access_disabled";
+  }
+  if (isCoursesComingSoonEnabled()) {
+    return "courses_coming_soon";
+  }
+  return "";
 }
 
 function applyCoursesComingSoonFlag(enabled) {
@@ -41090,6 +41260,23 @@ function renderCoursesComingSoonPage() {
   `;
 }
 
+function renderCoursesAccessUnavailablePage() {
+  return `
+    <section class="panel courses-shell">
+      <div class="card courses-empty">
+        <span class="maintenance-badge">Unavailable</span>
+        <h2 class="title" style="margin-bottom: 0.4rem;">Courses access is unavailable</h2>
+        <p class="subtle" style="max-width: 560px; margin-left: auto; margin-right: auto;">
+          Courses access is disabled for this account. Contact the admin if you need this portal enabled.
+        </p>
+        <div class="stack" style="justify-content: center;">
+          <button class="btn ghost" type="button" data-nav="app-launcher">Back to Apps</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function setCoursesTabTransition(previousTab, nextTab) {
   const order = ["dashboard", "enrolled", "suggestions"];
   const previousIndex = order.indexOf(String(previousTab || "dashboard").trim());
@@ -41729,8 +41916,13 @@ function renderLessonViewer(lessonId) {
 }
 
 function renderCourses() {
-  if (shouldBlockStudentCoursesPortal()) {
-    return renderCoursesTransitionStage(renderCoursesComingSoonPage());
+  const blockReason = getStudentCoursesPortalBlockReason();
+  if (blockReason) {
+    return renderCoursesTransitionStage(
+      blockReason === "courses_access_disabled"
+        ? renderCoursesAccessUnavailablePage()
+        : renderCoursesComingSoonPage(),
+    );
   }
   if (!state.coursesLoadedAt && !state.coursesLoading) {
     loadStudentCoursesWithProgress().then((ok) => {
@@ -41970,17 +42162,32 @@ async function loadAdminCoursesPlatform(options = {}) {
       Promise.resolve([]),
     ]);
 
-    const userIds = [...new Set([
+    const referencedUserIds = [...new Set([
       ...(Array.isArray(requests) ? requests : []).map((row) => String(row?.user_id || "").trim()),
       ...(Array.isArray(enrollments) ? enrollments : []).map((row) => String(row?.user_id || "").trim()),
     ].filter(isUuidValue))];
-    let profiles = [];
-    for (const batch of splitIntoBatches(userIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+    let profiles = await runRelationalQueryWithTimeout(
+      client
+        .from("profiles")
+        .select("id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled")
+        .eq("role", "student")
+        .order("full_name", { ascending: true }),
+      "Student profile query timed out.",
+    ).catch(() => []);
+    profiles = Array.isArray(profiles) ? profiles : [];
+    const loadedProfileIds = new Set(profiles.map((profile) => String(profile?.id || "").trim()).filter(isUuidValue));
+    const missingReferencedUserIds = referencedUserIds.filter((id) => !loadedProfileIds.has(id));
+    for (const batch of splitIntoBatches(missingReferencedUserIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const rows = await runRelationalQueryWithTimeout(
-        client.from("profiles").select("id,full_name,email,phone,academic_year,academic_semester,role,approved").in("id", batch),
+        client.from("profiles").select("id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled").in("id", batch),
         "Enrollment profile query timed out.",
       ).catch(() => []);
-      profiles.push(...(Array.isArray(rows) ? rows : []));
+      (Array.isArray(rows) ? rows : []).forEach((profile) => {
+        const profileId = String(profile?.id || "").trim();
+        if (!isUuidValue(profileId) || loadedProfileIds.has(profileId)) return;
+        loadedProfileIds.add(profileId);
+        profiles.push(profile);
+      });
     }
 
     state.adminCoursesPlatformCourses = Array.isArray(courses) ? courses : [];
@@ -42045,14 +42252,19 @@ function getAdminCourseBuilderCourseRows(courseId = state.adminCourseBuilderCour
 }
 
 function getAdminCourseBuilderProfileLabel(userId) {
-  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const profile = getAdminCourseBuilderProfile(userId);
   return profile
     ? `${String(profile.full_name || profile.email || userId).trim()}${profile.email ? ` (${profile.email})` : ""}`
     : String(userId || "Unknown student").trim();
 }
 
+function getAdminCourseBuilderProfile(userId) {
+  const targetId = String(userId || "").trim();
+  return (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === targetId) || null;
+}
+
 function getAdminCourseBuilderEnrollmentSearchText(userId) {
-  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const profile = getAdminCourseBuilderProfile(userId);
   const label = normalizeNotificationTargetSearchText(getAdminCourseBuilderProfileLabel(userId));
   const phone = normalizeNotificationTargetPhoneSearchText(profile?.phone);
   const phoneVariants = new Set([phone].filter(Boolean));
@@ -42068,7 +42280,7 @@ function getAdminCourseBuilderEnrollmentSearchText(userId) {
 }
 
 function getProfileInitials(userId) {
-  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const profile = getAdminCourseBuilderProfile(userId);
   if (!profile) return "ST";
   const name = String(profile.full_name || profile.email || "").trim();
   if (!name) return "ST";
@@ -42080,7 +42292,7 @@ function getProfileInitials(userId) {
 }
 
 function renderAdminAvatarBubble(userId) {
-  const profile = (state.adminCoursesPlatformProfiles || []).find((entry) => String(entry?.id || "").trim() === String(userId || "").trim());
+  const profile = getAdminCourseBuilderProfile(userId);
   const name = profile ? String(profile.full_name || profile.email || "").trim() : "";
   const initials = getProfileInitials(userId);
   let hash = 0;
@@ -43135,6 +43347,54 @@ async function adminApproveAllPendingEnrollmentRequests(courseId = "") {
   return pendingRequests.length;
 }
 
+async function adminEnrollPlatformCourseUser(courseId, userId) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  const targetUserId = String(userId || "").trim();
+  if (!client || !isUuidValue(targetCourseId) || !isUuidValue(targetUserId)) {
+    throw new Error("Course enrollment cannot be saved.");
+  }
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_enrollments").upsert({
+      user_id: targetUserId,
+      course_id: targetCourseId,
+      assigned_by: isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null,
+    }, { onConflict: "user_id,course_id", defaultToNull: false }),
+    "Course enrollment save timed out.",
+  );
+  const matchingPendingRequests = (state.adminCoursesPlatformRequests || [])
+    .filter((request) => String(request?.course_id || "").trim() === targetCourseId
+      && String(request?.user_id || "").trim() === targetUserId
+      && String(request?.status || "pending").trim() === "pending")
+    .map((request) => String(request?.id || "").trim())
+    .filter(isUuidValue);
+  if (matchingPendingRequests.length) {
+    await runRelationalQueryWithTimeout(
+      client.from("platform_course_enrollment_requests").update({ status: "approved", updated_at: nowISO() }).in("id", matchingPendingRequests),
+      "Enrollment request status sync timed out.",
+    ).catch((error) => {
+      console.warn("Could not sync matching enrollment request status.", error?.message || error);
+    });
+  }
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
+async function adminRemovePlatformCourseUser(courseId, userId) {
+  const client = getCoursesPlatformClient();
+  const targetCourseId = String(courseId || "").trim();
+  const targetUserId = String(userId || "").trim();
+  if (!client || !isUuidValue(targetCourseId) || !isUuidValue(targetUserId)) {
+    throw new Error("Course enrollment cannot be removed.");
+  }
+  await runRelationalQueryWithTimeout(
+    client.from("platform_course_enrollments").delete().eq("course_id", targetCourseId).eq("user_id", targetUserId),
+    "Course enrollment removal timed out.",
+  );
+  await loadAdminCoursesPlatform({ force: true });
+  return true;
+}
+
 async function adminDeleteAnnouncement(announcementId) {
   const client = getCoursesPlatformClient();
   const targetId = String(announcementId || "").trim();
@@ -43572,6 +43832,175 @@ function renderAdminRequestsSection(courses) {
           </section>
         `;
       }).join("") : `<p class="subtle">No enrollment requests match this filter.</p>`}
+    </div>
+  `;
+}
+
+function getAdminPlatformProfileDisplayName(profile) {
+  return String(profile?.full_name || profile?.email || "Student").trim() || "Student";
+}
+
+function getAdminPlatformProfileMeta(profile) {
+  const pieces = [];
+  const email = String(profile?.email || "").trim();
+  const phone = String(profile?.phone || "").trim();
+  const year = normalizeAcademicYearOrNull(profile?.academic_year);
+  const semester = normalizeAcademicSemesterOrNull(profile?.academic_semester);
+  if (email) pieces.push(email);
+  if (phone) pieces.push(phone);
+  if (year !== null && semester !== null) pieces.push(`Y${year} S${semester}`);
+  if (profile && profile.approved === false) pieces.push("Pending account");
+  return pieces.join(" • ");
+}
+
+function getAdminPlatformProfileSearchText(profile) {
+  const phone = normalizeNotificationTargetPhoneSearchText(profile?.phone);
+  const phoneVariants = new Set([phone].filter(Boolean));
+  if (phone.startsWith("20")) {
+    phoneVariants.add(`0${phone.slice(2)}`);
+  } else if (phone.startsWith("0")) {
+    phoneVariants.add(`20${phone.slice(1)}`);
+  }
+  return normalizeNotificationTargetSearchText([
+    profile?.id,
+    profile?.full_name,
+    profile?.email,
+    profile?.phone,
+    normalizeAcademicYearOrNull(profile?.academic_year) !== null ? `year ${profile.academic_year}` : "",
+    normalizeAcademicSemesterOrNull(profile?.academic_semester) !== null ? `semester ${profile.academic_semester}` : "",
+    [...phoneVariants].join(" "),
+  ].join(" "));
+}
+
+function matchesAdminCourseEnrollmentQuery(profile, query) {
+  const normalizedQuery = normalizeNotificationTargetSearchText(query);
+  if (!normalizedQuery) return true;
+  const haystack = getAdminPlatformProfileSearchText(profile);
+  return normalizedQuery
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((term) => haystack.includes(term));
+}
+
+function getAdminCourseEnrollmentProfileRows(courseId) {
+  const targetCourseId = String(courseId || "").trim();
+  const enrollments = (state.adminCoursesPlatformEnrollments || [])
+    .filter((row) => String(row?.course_id || "").trim() === targetCourseId);
+  return enrollments
+    .map((enrollment) => ({
+      enrollment,
+      profile: getAdminCourseBuilderProfile(enrollment.user_id),
+    }))
+    .sort((left, right) => {
+      const leftName = getAdminPlatformProfileDisplayName(left.profile);
+      const rightName = getAdminPlatformProfileDisplayName(right.profile);
+      return leftName.localeCompare(rightName);
+    });
+}
+
+function getAdminCourseEnrollmentCandidateProfiles(courseId) {
+  const targetCourseId = String(courseId || "").trim();
+  const enrolledUserIds = new Set(
+    (state.adminCoursesPlatformEnrollments || [])
+      .filter((row) => String(row?.course_id || "").trim() === targetCourseId)
+      .map((row) => String(row?.user_id || "").trim())
+      .filter(Boolean),
+  );
+  return (state.adminCoursesPlatformProfiles || [])
+    .filter((profile) => {
+      const profileId = String(profile?.id || "").trim();
+      if (!isUuidValue(profileId) || enrolledUserIds.has(profileId)) return false;
+      return String(profile?.role || "student").trim() === "student";
+    })
+    .sort((left, right) => getAdminPlatformProfileDisplayName(left).localeCompare(getAdminPlatformProfileDisplayName(right)));
+}
+
+function renderAdminCourseEnrollmentProfileRow(profile, options = {}) {
+  const profileId = String(profile?.id || options.userId || "").trim();
+  const name = getAdminPlatformProfileDisplayName(profile);
+  const meta = profile ? getAdminPlatformProfileMeta(profile) : "Profile details unavailable";
+  const action = String(options.action || "").trim();
+  const buttonHtml = action === "add"
+    ? `<button class="btn admin-btn-sm" type="button" data-action="admin-enroll-course-user" data-user-id="${escapeHtml(profileId)}">Enroll</button>`
+    : action === "remove"
+      ? `<button class="btn danger ghost admin-btn-sm" type="button" data-action="admin-remove-course-user" data-user-id="${escapeHtml(profileId)}">Remove</button>`
+      : "";
+  const dateLabel = options.assignedAt
+    ? `<small>Enrolled ${escapeHtml(formatReportDateTime(options.assignedAt))}</small>`
+    : "";
+  const statusBadge = profile?.approved === false
+    ? `<span class="status-badge is-pending">Pending account</span>`
+    : `<span class="status-badge is-approved">Approved</span>`;
+  return `
+    <div class="course-request-row admin-course-enrollment-row">
+      <div class="admin-course-enrollment-user">
+        ${renderAdminAvatarBubble(profileId)}
+        <span>
+          <b>${escapeHtml(name)}</b>
+          <small>${escapeHtml(meta)}</small>
+          ${dateLabel}
+        </span>
+      </div>
+      <div class="stack">
+        ${profile ? statusBadge : `<span class="status-badge is-rejected">Missing profile</span>`}
+        ${buttonHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) {
+  const enrolledSearch = String(state.adminCourseEnrollmentSearch || "");
+  const addSearch = String(state.adminCourseEnrollmentAddSearch || "");
+  const enrollmentRows = getAdminCourseEnrollmentProfileRows(selectedCourseId)
+    .filter(({ profile, enrollment }) => {
+      if (profile) return matchesAdminCourseEnrollmentQuery(profile, enrolledSearch);
+      return !String(enrolledSearch || "").trim() || String(enrollment?.user_id || "").includes(String(enrolledSearch || "").trim());
+    });
+  const candidateProfiles = getAdminCourseEnrollmentCandidateProfiles(selectedCourseId)
+    .filter((profile) => matchesAdminCourseEnrollmentQuery(profile, addSearch));
+  const candidateLimit = 40;
+  const visibleCandidates = candidateProfiles.slice(0, candidateLimit);
+  const selectedCourse = getAdminCourseBuilderCourse(selectedCourseId);
+  return `
+    <div class="course-builder-form admin-course-enrollments-panel">
+      <div class="admin-requests-head">
+        <div>
+          <h4>Enrolled users</h4>
+          <p class="subtle">Selected course: ${escapeHtml(getCoursePlatformCourseTitle(selectedCourse))}</p>
+        </div>
+        <span class="admin-enrollment-count-badge"><b>${rows.enrollments.length}</b> enrolled</span>
+      </div>
+      <div class="admin-enrollment-search">
+        <input id="admin-course-enrollment-search" type="search" value="${escapeHtml(enrolledSearch)}" placeholder="Search enrolled users..." autocomplete="off" />
+      </div>
+      <div class="course-builder-list">
+        ${enrollmentRows.length
+          ? enrollmentRows.map(({ enrollment, profile }) => renderAdminCourseEnrollmentProfileRow(profile, {
+            action: "remove",
+            userId: enrollment.user_id,
+            assignedAt: enrollment.assigned_at,
+          })).join("")
+          : `<p class="subtle">No enrolled users match this course and search.</p>`}
+      </div>
+    </div>
+    <div class="course-builder-form admin-course-enrollments-panel">
+      <div class="admin-requests-head">
+        <div>
+          <h4>Add users to course</h4>
+          <p class="subtle">Search student profiles, then enroll them into the selected course.</p>
+        </div>
+        <span class="admin-enrollment-count-badge"><b>${candidateProfiles.length}</b> available</span>
+      </div>
+      <div class="admin-enrollment-search">
+        <input id="admin-course-enrollment-add-search" type="search" value="${escapeHtml(addSearch)}" placeholder="Search by name, email, phone, year, or semester..." autocomplete="off" />
+      </div>
+      <div class="course-builder-list">
+        ${visibleCandidates.length
+          ? visibleCandidates.map((profile) => renderAdminCourseEnrollmentProfileRow(profile, { action: "add" })).join("")
+          : `<p class="subtle">No available student profiles match this search.</p>`}
+      </div>
+      ${candidateProfiles.length > candidateLimit ? `<p class="subtle" style="margin: 0;">Showing the first ${candidateLimit} matching users. Keep typing to narrow the list.</p>` : ""}
     </div>
   `;
 }
@@ -44049,6 +44478,10 @@ function adminRenderCourseBuilder(courseId) {
       title: "Course Builder",
       description: "Create new student courses, then build their modules, video lessons, and lesson materials.",
     },
+    enrollments: {
+      title: "Enrolled users",
+      description: "Choose a course, review enrolled students, and manually enroll users into that course.",
+    },
     suggestions: {
       title: "Suggestions",
       description: "Choose which courses appear on the Course Suggestions page and feature important courses first for students.",
@@ -44229,6 +44662,8 @@ function adminRenderCourseBuilder(courseId) {
         ` : ""}
 
         ${activePlatformSection === "announcements" && selectedCourse ? renderAdminAnnouncementsSection(courses, selectedCourseId, rows) : ""}
+
+        ${activePlatformSection === "enrollments" && selectedCourse ? renderAdminCourseEnrollmentsSection(courses, selectedCourseId, rows) : ""}
 
         ${activePlatformSection === "requests" ? renderAdminRequestsSection(courses) : ""}
       `}
@@ -44543,6 +44978,12 @@ function wireAdminCoursesPlatformBuilder() {
     if (target.id === "admin-course-table-search") {
       state.adminCourseTableSearch = String(target.value || "");
       rerenderAdminCourses();
+    } else if (target.id === "admin-course-enrollment-search") {
+      state.adminCourseEnrollmentSearch = String(target.value || "");
+      rerenderAdminCourses();
+    } else if (target.id === "admin-course-enrollment-add-search") {
+      state.adminCourseEnrollmentAddSearch = String(target.value || "");
+      rerenderAdminCourses();
     }
   });
 
@@ -44628,6 +45069,16 @@ function wireAdminCoursesPlatformBuilder() {
       runAdminCourseAction("Enrollment request approved.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "approved"));
     } else if (action === "admin-reject-course-request") {
       runAdminCourseAction("Enrollment request rejected.", () => adminResolveEnrollmentRequest(button.getAttribute("data-request-id") || "", "rejected"));
+    } else if (action === "admin-enroll-course-user") {
+      const userId = button.getAttribute("data-user-id") || "";
+      const profileLabel = getAdminCourseBuilderProfileLabel(userId);
+      runAdminCourseAction(`${profileLabel} enrolled.`, () => adminEnrollPlatformCourseUser(state.adminCourseBuilderCourseId, userId));
+    } else if (action === "admin-remove-course-user") {
+      const userId = button.getAttribute("data-user-id") || "";
+      const profileLabel = getAdminCourseBuilderProfileLabel(userId);
+      const courseLabel = getAdminCourseBuilderCourseLabel(state.adminCourseBuilderCourseId);
+      if (!window.confirm(`Remove ${profileLabel} from ${courseLabel}?`)) return;
+      runAdminCourseAction(`${profileLabel} removed from course.`, () => adminRemovePlatformCourseUser(state.adminCourseBuilderCourseId, userId));
     } else if (action === "admin-delete-announcement") {
       const announcementId = button.getAttribute("data-announcement-id") || "";
       if (!window.confirm("Delete this announcement?")) return;
@@ -44701,7 +45152,9 @@ function renderAppLauncher() {
       }
     });
   }
-  const coursesComingSoon = shouldBlockStudentCoursesPortal(user);
+  const coursesBlockReason = getStudentCoursesPortalBlockReason(user);
+  const coursesBlocked = Boolean(coursesBlockReason);
+  const coursesBlockedByAccess = coursesBlockReason === "courses_access_disabled";
   const canOpenMcqBank = user?.role !== "student" || isUserMcqAccessEnabled(user);
   return `
     <div class="app-launcher-wrapper">
@@ -44729,7 +45182,7 @@ function renderAppLauncher() {
             <span class="app-launcher-badge">${canOpenMcqBank ? 'Practice Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>' : "No MCQ access"}</span>
           </button>
           
-          <button class="card app-launcher-card ${coursesComingSoon ? "is-disabled" : ""}" ${coursesComingSoon ? 'data-action="courses-coming-soon-notice" aria-disabled="true"' : 'data-nav="courses"'} type="button">
+          <button class="card app-launcher-card ${coursesBlocked ? "is-disabled" : ""}" ${coursesBlocked ? 'data-action="courses-coming-soon-notice" aria-disabled="true"' : 'data-nav="courses"'} type="button">
             <div class="app-launcher-icon-wrapper is-courses">
               <div class="icon-pulse-ring"></div>
               <svg class="launcher-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -44738,8 +45191,8 @@ function renderAppLauncher() {
               </svg>
             </div>
             <h3>Courses</h3>
-            <p>${coursesComingSoon ? "The Courses learning portal is being prepared. MCQ Bank remains available." : "Browse interactive syllabus modules, access lessons, and view learning resources."}</p>
-            <span class="app-launcher-badge">${coursesComingSoon ? "Coming soon" : "Learning Portal"} ${coursesComingSoon ? "" : '<svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>'}</span>
+            <p>${coursesBlocked ? (coursesBlockedByAccess ? "Courses access is disabled for this account. Contact the admin if you need this portal enabled." : "The Courses learning portal is being prepared. MCQ Bank remains available.") : "Browse interactive syllabus modules, access lessons, and view learning resources."}</p>
+            <span class="app-launcher-badge">${coursesBlocked ? (coursesBlockedByAccess ? "No Courses access" : "Coming soon") : "Learning Portal"} ${coursesBlocked ? "" : '<svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>'}</span>
           </button>
         </div>
       </section>
