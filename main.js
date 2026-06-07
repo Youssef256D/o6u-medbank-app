@@ -2982,6 +2982,28 @@ function getFriendlyOAuthCallbackErrorMessage(rawMessage) {
   return decoded;
 }
 
+function isPkceCodeVerifierStorageError(rawMessage) {
+  const normalized = decodeOAuthErrorMessage(rawMessage).toLowerCase();
+  return normalized.includes("code verifier")
+    || normalized.includes("auth flow")
+    || normalized.includes("storage was cleared");
+}
+
+function hasCurrentSignedInLocalUser() {
+  const current = getCurrentUser();
+  if (current?.id) {
+    return true;
+  }
+  const currentUserId = String(load(STORAGE_KEYS.currentUserId, "") || "").trim();
+  return Boolean(currentUserId);
+}
+
+function shouldSilentlyClearStaleGoogleOAuthCallback(rawMessage, isPasswordRecoveryCallback = false) {
+  return !isPasswordRecoveryCallback
+    && isPkceCodeVerifierStorageError(rawMessage)
+    && hasCurrentSignedInLocalUser();
+}
+
 function isGoogleOAuthPendingState() {
   if (readSessionStorageKey(GOOGLE_OAUTH_PENDING_KEY) !== "1") {
     return false;
@@ -3186,6 +3208,12 @@ async function resolveSupabaseAuthCallback(authClient) {
     ? decodeOAuthErrorMessage(rawCallbackError)
     : getFriendlyOAuthCallbackErrorMessage(rawCallbackError);
   if (callbackError) {
+    if (shouldSilentlyClearStaleGoogleOAuthCallback(rawCallbackError, isPasswordRecoveryCallback)) {
+      setGoogleOAuthPendingState(false);
+      clearAuthCallbackParams();
+      console.info("Cleared stale Google sign-in callback after an active local session was already available.");
+      return "ignored";
+    }
     setGoogleOAuthPendingState(false);
     if (isPasswordRecoveryCallback) {
       setPasswordRecoveryPendingState(false);
@@ -3205,12 +3233,22 @@ async function resolveSupabaseAuthCallback(authClient) {
       const { error } = await queueSupabaseAuthRequest(authClient, () => authClient.auth.exchangeCodeForSession(code));
       if (error) {
         console.warn("Supabase OAuth callback exchange failed.", error?.message || error);
+        if (shouldSilentlyClearStaleGoogleOAuthCallback(error?.message || error, isPasswordRecoveryCallback)) {
+          setGoogleOAuthPendingState(false);
+          clearAuthCallbackParams();
+          console.info("Cleared stale Google sign-in PKCE callback after an active local session was already available.");
+          return "ignored";
+        }
+        const friendlyMessage = isPasswordRecoveryCallback
+          ? decodeOAuthErrorMessage(error?.message)
+          : getFriendlyOAuthCallbackErrorMessage(error?.message);
         setGoogleOAuthPendingState(false);
         if (isPasswordRecoveryCallback) {
           setPasswordRecoveryPendingState(false);
         }
         toast(
-          error.message
+          friendlyMessage
+          || error.message
           || (isPasswordRecoveryCallback
             ? "Password reset callback failed. Request a new reset email and try again."
             : "Google sign-in callback failed. Please try again."),
@@ -3226,12 +3264,16 @@ async function resolveSupabaseAuthCallback(authClient) {
       }));
       if (error) {
         console.warn("Supabase OAuth token callback failed.", error?.message || error);
+        const friendlyMessage = isPasswordRecoveryCallback
+          ? decodeOAuthErrorMessage(error?.message)
+          : getFriendlyOAuthCallbackErrorMessage(error?.message);
         setGoogleOAuthPendingState(false);
         if (isPasswordRecoveryCallback) {
           setPasswordRecoveryPendingState(false);
         }
         toast(
-          error.message
+          friendlyMessage
+          || error.message
           || (isPasswordRecoveryCallback
             ? "Password reset callback failed. Request a new reset email and try again."
             : "Google sign-in callback failed. Please try again."),
