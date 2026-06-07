@@ -63,6 +63,8 @@
     "expires_in",
     "expires_at",
   ]);
+  const NATIVE_OAUTH_REDIRECT_PARAM = "native_redirect";
+  const NATIVE_OAUTH_FLAG_PARAM = "native_oauth";
   let appLoadPromise = null;
   let appPrefetchTriggered = false;
   let supabaseSdkLoadPromise = null;
@@ -91,6 +93,61 @@
       }
     });
     return [...OAUTH_CALLBACK_QUERY_KEYS].some((key) => params.has(key));
+  }
+
+  function redirectNativeOAuthCallbackIfNeeded() {
+    let currentUrl;
+    try {
+      currentUrl = new URL(window.location.href);
+    } catch {
+      return false;
+    }
+
+    const searchParams = new URLSearchParams(currentUrl.search || "");
+    const hashParams = parseOAuthHashParams(currentUrl.hash);
+    const nativeRedirect = String(searchParams.get(NATIVE_OAUTH_REDIRECT_PARAM) || "o6umedbank://auth/callback").trim();
+    const isNativeOAuth = searchParams.get(NATIVE_OAUTH_FLAG_PARAM) === "1"
+      || searchParams.has(NATIVE_OAUTH_REDIRECT_PARAM);
+    if (!isNativeOAuth || !nativeRedirect || !hasOAuthCallbackParams()) {
+      return false;
+    }
+
+    let targetUrl;
+    try {
+      targetUrl = new URL(nativeRedirect);
+    } catch {
+      return false;
+    }
+
+    const callbackParams = new URLSearchParams();
+    searchParams.forEach((value, key) => {
+      if (key !== NATIVE_OAUTH_FLAG_PARAM && key !== NATIVE_OAUTH_REDIRECT_PARAM) {
+        callbackParams.set(key, value);
+      }
+    });
+    hashParams.forEach((value, key) => {
+      if (!callbackParams.has(key)) {
+        callbackParams.set(key, value);
+      }
+    });
+
+    if (![...OAUTH_CALLBACK_QUERY_KEYS].some((key) => callbackParams.has(key))) {
+      return false;
+    }
+
+    targetUrl.search = callbackParams.toString();
+    targetUrl.hash = "";
+    try {
+      document.body?.classList.add("is-google-auth-loading");
+      window.location.replace(targetUrl.toString());
+    } catch {
+      window.location.href = targetUrl.toString();
+    }
+    return true;
+  }
+
+  if (redirectNativeOAuthCallbackIfNeeded()) {
+    return;
   }
 
   function isGoogleOAuthPendingState() {
