@@ -19941,11 +19941,7 @@ function renderAuth(mode) {
   return `
     <section class="panel" style="max-width: 560px; margin-inline: auto;">
       <h2 class="title">Forgot Password</h2>
-      <p class="subtle">Send a password reset email using Supabase Auth.</p>
-      <form id="forgot-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-        <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
-        <button class="btn" type="submit">Send reset link</button>
-      </form>
+      <p class="subtle">Please contact the website admin to reset your password.</p>
       <div class="auth-inline">
         <button class="btn ghost" data-nav="login" type="button">Back to login</button>
       </div>
