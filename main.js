@@ -13376,7 +13376,7 @@ async function syncProfilesToRelational(usersPayload, options = {}) {
     const requestedProfileSyncIdSet = new Set(requestedProfileSyncIds);
     users = users.filter((user) => requestedProfileSyncIdSet.has(String(getUserProfileId(user) || "").trim()));
   } else if (userSyncScope === USER_RELATIONAL_SYNC_SCOPE_ADMIN && users.length > 1) {
-    console.warn("Skipped broad admin profile sync without explicit target profile IDs.");
+    console.debug("Skipped broad admin profile sync without explicit target profile IDs.");
     return;
   }
 
@@ -14453,7 +14453,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
     questionDbIdChangedExternalIds,
   );
   if (finalChoiceSyncPlan.skippedQuestionIds.length) {
-    console.warn(
+    console.debug(
       `Skipped choice sync for ${finalChoiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
     );
   }
@@ -14508,7 +14508,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       refreshedDbIdChangedExternalIds,
     );
     if (finalChoiceSyncPlan.skippedQuestionIds.length) {
-      console.warn(
+      console.debug(
         `Skipped choice sync for ${finalChoiceSyncPlan.skippedQuestionIds.length} question(s) with fewer than 2 valid choices.`,
       );
     }
@@ -39943,6 +39943,59 @@ function getCoursesPlatformClient() {
   return getRelationalClient();
 }
 
+const ADMIN_COURSE_PLATFORM_PROFILE_SELECT = "id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled";
+
+function normalizeAdminCoursePlatformProfileRow(profile = {}) {
+  const profileId = String(profile?.id || "").trim();
+  if (!isUuidValue(profileId)) {
+    return null;
+  }
+  const role = String(profile?.role || "student").trim().toLowerCase() === "admin" ? "admin" : "student";
+  return {
+    id: profileId,
+    full_name: String(profile?.full_name || profile?.name || profile?.email || "Student").trim() || "Student",
+    email: String(profile?.email || "").trim().toLowerCase(),
+    phone: String(profile?.phone || "").trim(),
+    academic_year: role === "student" ? normalizeAcademicYearOrNull(profile?.academic_year ?? profile?.academicYear) : null,
+    academic_semester: role === "student" ? normalizeAcademicSemesterOrNull(profile?.academic_semester ?? profile?.academicSemester) : null,
+    role,
+    approved: role === "admin" ? true : profile?.approved !== false && profile?.isApproved !== false,
+    courses_access_enabled: role === "admin" ? true : profile?.courses_access_enabled !== false && profile?.coursesAccessEnabled !== false,
+  };
+}
+
+function buildAdminCoursePlatformProfileRowsFromLocalUsers(users = null) {
+  const list = Array.isArray(users) ? users : getUsers();
+  return list
+    .filter((user) => hasSupabaseManagedIdentity(user) && !isLegacyDemoUser(user))
+    .map((user) => normalizeAdminCoursePlatformProfileRow({
+      id: getUserProfileId(user),
+      full_name: user?.name,
+      email: user?.email,
+      phone: user?.phone,
+      academic_year: user?.academicYear,
+      academic_semester: user?.academicSemester,
+      role: user?.role,
+      approved: user?.isApproved,
+      courses_access_enabled: user?.coursesAccessEnabled,
+    }))
+    .filter(Boolean);
+}
+
+function mergeAdminCoursePlatformProfiles(...profileLists) {
+  const byId = new Map();
+  profileLists.flat().forEach((profile) => {
+    const normalized = normalizeAdminCoursePlatformProfileRow(profile);
+    if (!normalized) {
+      return;
+    }
+    const existing = byId.get(normalized.id);
+    byId.set(normalized.id, existing ? { ...normalized, ...existing } : normalized);
+  });
+  return [...byId.values()]
+    .sort((left, right) => getAdminPlatformProfileDisplayName(left).localeCompare(getAdminPlatformProfileDisplayName(right)));
+}
+
 function patchAdminCoursePlatformCourse(courseId, patch = {}) {
   const targetCourseId = String(courseId || "").trim();
   if (!isUuidValue(targetCourseId) || !patch || typeof patch !== "object") {
@@ -42686,18 +42739,17 @@ async function loadAdminCoursesPlatform(options = {}) {
     let profiles = await fetchRowsPagedOrThrow((from, to) => (
       client
         .from("profiles")
-        .select("id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled")
-        .eq("role", "student")
+        .select(ADMIN_COURSE_PLATFORM_PROFILE_SELECT)
         .order("full_name", { ascending: true })
         .order("id", { ascending: true })
         .range(from, to)
-    ), { timeoutMessage: "Student profile query timed out." }).catch(() => []);
+    ), { timeoutMessage: "User profile query timed out." }).catch(() => []);
     profiles = Array.isArray(profiles) ? profiles : [];
     const loadedProfileIds = new Set(profiles.map((profile) => String(profile?.id || "").trim()).filter(isUuidValue));
     const missingReferencedUserIds = referencedUserIds.filter((id) => !loadedProfileIds.has(id));
     for (const batch of splitIntoBatches(missingReferencedUserIds, RELATIONAL_UUID_IN_BATCH_SIZE)) {
       const rows = await runRelationalQueryWithTimeout(
-        client.from("profiles").select("id,full_name,email,phone,academic_year,academic_semester,role,approved,courses_access_enabled").in("id", batch),
+        client.from("profiles").select(ADMIN_COURSE_PLATFORM_PROFILE_SELECT).in("id", batch),
         "Enrollment profile query timed out.",
       ).catch(() => []);
       (Array.isArray(rows) ? rows : []).forEach((profile) => {
@@ -42717,7 +42769,10 @@ async function loadAdminCoursesPlatform(options = {}) {
     state.adminCoursesPlatformRequests = Array.isArray(requests) ? requests : [];
     state.adminCoursesPlatformEnrollments = Array.isArray(enrollments) ? enrollments : [];
     state.adminCoursesPlatformTopics = Array.isArray(topics) ? topics : [];
-    state.adminCoursesPlatformProfiles = profiles;
+    state.adminCoursesPlatformProfiles = mergeAdminCoursePlatformProfiles(
+      profiles,
+      buildAdminCoursePlatformProfileRowsFromLocalUsers(),
+    );
     state.adminCoursesPlatformLoadedAt = Date.now();
     if (!state.adminCourseBuilderCourseId && state.adminCoursesPlatformCourses[0]?.id) {
       state.adminCourseBuilderCourseId = state.adminCoursesPlatformCourses[0].id;
@@ -43949,6 +44004,9 @@ async function adminResolveEnrollmentRequest(requestId, status) {
   const request = (state.adminCoursesPlatformRequests || []).find((entry) => String(entry?.id || "").trim() === String(requestId || "").trim());
   const nextStatus = String(status || "").trim() === "approved" ? "approved" : "rejected";
   if (!client || !request) throw new Error("Enrollment request cannot be updated.");
+  if (nextStatus === "approved") {
+    await ensureAdminCourseEnrollmentProfilesExist([request.user_id]);
+  }
   await runRelationalQueryWithTimeout(
     client.from("platform_course_enrollment_requests").update({ status: nextStatus, updated_at: nowISO() }).eq("id", request.id),
     "Enrollment request update timed out.",
@@ -43974,6 +44032,7 @@ async function adminApproveAllPendingEnrollmentRequests(courseId = "") {
   });
   if (!pendingRequests.length) return 0;
   const requestIds = pendingRequests.map((request) => request.id);
+  await ensureAdminCourseEnrollmentProfilesExist(pendingRequests.map((request) => request.user_id));
   await runRelationalQueryWithTimeout(
     client.from("platform_course_enrollment_requests").update({ status: "approved", updated_at: nowISO() }).in("id", requestIds),
     "Bulk enrollment request approval timed out.",
@@ -43993,6 +44052,135 @@ async function adminApproveAllPendingEnrollmentRequests(courseId = "") {
   return pendingRequests.length;
 }
 
+function getLocalUsersByAdminCoursePlatformProfileId() {
+  const byProfileId = new Map();
+  getUsers().forEach((user) => {
+    const profileId = String(getUserProfileId(user) || "").trim();
+    if (!isUuidValue(profileId) || byProfileId.has(profileId) || isLegacyDemoUser(user)) {
+      return;
+    }
+    byProfileId.set(profileId, user);
+  });
+  return byProfileId;
+}
+
+function buildAdminCoursePlatformProfileUpsertRowFromLocalUser(user) {
+  const profile = normalizeAdminCoursePlatformProfileRow({
+    id: getUserProfileId(user),
+    full_name: user?.name,
+    email: user?.email,
+    phone: user?.phone,
+    academic_year: user?.academicYear,
+    academic_semester: user?.academicSemester,
+    role: user?.role,
+    approved: user?.isApproved,
+    courses_access_enabled: user?.coursesAccessEnabled,
+  });
+  if (!profile?.id || !profile.email) {
+    return null;
+  }
+  return {
+    id: profile.id,
+    full_name: profile.full_name,
+    email: profile.email,
+    phone: profile.phone || null,
+    role: profile.role,
+    approved: profile.approved,
+    courses_access_enabled: profile.courses_access_enabled,
+    academic_year: profile.role === "student" ? profile.academic_year : null,
+    academic_semester: profile.role === "student" ? profile.academic_semester : null,
+  };
+}
+
+async function fetchAdminCoursePlatformProfilesById(client, profileIds, timeoutMessage = "Selected user profile lookup timed out.") {
+  const ids = [...new Set(
+    (Array.isArray(profileIds) ? profileIds : [profileIds])
+      .map((id) => String(id || "").trim())
+      .filter(isUuidValue),
+  )];
+  const rows = [];
+  if (!client || !ids.length) {
+    return rows;
+  }
+  for (const batch of splitIntoBatches(ids, RELATIONAL_UUID_IN_BATCH_SIZE)) {
+    const data = await runRelationalQueryWithTimeout(
+      client
+        .from("profiles")
+        .select(ADMIN_COURSE_PLATFORM_PROFILE_SELECT)
+        .in("id", batch),
+      timeoutMessage,
+      COURSE_PLATFORM_WRITE_TIMEOUT_MS,
+    ).catch(() => []);
+    if (Array.isArray(data) && data.length) {
+      rows.push(...data);
+    }
+  }
+  return rows;
+}
+
+async function ensureAdminCourseEnrollmentProfilesExist(userIds) {
+  const client = getCoursesPlatformClient();
+  const targetUserIds = [...new Set(
+    (Array.isArray(userIds) ? userIds : [userIds])
+      .map((userId) => String(userId || "").trim())
+      .filter(isUuidValue),
+  )];
+  if (!client || !targetUserIds.length) {
+    return [];
+  }
+
+  const existingProfiles = await fetchAdminCoursePlatformProfilesById(client, targetUserIds);
+  let profileRows = mergeAdminCoursePlatformProfiles(existingProfiles);
+  let existingProfileIds = new Set(profileRows.map((profile) => profile.id));
+  const missingProfileIds = targetUserIds.filter((profileId) => !existingProfileIds.has(profileId));
+
+  if (missingProfileIds.length) {
+    const localUsersByProfileId = getLocalUsersByAdminCoursePlatformProfileId();
+    const repairRows = missingProfileIds
+      .map((profileId) => buildAdminCoursePlatformProfileUpsertRowFromLocalUser(localUsersByProfileId.get(profileId)))
+      .filter(Boolean);
+    if (repairRows.length) {
+      for (const batch of splitIntoBatches(repairRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+        await runRelationalQueryWithTimeout(
+          client.from("profiles").upsert(batch, { onConflict: "id", defaultToNull: false }),
+          "Selected user profile repair timed out.",
+          COURSE_PLATFORM_WRITE_TIMEOUT_MS,
+        ).catch((error) => {
+          console.warn("Could not repair selected course enrollment profile.", error?.message || error);
+        });
+      }
+      const repairedProfiles = await fetchAdminCoursePlatformProfilesById(
+        client,
+        missingProfileIds,
+        "Selected user profile repair check timed out.",
+      );
+      profileRows = mergeAdminCoursePlatformProfiles(profileRows, repairedProfiles);
+      existingProfileIds = new Set(profileRows.map((profile) => profile.id));
+    }
+  }
+
+  rememberKnownRelationalProfileIds([...existingProfileIds]);
+  state.adminCoursesPlatformProfiles = mergeAdminCoursePlatformProfiles(
+    state.adminCoursesPlatformProfiles || [],
+    profileRows,
+    buildAdminCoursePlatformProfileRowsFromLocalUsers().filter((profile) => targetUserIds.includes(profile.id)),
+  );
+
+  const stillMissingIds = targetUserIds.filter((profileId) => !existingProfileIds.has(profileId));
+  if (stillMissingIds.length) {
+    const labels = stillMissingIds
+      .slice(0, 3)
+      .map((profileId) => getAdminCourseBuilderProfileLabel(profileId))
+      .join(", ");
+    throw new Error(
+      `Could not verify ${stillMissingIds.length} selected user profile${stillMissingIds.length === 1 ? "" : "s"} in Supabase. `
+      + `Refresh users, then try again${labels ? `: ${labels}` : "."}`,
+    );
+  }
+
+  return profileRows;
+}
+
 async function adminEnrollPlatformCourseUser(courseId, userId) {
   const client = getCoursesPlatformClient();
   const targetCourseId = String(courseId || "").trim();
@@ -44000,6 +44188,7 @@ async function adminEnrollPlatformCourseUser(courseId, userId) {
   if (!client || !isUuidValue(targetCourseId) || !isUuidValue(targetUserId)) {
     throw new Error("Course enrollment cannot be saved.");
   }
+  await ensureAdminCourseEnrollmentProfilesExist([targetUserId]);
   await runRelationalQueryWithTimeout(
     client.from("platform_course_enrollments").upsert({
       user_id: targetUserId,
@@ -44037,6 +44226,7 @@ async function adminEnrollPlatformCourseUsers(courseId, userIds) {
   if (!client || !isUuidValue(targetCourseId) || !targetUserIds.length) {
     throw new Error("Choose at least one user to enroll.");
   }
+  await ensureAdminCourseEnrollmentProfilesExist(targetUserIds);
   const assignedBy = isUuidValue(getCurrentCoursePlatformUserId()) ? getCurrentCoursePlatformUserId() : null;
   await runRelationalQueryWithTimeout(
     client.from("platform_course_enrollments").upsert(
