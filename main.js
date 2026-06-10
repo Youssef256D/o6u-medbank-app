@@ -24163,9 +24163,33 @@ function handleSessionKeydown(event) {
     return;
   }
 
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    event.preventDefault();
+    const user = getCurrentUser();
+    if (!user) {
+      return;
+    }
+    const session = getActiveSession(user.id, state.sessionId);
+    if (!session || session.status !== "in_progress") {
+      return;
+    }
+    const questionStore = getQuestionStore();
+    normalizeSession(session, { questionStore });
+    syncActiveResponseSelectionFromDom(session);
+    captureElapsedForCurrentQuestion(session);
+    const maxIndex = Math.max(0, session.questionIds.length - 1);
+    if (event.key === "ArrowLeft") {
+      session.currentIndex = Math.max(0, session.currentIndex - 1);
+    } else {
+      session.currentIndex = Math.min(maxIndex, session.currentIndex + 1);
+    }
+    session.updatedAt = nowISO();
+    upsertSession(session);
+    render();
+    return;
+  }
+
   const mapped = {
-    ArrowLeft: "prev-question",
-    ArrowRight: "next-question",
     f: "toggle-flag",
     n: "open-notes",
     l: "open-labs",
