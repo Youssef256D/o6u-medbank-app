@@ -726,6 +726,7 @@ const QUESTION_IMAGE_ALLOWED_MIME_TYPES = new Set([
 const COURSE_VIDEO_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 const SUPABASE_FREE_STORAGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const SUPABASE_TUS_CHUNK_SIZE = 6 * 1024 * 1024;
+const SUPABASE_TUS_RETRY_DELAYS = [0, 3000, 5000, 10000, 20000, 30000, 45000];
 const CLOUDFLARE_STREAM_UPLOAD_MAX_BYTES = 30 * 1024 * 1024 * 1024;
 const COURSE_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
@@ -3910,7 +3911,7 @@ function isLikelyTransientSupabaseError(error) {
     return true;
   }
   const rawStatus = String(error?.status || error?.statusCode || error?.code || "").trim();
-  if (["408", "409", "429", "500", "502", "503", "504"].includes(rawStatus)) {
+  if (["408", "409", "429", "500", "502", "503", "504", "521", "522", "523", "524", "525", "526", "544"].includes(rawStatus)) {
     return true;
   }
   const message = getErrorMessage(error, "").toLowerCase();
@@ -9533,6 +9534,9 @@ async function hydrateRelationalNotifications(currentUser) {
     timeoutMs: NOTIFICATION_HYDRATE_TIMEOUT_MS,
     timeoutMessage: "Notification query timed out.",
   };
+  const shouldWarnForNotificationHydrationError = (error) => (
+    error && !isMissingRelationError(error) && !isTimeoutResultError(error)
+  );
   let notificationRows = [];
   if (user.role === "admin") {
     const notificationsResult = await fetchRowsPaged((from, to) => (
@@ -9545,7 +9549,7 @@ async function hydrateRelationalNotifications(currentUser) {
         .range(from, to)
     ), notificationFetchOptions);
     if (notificationsResult.error) {
-      if (!isMissingRelationError(notificationsResult.error)) {
+      if (shouldWarnForNotificationHydrationError(notificationsResult.error)) {
         console.warn("Could not hydrate notifications.", notificationsResult.error?.message || notificationsResult.error);
       }
       return false;
@@ -9566,7 +9570,7 @@ async function hydrateRelationalNotifications(currentUser) {
     ), notificationFetchOptions);
     if (globalNotificationsResult.error) {
       globalQueryError = globalNotificationsResult.error;
-      if (!isMissingRelationError(globalNotificationsResult.error)) {
+      if (shouldWarnForNotificationHydrationError(globalNotificationsResult.error)) {
         console.warn(
           "Could not hydrate global notifications.",
           globalNotificationsResult.error?.message || globalNotificationsResult.error,
@@ -9591,7 +9595,7 @@ async function hydrateRelationalNotifications(currentUser) {
     }, notificationFetchOptions);
     if (directNotificationsResult.error) {
       directQueryError = directNotificationsResult.error;
-      if (!isMissingRelationError(directNotificationsResult.error)) {
+      if (shouldWarnForNotificationHydrationError(directNotificationsResult.error)) {
         console.warn(
           "Could not hydrate direct notifications.",
           directNotificationsResult.error?.message || directNotificationsResult.error,
@@ -9632,7 +9636,7 @@ async function hydrateRelationalNotifications(currentUser) {
         "Notification read-state query timed out.",
       );
       if (readError) {
-        if (!isMissingRelationError(readError)) {
+        if (shouldWarnForNotificationHydrationError(readError)) {
           console.warn("Could not hydrate notification read state.", readError?.message || readError);
         }
         readStateUnavailable = true;
@@ -43668,6 +43672,55 @@ function buildStableCourseVideoObjectPath(courseId, file, normalizedType) {
   return `courses/${targetCourseId}/${userScope}/resumable/${sizePart}-${modifiedPart}-${baseName}.${extension}`;
 }
 
+function splitSupabaseStorageObjectPath(filePath) {
+  const normalized = String(filePath || "").trim().replace(/^\/+|\/+$/g, "");
+  if (!normalized) {
+    return { directory: "", name: "" };
+  }
+  const parts = normalized.split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  return { directory: parts.join("/"), name };
+}
+
+async function findSupabaseStorageObject(client, bucket, filePath, options = {}) {
+  const { directory, name } = splitSupabaseStorageObjectPath(filePath);
+  if (!client?.storage || !bucket || !name) {
+    return { exists: false, object: null, error: null };
+  }
+  const expectedSize = Math.max(0, Number(options?.expectedSize) || 0);
+  const { data, error } = await runWithTimeoutResult(
+    client.storage
+      .from(bucket)
+      .list(directory, {
+        limit: 20,
+        search: name,
+        sortBy: { column: "updated_at", order: "desc" },
+      }),
+    Math.max(SUPABASE_QUERY_TIMEOUT_MS, 15000),
+    "Video upload verification timed out.",
+  );
+  if (error) {
+    return { exists: false, object: null, error };
+  }
+  const matched = (Array.isArray(data) ? data : []).find((entry) => String(entry?.name || "") === name) || null;
+  if (!matched) {
+    return { exists: false, object: null, error: null };
+  }
+  const actualSize = Math.max(0, Number(matched?.metadata?.size ?? matched?.metadata?.contentLength ?? matched?.size) || 0);
+  const sizeMatches = !expectedSize || !actualSize || Math.abs(actualSize - expectedSize) <= 1;
+  return { exists: sizeMatches, object: matched, error: null };
+}
+
+async function isCompletedSupabaseStorageObject(client, bucket, filePath, file) {
+  const result = await findSupabaseStorageObject(client, bucket, filePath, {
+    expectedSize: file?.size || 0,
+  });
+  if (result.error && !isMissingRelationError(result.error) && !isTimeoutResultError(result.error)) {
+    console.warn("Could not verify course video upload.", result.error?.message || result.error);
+  }
+  return Boolean(result.exists);
+}
+
 async function uploadSupabaseStorageObjectResumable(bucket, filePath, file, options = {}) {
   const tusClient = await getTusClient();
   const endpoint = getSupabaseStorageResumableEndpoint();
@@ -43677,10 +43730,30 @@ async function uploadSupabaseStorageObjectResumable(bucket, filePath, file, opti
   }
 
   return new Promise((resolve, reject) => {
+    let lastLoaded = 0;
+    let lastPercent = 0;
+    const emitProgress = (progress = {}) => {
+      if (typeof options?.onProgress !== "function") return;
+      const loaded = Math.max(lastLoaded, Number(progress.loaded) || 0);
+      const total = Math.max(0, Number(progress.total) || Number(file?.size) || 0);
+      const rawPercent = Number(progress.percent);
+      const computedPercent = total > 0 && loaded > 0
+        ? Math.round((loaded / total) * 100)
+        : rawPercent;
+      const percent = Math.max(lastPercent, Math.max(1, Math.min(99, Math.round(Number(computedPercent) || 1))));
+      lastLoaded = loaded;
+      lastPercent = percent;
+      options.onProgress({
+        ...progress,
+        loaded,
+        total,
+        percent,
+      });
+    };
     const upload = new tusClient.Upload(file, {
       endpoint,
       chunkSize: SUPABASE_TUS_CHUNK_SIZE,
-      retryDelays: [0, 3000, 5000, 10000, 20000],
+      retryDelays: SUPABASE_TUS_RETRY_DELAYS,
       uploadDataDuringCreation: true,
       removeFingerprintOnSuccess: true,
       headers: {
@@ -43702,7 +43775,7 @@ async function uploadSupabaseStorageObjectResumable(bucket, filePath, file, opti
         const percent = bytesTotal > 0
           ? Math.max(1, Math.min(99, Math.round((bytesUploaded / bytesTotal) * 100)))
           : 1;
-        options.onProgress({ percent, loaded: bytesUploaded, total: bytesTotal });
+        emitProgress({ percent, loaded: bytesUploaded, total: bytesTotal });
       },
       onSuccess() {
         resolve({ data: { path: filePath }, error: null });
@@ -43713,7 +43786,7 @@ async function uploadSupabaseStorageObjectResumable(bucket, filePath, file, opti
       .then((previousUploads) => {
         if (previousUploads.length) {
           if (typeof options?.onProgress === "function") {
-            options.onProgress({ percent: 1, loaded: 0, total: file.size, message: "Resuming video upload..." });
+            emitProgress({ percent: lastPercent || 1, loaded: lastLoaded, total: file.size, message: "Resuming video upload..." });
           }
           upload.resumeFromPreviousUpload(previousUploads[0]);
         }
@@ -43925,6 +43998,17 @@ async function uploadCourseLessonVideo(courseId, file, options = {}) {
   }
   const session = await getAdminCourseStorageUploadSession(client);
   const accessToken = String(session?.access_token || "").trim();
+  if (accessToken && await isCompletedSupabaseStorageObject(client, bucket, filePath, file)) {
+    if (typeof options?.onProgress === "function") {
+      options.onProgress({
+        percent: 100,
+        loaded: file.size,
+        total: file.size,
+        message: "Video already uploaded. Saving lesson...",
+      });
+    }
+    return `supabase-storage://${bucket}/${filePath}`;
+  }
   const uploadResult = accessToken
     ? await uploadSupabaseStorageObjectResumable(bucket, filePath, file, {
         accessToken,
@@ -43933,6 +44017,9 @@ async function uploadCourseLessonVideo(courseId, file, options = {}) {
         contentType: normalizedType || undefined,
         onProgress: options?.onProgress,
       }).catch(async (resumableError) => {
+        if (await isCompletedSupabaseStorageObject(client, bucket, filePath, file)) {
+          return { data: { path: filePath, verifiedAfterError: true }, error: null };
+        }
         console.warn("Resumable course video upload failed.", resumableError?.message || resumableError);
         return { data: null, error: resumableError };
       })
@@ -46070,13 +46157,16 @@ function wireAdminCoursesPlatformBuilder() {
     const data = readFormDataObject(form);
     const draftKey = getAdminCourseBuilderDraftKey(form);
     if (draftKey && getCourseVideoUploadFile(data)) {
+      let lastVisibleUploadPercent = 1;
       setAdminCourseUploadProgress(draftKey, {
         status: "starting",
         percent: 1,
         message: "Starting video upload...",
       });
       data._uploadProgress = (progress = {}) => {
-        const percent = Math.max(1, Math.min(100, Math.round(Number(progress.percent) || 1)));
+        const requestedPercent = Math.max(1, Math.min(100, Math.round(Number(progress.percent) || 1)));
+        const percent = Math.max(lastVisibleUploadPercent, requestedPercent);
+        lastVisibleUploadPercent = percent;
         const progressMessage = String(progress.message || "").trim();
         setAdminCourseUploadProgress(draftKey, {
           status: percent >= 100 ? "saving" : "uploading",
