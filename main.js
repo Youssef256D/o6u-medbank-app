@@ -236,6 +236,7 @@ const SESSION_HIGHLIGHTER_DEFAULT = "yellow";
 const SESSION_HIGHLIGHTER_COLORS = new Set(["yellow", "red", "green"]);
 const COURSES_COMING_SOON_FEATURE_KEY = "courses_coming_soon";
 const COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE = "Courses availability is not installed in Supabase yet. Apply the latest database migration, then refresh the admin dashboard.";
+const COURSES_PLATFORM_TRANSIENT_FAILURE_COOLDOWN_MS = 60000;
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -692,6 +693,12 @@ let adminBackupRestoreLastCheckedAt = 0;
 const relationalSessionHydrationRuntime = {
   transientFailureAt: 0,
   transientFailureMessage: "",
+};
+const coursesPlatformRuntime = {
+  availabilityTransientFailureAt: 0,
+  availabilityTransientFailureMessage: "",
+  platformTransientFailureAt: 0,
+  platformTransientFailureMessage: "",
 };
 const studentAccessIssueLogTimes = new Map();
 const studentApprovalRevalidationRuntime = {
@@ -21754,26 +21761,26 @@ function renderPreviousTestsSection(userOrId) {
       <div class="previous-tests-filter-grid">
         <label>
           Date solved
-          <select data-role="previous-test-filter" data-filter="dateKey">
+          <select id="previous-test-filter-date" name="previousTestDate" data-role="previous-test-filter" data-filter="dateKey">
             <option value="">All dates</option>
             ${dateOptions.map((option) => `<option value="${escapeHtml(option.key)}" ${filters.dateKey === option.key ? "selected" : ""}>${escapeHtml(`${option.label} (${option.count})`)}</option>`).join("")}
           </select>
         </label>
         <label>
           Course
-          <select data-role="previous-test-filter" data-filter="course">
+          <select id="previous-test-filter-course" name="previousTestCourse" data-role="previous-test-filter" data-filter="course">
             ${renderPreviousTestOptions(courseOptions, filters.course, "All courses", courseCountMap)}
           </select>
         </label>
         <label>
           Topic
-          <select data-role="previous-test-filter" data-filter="topic">
+          <select id="previous-test-filter-topic" name="previousTestTopic" data-role="previous-test-filter" data-filter="topic">
             ${renderPreviousTestOptions(topicOptions, filters.topic, filters.course ? "All topics in course" : "All topics", topicCountMap)}
           </select>
         </label>
         <label>
           Sort
-          <select data-role="previous-test-filter" data-filter="sort">
+          <select id="previous-test-filter-sort" name="previousTestSort" data-role="previous-test-filter" data-filter="sort">
             <option value="newest" ${filters.sort === "newest" ? "selected" : ""}>Newest first</option>
             <option value="oldest" ${filters.sort === "oldest" ? "selected" : ""}>Oldest first</option>
             <option value="best" ${filters.sort === "best" ? "selected" : ""}>Best score</option>
@@ -40320,6 +40327,32 @@ function isCoursesComingSoonEnabled() {
   return Boolean(state.coursesComingSoonEnabled);
 }
 
+function isCoursesPlatformTransientCooldownActive(kind) {
+  const key = kind === "availability" ? "availabilityTransientFailureAt" : "platformTransientFailureAt";
+  const failedAt = Number(coursesPlatformRuntime[key] || 0);
+  return failedAt > 0 && (Date.now() - failedAt) < COURSES_PLATFORM_TRANSIENT_FAILURE_COOLDOWN_MS;
+}
+
+function recordCoursesPlatformTransientFailure(kind, error) {
+  const atKey = kind === "availability" ? "availabilityTransientFailureAt" : "platformTransientFailureAt";
+  const messageKey = kind === "availability" ? "availabilityTransientFailureMessage" : "platformTransientFailureMessage";
+  if (!error || !isLikelyTransientSupabaseError(error)) {
+    coursesPlatformRuntime[atKey] = 0;
+    coursesPlatformRuntime[messageKey] = "";
+    return false;
+  }
+  coursesPlatformRuntime[atKey] = Date.now();
+  coursesPlatformRuntime[messageKey] = getErrorMessage(error, "Courses are temporarily unavailable.");
+  return true;
+}
+
+function clearCoursesPlatformTransientFailure(kind) {
+  const atKey = kind === "availability" ? "availabilityTransientFailureAt" : "platformTransientFailureAt";
+  const messageKey = kind === "availability" ? "availabilityTransientFailureMessage" : "platformTransientFailureMessage";
+  coursesPlatformRuntime[atKey] = 0;
+  coursesPlatformRuntime[messageKey] = "";
+}
+
 function shouldBlockStudentCoursesPortal(user = getCurrentUser()) {
   return Boolean(getStudentCoursesPortalBlockReason(user));
 }
@@ -40354,6 +40387,12 @@ async function loadCoursesComingSoonFlag(options = {}) {
   if (state.coursesComingSoonLoading && !force) {
     return !state.coursesComingSoonError;
   }
+  if (!force && isCoursesPlatformTransientCooldownActive("availability")) {
+    if (!state.coursesComingSoonLoadedAt) {
+      state.coursesComingSoonLoadedAt = Date.now();
+    }
+    return true;
+  }
   if (!force && state.coursesComingSoonLoadedAt && Date.now() - state.coursesComingSoonLoadedAt < STUDENT_DATA_REFRESH_MS) {
     return true;
   }
@@ -40387,8 +40426,16 @@ async function loadCoursesComingSoonFlag(options = {}) {
     } else {
       state.coursesComingSoonError = "";
     }
+    clearCoursesPlatformTransientFailure("availability");
     return true;
   } catch (error) {
+    if (recordCoursesPlatformTransientFailure("availability", error)) {
+      if (!state.coursesComingSoonLoadedAt) {
+        state.coursesComingSoonLoadedAt = Date.now();
+      }
+      state.coursesComingSoonError = "";
+      return true;
+    }
     console.warn("Could not load Courses availability flag.", error?.message || error);
     state.coursesComingSoonError = getErrorMessage(error, "Could not check Courses availability.");
     return false;
@@ -40776,6 +40823,13 @@ async function loadStudentCoursesWithProgress(options = {}) {
   if (state.coursesLoading && !options.force) {
     return false;
   }
+  if (!options.force && isCoursesPlatformTransientCooldownActive("platform")) {
+    state.coursesLoading = false;
+    if (!state.coursesLoadedAt) {
+      state.coursesError = "Courses are taking longer than usual to load. Tap Retry in a moment.";
+    }
+    return Boolean(state.coursesLoadedAt);
+  }
   state.coursesLoading = true;
   state.coursesError = "";
   try {
@@ -40848,8 +40902,16 @@ async function loadStudentCoursesWithProgress(options = {}) {
     state.coursesSuggestions = Array.isArray(suggestions) ? suggestions : [];
     state.coursesLoadedAt = Date.now();
     state.coursesLoading = false;
+    clearCoursesPlatformTransientFailure("platform");
     return true;
   } catch (error) {
+    if (recordCoursesPlatformTransientFailure("platform", error)) {
+      state.coursesError = state.coursesLoadedAt
+        ? ""
+        : "Courses are taking longer than usual to load. Tap Retry in a moment.";
+      state.coursesLoading = false;
+      return false;
+    }
     console.warn("Could not load courses platform.", error?.message || error);
     setCoursesPlatformError(error);
     state.coursesLoading = false;
@@ -42071,9 +42133,9 @@ function renderDirectLessonVideoPlayer(safeVideoUrl, watermarkLabel) {
         </span>
       </button>
       <span class="lesson-video-time" data-video-time-current>0:00</span>
-      <input class="lesson-video-seek" type="range" min="0" max="1000" value="0" step="1" data-video-control="seek" aria-label="Video progress" />
+      <input id="course-lesson-video-seek" name="courseLessonVideoSeek" class="lesson-video-seek" type="range" min="0" max="1000" value="0" step="1" data-video-control="seek" aria-label="Video progress" />
       <span class="lesson-video-time" data-video-time-duration>0:00</span>
-      <select class="lesson-video-speed" data-video-control="speed" aria-label="Playback speed">
+      <select id="course-lesson-video-speed" name="courseLessonVideoSpeed" class="lesson-video-speed" data-video-control="speed" aria-label="Playback speed">
         <option value="0.5">0.5x</option>
         <option value="0.75">0.75x</option>
         <option value="1" selected>1x</option>
@@ -42503,7 +42565,7 @@ function renderCourses() {
         : renderCoursesComingSoonPage(),
     );
   }
-  if (!state.coursesLoadedAt && !state.coursesLoading) {
+  if (!state.coursesLoadedAt && !state.coursesLoading && !isCoursesPlatformTransientCooldownActive("platform")) {
     loadStudentCoursesWithProgress().then((ok) => {
       if (state.route === "courses" && ok) {
         state.skipNextRouteAnimation = true;
@@ -42612,7 +42674,10 @@ async function requestLessonVideoFullscreen(container) {
         document.body.classList.add("is-lesson-video-fullscreen");
         await nativeRequestFullscreen.call(container);
         restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
-        return getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container;
+        if (getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container) {
+          return true;
+        }
+        document.body.classList.remove("is-lesson-video-fullscreen");
       } catch (fullscreenError) {
         document.body.classList.remove("is-lesson-video-fullscreen");
       }
