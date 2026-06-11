@@ -100,6 +100,7 @@ const KNOWN_ADMIN_PAGES = new Set([...ADMIN_DATA_PAGES, ADMIN_COURSES_PLATFORM_P
 const ADMIN_AUTO_REFRESH_PAGES = new Set(["dashboard", "users"]);
 const PRIMARY_ADMIN_ASSISTANT_NAME = "Hermes Admin Assistant";
 const PRIMARY_ADMIN_ASSISTANT_DESCRIPTION = "Single connected administrator for Hermes";
+const CORRECTED_QUESTIONS_TOPIC_NAME = "Corrected questions";
 const ADMIN_AGENT_PERMISSION_OPTIONS = [
   ["read_dashboard", "View dashboard summary"],
   ["draft_announcements", "Create unpublished announcement drafts"],
@@ -31499,11 +31500,15 @@ function wireAdmin() {
     const data = new FormData(form);
     const questions = getQuestions();
     const existingId = String(data.get("id") || "");
+    const existingQuestion = existingId
+      ? questions.find((entry) => String(entry?.id || "").trim() === existingId)
+      : null;
     state.adminQuestionSaveRunning = true;
     state.skipNextRouteAnimation = true;
     render();
 
     let successMessage = "Question saved.";
+    let correctedQuestionNotificationIds = [];
 
     try {
       let questionImage = String(data.get("questionImage") || "").trim();
@@ -31572,6 +31577,13 @@ function wireAdmin() {
         status: String(data.get("status") || "published"),
       };
 
+      const correctAnswerChanged = didQuestionCorrectAnswerChange(existingQuestion, payload);
+      if (correctAnswerChanged) {
+        const correctedTopic = ensureCorrectedQuestionsTopicForCourse(payload.qbankCourse);
+        payload.qbankTopic = correctedTopic;
+        payload.topic = correctedTopic;
+      }
+
       if (!QBANK_COURSE_TOPICS[payload.qbankCourse]?.includes(payload.qbankTopic)) {
         payload.qbankTopic = (QBANK_COURSE_TOPICS[payload.qbankCourse] || [])[0] || payload.qbankTopic;
         payload.topic = payload.qbankTopic;
@@ -31583,6 +31595,10 @@ function wireAdmin() {
         questions[idx] = { ...questions[idx], ...payload };
       } else {
         questions.push(payload);
+      }
+      if (idx >= 0 && correctAnswerChanged) {
+        correctedQuestionNotificationIds = queueCorrectedQuestionNotifications(questions[idx], existingQuestion);
+        successMessage = "Question updated and moved to Corrected questions.";
       }
 
       save(STORAGE_KEYS.questions, questions);
@@ -31600,6 +31616,18 @@ function wireAdmin() {
 
       try {
         await flushPendingSyncNow();
+        if (correctedQuestionNotificationIds.length) {
+          const deliveryResult = await flushPendingNotificationOutbox({
+            user: getCurrentUser(),
+            users: getCloudNotificationTargetUsers(getUsers()),
+            targetNotificationIds: correctedQuestionNotificationIds,
+          });
+          if (deliveryResult.deliveredIds.length) {
+            toast(`Students notified about ${CORRECTED_QUESTIONS_TOPIC_NAME}.`);
+          } else if (deliveryResult.message) {
+            toast(`Correction notification queued: ${deliveryResult.message}`);
+          }
+        }
       } catch (syncError) {
         toast(`${successMessage} locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       }
@@ -39814,6 +39842,116 @@ function getNormalizedQuestionCorrectChoiceIds(question) {
       .map((choice) => normalizeQuestionChoiceLabel(choice?.id || choice?.choice_label || choice?.label))
       .filter((entry) => choiceIds.has(entry)),
   )].sort();
+}
+
+function didQuestionCorrectAnswerChange(previousQuestion, nextQuestion) {
+  if (!previousQuestion || !nextQuestion) {
+    return false;
+  }
+  const previousCorrect = getNormalizedQuestionCorrectChoiceIds(previousQuestion);
+  const nextCorrect = getNormalizedQuestionCorrectChoiceIds(nextQuestion);
+  return !arraysEqual(previousCorrect, nextCorrect);
+}
+
+function ensureCorrectedQuestionsTopicForCourse(course) {
+  const courseName = String(course || "").trim();
+  if (!courseName) {
+    return CORRECTED_QUESTIONS_TOPIC_NAME;
+  }
+
+  const existingTopics = normalizeCourseTopicList(
+    COURSE_TOPIC_OVERRIDES[courseName] || QBANK_COURSE_TOPICS[courseName] || [],
+    courseName,
+  );
+  const existingCorrectedTopic = findMatchingTopicNameInList(existingTopics, CORRECTED_QUESTIONS_TOPIC_NAME);
+  if (existingCorrectedTopic) {
+    return existingCorrectedTopic;
+  }
+
+  const previousTopics = [...(QBANK_COURSE_TOPICS[courseName] || existingTopics)];
+  COURSE_TOPIC_OVERRIDES[courseName] = normalizeCourseTopicList(
+    [...existingTopics, CORRECTED_QUESTIONS_TOPIC_NAME],
+    courseName,
+  );
+  rebuildCurriculumCatalog();
+  save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
+  syncTopicNewCatalogForCourse(courseName, previousTopics, COURSE_TOPIC_OVERRIDES[courseName] || [], {
+    addedBy: "corrected_questions",
+  });
+  return CORRECTED_QUESTIONS_TOPIC_NAME;
+}
+
+function getCorrectedQuestionNotificationRecipients(course, users = null) {
+  const courseName = String(course || "").trim();
+  if (!courseName) {
+    return [];
+  }
+  const sourceUsers = Array.isArray(users) ? users : getCloudNotificationTargetUsers(getUsers());
+  return sourceUsers.filter((entry) => {
+    if (String(entry?.role || "").trim().toLowerCase() !== "student" || !isUserAccessApproved(entry)) {
+      return false;
+    }
+    return getAvailableCoursesForUser(entry).some((availableCourse) => doCourseNamesMatch(availableCourse, courseName));
+  });
+}
+
+function queueCorrectedQuestionNotifications(question, previousQuestion = null) {
+  const currentUser = getCurrentUser();
+  if (!currentUser || currentUser.role !== "admin") {
+    return [];
+  }
+
+  const meta = getQbankCourseTopicMeta(question);
+  const courseName = String(meta.course || question?.qbankCourse || question?.course || "").trim();
+  if (!courseName || String(question?.status || "published").trim().toLowerCase() !== "published") {
+    return [];
+  }
+
+  const users = getCloudNotificationTargetUsers(getUsers());
+  const recipients = getCorrectedQuestionNotificationRecipients(courseName, users);
+  if (!recipients.length) {
+    return [];
+  }
+
+  const previousCorrect = getNormalizedQuestionCorrectChoiceIds(previousQuestion).join(", ") || "previous answer";
+  const nextCorrect = getNormalizedQuestionCorrectChoiceIds(question).join(", ") || "updated answer";
+  const title = "Corrected question available";
+  const body = [
+    `A question in ${courseName} was corrected.`,
+    `Correct answer changed from ${previousCorrect} to ${nextCorrect}.`,
+    `Open Create test, choose ${courseName}, then select ${CORRECTED_QUESTIONS_TOPIC_NAME} to solve it again.`,
+  ].join(" ");
+  const createdAt = nowISO();
+  const createdByName = String(currentUser.name || "Admin").trim() || "Admin";
+  const localNotifications = [];
+
+  recipients.forEach((recipient) => {
+    const targetUserId = String(getUserProfileId(recipient) || recipient?.id || "").trim();
+    if (!isUuidValue(targetUserId)) {
+      return;
+    }
+    const notification = normalizeNotificationRecord({
+      id: crypto.randomUUID(),
+      targetType: "user",
+      targetUserId,
+      title,
+      body,
+      createdAt,
+      createdById: String(currentUser.id || "").trim(),
+      createdByName,
+      readByUserIds: [],
+    });
+    if (!notification) {
+      return;
+    }
+    localNotifications.push(notification);
+    queueNotificationForCloudDelivery(notification);
+  });
+
+  if (localNotifications.length) {
+    saveNotificationsLocal([...localNotifications, ...getNotifications()]);
+  }
+  return localNotifications.map((entry) => entry.id);
 }
 
 function getNormalizedResponseSelectedChoiceIds(response, allowedChoiceIds = null) {
