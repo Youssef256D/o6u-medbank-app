@@ -476,6 +476,7 @@ function hasAdminAddUserDraftChanges(draft = null) {
 function normalizeAdminUserEnrollmentDraft(draft = null) {
   const nextDraft = draft && typeof draft === "object" && !Array.isArray(draft) ? draft : {};
   return {
+    name: String(nextDraft.name ?? ""),
     phone: String(nextDraft.phone ?? ""),
     academicYear: String(normalizeAcademicYearOrNull(nextDraft.academicYear) ?? ""),
     academicSemester: String(normalizeAcademicSemesterOrNull(nextDraft.academicSemester) ?? ""),
@@ -498,6 +499,8 @@ function hasAdminUserEnrollmentDraftChanges(account, draft = null) {
     return false;
   }
   const normalizedDraft = normalizeAdminUserEnrollmentDraft(draft);
+  const savedName = String(account.name || "").trim();
+  const draftName = String(normalizedDraft.name || "").trim();
   const savedPhone = String(account.phone || "").trim();
   const draftPhone = String(normalizedDraft.phone || "").trim();
   const savedYear = account.role === "student"
@@ -507,7 +510,8 @@ function hasAdminUserEnrollmentDraftChanges(account, draft = null) {
     ? String(normalizeAcademicSemesterOrNull(account.academicSemester) ?? "")
     : "";
   return (
-    draftPhone !== savedPhone
+    draftName !== savedName
+    || draftPhone !== savedPhone
     || normalizedDraft.academicYear !== savedYear
     || normalizedDraft.academicSemester !== savedSemester
   );
@@ -631,6 +635,7 @@ function getAdminUserEnrollmentViewModel(account) {
   return {
     account: {
       ...account,
+      name: draft.name,
       phone: draft.phone,
       academicYear: draftYear,
       academicSemester: draftSemester,
@@ -4319,7 +4324,7 @@ async function refreshLocalUserFromRelationalProfile(authUser, fallbackUser = nu
     );
   const profileHasStudentCompletion = role !== "student"
     ? true
-    : resolvedApproval === true || !isStudentProfileCompletionRequired({
+    : isStudentProfileDataComplete({
       role: "student",
       phone: resolvedPhone,
       academicYear: year,
@@ -4450,7 +4455,7 @@ function isUserAccessApproved(user) {
   if (user.role === "admin") {
     return true;
   }
-  if (user.role === "student" && !hasCompleteStudentProfile(user)) {
+  if (user.role === "student" && !isStudentProfileDataComplete(user)) {
     return false;
   }
   return user.isApproved !== false;
@@ -5385,12 +5390,18 @@ function isStudentProfileCompletionRequired(user) {
   if (!user || user.role !== "student") {
     return false;
   }
-  if (hasSupabaseManagedIdentity(user) && user.profileCompleted === true) {
-    return false;
-  }
   const missingCoreProfile = !hasCompleteStudentProfile(user);
   const missingCourseSelection = !hasSelectedStudentCourses(user);
   return missingCoreProfile || missingCourseSelection;
+}
+
+function isStudentProfileDataComplete(user) {
+  return Boolean(
+    user
+    && user.role === "student"
+    && hasCompleteStudentProfile(user)
+    && hasSelectedStudentCourses(user)
+  );
 }
 
 function getStudentProfileCompletionRoute(user) {
@@ -8933,7 +8944,7 @@ async function hydrateRelationalProfiles(currentUser) {
     const serverApproved = role === "admin" || Boolean(profile.approved);
     const resolvedProfileCompleted = role !== "student"
       ? true
-      : serverApproved || !isStudentProfileCompletionRequired({
+      : isStudentProfileDataComplete({
         role: "student",
         phone: resolvedPhone,
         academicYear: year,
@@ -25406,6 +25417,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const coursesAccessEnabled = isUserCoursesAccessEnabled(account);
   const visibleCourses = getAdminVisibleCoursesForUser(displayAccount);
   const coursePreview = getAdminVisibleCoursePreviewText(visibleCourses);
+  const nameInput = row.querySelector("input[data-field='name']");
   const phoneInput = row.querySelector("input[data-field='phone']");
   const saveButton = row.querySelector("[data-action='save-user-enrollment']");
 
@@ -25417,6 +25429,10 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   const semesterSelect = row.querySelector("select[data-field='academicSemester']");
   if (semesterSelect) {
     semesterSelect.value = semester === null ? "" : String(semester);
+  }
+
+  if (nameInput) {
+    nameInput.value = String(displayAccount.name ?? account.name ?? "");
   }
 
   if (phoneInput) {
@@ -26125,6 +26141,7 @@ function renderAdmin() {
         const accountPhone = String(displayAccount.phone ?? "");
         const saveMode = accountId ? getAdminUserEnrollmentSaveMode(accountId) : "";
         const saveBusy = Boolean(saveMode);
+        const accountName = String(displayAccount.name ?? account.name ?? "").trim();
         const rowClassNames = [];
         if (isSelected) {
           rowClassNames.push("is-selected");
@@ -26150,7 +26167,20 @@ function renderAdmin() {
               />
             </td>
             <td class="admin-user-account">
-              <b>${escapeHtml(account.name)}</b><br />
+              <label class="admin-inline-name-field">
+                <span class="sr-only">Full name for ${escapeHtml(String(account.email || "user"))}</span>
+                <input
+                  class="admin-mini-input admin-inline-name-input"
+                  type="text"
+                  name="inlineName"
+                  data-field="name"
+                  value="${escapeHtml(accountName)}"
+                  autocomplete="off"
+                  maxlength="120"
+                  placeholder="Full name"
+                  aria-label="Full name for ${escapeHtml(String(account.email || "user"))}"
+                />
+              </label><br />
               <small class="admin-account-email">
                 <span>${escapeHtml(account.email)}</span>
                 ${authProviderIcon}
@@ -29906,10 +29936,12 @@ function wireAdmin() {
   };
 
   const readAdminUserEnrollmentDraftFromRow = (row) => {
+    const nameInput = row?.querySelector("input[data-field='name']");
     const phoneInput = row?.querySelector("input[data-field='phone']");
     const yearSelect = row?.querySelector("select[data-field='academicYear']");
     const semesterSelect = row?.querySelector("select[data-field='academicSemester']");
     return normalizeAdminUserEnrollmentDraft({
+      name: nameInput?.value ?? "",
       phone: phoneInput?.value ?? "",
       academicYear: yearSelect?.value ?? "",
       academicSemester: semesterSelect?.value ?? "",
@@ -29980,6 +30012,13 @@ function wireAdmin() {
       };
       const role = users[idx].role;
       const previousApproved = Boolean(users[idx].isApproved);
+      const nameInput = row.querySelector("input[data-field='name']");
+      const fullName = String(nameInput?.value || "").trim();
+      if (!fullName) {
+        toast("Full name is required.");
+        return false;
+      }
+      users[idx].name = fullName;
       const phoneInput = row.querySelector("input[data-field='phone']");
       const rawPhone = String(phoneInput?.value || "").trim();
       let normalizedPhone = "";
@@ -30196,10 +30235,11 @@ function wireAdmin() {
   };
 
   appEl.querySelectorAll("tr[data-user-id]").forEach((row) => {
+    const nameInput = row.querySelector("input[data-field='name']");
     const phoneInput = row.querySelector("input[data-field='phone']");
     const yearSelect = row.querySelector("select[data-field='academicYear']");
     const semesterSelect = row.querySelector("select[data-field='academicSemester']");
-    if (!phoneInput && !yearSelect && !semesterSelect) {
+    if (!nameInput && !phoneInput && !yearSelect && !semesterSelect) {
       return;
     }
     const syncEnrollmentDraftPreview = () => {
@@ -30210,6 +30250,8 @@ function wireAdmin() {
     const syncEnrollmentDraftOnly = () => {
       syncAdminUserEnrollmentDraftFromRow(row, { patchUi: false });
     };
+    nameInput?.addEventListener("input", syncEnrollmentDraftOnly);
+    nameInput?.addEventListener("change", syncEnrollmentDraftPreview);
     phoneInput?.addEventListener("input", syncEnrollmentDraftOnly);
     phoneInput?.addEventListener("change", syncEnrollmentDraftPreview);
     yearSelect?.addEventListener("change", syncEnrollmentDraftPreview);

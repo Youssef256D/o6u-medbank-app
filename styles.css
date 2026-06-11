@@ -2510,6 +2510,18 @@ body.theme-comfort .maintenance-badge {
   height: 100%;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .admin-mini-select {
   min-width: 112px;
   max-width: 140px;
@@ -2531,6 +2543,18 @@ body.theme-comfort .maintenance-badge {
   margin: 0.32rem 0 0.28rem;
 }
 
+.admin-inline-name-field {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  margin: 0 0 0.28rem;
+}
+
+.admin-inline-name-input {
+  font-weight: 700;
+}
+
+.admin-inline-name-input,
 .admin-inline-phone-input {
   width: 100%;
 }
@@ -8846,6 +8870,7 @@ html body :is(.title,
     height: 22px;
   }
 
+  .admin-inline-name-field,
   .admin-inline-phone-field,
   .admin-mini-select,
   .admin-mini-input,
