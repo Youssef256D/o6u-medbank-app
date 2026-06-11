@@ -197,6 +197,8 @@ const QUESTION_RELATIONAL_BATCH_SIZE = 100;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const SESSION_HISTORY_SYNC_BATCH_SIZE = 25;
 const SESSION_HISTORY_SYNC_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 45000);
+const SESSION_HISTORY_HYDRATE_PAGE_SIZE = 100;
+const SESSION_HISTORY_HYDRATE_FAILURE_COOLDOWN_MS = 60000;
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
 const SUPABASE_AUTH_FETCH_TIMEOUT_MS = SUPABASE_SESSION_TIMEOUT_MS + 5000;
@@ -685,7 +687,12 @@ let adminApprovedAccessRepairInFlight = false;
 let adminApprovedAccessRepairSignature = "";
 let adminApprovedAccessRepairCompletedSignature = "";
 let adminApprovedAccessRepairAttemptedAt = 0;
+let adminApprovedAccessRepairRetryAfter = 0;
 let adminBackupRestoreLastCheckedAt = 0;
+const relationalSessionHydrationRuntime = {
+  transientFailureAt: 0,
+  transientFailureMessage: "",
+};
 const studentAccessIssueLogTimes = new Map();
 const studentApprovalRevalidationRuntime = {
   profileId: "",
@@ -3919,6 +3926,7 @@ function isLikelyTransientSupabaseError(error) {
     || message.includes("temporarily unavailable")
     || message.includes("gateway timeout")
     || message.includes("request timeout")
+    || message.includes("timed out")
     || message.includes("rate limit")
     || message.includes("too many requests");
 }
@@ -9535,7 +9543,7 @@ async function hydrateRelationalNotifications(currentUser) {
     timeoutMessage: "Notification query timed out.",
   };
   const shouldWarnForNotificationHydrationError = (error) => (
-    error && !isMissingRelationError(error) && !isTimeoutResultError(error)
+    error && !isMissingRelationError(error) && !isLikelyTransientSupabaseError(error)
   );
   let notificationRows = [];
   if (user.role === "admin") {
@@ -9892,6 +9900,12 @@ async function hydrateRelationalSessions(currentUser) {
   if (!currentUser || !client || !relationalSync.enabled || !isUuidValue(userProfileId)) {
     return;
   }
+  if (!shouldHydrateSessionHistoryOnActiveRoute()) {
+    return;
+  }
+  if (isSessionHistoryHydrationCoolingDown()) {
+    return;
+  }
   if (!hasActiveSupabaseSessionForUser(currentUser)) {
     const ready = await ensureRelationalSyncReady({ force: true }).catch(() => false);
     if (!ready || !hasActiveSupabaseSessionForUser(currentUser)) {
@@ -9917,10 +9931,16 @@ async function hydrateRelationalSessions(currentUser) {
       query = query.eq("user_id", userProfileId);
     }
     return query.range(from, to);
+  }, {
+    pageSize: SESSION_HISTORY_HYDRATE_PAGE_SIZE,
+    timeoutMs: SESSION_HISTORY_SYNC_TIMEOUT_MS,
+    timeoutMessage: "Previous test history query timed out.",
   });
   if (historyResult.error) {
+    recordSessionHistoryHydrationResult(historyResult.error);
     return;
   }
+  recordSessionHistoryHydrationResult(null);
   const historyRows = Array.isArray(historyResult.data) ? historyResult.data : [];
   const blockCourseIds = [...new Set(
     historyRows
@@ -10912,6 +10932,38 @@ function shouldDeferSessionHydrationOnActiveRoute(user = null) {
   return hasRenderableLocalSessionRouteState(user);
 }
 
+function shouldHydrateSessionHistoryOnActiveRoute() {
+  const currentRoute = String(state.route || "").trim();
+  return [
+    "dashboard",
+    "create-test",
+    "session",
+    "review",
+    "analytics",
+  ].includes(currentRoute);
+}
+
+function isSessionHistoryHydrationCoolingDown() {
+  const failedAt = Number(relationalSessionHydrationRuntime.transientFailureAt || 0);
+  return failedAt > 0 && (Date.now() - failedAt) < SESSION_HISTORY_HYDRATE_FAILURE_COOLDOWN_MS;
+}
+
+function recordSessionHistoryHydrationResult(error = null) {
+  if (!error) {
+    relationalSessionHydrationRuntime.transientFailureAt = 0;
+    relationalSessionHydrationRuntime.transientFailureMessage = "";
+    return;
+  }
+  if (!isLikelyTransientSupabaseError(error)) {
+    return;
+  }
+  relationalSessionHydrationRuntime.transientFailureAt = Date.now();
+  relationalSessionHydrationRuntime.transientFailureMessage = getErrorMessage(
+    error,
+    "Previous test history is temporarily unavailable.",
+  );
+}
+
 function mergeHydratedCourseTopicGroupsWithLocal(remotePayload) {
   const remoteGroups = normalizeCourseTopicGroupMap(remotePayload);
   const localGroups = normalizeCourseTopicGroupMap(load(STORAGE_KEYS.courseTopicGroups, {}));
@@ -11814,7 +11866,9 @@ async function flushRelationalWrites(options = {}) {
         }
         scheduleSyncStatusUiRefresh();
       } catch (error) {
-        console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+        if (!isLikelyTransientSupabaseError(error)) {
+          console.warn(`Relational sync failed for ${storageKey}.`, error?.message || error);
+        }
         const retryPayload = (
           storageKey === STORAGE_KEYS.sessions
           && Array.isArray(error?.retryRelationalPayload)
@@ -32478,6 +32532,7 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
     adminApprovedAccessRepairSignature = "";
     adminApprovedAccessRepairCompletedSignature = "";
     adminApprovedAccessRepairAttemptedAt = 0;
+    adminApprovedAccessRepairRetryAfter = 0;
     return;
   }
   if (isBrowserOffline() || !getSupabaseAuthClient() || !hasActiveSupabaseSessionForUser(currentUser)) {
@@ -32488,6 +32543,9 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
 
   const nowTs = Date.now();
   if (adminApprovedAccessRepairInFlight) {
+    return;
+  }
+  if (adminApprovedAccessRepairRetryAfter && nowTs < adminApprovedAccessRepairRetryAfter) {
     return;
   }
   if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
@@ -32516,20 +32574,32 @@ function scheduleApprovedAdminUserAccessRepair(users = null, actorUser = null) {
       }
       if (!repairResult.failedIds.length) {
         adminApprovedAccessRepairCompletedSignature = nextSignature;
+        adminApprovedAccessRepairRetryAfter = 0;
       } else if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
         adminApprovedAccessRepairCompletedSignature = "";
       }
       if (!repairResult.ok && repairResult.failedIds.length) {
-        console.warn(
-          `Approved user auth access repair failed for ${repairResult.failedIds.length} account(s).`,
-          repairResult.message || "Unknown error.",
-        );
+        const repairError = {
+          message: repairResult.message || "Unknown error.",
+        };
+        if (isLikelyTransientSupabaseError(repairError)) {
+          adminApprovedAccessRepairRetryAfter = Date.now() + (5 * ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS);
+        } else {
+          console.warn(
+            `Approved user auth access repair failed for ${repairResult.failedIds.length} account(s).`,
+            repairResult.message || "Unknown error.",
+          );
+        }
       }
     } catch (error) {
       if (adminApprovedAccessRepairCompletedSignature === nextSignature) {
         adminApprovedAccessRepairCompletedSignature = "";
       }
-      console.warn("Approved user auth access repair failed.", error?.message || error);
+      if (isLikelyTransientSupabaseError(error)) {
+        adminApprovedAccessRepairRetryAfter = Date.now() + (5 * ADMIN_APPROVED_ACCESS_REPAIR_COOLDOWN_MS);
+      } else {
+        console.warn("Approved user auth access repair failed.", error?.message || error);
+      }
     } finally {
       adminApprovedAccessRepairInFlight = false;
     }
@@ -42471,6 +42541,15 @@ function getActiveLessonVideoFullscreenContainer() {
   return document.querySelector(".lesson-video.is-pseudo-fullscreen");
 }
 
+function getActiveNativeLessonVideoFullscreenContainer() {
+  const activeElement = getActiveFullscreenElement();
+  return activeElement?.classList?.contains("lesson-video") ? activeElement : null;
+}
+
+function getCurrentLessonVideoFullscreenContainer() {
+  return getActiveNativeLessonVideoFullscreenContainer() || getActiveLessonVideoFullscreenContainer();
+}
+
 function getLessonVideoPlaybackState(video) {
   if (!video) return null;
   return {
@@ -42523,9 +42602,20 @@ async function requestLessonVideoFullscreen(container) {
   try {
     const video = container.querySelector("#course-lesson-video-player");
     courseVideoRuntime.fullscreenPlaybackState = getLessonVideoPlaybackState(video);
-    const activeContainer = getActiveLessonVideoFullscreenContainer();
+    const activeContainer = getCurrentLessonVideoFullscreenContainer();
     if (activeContainer && activeContainer !== container) {
       await exitLessonVideoFullscreen();
+    }
+    const nativeRequestFullscreen = container.requestFullscreen || container.webkitRequestFullscreen;
+    if (nativeRequestFullscreen) {
+      try {
+        document.body.classList.add("is-lesson-video-fullscreen");
+        await nativeRequestFullscreen.call(container);
+        restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
+        return getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container;
+      } catch (fullscreenError) {
+        document.body.classList.remove("is-lesson-video-fullscreen");
+      }
     }
     if (!courseVideoRuntime.fullscreenPlaceholder || !courseVideoRuntime.fullscreenPlaceholder.isConnected) {
       const placeholder = document.createComment("lesson-video-fullscreen-placeholder");
@@ -42538,23 +42628,17 @@ async function requestLessonVideoFullscreen(container) {
     container.classList.add("is-pseudo-fullscreen");
     document.body.classList.add("is-lesson-video-fullscreen");
     restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
-    if (!getActiveFullscreenElement()) {
-      if (container.requestFullscreen) {
-        await container.requestFullscreen();
-      } else if (container.webkitRequestFullscreen) {
-        container.webkitRequestFullscreen();
-      }
-    }
     return true;
   } catch (error) {
     console.warn("Could not enter lesson video fullscreen.", error?.message || error);
-    return Boolean(getActiveLessonVideoFullscreenContainer() === container);
+    document.body.classList.remove("is-lesson-video-fullscreen");
+    return Boolean(getCurrentLessonVideoFullscreenContainer() === container);
   }
 }
 
 async function exitLessonVideoFullscreen() {
   try {
-    const container = getActiveLessonVideoFullscreenContainer();
+    const container = getCurrentLessonVideoFullscreenContainer();
     const video = container?.querySelector("#course-lesson-video-player");
     const snapshot = getLessonVideoPlaybackState(video) || courseVideoRuntime.fullscreenPlaybackState;
     courseVideoRuntime.fullscreenPlaybackState = snapshot;
@@ -42565,7 +42649,11 @@ async function exitLessonVideoFullscreen() {
         document.webkitExitFullscreen();
       }
     }
-    restoreLessonVideoFullscreenContainer();
+    if (getActiveLessonVideoFullscreenContainer() === container) {
+      restoreLessonVideoFullscreenContainer();
+    } else {
+      document.body.classList.remove("is-lesson-video-fullscreen");
+    }
     restoreLessonVideoPlaybackState(video, snapshot);
     return true;
   } catch (error) {
@@ -42603,12 +42691,13 @@ function wireLessonVideoPlayerControls() {
     if (muteButton) muteButton.setAttribute("aria-label", video.muted || video.volume === 0 ? "Unmute video" : "Mute video");
     if (currentTimeEl) currentTimeEl.textContent = formatLessonVideoClock(current);
     if (durationEl) durationEl.textContent = duration ? formatLessonVideoClock(duration) : "0:00";
-    if (seek && duration) {
-      seek.value = video.ended ? "1000" : String(Math.max(0, Math.min(1000, Math.round((current / duration) * 1000))));
+    if (seek) {
+      const progressValue = duration ? (video.ended ? 1000 : Math.max(0, Math.min(1000, Math.round((current / duration) * 1000)))) : 0;
+      seek.value = String(progressValue);
+      seek.style.setProperty("--lesson-video-progress", `${progressValue / 10}%`);
     }
     if (fullscreenButton) {
-      const fullscreenActive = getActiveLessonVideoFullscreenContainer() === container
-        || getActiveFullscreenElement() === container;
+      const fullscreenActive = getCurrentLessonVideoFullscreenContainer() === container;
       fullscreenButton.setAttribute(
         "aria-label",
         fullscreenActive ? "Exit fullscreen video" : "Fullscreen video",
@@ -42649,6 +42738,7 @@ function wireLessonVideoPlayerControls() {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
     if (!duration) return;
     video.currentTime = (Number(seek.value) / 1000) * duration;
+    seek.style.setProperty("--lesson-video-progress", `${Math.max(0, Math.min(1000, Number(seek.value) || 0)) / 10}%`);
     syncControls();
   });
 
@@ -42667,7 +42757,7 @@ function wireLessonVideoPlayerControls() {
   fullscreenButton?.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
-    if (getActiveLessonVideoFullscreenContainer() === container || getActiveFullscreenElement() === container) {
+    if (getCurrentLessonVideoFullscreenContainer() === container) {
       await exitLessonVideoFullscreen();
     } else {
       const didEnterFullscreen = await requestLessonVideoFullscreen(container);
@@ -42686,9 +42776,13 @@ function wireLessonVideoPlayerControls() {
   });
 
   const handleFullscreenChange = () => {
-    if (!getActiveFullscreenElement() && getActiveLessonVideoFullscreenContainer() === container) {
-      const snapshot = courseVideoRuntime.fullscreenPlaybackState || getLessonVideoPlaybackState(video);
-      restoreLessonVideoFullscreenContainer();
+    if (!getActiveFullscreenElement() && document.body.classList.contains("is-lesson-video-fullscreen")) {
+      const snapshot = getLessonVideoPlaybackState(video) || courseVideoRuntime.fullscreenPlaybackState;
+      if (getActiveLessonVideoFullscreenContainer() === container) {
+        restoreLessonVideoFullscreenContainer();
+      } else {
+        document.body.classList.remove("is-lesson-video-fullscreen");
+      }
       restoreLessonVideoPlaybackState(video, snapshot);
     }
     syncControls();
