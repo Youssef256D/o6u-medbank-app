@@ -13178,6 +13178,32 @@ body.theme-comfort .courses-page-stat-icon {
   }
 }
 
+body.is-lesson-video-fullscreen .card:hover {
+  transform: none;
+}
+
+body.is-courses-route .lesson-video:fullscreen,
+body.is-courses-route .lesson-video:-webkit-full-screen,
+body.is-courses-route .lesson-video.is-pseudo-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  width: 100dvw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100vh;
+  min-height: 0;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+body.is-courses-route .lesson-video:fullscreen .lesson-video-controls,
+body.is-courses-route .lesson-video:-webkit-full-screen .lesson-video-controls,
+body.is-courses-route .lesson-video.is-pseudo-fullscreen .lesson-video-controls {
+  border-radius: 0;
+}
+
 .course-card-badge-open {
   background: #e8f5e9;
   color: #2e7d32;

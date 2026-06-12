@@ -29,6 +29,7 @@ const STORAGE_KEYS = {
   pendingQuestionDeletions: "mcq_pending_question_deletions",
   pendingCourseDeletions: "mcq_pending_course_deletions",
   pendingCourseTopicDeletions: "mcq_pending_course_topic_deletions",
+  courseVideoResume: "mcq_course_video_resume",
 };
 
 const appEl = document.getElementById("app");
@@ -960,6 +961,11 @@ const courseVideoRuntime = {
   entries: new Map(),
   fullscreenPlaceholder: null,
   fullscreenPlaybackState: null,
+  fullscreenInteractionLockedUntil: 0,
+  playbackStates: new Map(),
+  pendingPlaybackRestore: null,
+  preservedPlaybackContainer: null,
+  lastResumeStorageWriteAt: 0,
 };
 const cloudflareStreamRuntime = {
   entries: new Map(),
@@ -18849,6 +18855,8 @@ function restoreFocusState() {
 }
 
 function render() {
+  persistActiveLessonVideoPlaybackState({ source: "render", allowAutoplayRestore: true });
+  preserveActiveLessonVideoContainerForRender();
   saveFocusState();
   document.body.classList.remove("no-panel-animations");
   clearTimer();
@@ -18857,6 +18865,7 @@ function render() {
   document.removeEventListener("keydown", handleSessionKeydown);
   document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
   document.removeEventListener("keydown", handleReviewKeydown);
+  cleanupDetachedLessonVideoFullscreenArtifacts();
 
   const user = getCurrentUser();
   const authRestorePending = isSupabaseAuthRestorePending(user, state.route);
@@ -19156,6 +19165,7 @@ function render() {
         appEl.innerHTML = renderLanding();
     }
   }
+  discardUnrestoredLessonVideoContainer();
 
   const isAdminQuestionModalOpen = state.route === "admin" && state.adminPage === "questions" && state.adminQuestionModalOpen;
   const isAdminCourseTopicModalOpen = state.route === "admin" && state.adminPage === "courses" && Boolean(state.adminCourseTopicModalCourse);
@@ -42612,6 +42622,204 @@ function getCurrentLessonVideoFullscreenContainer() {
   return getActiveNativeLessonVideoFullscreenContainer() || getActiveLessonVideoFullscreenContainer();
 }
 
+function getCourseVideoResumeStorageKey(lessonId = state.coursesActiveLessonId) {
+  const safeLessonId = String(lessonId || "").trim();
+  if (!safeLessonId) return "";
+  const user = getCurrentUser();
+  const userKey = String(user?.id || user?.email || user?.name || "anonymous").trim() || "anonymous";
+  return `${userKey}:${safeLessonId}`;
+}
+
+function getStoredCourseVideoResumeStore() {
+  return load(STORAGE_KEYS.courseVideoResume, {});
+}
+
+function writeCourseVideoResumeSnapshot(key, snapshot, options = {}) {
+  if (!key || !snapshot) return;
+  const now = Date.now();
+  const force = options?.force === true;
+  if (!force && now - Number(courseVideoRuntime.lastResumeStorageWriteAt || 0) < 2500) {
+    return;
+  }
+  courseVideoRuntime.lastResumeStorageWriteAt = now;
+  const store = getStoredCourseVideoResumeStore();
+  const persistedSnapshot = {
+    ...snapshot,
+    paused: true,
+    allowAutoplayRestore: false,
+    updatedAt: now,
+  };
+  store[key] = persistedSnapshot;
+
+  const entries = Object.entries(store)
+    .filter(([, value]) => value && typeof value === "object")
+    .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))
+    .slice(0, 80);
+  save(STORAGE_KEYS.courseVideoResume, Object.fromEntries(entries));
+}
+
+function persistActiveLessonVideoPlaybackState(options = {}) {
+  const video = appEl?.querySelector("#course-lesson-video-player");
+  if (!video) return null;
+  const lessonId = String(state.coursesActiveLessonId || "").trim();
+  const key = getCourseVideoResumeStorageKey(lessonId);
+  if (!key) return null;
+  const snapshot = {
+    ...getLessonVideoPlaybackState(video),
+    lessonId,
+    key,
+    duration: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0,
+    sourceUrl: String(video.currentSrc || video.getAttribute("src") || "").trim(),
+    allowAutoplayRestore: options?.allowAutoplayRestore === true,
+    updatedAt: Date.now(),
+  };
+  if (video.ended || Number(snapshot.currentTime || 0) < 0.75) {
+    return snapshot;
+  }
+  courseVideoRuntime.playbackStates.set(key, snapshot);
+  courseVideoRuntime.pendingPlaybackRestore = snapshot;
+  writeCourseVideoResumeSnapshot(key, snapshot, { force: options?.forceStorage === true });
+  return snapshot;
+}
+
+function getRestorableLessonVideoPlaybackState() {
+  const key = getCourseVideoResumeStorageKey();
+  if (!key) return null;
+  const pending = courseVideoRuntime.pendingPlaybackRestore;
+  if (pending?.key === key) {
+    return pending;
+  }
+  const runtimeSnapshot = courseVideoRuntime.playbackStates.get(key);
+  if (runtimeSnapshot) {
+    return runtimeSnapshot;
+  }
+  const storedSnapshot = getStoredCourseVideoResumeStore()?.[key];
+  if (!storedSnapshot || typeof storedSnapshot !== "object") {
+    return null;
+  }
+  const ageMs = Date.now() - Number(storedSnapshot.updatedAt || 0);
+  if (!Number.isFinite(ageMs) || ageMs > 1000 * 60 * 60 * 24 * 30) {
+    return null;
+  }
+  return {
+    ...storedSnapshot,
+    paused: true,
+    allowAutoplayRestore: false,
+  };
+}
+
+function restoreActiveLessonVideoPlaybackState(video) {
+  const snapshot = getRestorableLessonVideoPlaybackState();
+  if (!video || !snapshot) return null;
+  const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Number(snapshot.duration || 0);
+  const targetTime = Number(snapshot.currentTime || 0);
+  if (!Number.isFinite(targetTime) || targetTime < 0.75) {
+    return null;
+  }
+  if (duration && targetTime >= Math.max(0, duration - 0.35)) {
+    return null;
+  }
+  restoreLessonVideoPlaybackState(video, {
+    ...snapshot,
+    paused: snapshot.allowAutoplayRestore ? Boolean(snapshot.paused) : true,
+  });
+  courseVideoRuntime.pendingPlaybackRestore = null;
+  return snapshot;
+}
+
+function preserveActiveLessonVideoContainerForRender() {
+  if (state.route !== "courses" || state.coursesView !== "lesson") return null;
+  const video = appEl?.querySelector("#course-lesson-video-player");
+  const container = video?.closest(".lesson-video");
+  const key = getCourseVideoResumeStorageKey();
+  if (!video || !container || !key || !appEl.contains(container)) return null;
+  const snapshot = persistActiveLessonVideoPlaybackState({
+    source: "preserve",
+    allowAutoplayRestore: !video.paused && !video.ended,
+    forceStorage: true,
+  });
+  if (!snapshot) return null;
+  courseVideoRuntime.preservedPlaybackContainer = {
+    key,
+    lessonId: String(state.coursesActiveLessonId || "").trim(),
+    container,
+    snapshot,
+    createdAt: Date.now(),
+  };
+  container.remove();
+  return courseVideoRuntime.preservedPlaybackContainer;
+}
+
+function restorePreservedLessonVideoContainerForRender() {
+  const preserved = courseVideoRuntime.preservedPlaybackContainer;
+  if (!preserved?.container) return null;
+  const key = getCourseVideoResumeStorageKey();
+  if (!key || preserved.key !== key || state.route !== "courses" || state.coursesView !== "lesson") {
+    return null;
+  }
+  const freshVideo = appEl?.querySelector("#course-lesson-video-player");
+  const freshContainer = freshVideo?.closest(".lesson-video");
+  if (!freshContainer) {
+    return null;
+  }
+  freshContainer.replaceWith(preserved.container);
+  courseVideoRuntime.pendingPlaybackRestore = preserved.snapshot;
+  restoreLessonVideoPlaybackState(
+    preserved.container.querySelector("#course-lesson-video-player"),
+    preserved.snapshot,
+  );
+  courseVideoRuntime.preservedPlaybackContainer = null;
+  return preserved.container;
+}
+
+function discardUnrestoredLessonVideoContainer() {
+  const preserved = courseVideoRuntime.preservedPlaybackContainer;
+  if (!preserved?.container) return;
+  if (preserved.container.isConnected) {
+    courseVideoRuntime.preservedPlaybackContainer = null;
+    return;
+  }
+  preserved.container.querySelectorAll("video").forEach((video) => {
+    try {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    } catch {
+      // Best-effort cleanup for a player preserved across a render but no longer needed.
+    }
+  });
+  courseVideoRuntime.preservedPlaybackContainer = null;
+}
+
+function lockLessonVideoFullscreenInteraction(durationMs = 450) {
+  courseVideoRuntime.fullscreenInteractionLockedUntil = Date.now() + Math.max(0, Number(durationMs) || 0);
+}
+
+function cleanupDetachedLessonVideoFullscreenArtifacts() {
+  document.querySelectorAll("body > .lesson-video").forEach((container) => {
+    if (appEl.contains(container)) return;
+    container.querySelectorAll("video").forEach((video) => {
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch {
+        // Best-effort cleanup for stale players that were detached during fullscreen.
+      }
+    });
+    container.remove();
+  });
+  const placeholder = courseVideoRuntime.fullscreenPlaceholder;
+  if (placeholder?.parentNode) {
+    placeholder.remove();
+  }
+  courseVideoRuntime.fullscreenPlaceholder = null;
+  document.querySelectorAll(".lesson-video.is-pseudo-fullscreen").forEach((container) => {
+    container.classList.remove("is-pseudo-fullscreen");
+  });
+  document.body.classList.remove("is-lesson-video-fullscreen");
+}
+
 function getLessonVideoPlaybackState(video) {
   if (!video) return null;
   return {
@@ -42682,14 +42890,6 @@ async function requestLessonVideoFullscreen(container) {
         document.body.classList.remove("is-lesson-video-fullscreen");
       }
     }
-    if (!courseVideoRuntime.fullscreenPlaceholder || !courseVideoRuntime.fullscreenPlaceholder.isConnected) {
-      const placeholder = document.createComment("lesson-video-fullscreen-placeholder");
-      container.parentNode?.insertBefore(placeholder, container);
-      courseVideoRuntime.fullscreenPlaceholder = placeholder;
-    }
-    if (container.parentNode !== document.body) {
-      document.body.appendChild(container);
-    }
     container.classList.add("is-pseudo-fullscreen");
     document.body.classList.add("is-lesson-video-fullscreen");
     restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
@@ -42707,6 +42907,7 @@ async function exitLessonVideoFullscreen() {
     const video = container?.querySelector("#course-lesson-video-player");
     const snapshot = getLessonVideoPlaybackState(video) || courseVideoRuntime.fullscreenPlaybackState;
     courseVideoRuntime.fullscreenPlaybackState = snapshot;
+    lockLessonVideoFullscreenInteraction();
     if (getActiveFullscreenElement()) {
       if (document.exitFullscreen) {
         await document.exitFullscreen();
@@ -42729,9 +42930,14 @@ async function exitLessonVideoFullscreen() {
 }
 
 function wireLessonVideoPlayerControls() {
+  restorePreservedLessonVideoContainerForRender();
   const video = appEl.querySelector("#course-lesson-video-player");
   if (!video) return;
   const container = video.closest(".lesson-video");
+  if (container?.dataset.lessonVideoControlsWired === "true") {
+    restoreActiveLessonVideoPlaybackState(video);
+    return;
+  }
   const playButton = container?.querySelector("[data-video-control='play']");
   const playIcon = container?.querySelector("[data-video-play-icon]");
   const seek = container?.querySelector("[data-video-control='seek']");
@@ -42756,6 +42962,13 @@ function wireLessonVideoPlayerControls() {
     if (muteButton) muteButton.setAttribute("aria-label", video.muted || video.volume === 0 ? "Unmute video" : "Mute video");
     if (currentTimeEl) currentTimeEl.textContent = formatLessonVideoClock(current);
     if (durationEl) durationEl.textContent = duration ? formatLessonVideoClock(duration) : "0:00";
+    if (speedSelect) {
+      const rate = Math.max(0.25, Math.min(3, Number(video.playbackRate) || 1));
+      const nextValue = String(rate);
+      if (speedSelect.value !== nextValue) {
+        speedSelect.value = nextValue;
+      }
+    }
     if (seek) {
       const progressValue = duration ? (video.ended ? 1000 : Math.max(0, Math.min(1000, Math.round((current / duration) * 1000)))) : 0;
       seek.value = String(progressValue);
@@ -42771,6 +42984,9 @@ function wireLessonVideoPlayerControls() {
   };
 
   const togglePlay = () => {
+    if (Date.now() < Number(courseVideoRuntime.fullscreenInteractionLockedUntil || 0)) {
+      return;
+    }
     if (video.paused) {
       video.play().catch((error) => {
         toast(getErrorMessage(error, "Video could not start."));
@@ -42786,36 +43002,56 @@ function wireLessonVideoPlayerControls() {
     togglePlay();
   });
   video.addEventListener("click", togglePlay);
-  video.addEventListener("play", syncControls);
-  video.addEventListener("pause", syncControls);
-  video.addEventListener("loadedmetadata", syncControls, { once: true });
+  video.addEventListener("play", () => {
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
+    syncControls();
+  });
+  video.addEventListener("pause", () => {
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
+    syncControls();
+  });
+  video.addEventListener("loadedmetadata", () => {
+    restoreActiveLessonVideoPlaybackState(video);
+    window.setTimeout(syncControls, 140);
+    syncControls();
+  }, { once: true });
   video.addEventListener("durationchange", syncControls);
   video.addEventListener("timeupdate", syncControls);
   video.addEventListener("timeupdate", () => {
+    persistActiveLessonVideoPlaybackState();
     if (getActiveLessonVideoFullscreenContainer() === container || getActiveFullscreenElement() === container) {
       courseVideoRuntime.fullscreenPlaybackState = getLessonVideoPlaybackState(video);
     }
   });
-  video.addEventListener("ended", syncControls);
-  video.addEventListener("volumechange", syncControls);
+  video.addEventListener("ended", () => {
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
+    syncControls();
+  });
+  video.addEventListener("volumechange", () => {
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
+    syncControls();
+  });
 
   seek?.addEventListener("input", () => {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
     if (!duration) return;
     video.currentTime = (Number(seek.value) / 1000) * duration;
     seek.style.setProperty("--lesson-video-progress", `${Math.max(0, Math.min(1000, Number(seek.value) || 0)) / 10}%`);
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
     syncControls();
   });
 
   speedSelect?.addEventListener("change", () => {
     const nextRate = Math.max(0.25, Math.min(3, Number(speedSelect.value) || 1));
     video.playbackRate = nextRate;
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
   });
 
   muteButton?.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     video.muted = !video.muted;
+    persistActiveLessonVideoPlaybackState({ forceStorage: true });
     syncControls();
   });
 
@@ -42843,6 +43079,7 @@ function wireLessonVideoPlayerControls() {
   const handleFullscreenChange = () => {
     if (!getActiveFullscreenElement() && document.body.classList.contains("is-lesson-video-fullscreen")) {
       const snapshot = getLessonVideoPlaybackState(video) || courseVideoRuntime.fullscreenPlaybackState;
+      lockLessonVideoFullscreenInteraction();
       if (getActiveLessonVideoFullscreenContainer() === container) {
         restoreLessonVideoFullscreenContainer();
       } else {
@@ -42854,6 +43091,11 @@ function wireLessonVideoPlayerControls() {
   };
   document.addEventListener("fullscreenchange", handleFullscreenChange);
   document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+  if (container) {
+    container.dataset.lessonVideoControlsWired = "true";
+  }
+  restoreActiveLessonVideoPlaybackState(video);
+  window.setTimeout(syncControls, 160);
   syncControls();
 }
 
@@ -42892,26 +43134,30 @@ function wireCourses() {
 
   wireLessonVideoPlayerControls();
 
-  appEl.querySelector("#course-lesson-video-player")?.addEventListener("ended", async () => {
-    const lessonId = String(state.coursesActiveLessonId || "").trim();
-    if (!lessonId) return;
-    if (!(state.coursesWatchedLessonIds instanceof Set)) {
-      state.coursesWatchedLessonIds = new Set();
-    }
-    state.coursesWatchedLessonIds.add(lessonId);
-    const progressSaved = await updateLessonProgress(lessonId, "in_progress", 95);
-    if (!progressSaved) return;
-    toast("Video watched. You can mark this lesson complete.");
-    const completeButton = [...appEl.querySelectorAll("[data-action='courses-complete-lesson']")]
-      .find((button) => String(button.getAttribute("data-lesson-id") || "").trim() === lessonId);
-    if (completeButton) {
-      completeButton.disabled = false;
-    }
-    const completionNote = appEl.querySelector(".lesson-completion-note");
-    if (completionNote) {
-      completionNote.textContent = "Video watched. You can mark this lesson complete.";
-    }
-  });
+  const lessonVideoForCompletion = appEl.querySelector("#course-lesson-video-player");
+  if (lessonVideoForCompletion && lessonVideoForCompletion.dataset.lessonCompletionWired !== "true") {
+    lessonVideoForCompletion.dataset.lessonCompletionWired = "true";
+    lessonVideoForCompletion.addEventListener("ended", async () => {
+      const lessonId = String(state.coursesActiveLessonId || "").trim();
+      if (!lessonId) return;
+      if (!(state.coursesWatchedLessonIds instanceof Set)) {
+        state.coursesWatchedLessonIds = new Set();
+      }
+      state.coursesWatchedLessonIds.add(lessonId);
+      const progressSaved = await updateLessonProgress(lessonId, "in_progress", 95);
+      if (!progressSaved) return;
+      toast("Video watched. You can mark this lesson complete.");
+      const completeButton = [...appEl.querySelectorAll("[data-action='courses-complete-lesson']")]
+        .find((button) => String(button.getAttribute("data-lesson-id") || "").trim() === lessonId);
+      if (completeButton) {
+        completeButton.disabled = false;
+      }
+      const completionNote = appEl.querySelector(".lesson-completion-note");
+      if (completionNote) {
+        completionNote.textContent = "Video watched. You can mark this lesson complete.";
+      }
+    });
+  }
 
   appEl.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
