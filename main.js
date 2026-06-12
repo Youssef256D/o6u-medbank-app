@@ -26241,44 +26241,46 @@ function renderAdmin() {
                 ${selectionDisabledReason ? `title="${escapeHtml(selectionDisabledReason)}"` : ""}
               />
             </td>
-            <td class="admin-user-account">
-              <label class="admin-inline-name-field">
-                <span class="sr-only">Full name for ${escapeHtml(String(account.email || "user"))}</span>
-                <input
-                  class="admin-mini-input admin-inline-name-input"
-                  type="text"
-                  name="inlineName"
-                  data-field="name"
-                  value="${escapeHtml(accountName)}"
-                  autocomplete="off"
-                  maxlength="120"
-                  placeholder="Full name"
-                  aria-label="Full name for ${escapeHtml(String(account.email || "user"))}"
-                />
-              </label><br />
-              <small class="admin-account-email">
-                <span>${escapeHtml(account.email)}</span>
-                ${authProviderIcon}
-              </small><br />
-              <label class="admin-inline-phone-field">
-                <input
-                  class="admin-mini-input admin-inline-phone-input"
-                  type="tel"
-                  name="inlinePhone"
-                  data-field="phone"
-                  value="${escapeHtml(accountPhone)}"
-                  inputmode="tel"
-                  autocomplete="off"
-                  maxlength="20"
-                  placeholder="+20 10 0000 0000"
-                  aria-label="Phone number for ${escapeHtml(String(account.name || account.email || "user"))}"
-                />
-              </label>
-              <small>
-                <span class="badge ${isApproved ? "good" : "bad"}" data-user-status-badge>${isApproved ? "approved" : "pending"}</span>
-                ${account.role === "student" ? `<span class="badge ${mcqAccessEnabled ? "good" : "neutral"}" data-user-mcq-status-badge>MCQ ${mcqAccessEnabled ? "on" : "off"}</span>` : ""}
-                ${account.role === "student" ? `<span class="badge ${coursesAccessEnabled ? "good" : "neutral"}" data-user-courses-status-badge>Courses ${coursesAccessEnabled ? "on" : "off"}</span>` : ""}
-              </small>
+            <td>
+              <div class="admin-user-account">
+                <label class="admin-inline-name-field">
+                  <span class="sr-only">Full name for ${escapeHtml(String(account.email || "user"))}</span>
+                  <input
+                    class="admin-mini-input admin-inline-name-input"
+                    type="text"
+                    name="inlineName"
+                    data-field="name"
+                    value="${escapeHtml(accountName)}"
+                    autocomplete="off"
+                    maxlength="120"
+                    placeholder="Full name"
+                    aria-label="Full name for ${escapeHtml(String(account.email || "user"))}"
+                  />
+                </label><br />
+                <small class="admin-account-email">
+                  <span>${escapeHtml(account.email)}</span>
+                  ${authProviderIcon}
+                </small><br />
+                <label class="admin-inline-phone-field">
+                  <input
+                    class="admin-mini-input admin-inline-phone-input"
+                    type="tel"
+                    name="inlinePhone"
+                    data-field="phone"
+                    value="${escapeHtml(accountPhone)}"
+                    inputmode="tel"
+                    autocomplete="off"
+                    maxlength="20"
+                    placeholder="+20 10 0000 0000"
+                    aria-label="Phone number for ${escapeHtml(String(account.name || account.email || "user"))}"
+                  />
+                </label>
+                <small>
+                  <span class="badge ${isApproved ? "good" : "bad"}" data-user-status-badge>${isApproved ? "approved" : "pending"}</span>
+                  ${account.role === "student" ? `<span class="badge ${mcqAccessEnabled ? "good" : "neutral"}" data-user-mcq-status-badge>MCQ ${mcqAccessEnabled ? "on" : "off"}</span>` : ""}
+                  ${account.role === "student" ? `<span class="badge ${coursesAccessEnabled ? "good" : "neutral"}" data-user-courses-status-badge>Courses ${coursesAccessEnabled ? "on" : "off"}</span>` : ""}
+                </small>
+              </div>
             </td>
             <td><span class="badge ${account.role === "admin" ? "good" : "neutral"}">${escapeHtml(account.role)}</span></td>
             <td>
