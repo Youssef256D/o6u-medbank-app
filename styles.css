@@ -2368,7 +2368,8 @@ body.theme-comfort .maintenance-badge {
 
 .admin-users-table th,
 .admin-users-table td {
-  vertical-align: top;
+  vertical-align: middle;
+  padding: 0.8rem 0.5rem;
 }
 
 .admin-users-filter-form {
@@ -2445,31 +2446,31 @@ body.theme-comfort .maintenance-badge {
 }
 
 .admin-users-table .col-select {
-  width: 6%;
+  width: 4%;
 }
 
 .admin-users-table .col-account {
-  width: 22%;
+  width: 24%;
 }
 
 .admin-users-table .col-role {
-  width: 10%;
+  width: 8%;
 }
 
 .admin-users-table .col-year {
-  width: 11%;
+  width: 9%;
 }
 
 .admin-users-table .col-semester {
-  width: 13%;
+  width: 11%;
 }
 
 .admin-users-table .col-courses {
-  width: 21%;
+  width: 18%;
 }
 
 .admin-users-table .col-actions {
-  width: 17%;
+  width: 26%;
 }
 
 .admin-user-select-cell {
@@ -2486,6 +2487,85 @@ body.theme-comfort .maintenance-badge {
   accent-color: var(--brand);
 }
 
+.admin-user-account {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.admin-user-account br {
+  display: none;
+}
+
+.admin-users-table .admin-mini-input {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 6px;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.88rem;
+  height: 30px;
+  box-sizing: border-box;
+  font-family: var(--font-admin-ui);
+  transition: all 0.15s ease-in-out;
+}
+
+.admin-users-table .admin-mini-input:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.admin-users-table .admin-mini-input:focus {
+  outline: none;
+  border-color: var(--brand);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+
+.admin-users-table .admin-mini-select {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 8px;
+  padding: 0.35rem 1.8rem 0.35rem 0.65rem;
+  font-size: 0.88rem;
+  height: 32px;
+  box-sizing: border-box;
+  font-family: var(--font-admin-ui);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23486581'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 0.85rem;
+  cursor: pointer;
+}
+
+.admin-users-table .admin-mini-select:hover {
+  border-color: var(--line-strong);
+  background-color: var(--surface);
+}
+
+.admin-users-table .admin-mini-select:focus {
+  outline: none;
+  border-color: var(--brand);
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+
+.admin-users-table .badge {
+  border-radius: 6px;
+  font-size: 0.68rem;
+  padding: 0.15rem 0.45rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.admin-user-account small:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.1rem;
+}
+
 .admin-user-account b {
   font-size: 1rem;
 }
@@ -2495,6 +2575,9 @@ body.theme-comfort .maintenance-badge {
   align-items: center;
   gap: 0.3rem;
   flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.05rem 0;
 }
 
 .admin-auth-provider-icon {
@@ -2540,14 +2623,14 @@ body.theme-comfort .maintenance-badge {
   display: block;
   width: 100%;
   max-width: 220px;
-  margin: 0.32rem 0 0.28rem;
+  margin: 0;
 }
 
 .admin-inline-name-field {
   display: block;
   width: 100%;
   max-width: 220px;
-  margin: 0 0 0.28rem;
+  margin: 0;
 }
 
 .admin-inline-name-input {
@@ -2559,8 +2642,20 @@ body.theme-comfort .maintenance-badge {
   width: 100%;
 }
 
+#admin-users-section tbody tr td {
+  transition: background-color 0.15s ease;
+}
+
+#admin-users-section tbody tr:hover td {
+  background-color: rgba(23, 126, 137, 0.025);
+}
+
 #admin-users-section tbody tr.is-selected td {
-  background: rgba(23, 126, 137, 0.08);
+  background-color: rgba(23, 126, 137, 0.08);
+}
+
+#admin-users-section tbody tr.is-selected:hover td {
+  background-color: rgba(23, 126, 137, 0.11);
 }
 
 .admin-na {
@@ -2581,14 +2676,45 @@ body.theme-comfort .maintenance-badge {
 }
 
 .admin-course-preview {
-  display: inline-block;
-  font-size: 0.92rem;
+  display: block;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  border: 1px solid rgba(23, 126, 137, 0.18);
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .admin-user-actions {
-  display: grid;
-  gap: 0.42rem;
-  justify-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  width: 100%;
+}
+
+.admin-user-actions .btn,
+.admin-user-actions .admin-access-switch {
+  flex: 1 1 calc(50% - 0.25rem);
+  min-width: 110px;
+  justify-content: center;
+  box-sizing: border-box;
+  margin: 0;
+  height: 32px;
+  min-height: 32px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.82rem;
+  border-radius: 8px;
+}
+
+.admin-user-actions .admin-access-switch {
+  border-radius: 8px;
+  min-width: 114px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0.25rem 0.65rem;
 }
 
 .admin-course-topics {
@@ -3719,10 +3845,10 @@ body.theme-comfort .maintenance-badge {
   gap: 0.45rem;
   min-width: 126px;
   min-height: 36px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.86);
-  color: var(--text);
+  color: var(--ink);
   cursor: pointer;
   font-weight: 800;
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
@@ -8875,9 +9001,16 @@ html body :is(.title,
   .admin-mini-select,
   .admin-mini-input,
   .admin-user-actions,
-  .admin-user-actions .btn {
+  .admin-user-actions .btn,
+  .admin-user-actions .admin-access-switch {
     width: 100%;
     max-width: none;
+    flex: 1 1 auto;
+  }
+
+  .admin-user-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .admin-users-table-wrap .badge,
