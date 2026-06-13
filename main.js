@@ -135,7 +135,7 @@ const BACKGROUND_SYNC_INTERVAL_MS = 15000;
 const ADMIN_QUESTION_BACKGROUND_REFRESH_MS = 180000;
 const ADMIN_BACKUP_RESTORE_CHECK_COOLDOWN_MS = 5 * 60 * 1000;
 const STUDENT_DATA_REFRESH_MS = 30000;
-const STUDENT_FULL_DATA_REFRESH_MS = 120000;
+const STUDENT_FULL_DATA_REFRESH_MS = 10 * 60 * 1000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
 const STUDENT_FORCE_REFRESH_POLL_MS = 500;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 10000;
@@ -195,7 +195,8 @@ const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
-const QUESTION_RELATIONAL_PAGE_SIZE = 250;
+const QUESTION_RELATIONAL_PAGE_SIZE = 500;
+const QUESTION_CHOICE_RELATIONAL_PAGE_SIZE = 1000;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const SESSION_HISTORY_SYNC_BATCH_SIZE = 25;
@@ -7173,6 +7174,7 @@ function getCloudSyncStatusModel(user = null) {
   );
   const isSupabaseReconnectPending = Boolean(
     shouldAttemptSupabaseReconnect(currentUser)
+    && !hasActiveSupabaseSessionForUser(currentUser)
     && (
       supabaseAuth.initializing
       || supabaseBootstrapInFlight
@@ -9263,20 +9265,25 @@ async function hydrateRelationalQuestions() {
 
   const questionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
   const questionIds = questionRows.map((question) => question.id).filter(isUuidValue);
-  const choiceRows = [];
-  for (const questionIdBatch of splitIntoBatches(questionIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
-    const data = await runRelationalQueryWithTimeout(
-      client
-        .from("question_choices")
-        .select("question_id,choice_label,choice_text,is_correct")
-        .in("question_id", questionIdBatch),
-      "Question choice hydration timed out.",
-      QUESTION_RELATIONAL_TIMEOUT_MS,
-    );
-    if (Array.isArray(data) && data.length) {
-      choiceRows.push(...data);
-    }
+  const questionIdSet = new Set(questionIds);
+  const choicesResult = await fetchRowsPaged(
+    (from, to) => client
+      .from("question_choices")
+      .select("question_id,choice_label,choice_text,is_correct")
+      .order("question_id", { ascending: true })
+      .order("choice_label", { ascending: true })
+      .range(from, to),
+    {
+      pageSize: QUESTION_CHOICE_RELATIONAL_PAGE_SIZE,
+      timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+      timeoutMessage: "Question choice hydration timed out.",
+    },
+  );
+  if (choicesResult.error) {
+    throw choicesResult.error;
   }
+  const choiceRows = (Array.isArray(choicesResult.data) ? choicesResult.data : [])
+    .filter((choice) => questionIdSet.has(choice?.question_id));
 
   const courseById = Object.fromEntries((courseRows || []).map((course) => [course.id, String(course.course_name || "").trim()]));
   const topicById = Object.fromEntries((topicRows || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
