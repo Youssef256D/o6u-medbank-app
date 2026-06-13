@@ -962,6 +962,7 @@ const courseVideoRuntime = {
   fullscreenPlaceholder: null,
   fullscreenPlaybackState: null,
   fullscreenInteractionLockedUntil: 0,
+  renderDeferredDuringFullscreen: false,
   playbackStates: new Map(),
   pendingPlaybackRestore: null,
   preservedPlaybackContainer: null,
@@ -18852,6 +18853,10 @@ function restoreFocusState() {
 }
 
 function render() {
+  if (shouldDeferLessonVideoRenderForFullscreen()) {
+    courseVideoRuntime.renderDeferredDuringFullscreen = true;
+    return;
+  }
   persistActiveLessonVideoPlaybackState({ source: "render", allowAutoplayRestore: true });
   preserveActiveLessonVideoContainerForRender();
   saveFocusState();
@@ -42621,6 +42626,58 @@ function getCurrentLessonVideoFullscreenContainer() {
   return getActiveNativeLessonVideoFullscreenContainer() || getActiveLessonVideoFullscreenContainer();
 }
 
+function waitForLessonVideoNativeFullscreen(container, timeoutMs = 450) {
+  if (!container) {
+    return Promise.resolve(false);
+  }
+  const hasEntered = () => getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container;
+  if (hasEntered()) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutHandle = null;
+    const finish = (didEnter) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutHandle);
+      document.removeEventListener("fullscreenchange", handleChange);
+      document.removeEventListener("webkitfullscreenchange", handleChange);
+      resolve(Boolean(didEnter));
+    };
+    const checkEntered = () => {
+      if (hasEntered()) finish(true);
+    };
+    const handleChange = () => checkEntered();
+    document.addEventListener("fullscreenchange", handleChange);
+    document.addEventListener("webkitfullscreenchange", handleChange);
+    timeoutHandle = window.setTimeout(() => finish(hasEntered()), Math.max(0, Number(timeoutMs) || 0));
+    window.requestAnimationFrame(() => window.requestAnimationFrame(checkEntered));
+  });
+}
+
+function shouldDeferLessonVideoRenderForFullscreen() {
+  return Boolean(
+    state.route === "courses"
+    && state.coursesView === "lesson"
+    && getActiveNativeLessonVideoFullscreenContainer()
+  );
+}
+
+function flushDeferredLessonVideoRender() {
+  if (!courseVideoRuntime.renderDeferredDuringFullscreen || shouldDeferLessonVideoRenderForFullscreen()) {
+    return;
+  }
+  courseVideoRuntime.renderDeferredDuringFullscreen = false;
+  window.setTimeout(() => {
+    if (!shouldDeferLessonVideoRenderForFullscreen()) {
+      render();
+    } else {
+      courseVideoRuntime.renderDeferredDuringFullscreen = true;
+    }
+  }, 0);
+}
+
 function getCourseVideoResumeStorageKey(lessonId = state.coursesActiveLessonId) {
   const safeLessonId = String(lessonId || "").trim();
   if (!safeLessonId) return "";
@@ -42893,9 +42950,13 @@ async function requestLessonVideoFullscreen(container) {
     if (nativeRequestFullscreen) {
       try {
         document.body.classList.add("is-lesson-video-fullscreen");
-        await nativeRequestFullscreen.call(container);
+        const fullscreenRequest = nativeRequestFullscreen.call(container);
+        if (fullscreenRequest && typeof fullscreenRequest.then === "function") {
+          await fullscreenRequest;
+        }
+        const didEnterNativeFullscreen = await waitForLessonVideoNativeFullscreen(container);
         restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
-        if (getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container) {
+        if (didEnterNativeFullscreen) {
           return true;
         }
         document.body.classList.remove("is-lesson-video-fullscreen");
@@ -42942,10 +43003,12 @@ async function exitLessonVideoFullscreen() {
       document.body.classList.remove("is-lesson-video-fullscreen");
     }
     restoreLessonVideoPlaybackState(video, snapshot);
+    flushDeferredLessonVideoRender();
     return true;
   } catch (error) {
     console.warn("Could not exit lesson video fullscreen.", error?.message || error);
     restoreLessonVideoFullscreenContainer();
+    flushDeferredLessonVideoRender();
   }
   return false;
 }
@@ -43107,6 +43170,7 @@ function wireLessonVideoPlayerControls() {
         document.body.classList.remove("is-lesson-video-fullscreen");
       }
       restoreLessonVideoPlaybackState(video, snapshot);
+      flushDeferredLessonVideoRender();
     }
     syncControls();
   };
