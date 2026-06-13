@@ -13881,7 +13881,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
   const fetchAllCourses = () => fetchRowsPaged((from, to) => (
     client
       .from("courses")
-      .select("id,course_name,academic_year,academic_semester,is_active")
+      .select("id,course_name,course_code,academic_year,academic_semester,is_active")
       .order("academic_year", { ascending: true })
       .order("academic_semester", { ascending: true })
       .order("course_name", { ascending: true })
