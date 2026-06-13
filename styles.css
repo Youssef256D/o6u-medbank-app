@@ -10699,6 +10699,12 @@ body.is-lesson-video-fullscreen {
   overflow: hidden;
 }
 
+.lesson-video-fullscreen-placeholder {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 245px;
+}
+
 .lesson-video iframe {
   position: absolute;
   inset: 0;

@@ -3534,7 +3534,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       render();
       return;
     }
-    const shouldPreserveLocalSession = shouldPreserveSupabaseLocalSessionAfterSignedOut(preservedLocalUser);
+    const shouldPreserveLocalSession = !skipRecovery && shouldPreserveSupabaseLocalSessionAfterSignedOut(preservedLocalUser);
     if (shouldPreserveLocalSession) {
       clearNotificationRealtimeSubscription();
       clearSessionRealtimeSubscription();
@@ -5562,10 +5562,7 @@ function shouldPreserveSupabaseLocalSessionAfterSignedOut(user) {
   if (!hasSupabaseManagedIdentity(user)) {
     return false;
   }
-  if (isBrowserOffline()) {
-    return true;
-  }
-  return Boolean(relationalSync.flushing || supabaseSync.flushing || getPendingCloudWriteCount() > 0);
+  return true;
 }
 
 function canUseLocalPasswordFallback(user) {
@@ -42800,6 +42797,12 @@ function lockLessonVideoFullscreenInteraction(durationMs = 450) {
 function cleanupDetachedLessonVideoFullscreenArtifacts() {
   document.querySelectorAll("body > .lesson-video").forEach((container) => {
     if (appEl.contains(container)) return;
+    if (
+      container.classList.contains("is-pseudo-fullscreen")
+      || getActiveFullscreenElement() === container
+    ) {
+      return;
+    }
     container.querySelectorAll("video").forEach((video) => {
       try {
         video.pause();
@@ -42865,6 +42868,14 @@ function restoreLessonVideoFullscreenContainer() {
   if (container && placeholder?.parentNode) {
     placeholder.parentNode.insertBefore(container, placeholder);
     placeholder.remove();
+  } else if (container && !appEl.contains(container)) {
+    const freshVideo = appEl?.querySelector("#course-lesson-video-player");
+    const freshContainer = freshVideo?.closest(".lesson-video");
+    if (freshContainer) {
+      freshContainer.replaceWith(container);
+    } else {
+      container.remove();
+    }
   }
   courseVideoRuntime.fullscreenPlaceholder = null;
 }
@@ -42892,6 +42903,14 @@ async function requestLessonVideoFullscreen(container) {
         document.body.classList.remove("is-lesson-video-fullscreen");
       }
     }
+    if (!courseVideoRuntime.fullscreenPlaceholder?.parentNode) {
+      const placeholder = document.createElement("div");
+      placeholder.className = "lesson-video-fullscreen-placeholder";
+      placeholder.setAttribute("aria-hidden", "true");
+      container.parentNode?.insertBefore(placeholder, container);
+      courseVideoRuntime.fullscreenPlaceholder = placeholder;
+    }
+    document.body.appendChild(container);
     container.classList.add("is-pseudo-fullscreen");
     document.body.classList.add("is-lesson-video-fullscreen");
     restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
