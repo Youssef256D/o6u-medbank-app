@@ -1023,6 +1023,7 @@ let globalEventsBound = false;
 let questionSyncInFlightPromise = null;
 let queuedQuestionSyncPayload = null;
 let syncStatusUiRefreshHandle = null;
+let pendingSyncBackgroundPromise = null;
 let lifecycleResumeHandle = null;
 let studentBootRefreshPromise = null;
 let studentBootRefreshKey = "";
@@ -6622,9 +6623,8 @@ async function primeStudentCourseCatalogAfterAuth(user = null) {
 
   const ready = await ensureRelationalSyncReady().catch(() => false);
   if (ready) {
-    const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
-      || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
-      || relationalSync.flushing;
+    const hasPendingCourseWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.curriculum)
+      || isRelationalStorageKeyBusy(STORAGE_KEYS.courseTopics);
     if (hasPendingCourseWrites) {
       return false;
     }
@@ -7395,6 +7395,21 @@ function getPendingRelationalPayloadForStorageKey(storageKey) {
     return combinedPayload.courseTopics;
   }
   return undefined;
+}
+
+function isRelationalStorageKeyBusy(storageKey) {
+  return Boolean(
+    relationalSync.pendingWrites.has(storageKey)
+    || relationalSync.inFlightPayloadSignatures.has(storageKey)
+  );
+}
+
+function getRelationalSyncPriority(storageKey) {
+  if (storageKey === STORAGE_KEYS.users) return 0;
+  if (storageKey === STORAGE_KEYS.sessions) return 1;
+  if (storageKey === STORAGE_KEYS.questions) return 2;
+  if (storageKey === STORAGE_KEYS.curriculum || storageKey === STORAGE_KEYS.courseTopics) return 3;
+  return 4;
 }
 
 function normalizeRelationalUserSyncScope(value) {
@@ -8490,17 +8505,15 @@ async function hydrateRelationalState(user) {
     return;
   }
   if (relationalSync.pendingWrites.size || relationalSync.flushing) {
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+    flushPendingSyncInBackground();
   }
 
-  const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
-    || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
-    || relationalSync.flushing;
-  const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
-  const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
-  const hasPendingNotificationWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.notifications) || relationalSync.flushing;
-  const hasPendingSessionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions)
-    || relationalSync.flushing
+  const hasPendingCourseWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.curriculum)
+    || isRelationalStorageKeyBusy(STORAGE_KEYS.courseTopics);
+  const hasPendingUserWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.users);
+  const hasPendingQuestionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.questions);
+  const hasPendingNotificationWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.notifications);
+  const hasPendingSessionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.sessions)
     || sessionSyncRuntime.dirty
     || sessionSyncRuntime.flushing;
 
@@ -10443,14 +10456,14 @@ function cloneTextHighlightStore(value) {
 function hasPendingSessionSyncForId(sessionId = "") {
   const targetId = String(sessionId || "").trim();
   const activeSessionId = String(state.sessionId || "").trim();
-  if (!targetId && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || relationalSync.flushing)) {
+  if (!targetId && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || isRelationalStorageKeyBusy(STORAGE_KEYS.sessions))) {
     return true;
   }
   if (
     targetId
     && activeSessionId === targetId
     && state.route === "session"
-    && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || relationalSync.flushing)
+    && (sessionSyncRuntime.dirty || sessionSyncRuntime.flushing || isRelationalStorageKeyBusy(STORAGE_KEYS.sessions))
   ) {
     return true;
   }
@@ -11821,7 +11834,9 @@ async function flushRelationalWrites(options = {}) {
     entryMap.set(STORAGE_KEYS.curriculum, relationalSync.pendingWrites.get(STORAGE_KEYS.curriculum));
     entryMap.delete(STORAGE_KEYS.courseTopics);
   }
-  const entries = Array.from(entryMap.entries());
+  const entries = Array.from(entryMap.entries()).sort(
+    ([storageKeyA], [storageKeyB]) => getRelationalSyncPriority(storageKeyA) - getRelationalSyncPriority(storageKeyB),
+  );
   entries.forEach(([storageKey, payload]) => {
     const entryMeta = entryMetaMap.get(storageKey) || null;
     if (
@@ -12093,12 +12108,18 @@ function yieldToBrowser(delayMs = 0) {
 // Fire-and-forget sync: kicks off background sync without blocking the caller.
 // Use this in user-facing action handlers so the UI responds instantly.
 function flushPendingSyncInBackground(options = {}) {
-  flushPendingSyncNow({
+  if (pendingSyncBackgroundPromise) {
+    return pendingSyncBackgroundPromise;
+  }
+  pendingSyncBackgroundPromise = flushPendingSyncNow({
     throwOnRelationalFailure: false,
     ...options,
   }).catch((error) => {
     console.warn("Background sync failed.", error?.message || error);
+  }).finally(() => {
+    pendingSyncBackgroundPromise = null;
   });
+  return pendingSyncBackgroundPromise;
 }
 
 async function flushAdminUserAccountSyncNow(options = {}) {
@@ -18443,14 +18464,14 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       return true;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing) {
-      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+      flushPendingSyncInBackground();
     }
     const now = Date.now();
     const needsFullSync = force
       || !state.studentDataLastFullSyncAt
       || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
-    const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
-    const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions) || relationalSync.flushing;
+    const hasPendingUserWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.users);
+    const hasPendingQuestionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.questions);
     let completedFullSync = false;
     if (needsFullSync) {
       // Run courses/topics and profiles in parallel — they are independent DB reads.
@@ -18624,15 +18645,13 @@ async function refreshAdminDataSnapshot(user, options = {}) {
       if (force && relationalSync.pendingWrites.has(STORAGE_KEYS.questions)) {
         relationalSync.pendingWrites.delete(STORAGE_KEYS.questions);
       }
-      await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
+      flushPendingSyncInBackground();
     }
 
-    const hasPendingUserWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.users) || relationalSync.flushing;
-    const hasPendingCourseWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.curriculum)
-      || relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
-      || relationalSync.flushing;
-    const hasPendingQuestionWrites = relationalSync.pendingWrites.has(STORAGE_KEYS.questions)
-      || relationalSync.flushing
+    const hasPendingUserWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.users);
+    const hasPendingCourseWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.curriculum)
+      || isRelationalStorageKeyBusy(STORAGE_KEYS.courseTopics);
+    const hasPendingQuestionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.questions)
       || isQuestionSyncBusy();
     const activeAdminPage = String(state.adminPage || "").trim();
     const adminPageNeedsQuestionHydration = activeAdminPage === "questions" || activeAdminPage === "bulk-import";
