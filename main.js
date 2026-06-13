@@ -124,6 +124,7 @@ const RELATIONAL_READY_CACHE_MS = 45000;
 const RELATIONAL_READY_FAILURE_CACHE_MS = 6000;
 const RELATIONAL_FLUSH_DEBOUNCE_MS = 80;
 const RELATIONAL_RETRY_FLUSH_MS = 800;
+const RELATIONAL_RETRY_MAX_MS = 60000;
 const SUPABASE_FLUSH_DEBOUNCE_MS = 1200;
 const SUPABASE_RETRY_FLUSH_MS = 1200;
 const SUPABASE_BACKUP_RETRY_MAX_MS = 60000;
@@ -907,6 +908,7 @@ const relationalSync = {
   lastSuccessAt: 0,
   lastFailureAt: 0,
   lastFailureMessage: "",
+  failureCount: 0,
   retryAt: 0,
   profilesBackfillAttempted: false,
   questionsBackfillAttempted: false,
@@ -7312,6 +7314,14 @@ function clearRelationalFlushTimer() {
   }
 }
 
+function getRelationalRetryDelayMs() {
+  const failureCount = Math.max(1, Number(relationalSync.failureCount || 1));
+  const exponent = Math.min(failureCount - 1, 6);
+  const baseDelay = RELATIONAL_RETRY_FLUSH_MS * (2 ** exponent);
+  const jitter = Math.floor(Math.random() * RELATIONAL_RETRY_FLUSH_MS);
+  return Math.min(RELATIONAL_RETRY_MAX_MS, baseDelay + jitter);
+}
+
 function resetRelationalSyncState() {
   relationalSync.enabled = false;
   relationalSync.pendingWrites.clear();
@@ -7331,6 +7341,7 @@ function resetRelationalSyncState() {
   relationalSync.lastSuccessAt = 0;
   relationalSync.lastFailureAt = 0;
   relationalSync.lastFailureMessage = "";
+  relationalSync.failureCount = 0;
   relationalSync.retryAt = 0;
   relationalSync.profilesBackfillAttempted = false;
   relationalSync.questionsBackfillAttempted = false;
@@ -11965,18 +11976,22 @@ async function flushRelationalWrites(options = {}) {
       relationalSync.retryAt = 0;
       relationalSync.lastFailureAt = 0;
       relationalSync.lastFailureMessage = "";
+      relationalSync.failureCount = 0;
+    } else if (firstError) {
+      relationalSync.failureCount = Math.min(Number(relationalSync.failureCount || 0) + 1, 20);
     }
   } finally {
     relationalSync.inFlightPayloadSignatures.clear();
     relationalSync.inFlightWriteMeta.clear();
     relationalSync.flushing = false;
     if (relationalSync.pendingWrites.size && !relationalSync.flushTimer) {
-      relationalSync.retryAt = Date.now() + RELATIONAL_RETRY_FLUSH_MS;
+      const retryDelayMs = firstError ? getRelationalRetryDelayMs() : RELATIONAL_RETRY_FLUSH_MS;
+      relationalSync.retryAt = Date.now() + retryDelayMs;
       relationalSync.flushTimer = window.setTimeout(() => {
         flushRelationalWrites().catch((error) => {
           console.warn("Relational retry flush failed.", error);
         });
-      }, RELATIONAL_RETRY_FLUSH_MS);
+      }, retryDelayMs);
     }
     scheduleSyncStatusUiRefresh();
   }
@@ -13865,18 +13880,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     }
   }
 
-  if (desiredCourses.length) {
-    for (const courseBatch of splitIntoBatches(desiredCourses, RELATIONAL_UPSERT_BATCH_SIZE)) {
-      await runRelationalQueryWithTimeout(
-        client
-          .from("courses")
-          .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester", defaultToNull: false }),
-        "Course sync timed out.",
-      );
-    }
-  }
-
-  const allCoursesResult = await fetchRowsPaged((from, to) => (
+  const fetchAllCourses = () => fetchRowsPaged((from, to) => (
     client
       .from("courses")
       .select("id,course_name,academic_year,academic_semester,is_active")
@@ -13886,10 +13890,59 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
       .order("id", { ascending: true })
       .range(from, to)
   ));
+
+  const fetchAllTopics = () => fetchRowsPaged((from, to) => (
+    client
+      .from("course_topics")
+      .select("id,course_id,topic_name,sort_order,is_active")
+      .order("course_id", { ascending: true })
+      .order("topic_name", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to)
+  ));
+
+  let allCoursesResult = await fetchAllCourses();
   if (allCoursesResult.error) {
     throw allCoursesResult.error;
   }
-  const allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
+  let allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
+
+  const courseRowMatchesDesired = (existingCourse, desiredCourse) => (
+    existingCourse
+    && String(existingCourse.course_code || "") === String(desiredCourse.course_code || "")
+    && Number(existingCourse.academic_year) === Number(desiredCourse.academic_year)
+    && Number(existingCourse.academic_semester) === Number(desiredCourse.academic_semester)
+    && Boolean(existingCourse.is_active) === Boolean(desiredCourse.is_active)
+  );
+
+  const currentCoursesByCompositeKey = {};
+  (allCourses || []).forEach((course) => {
+    const compositeKey = `${course.course_name}::${course.academic_year}::${course.academic_semester}`;
+    if (!currentCoursesByCompositeKey[compositeKey] || course.is_active) {
+      currentCoursesByCompositeKey[compositeKey] = course;
+    }
+  });
+
+  const coursesNeedingUpsert = desiredCourses.filter((course) => {
+    const compositeKey = `${course.course_name}::${course.academic_year}::${course.academic_semester}`;
+    return !courseRowMatchesDesired(currentCoursesByCompositeKey[compositeKey], course);
+  });
+
+  if (coursesNeedingUpsert.length) {
+    for (const courseBatch of splitIntoBatches(coursesNeedingUpsert, RELATIONAL_UPSERT_BATCH_SIZE)) {
+      await runRelationalQueryWithTimeout(
+        client
+          .from("courses")
+          .upsert(courseBatch, { onConflict: "course_name,academic_year,academic_semester", defaultToNull: false }),
+        "Course sync timed out.",
+      );
+    }
+    allCoursesResult = await fetchAllCourses();
+    if (allCoursesResult.error) {
+      throw allCoursesResult.error;
+    }
+    allCourses = Array.isArray(allCoursesResult.data) ? allCoursesResult.data : [];
+  }
 
   const courseRowsByName = {};
   const courseRowsListByName = {};
@@ -13932,8 +13985,31 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     });
   });
 
+  let allTopicsResult = await fetchAllTopics();
+  if (allTopicsResult.error) {
+    throw allTopicsResult.error;
+  }
+  let allTopics = Array.isArray(allTopicsResult.data) ? allTopicsResult.data : [];
+  const currentTopicsByCourseAndName = {};
+  (allTopics || []).forEach((topic) => {
+    const topicKey = `${topic.course_id}::${topic.topic_name}`;
+    if (!currentTopicsByCourseAndName[topicKey] || topic.is_active) {
+      currentTopicsByCourseAndName[topicKey] = topic;
+    }
+  });
+
+  const topicRowMatchesDesired = (existingTopic, desiredTopic) => (
+    existingTopic
+    && Number(existingTopic.sort_order || 0) === Number(desiredTopic.sort_order || 0)
+    && Boolean(existingTopic.is_active) === Boolean(desiredTopic.is_active)
+  );
+  const topicsNeedingUpsert = desiredTopicRows.filter((topic) => {
+    const topicKey = `${topic.course_id}::${topic.topic_name}`;
+    return !topicRowMatchesDesired(currentTopicsByCourseAndName[topicKey], topic);
+  });
+
   if (desiredTopicRows.length) {
-    for (const topicBatch of splitIntoBatches(desiredTopicRows, RELATIONAL_UPSERT_BATCH_SIZE)) {
+    for (const topicBatch of splitIntoBatches(topicsNeedingUpsert, RELATIONAL_UPSERT_BATCH_SIZE)) {
       await runRelationalQueryWithTimeout(
         client
           .from("course_topics")
@@ -13942,20 +14018,13 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
       );
     }
   }
-
-  const allTopicsResult = await fetchRowsPaged((from, to) => (
-    client
-      .from("course_topics")
-      .select("id,course_id,topic_name,is_active")
-      .order("course_id", { ascending: true })
-      .order("topic_name", { ascending: true })
-      .order("id", { ascending: true })
-      .range(from, to)
-  ));
-  if (allTopicsResult.error) {
-    throw allTopicsResult.error;
+  if (topicsNeedingUpsert.length) {
+    allTopicsResult = await fetchAllTopics();
+    if (allTopicsResult.error) {
+      throw allTopicsResult.error;
+    }
+    allTopics = Array.isArray(allTopicsResult.data) ? allTopicsResult.data : [];
   }
-  const allTopics = Array.isArray(allTopicsResult.data) ? allTopicsResult.data : [];
   const pendingCourseDeletions = getPendingCourseDeletions();
   if (pendingCourseDeletions.length) {
     const deactivatedCourseIds = [];
