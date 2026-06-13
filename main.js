@@ -30,6 +30,7 @@ const STORAGE_KEYS = {
   pendingCourseDeletions: "mcq_pending_course_deletions",
   pendingCourseTopicDeletions: "mcq_pending_course_topic_deletions",
   courseVideoResume: "mcq_course_video_resume",
+  coursePlatformCache: "mcq_course_platform_cache",
 };
 
 const appEl = document.getElementById("app");
@@ -238,6 +239,7 @@ const SESSION_HIGHLIGHTER_COLORS = new Set(["yellow", "red", "green"]);
 const COURSES_COMING_SOON_FEATURE_KEY = "courses_coming_soon";
 const COURSES_COMING_SOON_MIGRATION_REQUIRED_MESSAGE = "Courses availability is not installed in Supabase yet. Apply the latest database migration, then refresh the admin dashboard.";
 const COURSES_PLATFORM_TRANSIENT_FAILURE_COOLDOWN_MS = 60000;
+const COURSES_PLATFORM_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const OAUTH_CALLBACK_QUERY_KEYS = new Set([
   "code",
   "state",
@@ -700,6 +702,7 @@ const coursesPlatformRuntime = {
   availabilityTransientFailureMessage: "",
   platformTransientFailureAt: 0,
   platformTransientFailureMessage: "",
+  emptyEnrollmentRetryTimer: null,
 };
 const studentAccessIssueLogTimes = new Map();
 const studentApprovalRevalidationRuntime = {
@@ -962,7 +965,6 @@ const courseVideoRuntime = {
   fullscreenPlaceholder: null,
   fullscreenPlaybackState: null,
   fullscreenInteractionLockedUntil: 0,
-  renderDeferredDuringFullscreen: false,
   playbackStates: new Map(),
   pendingPlaybackRestore: null,
   preservedPlaybackContainer: null,
@@ -18853,10 +18855,6 @@ function restoreFocusState() {
 }
 
 function render() {
-  if (shouldDeferLessonVideoRenderForFullscreen()) {
-    courseVideoRuntime.renderDeferredDuringFullscreen = true;
-    return;
-  }
   persistActiveLessonVideoPlaybackState({ source: "render", allowAutoplayRestore: true });
   preserveActiveLessonVideoContainerForRender();
   saveFocusState();
@@ -40319,6 +40317,10 @@ function patchAdminCoursePlatformCourse(courseId, patch = {}) {
 }
 
 function resetStudentCoursesPlatformState() {
+  if (coursesPlatformRuntime.emptyEnrollmentRetryTimer) {
+    window.clearTimeout(coursesPlatformRuntime.emptyEnrollmentRetryTimer);
+    coursesPlatformRuntime.emptyEnrollmentRetryTimer = null;
+  }
   state.coursesLoadedAt = 0;
   state.coursesLoading = false;
   state.coursesError = "";
@@ -40501,6 +40503,131 @@ function getCurrentCoursePlatformUserId() {
     return String(user?.id || "").trim();
   }
   return String(getCurrentSessionProfileId(user) || getUserProfileId(user) || "").trim();
+}
+
+function getCoursePlatformCacheKeys(user = getCurrentUser()) {
+  return [
+    getCurrentCoursePlatformUserId(),
+    getCurrentSessionProfileId(user),
+    getUserProfileId(user),
+    user?.id,
+    user?.supabaseAuthId,
+  ]
+    .map((entry) => String(entry || "").trim())
+    .filter((entry, index, entries) => entry && entries.indexOf(entry) === index);
+}
+
+function normalizeStudentCoursesPlatformPayload(payload) {
+  const source = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  return {
+    courses: Array.isArray(source.courses) ? source.courses : [],
+    enrollments: Array.isArray(source.enrollments) ? source.enrollments : [],
+    requests: Array.isArray(source.requests) ? source.requests : [],
+    progress: Array.isArray(source.progress) ? source.progress : [],
+    lessons: Array.isArray(source.lessons) ? source.lessons : [],
+    modules: Array.isArray(source.modules) ? source.modules : [],
+    resources: Array.isArray(source.resources) ? source.resources : [],
+    announcements: Array.isArray(source.announcements) ? source.announcements : [],
+    suggestions: Array.isArray(source.suggestions) ? source.suggestions : [],
+    loadedAt: Number(source.loadedAt || source.cachedAt || 0) || 0,
+  };
+}
+
+function applyStudentCoursesPlatformPayload(payload, options = {}) {
+  const data = normalizeStudentCoursesPlatformPayload(payload);
+  state.coursesCatalog = data.courses;
+  state.coursesEnrollments = data.enrollments;
+  state.coursesRequests = data.requests;
+  state.coursesProgress = data.progress;
+  state.coursesLessons = data.lessons;
+  state.coursesModules = data.modules;
+  state.coursesResources = data.resources;
+  state.coursesAnnouncements = data.announcements;
+  state.coursesSuggestions = data.suggestions;
+  state.coursesLoadedAt = Number(options.loadedAt || data.loadedAt || Date.now()) || Date.now();
+  state.coursesError = "";
+  return data;
+}
+
+function readStudentCoursesPlatformCache(user = getCurrentUser()) {
+  const cache = load(STORAGE_KEYS.coursePlatformCache, {});
+  const keys = getCoursePlatformCacheKeys(user);
+  const now = Date.now();
+  for (const key of keys) {
+    const entry = cache?.[key];
+    const data = normalizeStudentCoursesPlatformPayload(entry?.data || entry);
+    const cachedAt = Number(entry?.cachedAt || data.loadedAt || 0);
+    if (!cachedAt || now - cachedAt > COURSES_PLATFORM_CACHE_MAX_AGE_MS) {
+      continue;
+    }
+    if (
+      data.courses.length
+      || data.enrollments.length
+      || data.requests.length
+      || data.suggestions.length
+    ) {
+      return { ...data, loadedAt: cachedAt };
+    }
+  }
+  return null;
+}
+
+function applyCachedStudentCoursesPlatformPayload(user = getCurrentUser()) {
+  const cached = readStudentCoursesPlatformCache(user);
+  if (!cached) {
+    return false;
+  }
+  applyStudentCoursesPlatformPayload(cached, { loadedAt: cached.loadedAt });
+  return true;
+}
+
+function persistStudentCoursesPlatformCache(user = getCurrentUser()) {
+  const keys = getCoursePlatformCacheKeys(user);
+  if (!keys.length) {
+    return;
+  }
+  const cachedAt = Date.now();
+  const cache = load(STORAGE_KEYS.coursePlatformCache, {});
+  const entry = {
+    cachedAt,
+    appVersion: APP_VERSION,
+    data: normalizeStudentCoursesPlatformPayload({
+      courses: state.coursesCatalog,
+      enrollments: state.coursesEnrollments,
+      requests: state.coursesRequests,
+      progress: state.coursesProgress,
+      lessons: state.coursesLessons,
+      modules: state.coursesModules,
+      resources: state.coursesResources,
+      announcements: state.coursesAnnouncements,
+      suggestions: state.coursesSuggestions,
+      loadedAt: state.coursesLoadedAt || cachedAt,
+    }),
+  };
+  keys.forEach((key) => {
+    cache[key] = entry;
+  });
+  saveLocalOnly(STORAGE_KEYS.coursePlatformCache, cache, { audit: false });
+}
+
+function scheduleStudentCoursesEmptyEnrollmentRetry() {
+  if (coursesPlatformRuntime.emptyEnrollmentRetryTimer) {
+    return;
+  }
+  coursesPlatformRuntime.emptyEnrollmentRetryTimer = window.setTimeout(() => {
+    coursesPlatformRuntime.emptyEnrollmentRetryTimer = null;
+    if (state.route !== "courses") {
+      return;
+    }
+    loadStudentCoursesWithProgress({ force: true })
+      .then(() => {
+        if (state.route === "courses") {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      })
+      .catch(() => { });
+  }, 1200);
 }
 
 function getCoursePlatformCourseTitle(course) {
@@ -40794,24 +40921,25 @@ function buildLocalDemoPlatformData(user = getCurrentUser()) {
 
 async function loadLocalDemoCoursesWithProgress(user = getCurrentUser()) {
   const data = buildLocalDemoPlatformData(user);
-  state.coursesCatalog = data.courses;
-  state.coursesEnrollments = data.enrollments;
-  state.coursesRequests = data.requests;
-  state.coursesProgress = data.progress;
-  state.coursesLessons = data.lessons;
-  state.coursesModules = data.modules;
-  state.coursesResources = data.resources;
-  state.coursesAnnouncements = data.announcements;
-  state.coursesSuggestions = data.suggestions;
-  state.coursesLoadedAt = Date.now();
+  applyStudentCoursesPlatformPayload(data);
   state.coursesLoading = false;
-  state.coursesError = "";
+  persistStudentCoursesPlatformCache(user);
   return true;
 }
 
 async function loadStudentCoursesWithProgress(options = {}) {
   const user = getCurrentUser();
-  await loadCoursesComingSoonFlag({ force: Boolean(options.force) }).catch(() => false);
+  const force = Boolean(options.force);
+  if (state.coursesLoading && !force) {
+    return Boolean(state.coursesLoadedAt);
+  }
+  state.coursesLoading = true;
+  state.coursesError = "";
+  if (!state.coursesLoadedAt) {
+    applyCachedStudentCoursesPlatformPayload(user);
+    state.coursesLoading = true;
+  }
+  await loadCoursesComingSoonFlag({ force }).catch(() => false);
   if (shouldBlockStudentCoursesPortal(user)) {
     resetStudentCoursesPlatformState();
     return true;
@@ -40829,23 +40957,20 @@ async function loadStudentCoursesWithProgress(options = {}) {
   }
   if (!client || !isUuidValue(userId)) {
     state.coursesLoading = false;
-    state.coursesError = isBrowserOffline()
-      ? "Courses need an internet connection. Reconnect and try again."
-      : "Your cloud session is still reconnecting. Tap Retry in a moment.";
-    return false;
+    state.coursesError = state.coursesLoadedAt
+      ? ""
+      : isBrowserOffline()
+        ? "Courses need an internet connection. Reconnect and try again."
+        : "Your cloud session is still reconnecting. Tap Retry in a moment.";
+    return Boolean(state.coursesLoadedAt);
   }
-  if (state.coursesLoading && !options.force) {
-    return false;
-  }
-  if (!options.force && isCoursesPlatformTransientCooldownActive("platform")) {
+  if (!force && isCoursesPlatformTransientCooldownActive("platform")) {
     state.coursesLoading = false;
     if (!state.coursesLoadedAt) {
       state.coursesError = "Courses are taking longer than usual to load. Tap Retry in a moment.";
     }
     return Boolean(state.coursesLoadedAt);
   }
-  state.coursesLoading = true;
-  state.coursesError = "";
   try {
     const [courses, enrollments, requests, progress, lessons, modules, announcements, suggestions] = await Promise.all([
       runRelationalQueryWithTimeout(
@@ -40906,17 +41031,33 @@ async function loadStudentCoursesWithProgress(options = {}) {
       }),
     ]);
 
-    state.coursesCatalog = (Array.isArray(courses) ? courses : []).filter((course) => course?.is_published !== false || getCourseEnrollmentState(course, enrollments, requests).isEnrolled);
-    state.coursesEnrollments = Array.isArray(enrollments) ? enrollments : [];
-    state.coursesRequests = Array.isArray(requests) ? requests : [];
-    state.coursesProgress = Array.isArray(progress) ? progress : [];
-    state.coursesLessons = Array.isArray(lessons) ? lessons : [];
-    state.coursesModules = Array.isArray(modules) ? modules : [];
-    state.coursesAnnouncements = Array.isArray(announcements) ? announcements : [];
-    state.coursesSuggestions = Array.isArray(suggestions) ? suggestions : [];
-    state.coursesLoadedAt = Date.now();
+    const nextPayload = normalizeStudentCoursesPlatformPayload({
+      courses: (Array.isArray(courses) ? courses : []).filter((course) => course?.is_published !== false || getCourseEnrollmentState(course, enrollments, requests).isEnrolled),
+      enrollments,
+      requests,
+      progress,
+      lessons,
+      modules,
+      resources: state.coursesResources,
+      announcements,
+      suggestions,
+      loadedAt: Date.now(),
+    });
+    if (
+      !force
+      && state.coursesEnrollments.length
+      && !nextPayload.enrollments.length
+      && nextPayload.courses.length
+    ) {
+      state.coursesLoading = false;
+      state.coursesError = "";
+      scheduleStudentCoursesEmptyEnrollmentRetry();
+      return true;
+    }
+    applyStudentCoursesPlatformPayload(nextPayload);
     state.coursesLoading = false;
     clearCoursesPlatformTransientFailure("platform");
+    persistStudentCoursesPlatformCache(user);
     return true;
   } catch (error) {
     if (recordCoursesPlatformTransientFailure("platform", error)) {
@@ -42617,65 +42758,8 @@ function getActiveLessonVideoFullscreenContainer() {
   return document.querySelector(".lesson-video.is-pseudo-fullscreen");
 }
 
-function getActiveNativeLessonVideoFullscreenContainer() {
-  const activeElement = getActiveFullscreenElement();
-  return activeElement?.classList?.contains("lesson-video") ? activeElement : null;
-}
-
 function getCurrentLessonVideoFullscreenContainer() {
-  return getActiveNativeLessonVideoFullscreenContainer() || getActiveLessonVideoFullscreenContainer();
-}
-
-function waitForLessonVideoNativeFullscreen(container, timeoutMs = 450) {
-  if (!container) {
-    return Promise.resolve(false);
-  }
-  const hasEntered = () => getActiveFullscreenElement() === container || getActiveNativeLessonVideoFullscreenContainer() === container;
-  if (hasEntered()) {
-    return Promise.resolve(true);
-  }
-  return new Promise((resolve) => {
-    let settled = false;
-    let timeoutHandle = null;
-    const finish = (didEnter) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutHandle);
-      document.removeEventListener("fullscreenchange", handleChange);
-      document.removeEventListener("webkitfullscreenchange", handleChange);
-      resolve(Boolean(didEnter));
-    };
-    const checkEntered = () => {
-      if (hasEntered()) finish(true);
-    };
-    const handleChange = () => checkEntered();
-    document.addEventListener("fullscreenchange", handleChange);
-    document.addEventListener("webkitfullscreenchange", handleChange);
-    timeoutHandle = window.setTimeout(() => finish(hasEntered()), Math.max(0, Number(timeoutMs) || 0));
-    window.requestAnimationFrame(() => window.requestAnimationFrame(checkEntered));
-  });
-}
-
-function shouldDeferLessonVideoRenderForFullscreen() {
-  return Boolean(
-    state.route === "courses"
-    && state.coursesView === "lesson"
-    && getActiveNativeLessonVideoFullscreenContainer()
-  );
-}
-
-function flushDeferredLessonVideoRender() {
-  if (!courseVideoRuntime.renderDeferredDuringFullscreen || shouldDeferLessonVideoRenderForFullscreen()) {
-    return;
-  }
-  courseVideoRuntime.renderDeferredDuringFullscreen = false;
-  window.setTimeout(() => {
-    if (!shouldDeferLessonVideoRenderForFullscreen()) {
-      render();
-    } else {
-      courseVideoRuntime.renderDeferredDuringFullscreen = true;
-    }
-  }, 0);
+  return getActiveLessonVideoFullscreenContainer();
 }
 
 function getCourseVideoResumeStorageKey(lessonId = state.coursesActiveLessonId) {
@@ -42852,6 +42936,12 @@ function lockLessonVideoFullscreenInteraction(durationMs = 450) {
 }
 
 function cleanupDetachedLessonVideoFullscreenArtifacts() {
+  const activeFullscreenContainer = getActiveLessonVideoFullscreenContainer();
+  if (activeFullscreenContainer) {
+    document.body.classList.add("is-lesson-video-fullscreen");
+    document.documentElement.classList.add("is-lesson-video-fullscreen");
+    return;
+  }
   document.querySelectorAll("body > .lesson-video").forEach((container) => {
     if (appEl.contains(container)) return;
     if (
@@ -42880,6 +42970,7 @@ function cleanupDetachedLessonVideoFullscreenArtifacts() {
     container.classList.remove("is-pseudo-fullscreen");
   });
   document.body.classList.remove("is-lesson-video-fullscreen");
+  document.documentElement.classList.remove("is-lesson-video-fullscreen");
 }
 
 function getLessonVideoPlaybackState(video) {
@@ -42920,7 +43011,10 @@ function restoreLessonVideoPlaybackState(video, snapshot) {
 function restoreLessonVideoFullscreenContainer() {
   const container = getActiveLessonVideoFullscreenContainer();
   container?.classList.remove("is-pseudo-fullscreen");
+  container?.removeAttribute("data-lesson-video-fullscreen");
+  container?.removeAttribute("tabindex");
   document.body.classList.remove("is-lesson-video-fullscreen");
+  document.documentElement.classList.remove("is-lesson-video-fullscreen");
   const placeholder = courseVideoRuntime.fullscreenPlaceholder;
   if (container && placeholder?.parentNode) {
     placeholder.parentNode.insertBefore(container, placeholder);
@@ -42946,24 +43040,6 @@ async function requestLessonVideoFullscreen(container) {
     if (activeContainer && activeContainer !== container) {
       await exitLessonVideoFullscreen();
     }
-    const nativeRequestFullscreen = container.requestFullscreen || container.webkitRequestFullscreen;
-    if (nativeRequestFullscreen) {
-      try {
-        document.body.classList.add("is-lesson-video-fullscreen");
-        const fullscreenRequest = nativeRequestFullscreen.call(container);
-        if (fullscreenRequest && typeof fullscreenRequest.then === "function") {
-          await fullscreenRequest;
-        }
-        const didEnterNativeFullscreen = await waitForLessonVideoNativeFullscreen(container);
-        restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
-        if (didEnterNativeFullscreen) {
-          return true;
-        }
-        document.body.classList.remove("is-lesson-video-fullscreen");
-      } catch (fullscreenError) {
-        document.body.classList.remove("is-lesson-video-fullscreen");
-      }
-    }
     if (!courseVideoRuntime.fullscreenPlaceholder?.parentNode) {
       const placeholder = document.createElement("div");
       placeholder.className = "lesson-video-fullscreen-placeholder";
@@ -42973,12 +43049,23 @@ async function requestLessonVideoFullscreen(container) {
     }
     document.body.appendChild(container);
     container.classList.add("is-pseudo-fullscreen");
+    container.setAttribute("data-lesson-video-fullscreen", "true");
+    container.setAttribute("tabindex", "-1");
     document.body.classList.add("is-lesson-video-fullscreen");
+    document.documentElement.classList.add("is-lesson-video-fullscreen");
     restoreLessonVideoPlaybackState(video, courseVideoRuntime.fullscreenPlaybackState);
+    window.requestAnimationFrame(() => {
+      try {
+        container.focus({ preventScroll: true });
+      } catch {
+        container.focus();
+      }
+    });
     return true;
   } catch (error) {
     console.warn("Could not enter lesson video fullscreen.", error?.message || error);
     document.body.classList.remove("is-lesson-video-fullscreen");
+    document.documentElement.classList.remove("is-lesson-video-fullscreen");
     return Boolean(getCurrentLessonVideoFullscreenContainer() === container);
   }
 }
@@ -43001,14 +43088,13 @@ async function exitLessonVideoFullscreen() {
       restoreLessonVideoFullscreenContainer();
     } else {
       document.body.classList.remove("is-lesson-video-fullscreen");
+      document.documentElement.classList.remove("is-lesson-video-fullscreen");
     }
     restoreLessonVideoPlaybackState(video, snapshot);
-    flushDeferredLessonVideoRender();
     return true;
   } catch (error) {
     console.warn("Could not exit lesson video fullscreen.", error?.message || error);
     restoreLessonVideoFullscreenContainer();
-    flushDeferredLessonVideoRender();
   }
   return false;
 }
@@ -43160,22 +43246,6 @@ function wireLessonVideoPlayerControls() {
     syncControls();
   });
 
-  const handleFullscreenChange = () => {
-    if (!getActiveFullscreenElement() && document.body.classList.contains("is-lesson-video-fullscreen")) {
-      const snapshot = getLessonVideoPlaybackState(video) || courseVideoRuntime.fullscreenPlaybackState;
-      lockLessonVideoFullscreenInteraction();
-      if (getActiveLessonVideoFullscreenContainer() === container) {
-        restoreLessonVideoFullscreenContainer();
-      } else {
-        document.body.classList.remove("is-lesson-video-fullscreen");
-      }
-      restoreLessonVideoPlaybackState(video, snapshot);
-      flushDeferredLessonVideoRender();
-    }
-    syncControls();
-  };
-  document.addEventListener("fullscreenchange", handleFullscreenChange);
-  document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
   if (container) {
     container.dataset.lessonVideoControlsWired = "true";
   }
