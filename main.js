@@ -827,10 +827,8 @@ const ADMIN_ONLY_RELATIONAL_KEYS = new Set([STORAGE_KEYS.questions, STORAGE_KEYS
 const LEGACY_SUPABASE_STATE_SYNC_KEYS = SYNCABLE_STORAGE_KEYS.filter((key) => !RELATIONAL_SYNC_KEY_SET.has(key));
 const LEGACY_SUPABASE_STATE_SYNC_KEY_SET = new Set(LEGACY_SUPABASE_STATE_SYNC_KEYS);
 const RELATIONAL_BACKUP_SYNC_KEYS = [
+  // Keep in-progress session state backed up until it becomes relational test history.
   STORAGE_KEYS.sessions,
-  STORAGE_KEYS.questions,
-  STORAGE_KEYS.curriculum,
-  STORAGE_KEYS.courseTopics,
 ];
 const RELATIONAL_BACKUP_SYNC_KEY_SET = new Set(RELATIONAL_BACKUP_SYNC_KEYS);
 const SUPABASE_BACKUP_SYNC_KEY_SET = new Set([
