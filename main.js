@@ -3481,7 +3481,7 @@ async function handleSupabaseAuthStateChange(event, session) {
       render();
       return;
     }
-    if (["login", "signup", "forgot", "landing", "dashboard"].includes(state.route) && localUser) {
+    if (["login", "signup", "forgot", "landing"].includes(state.route) && localUser) {
       state.studentMcqBankEntered = false;
       const postAuthRoute = getStudentProfileCompletionRoute(localUser) || (localUser.role === "admin" ? "admin" : "app-launcher");
       navigate(postAuthRoute);
@@ -47224,7 +47224,7 @@ function renderAppLauncher() {
             <span class="app-launcher-badge">${canOpenMcqBank ? 'Practice Portal <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>' : "No MCQ access"}</span>
           </button>
           
-          <button class="card app-launcher-card ${coursesBlocked ? "is-disabled" : ""}" ${coursesBlocked ? 'data-action="courses-coming-soon-notice" aria-disabled="true"' : 'data-nav="courses"'} type="button">
+          <button class="card app-launcher-card ${coursesBlocked ? "is-disabled" : ""}" ${coursesBlocked ? 'data-action="courses-coming-soon-notice" aria-disabled="true"' : 'data-action="courses-home-tab" data-tab="dashboard"'} type="button">
             <div class="app-launcher-icon-wrapper is-courses">
               <div class="icon-pulse-ring"></div>
               <svg class="launcher-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
