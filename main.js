@@ -137,7 +137,7 @@ const ADMIN_BACKUP_RESTORE_CHECK_COOLDOWN_MS = 5 * 60 * 1000;
 const STUDENT_DATA_REFRESH_MS = 30000;
 const STUDENT_FULL_DATA_REFRESH_MS = 10 * 60 * 1000;
 const STUDENT_SESSION_LIVE_REFRESH_MS = 6000;
-const STUDENT_FORCE_REFRESH_POLL_MS = 500;
+const STUDENT_FORCE_REFRESH_POLL_MS = 15000;
 const STUDENT_BACKGROUND_SYNC_POLL_MS = 10000;
 const STUDENT_ACCESS_POLL_MS = 6000;
 const STUDENT_ACCESS_LOG_THROTTLE_MS = 60000;
@@ -7152,7 +7152,8 @@ function getCloudSyncStatusModel(user = null) {
   const hasActiveSupabaseSession = Boolean(getActiveSupabaseAuthUserId());
   const pendingBuckets = getPendingCloudWriteBuckets();
   const pendingCount = pendingBuckets.pendingCount;
-  const syncingNow = Boolean(relationalSync.flushing || supabaseSync.flushing || adminActionRuntime.flushing);
+  const syncingNow = pendingCount > 0
+    && Boolean(relationalSync.flushing || supabaseSync.flushing || adminActionRuntime.flushing);
   const lastSuccessAt = Math.max(
     Number(relationalSync.lastSuccessAt || 0),
     Number(supabaseSync.lastSuccessAt || 0),
@@ -9158,23 +9159,6 @@ async function hydrateRelationalQuestions() {
       .filter(([externalId]) => Boolean(externalId)),
   );
   const currentUser = getCurrentUser();
-  const coursesResult = await fetchRowsPaged((from, to) => (
-    client.from("courses").select("id,course_name").range(from, to)
-  ));
-  if (coursesResult.error) {
-    console.warn("Could not hydrate relational questions: courses lookup failed.", coursesResult.error?.message || coursesResult.error);
-    return false;
-  }
-  const courseRows = Array.isArray(coursesResult.data) ? coursesResult.data : [];
-
-  const topicsResult = await fetchRowsPaged((from, to) => (
-    client.from("course_topics").select("id,course_id,topic_name").range(from, to)
-  ));
-  if (topicsResult.error) {
-    console.warn("Could not hydrate relational questions: topics lookup failed.", topicsResult.error?.message || topicsResult.error);
-    return false;
-  }
-  const topicRows = Array.isArray(topicsResult.data) ? topicsResult.data : [];
   let questionColumnSupport = relationalQuestionColumnSupport;
   try {
     questionColumnSupport = await getRelationalQuestionColumnSupport(client);
@@ -9209,14 +9193,52 @@ async function hydrateRelationalQuestions() {
       .range(from, to);
   };
 
+  let useResilientCatalogRpc = true;
+  let useFastCatalogRpc = true;
+  const fetchQuestionsPage = (from, to) => (
+    useResilientCatalogRpc
+      ? client.rpc("get_accessible_question_catalog_page", {
+        requested_limit: Math.max(1, to - from + 1),
+        requested_offset: from,
+      })
+      : useFastCatalogRpc
+      ? client.rpc("get_accessible_questions_page", {
+        requested_limit: Math.max(1, to - from + 1),
+        requested_offset: from,
+      })
+      : buildQuestionsQuery(from, to)
+  );
+
   let questionsResult = await fetchRowsPaged(
-    (from, to) => buildQuestionsQuery(from, to),
+    fetchQuestionsPage,
     {
       pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
       timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
       timeoutMessage: "Question hydration timed out.",
     },
   );
+  if (questionsResult.error && useResilientCatalogRpc && isMissingRpcFunctionError(questionsResult.error)) {
+    useResilientCatalogRpc = false;
+    questionsResult = await fetchRowsPaged(
+      fetchQuestionsPage,
+      {
+        pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
+        timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+        timeoutMessage: "Question hydration timed out.",
+      },
+    );
+  }
+  if (questionsResult.error && useFastCatalogRpc && isMissingRpcFunctionError(questionsResult.error)) {
+    useFastCatalogRpc = false;
+    questionsResult = await fetchRowsPaged(
+      fetchQuestionsPage,
+      {
+        pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
+        timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+        timeoutMessage: "Question hydration timed out.",
+      },
+    );
+  }
   if (questionsResult.error) {
     console.warn("Could not hydrate relational questions.", questionsResult.error?.message || questionsResult.error);
     return false;
@@ -9233,7 +9255,7 @@ async function hydrateRelationalQuestions() {
       try {
         await syncQuestionsToRelational(localQuestionsBefore);
         const retryResult = await fetchRowsPaged(
-          (from, to) => buildQuestionsQuery(from, to),
+          fetchQuestionsPage,
           {
             pageSize: QUESTION_RELATIONAL_PAGE_SIZE,
             timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
@@ -9265,25 +9287,69 @@ async function hydrateRelationalQuestions() {
 
   const questionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
   const questionIds = questionRows.map((question) => question.id).filter(isUuidValue);
-  const questionIdSet = new Set(questionIds);
-  const choicesResult = await fetchRowsPaged(
-    (from, to) => client
-      .from("question_choices")
-      .select("question_id,choice_label,choice_text,is_correct")
-      .order("question_id", { ascending: true })
-      .order("choice_label", { ascending: true })
-      .range(from, to),
-    {
-      pageSize: QUESTION_CHOICE_RELATIONAL_PAGE_SIZE,
-      timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
-      timeoutMessage: "Question choice hydration timed out.",
-    },
-  );
-  if (choicesResult.error) {
-    throw choicesResult.error;
+  let courseRows = [];
+  let topicRows = [];
+  const needsCourseTopicLookup = questionRows.some((question) => (
+    !String(question?.course_name || "").trim()
+    || !String(question?.topic_name || "").trim()
+  ));
+  if (needsCourseTopicLookup) {
+    const [coursesResult, topicsResult] = await Promise.all([
+      fetchRowsPaged((from, to) => (
+        client.from("courses").select("id,course_name").range(from, to)
+      )),
+      fetchRowsPaged((from, to) => (
+        client.from("course_topics").select("id,course_id,topic_name").range(from, to)
+      )),
+    ]);
+    if (coursesResult.error) {
+      console.warn("Could not hydrate relational questions: courses lookup failed.", coursesResult.error?.message || coursesResult.error);
+    } else {
+      courseRows = Array.isArray(coursesResult.data) ? coursesResult.data : [];
+    }
+    if (topicsResult.error) {
+      console.warn("Could not hydrate relational questions: topics lookup failed.", topicsResult.error?.message || topicsResult.error);
+    } else {
+      topicRows = Array.isArray(topicsResult.data) ? topicsResult.data : [];
+    }
   }
-  const choiceRows = (Array.isArray(choicesResult.data) ? choicesResult.data : [])
-    .filter((choice) => questionIdSet.has(choice?.question_id));
+  const choiceRows = questionRows.flatMap((question) => (
+    Array.isArray(question?.choices) ? question.choices : []
+  ));
+  let useFastChoiceCatalogRpc = true;
+  for (const questionIdBatch of useResilientCatalogRpc ? [] : splitIntoBatches(questionIds, RELATIONAL_IN_BATCH_SIZE)) {
+    let choicesResult = await runWithTimeoutResult(
+      client.rpc("get_accessible_question_choices", {
+        target_question_ids: questionIdBatch,
+      }),
+      QUESTION_RELATIONAL_TIMEOUT_MS,
+      "Question choice hydration timed out.",
+    );
+    if (choicesResult.error && isMissingRpcFunctionError(choicesResult.error)) {
+      useFastChoiceCatalogRpc = false;
+    }
+    if (!useFastChoiceCatalogRpc) {
+      choicesResult = await fetchRowsPaged(
+        (from, to) => client
+          .from("question_choices")
+          .select("question_id,choice_label,choice_text,is_correct")
+          .in("question_id", questionIdBatch)
+          .order("question_id", { ascending: true })
+          .order("choice_label", { ascending: true })
+          .range(from, to),
+        {
+          pageSize: QUESTION_CHOICE_RELATIONAL_PAGE_SIZE,
+          timeoutMs: QUESTION_RELATIONAL_TIMEOUT_MS,
+          timeoutMessage: "Question choice hydration timed out.",
+        },
+      );
+    }
+    if (choicesResult.error) {
+      console.warn("Could not hydrate a relational question-choice batch.", choicesResult.error?.message || choicesResult.error);
+      continue;
+    }
+    choiceRows.push(...(Array.isArray(choicesResult.data) ? choicesResult.data : []));
+  }
 
   const courseById = Object.fromEntries((courseRows || []).map((course) => [course.id, String(course.course_name || "").trim()]));
   const topicById = Object.fromEntries((topicRows || []).map((topic) => [topic.id, String(topic.topic_name || "").trim()]));
@@ -9316,8 +9382,8 @@ async function hydrateRelationalQuestions() {
   const mappedQuestions = (questionRows || []).map((question) => {
     const externalId = String(question.external_id || question.id || "").trim();
     const existingQuestion = localQuestionByExternalId[externalId] || localQuestionByDbId[String(question.id || "").trim()] || null;
-    const courseName = courseById[question.course_id] || CURRICULUM_COURSE_LIST[0] || "Course";
-    const topicName = topicById[question.topic_id] || resolveDefaultTopic(courseName);
+    const courseName = String(question.course_name || courseById[question.course_id] || CURRICULUM_COURSE_LIST[0] || "Course").trim();
+    const topicName = String(question.topic_name || topicById[question.topic_id] || resolveDefaultTopic(courseName)).trim();
     const rawChoices = (choicesByQuestionId[question.id] || [])
       .sort((a, b) => String(a.choice_label).localeCompare(String(b.choice_label)));
     const remoteChoices = normalizeQuestionChoiceEntries(
@@ -12250,6 +12316,13 @@ function isMissingRelationError(error) {
     return true;
   }
   return false;
+}
+
+function isMissingRpcFunctionError(error) {
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || "").toLowerCase();
+  return code === "PGRST202"
+    || (message.includes("could not find the function") && message.includes("schema cache"));
 }
 
 function isMissingColumnError(error) {
