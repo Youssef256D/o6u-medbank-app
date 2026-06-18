@@ -15,11 +15,11 @@ A multi-part hardening/cleanup pass. **No served file changed behaviorally and
 the live deploy model is unchanged.** Everything here is reversible.
 
 #### Security: innerHTML / XSS escaping audit
-- Enumerated all 58 `.innerHTML` assignments in `main.js` and every `${...}`
+- Enumerated all 60 `.innerHTML` assignments in `main.js` and every `${...}`
   interpolation into HTML element, attribute, `href=`/`src=`/`style=`/`data-`
   contexts.
 - **Result: verified clean — no patches were needed.** The existing
-  `escapeHtml()` helper (used 459×) provides consistent escaping.
+  `escapeHtml()` helper (used 525×) provides consistent escaping.
 - The single field that appeared unescaped, `choice.id` at the session/review
   render sites, was traced through the full data flow and confirmed safe:
   `normalizeQuestionChoiceLabel` whitelists choice ids to exactly
@@ -31,8 +31,9 @@ the live deploy model is unchanged.** Everything here is reversible.
 - Added `package.json` with `devDependencies`: `esbuild`, `eslint`; scripts
   `build`, `build:minify`, `lint`.
 - Added `build/esbuild.config.js`: reads committed `main.js`/`bootstrap.js`,
-  emits minified output to `dist/` with non-colliding names (e.g. `main.min.js`).
-- Added `.eslintrc.cjs` with a conservative correctness/security config.
+  emits optional output to `dist/` with non-colliding names (`*.built.js` by
+  default, `*.min.js` via `build:minify`).
+- Added `eslint.config.cjs` with a conservative correctness/security config.
 - `dist/` is gitignored. The committed, un-minified `main.js` remains the served
   source of truth. Flipping the deploy to serve built output is a future,
   explicit decision.

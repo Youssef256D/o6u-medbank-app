@@ -1,3 +1,13 @@
+/**
+ * @deprecated 2026-06-18 — Retained for the optional Vercel/Netlify hosting path
+ * only. In the current GitHub Pages deploy the frontend always calls the
+ * canonical Supabase Edge Function instead (supabase.config.js has
+ * serverApiBaseUrl === "", so main.js falls back to
+ *   <project-url>/functions/v1/admin-set-user-access).
+ *
+ * Canonical implementation: supabase/functions/admin-set-user-access/index.ts
+ * Do not extend this file; extend the Edge Function. See AGENTS.md §6.
+ */
 "use strict";
 
 const {

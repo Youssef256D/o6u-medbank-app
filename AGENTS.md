@@ -134,8 +134,10 @@ A build pipeline is scaffolded but **not wired into the deploy**:
 - `package.json` — devDependencies: `esbuild`, `eslint`. Scripts: `build`,
   `build:minify`, `lint`.
 - `build/esbuild.config.js` — reads committed `main.js`/`bootstrap.js` and emits
-  minified output to `dist/` (e.g. `dist/main.min.js`). Output filenames never
-  collide with the served files.
+  optional output to `dist/` (`*.built.js` by default, `*.min.js` via
+  `build:minify`). Output filenames never collide with the served files.
+- `eslint.config.cjs` — conservative lint config for syntax/correctness checks
+  without imposing a large style refactor on the existing flat-script SPA.
 - `dist/` is gitignored.
 
 The committed, un-minified `main.js` remains the source of truth and what
@@ -190,9 +192,9 @@ Performed a multi-part hardening/cleanup pass. **The live site was not affected:
 no served file changed behaviorally.** All changes are reversible.
 
 1. **innerHTML / XSS escaping audit (VERIFIED CLEAN — no patches needed).**
-   Enumerated all 58 `.innerHTML` assignments and every `${...}` interpolation
+   Enumerated all 60 `.innerHTML` assignments and every `${...}` interpolation
    in HTML/attribute/style context. Findings:
-   - `escapeHtml()` (main.js ~L40314) is used 459×; discipline is strong.
+   - `escapeHtml()` (main.js ~L40314) is used 525×; discipline is strong.
    - The one field that appeared unescaped — `choice.id` at the session/review
      render sites (e.g. L23624–23635, L24863–24865) — is provably safe: every
      code path into rendering passes through `normalizeQuestionChoiceEntries` →
@@ -204,7 +206,7 @@ no served file changed behaviorally.** All changes are reversible.
    - **No edits to `main.js` were required.** No fabricated patches were added.
 
 2. **esbuild + ESLint tooling scaffolded (deploy NOT flipped).** Added
-   `package.json`, `build/esbuild.config.js`, `.eslintrc.cjs`. The committed
+   `package.json`, `build/esbuild.config.js`, `eslint.config.cjs`. The committed
    `main.js` stays the served source of truth; `dist/` is gitignored.
 
 3. **CI extended.** `.github/workflows/validate-changes.yml` now runs
@@ -224,7 +226,7 @@ no served file changed behaviorally.** All changes are reversible.
 6. **Cross-tool docs added.** Created this `AGENTS.md` and `CHANGELOG.md`.
 
 **Files touched:** `AGENTS.md`, `CHANGELOG.md`, `README.md`, `package.json`,
-`build/esbuild.config.js`, `.eslintrc.cjs`, `.gitignore`,
+`build/esbuild.config.js`, `eslint.config.cjs`, `.gitignore`,
 `.github/workflows/validate-changes.yml`, `api/_supabase.js`,
 `api/admin-delete-user.js`, `api/admin-set-user-access.js`,
 `api/admin-set-user-password.js`, `schema.sql`, `database/schema.sql`.

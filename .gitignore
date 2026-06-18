@@ -2,3 +2,7 @@
 .env
 .env.*
 !.env.example
+dist/
+node_modules/
+.npm-cache/
+npm-debug.log*

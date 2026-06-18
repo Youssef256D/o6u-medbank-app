@@ -1,0 +1,15 @@
+{
+  "name": "o6u-medbank-static-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Optional validation and minification tooling for the O6U MedBank static GitHub Pages app.",
+  "scripts": {
+    "lint": "eslint bootstrap.js main.js sw.js supabase.config.js api/*.js build/*.js",
+    "build": "node build/esbuild.config.js",
+    "build:minify": "node build/esbuild.config.js --minify"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "eslint": "9.39.4"
+  }
+}

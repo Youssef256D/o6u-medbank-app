@@ -18,13 +18,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install tooling
+        run: npm ci
+
       - name: Validate main.js syntax
         run: node --check main.js
 
       - name: Validate bootstrap.js syntax
         run: node --check bootstrap.js
 
+      - name: Validate service worker syntax
+        run: node --check sw.js
+
+      - name: Validate config syntax
+        run: node --check supabase.config.js
+
+      - name: Validate API syntax
+        run: |
+          node --check api/_supabase.js
+          node --check api/admin-delete-user.js
+          node --check api/admin-set-user-access.js
+          node --check api/admin-set-user-password.js
+
       - name: Validate essential files
         run: |
           test -f index.html
           test -f styles.css
+          test -f supabase.config.js
+          test -f sw.js
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build optional assets
+        run: npm run build

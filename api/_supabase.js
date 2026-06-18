@@ -1,3 +1,14 @@
+/**
+ * @deprecated 2026-06-18 — Retained only for the optional Vercel/Netlify
+ * hosting path used by the deprecated /api admin endpoints. In the current
+ * GitHub Pages deploy the frontend calls canonical Supabase Edge Functions
+ * instead because supabase.config.js keeps serverApiBaseUrl empty.
+ *
+ * Canonical implementations live in the matching supabase/functions/admin-*
+ * Edge Function directories.
+ * Do not extend this helper for production admin behavior; extend the Edge
+ * Functions. See AGENTS.md §6.
+ */
 "use strict";
 
 const MAX_BODY_BYTES = 1024 * 1024;

@@ -127,6 +127,7 @@ Alternative hosts (often easier for env management): Netlify, Vercel, Cloudflare
 This repo now includes a backend function for sensitive admin actions:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-delete-user.js`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-set-user-access.js`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/api/admin-set-user-password.js`
 - shared helpers: `/Users/youssefayoub/Documents/Apps/MCQs Website/api/_supabase.js`
 
@@ -135,6 +136,7 @@ What it does:
 - Verifies the caller's Supabase access token.
 - Checks the caller role from `profiles` (`admin` only).
 - Deletes target users via Supabase Admin API using `SUPABASE_SERVICE_ROLE_KEY` (server-side only).
+- Updates target user access/approval via Supabase Admin API and `profiles` (server-side only).
 - Updates target user passwords via Supabase Admin API using `SUPABASE_SERVICE_ROLE_KEY` (server-side only).
 
 Required environment variables (server):
@@ -152,17 +154,32 @@ Frontend config:
 
 For GitHub Pages-only deploys, `serverApiBaseUrl` can stay empty and the app will use Supabase Edge Functions fallback.
 
+### Canonical admin endpoints
+
+The production GitHub Pages deploy uses Supabase Edge Functions as the canonical
+admin API:
+
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-access/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
+
+The `/api/*.js` files are deprecated in place and retained only for an optional
+Vercel/Netlify-style hosting path where `serverApiBaseUrl` is set. Do not extend
+the `/api` copies for production behavior; extend the Edge Functions instead.
+
 ### Supabase Edge Function fallback (no separate `/api` backend)
 
 You can deploy these Edge Functions and keep `serverApiBaseUrl` empty:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-access/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
 
 Deploy to the hosted Supabase project:
 
 ```bash
 supabase functions deploy admin-delete-user
+supabase functions deploy admin-set-user-access
 supabase functions deploy admin-set-user-password
 ```
 
@@ -174,9 +191,10 @@ supabase secrets set ALLOWED_ORIGIN=https://your-site.example.com
 
 How it works with this app:
 
-- The frontend first tries `serverApiBaseUrl/admin-delete-user` and `serverApiBaseUrl/admin-set-user-password` if configured.
+- The frontend first tries `serverApiBaseUrl/admin-delete-user`, `serverApiBaseUrl/admin-set-user-access`, and `serverApiBaseUrl/admin-set-user-password` if configured.
 - If not available, it automatically falls back to:
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
+  - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-access`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
 
 ## Hermes admin assistant
