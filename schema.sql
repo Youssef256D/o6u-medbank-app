@@ -1,3 +1,16 @@
+-- ============================================================================
+-- ⚠️  HISTORICAL SNAPSHOT — NOT AUTHORITATIVE. DO NOT EDIT TO CHANGE LIVE SCHEMA.
+-- ----------------------------------------------------------------------------
+-- This file is a frozen reference copy of the early relational schema (21 core
+-- tables). It is missing everything added after Feb 2026 (profiles, the course
+-- learning-platform tables, the admin-agent control plane, access gates, etc.).
+--
+-- The CANONICAL schema is the set of applied migrations in:
+--     supabase/migrations/
+-- Apply schema changes ONLY by adding a timestamped migration there and pushing
+-- it to the hosted Supabase project. See AGENTS.md §5 ("Schema source of truth").
+-- ============================================================================
+
 -- O6U MedBank relational schema
 -- Target: PostgreSQL 15+
 
