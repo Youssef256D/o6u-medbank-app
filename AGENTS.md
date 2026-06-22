@@ -187,6 +187,27 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-22 — Admin user create refresh fix
+Fixed the admin Users dashboard race where a newly added/edited local user could
+briefly appear, then lose admin-entered fields after the next Supabase profile
+refresh.
+
+1. **Recent admin user data is protected during relational hydration.**
+   `hydrateRelationalProfiles()` now actually applies the existing
+   `shouldPreferRecentLocalUserData()` decision when resolving name, role,
+   phone, approval/access flags, year/semester, and assigned courses. This keeps
+   freshly entered admin form data from being overwritten by stale or incomplete
+   profile rows while Supabase catches up.
+2. **False student access issues are avoided during the same short window.**
+   Missing-enrollment diagnostics are delayed while recent local enrollment data
+   is intentionally preferred.
+3. **Safe merge diagnostics were added.** The debug log reports only profile
+   id/email/role and which field groups were protected; it does not log
+   passwords, tokens, question data, or secrets.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-22.03`.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-22 — Mobile responsiveness polish
 Scoped CSS-only mobile refinements. No business logic, Supabase, auth,
 enrollment, course, question, video, or desktop layout behavior was changed.

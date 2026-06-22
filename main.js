@@ -9078,10 +9078,14 @@ async function hydrateRelationalProfiles(currentUser) {
     if (existing) {
       matchedLocalUserByProfileId.set(String(profile.id || "").trim(), existing);
     }
-    const role = String(profile.role || "student") === "admin" ? "admin" : "student";
     const preferLocalOverDb = shouldPreferRecentLocalUserData(existing);
+    const dbRole = String(profile.role || "student") === "admin" ? "admin" : "student";
+    const localRole = String(existing?.role || "").trim().toLowerCase() === "admin" ? "admin" : "student";
+    const role = preferLocalOverDb && existing ? localRole : dbRole;
     const profileYear = normalizeAcademicYearOrNull(profile.academic_year);
     const profileSemester = normalizeAcademicSemesterOrNull(profile.academic_semester);
+    const existingYear = normalizeAcademicYearOrNull(existing?.academicYear);
+    const existingSemester = normalizeAcademicSemesterOrNull(existing?.academicSemester);
     const profilePhone = String(profile.phone || "").trim();
     const existingPhone = String(existing?.phone || "").trim();
     const enrolledTerm = role === "student" ? enrollmentTermMap[profile.id] || null : null;
@@ -9091,7 +9095,10 @@ async function hydrateRelationalProfiles(currentUser) {
     const normalizedProfilePhone = profilePhoneValidation.ok ? profilePhoneValidation.number : "";
     const existingPhoneValidation = validateAndNormalizePhoneNumber(existingPhone);
     const normalizedExistingPhone = existingPhoneValidation.ok ? existingPhoneValidation.number : "";
-    const resolvedPhone = normalizedProfilePhone || normalizedExistingPhone;
+    const resolvedPhone = preferLocalOverDb
+      ? (normalizedExistingPhone || normalizedProfilePhone)
+      : (normalizedProfilePhone || normalizedExistingPhone);
+    const existingCourses = sanitizeCourseAssignments(existing?.assignedCourses || []);
     const enrolledCourses = role === "student"
       ? sanitizeCourseAssignments(enrollmentCourseMap[profile.id] || [])
       : [];
@@ -9103,23 +9110,33 @@ async function hydrateRelationalProfiles(currentUser) {
     // enrollment rows are the database access index used by RLS.
     const hasProfileEnrollmentTerm = profileYear !== null && profileSemester !== null;
     let year = role === "student"
-      ? (hasProfileEnrollmentTerm ? profileYear : enrolledYear)
+      ? (
+          preferLocalOverDb
+            ? (existingYear ?? (hasProfileEnrollmentTerm ? profileYear : enrolledYear))
+            : (hasProfileEnrollmentTerm ? profileYear : enrolledYear)
+        )
       : null;
     let semester = role === "student"
-      ? (hasProfileEnrollmentTerm ? profileSemester : enrolledSemester)
+      ? (
+          preferLocalOverDb
+            ? (existingSemester ?? (hasProfileEnrollmentTerm ? profileSemester : enrolledSemester))
+            : (hasProfileEnrollmentTerm ? profileSemester : enrolledSemester)
+        )
       : null;
     const serverTermCourses = role === "student" && year !== null && semester !== null
       ? getCurriculumCourses(year, semester)
       : [];
     let assignedCourses = role !== "student"
-      ? [...allCourses]
-      : enrolledCourses.length
+      ? (preferLocalOverDb && existingCourses.length ? existingCourses : [...allCourses])
+      : preferLocalOverDb && existingCourses.length
+        ? existingCourses
+        : enrolledCourses.length
           ? enrolledCourses
           : serverTermCourses.length
             ? serverTermCourses
             : [];
     if (role === "student") {
-      const shouldPreserveEnrolledCourses = enrolledCourses.length > 0;
+      const shouldPreserveEnrolledCourses = enrolledCourses.length > 0 && !(preferLocalOverDb && existingCourses.length);
       const repairedEnrollment = normalizeStudentEnrollmentProfile({
         academicYear: year,
         academicSemester: semester,
@@ -9132,7 +9149,29 @@ async function hydrateRelationalProfiles(currentUser) {
         : repairedEnrollment.assignedCourses;
     }
     let studentAccessIssue = null;
-    if (role === "student" && Boolean(profile.approved)) {
+    const localApproved = typeof existing?.isApproved === "boolean" ? existing.isApproved : undefined;
+    const serverApproved = role === "admin"
+      ? true
+      : (
+          preferLocalOverDb && typeof localApproved === "boolean"
+            ? localApproved
+            : Boolean(profile.approved)
+        );
+    const resolvedMcqAccess = role === "admin"
+      ? true
+      : (
+          preferLocalOverDb && typeof existing?.mcqAccessEnabled === "boolean"
+            ? existing.mcqAccessEnabled
+            : profile.mcq_access_enabled !== false
+        );
+    const resolvedCoursesAccess = role === "admin"
+      ? true
+      : (
+          preferLocalOverDb && typeof existing?.coursesAccessEnabled === "boolean"
+            ? existing.coursesAccessEnabled
+            : profile.courses_access_enabled !== false
+        );
+    if (role === "student" && serverApproved && !preferLocalOverDb) {
       if (!hasCompleteStudentProfile({
         role: "student",
         phone: resolvedPhone,
@@ -9158,7 +9197,20 @@ async function hydrateRelationalProfiles(currentUser) {
         );
       }
     }
-    const serverApproved = role === "admin" || Boolean(profile.approved);
+    const resolvedName = preferLocalOverDb
+      ? (String(existing?.name || "").trim() || String(profile.full_name || "").trim() || "Student")
+      : (String(profile.full_name || "").trim() || String(existing?.name || "").trim() || "Student");
+    const resolvedEmail = preferLocalOverDb
+      ? (String(existing?.email || "").trim().toLowerCase() || String(profile.email || "").trim().toLowerCase())
+      : (String(profile.email || "").trim().toLowerCase() || String(existing?.email || "").trim().toLowerCase());
+    const resolvedApprovedAt = serverApproved
+      ? (
+          preferLocalOverDb
+            ? (existing?.approvedAt || profile.created_at || nowISO())
+            : (profile.created_at || existing?.approvedAt || nowISO())
+        )
+      : null;
+    const resolvedApprovedBy = serverApproved ? (existing?.approvedBy || "admin") : null;
     const resolvedProfileCompleted = role !== "student"
       ? true
       : isStudentProfileDataComplete({
@@ -9169,19 +9221,33 @@ async function hydrateRelationalProfiles(currentUser) {
         assignedCourses,
         authProvider: normalizeAuthProvider(profile.auth_provider || existing?.authProvider),
       });
+    if (preferLocalOverDb) {
+      console.debug("Preserved recent admin user fields during profile refresh.", {
+        profileId: String(profile.id || "").trim(),
+        email: resolvedEmail,
+        role,
+        protectedFields: {
+          name: Boolean(String(existing?.name || "").trim()),
+          phone: Boolean(normalizedExistingPhone),
+          role: localRole !== dbRole,
+          approval: typeof existing?.isApproved === "boolean",
+          enrollment: existingYear !== null || existingSemester !== null || existingCourses.length > 0,
+        },
+      });
+    }
     return {
       id: profile.id,
-      name: String(profile.full_name || "").trim() || existing?.name || "Student",
-      email: String(profile.email || "").trim().toLowerCase(),
+      name: resolvedName,
+      email: resolvedEmail,
       password: existing?.password || "",
       phone: resolvedPhone,
       role,
       verified: true,
       isApproved: serverApproved,
-      mcqAccessEnabled: role === "admin" ? true : profile.mcq_access_enabled !== false,
-      coursesAccessEnabled: role === "admin" ? true : profile.courses_access_enabled !== false,
-      approvedAt: serverApproved ? (existing?.approvedAt || profile.created_at || nowISO()) : null,
-      approvedBy: serverApproved ? (existing?.approvedBy || "admin") : null,
+      mcqAccessEnabled: resolvedMcqAccess,
+      coursesAccessEnabled: resolvedCoursesAccess,
+      approvedAt: resolvedApprovedAt,
+      approvedBy: resolvedApprovedBy,
       assignedCourses,
       enrolledCourses,
       academicYear: year,

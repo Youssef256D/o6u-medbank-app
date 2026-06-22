@@ -9,6 +9,11 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-22 — Admin user create refresh fix
+
+- Preserved recently entered admin-side user fields during the immediate Supabase profile refresh, preventing stale/partial profile rows from wiping name, role, phone, approval, or enrollment details right after adding a user.
+- Added a safe debug log for this merge decision and bumped `index.html` `app-version` to `2026-06-22.03` so static clients fetch the corrected script.
+
 ### 2026-06-22 — Mobile responsiveness polish
 
 - Added phone-only CSS refinements for the MCQ solving view so answer controls keep larger tap targets without changing the desktop exam layout.
