@@ -195,6 +195,7 @@ const RELATIONAL_UPSERT_BATCH_SIZE = 200;
 const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
+const STUDENT_AUTH_CONTENT_WARMUP_TIMEOUT_MS = Math.max(QUESTION_RELATIONAL_TIMEOUT_MS, SUPABASE_QUERY_TIMEOUT_MS, 15000) + 5000;
 const QUESTION_RELATIONAL_PAGE_SIZE = 500;
 const QUESTION_CHOICE_RELATIONAL_PAGE_SIZE = 1000;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
@@ -451,6 +452,10 @@ const state = {
   studentDataRefreshing: false,
   studentDataLastSyncAt: 0,
   studentDataLastFullSyncAt: 0,
+  studentQuestionReadStatus: "idle",
+  studentQuestionReadError: "",
+  studentQuestionReadStartedAt: 0,
+  studentQuestionReadCompletedAt: 0,
   userMenuOpen: false,
   notificationMenuOpen: false,
 };
@@ -1969,6 +1974,24 @@ function markStudentRefreshTriggerSeen(token) {
   return true;
 }
 
+function studentRefreshPayloadTouchesCoursePlatform(payload = null) {
+  const keys = Array.isArray(payload?.changedKeys) ? payload.changedKeys : [];
+  return keys.some((key) => {
+    const normalized = String(key || "").trim();
+    return normalized.startsWith("platform_")
+      || normalized === "courses_platform"
+      || normalized === "course_platform";
+  });
+}
+
+function studentRefreshPayloadTouchesMcqBank(payload = null) {
+  const keys = Array.isArray(payload?.changedKeys) ? payload.changedKeys : [];
+  if (!keys.length) {
+    return true;
+  }
+  return keys.some((key) => AUTO_STUDENT_REFRESH_SYNC_KEYS.has(String(key || "").trim()));
+}
+
 function isStudentExamRefreshRoute(route = state.route) {
   const normalizedRoute = String(route || "").trim().toLowerCase();
   return normalizedRoute === "session" || normalizedRoute === "review";
@@ -2030,11 +2053,22 @@ async function processPendingStudentRefreshTrigger(user = null, options = {}) {
   }
 
   const onExamRoute = isStudentExamRefreshRoute();
-  const refreshed = await refreshStudentDataSnapshot(current, {
-    force: true,
-    rerender: !onExamRoute,
-  }).catch(() => false);
-  if (!refreshed) {
+  const payload = pending.payload || null;
+  const needsMcqRefresh = studentRefreshPayloadTouchesMcqBank(payload);
+  const needsCoursePlatformRefresh = studentRefreshPayloadTouchesCoursePlatform(payload) || state.route === "courses";
+  const refreshed = needsMcqRefresh
+    ? await refreshStudentDataSnapshot(current, {
+      force: true,
+      rerender: !onExamRoute,
+    }).catch(() => false)
+    : true;
+  const coursesRefreshed = needsCoursePlatformRefresh
+    ? await loadStudentCoursesWithProgress({ force: true }).catch((error) => {
+      console.warn("Student course enrollment refresh failed.", error?.message || error);
+      return false;
+    })
+    : true;
+  if (!refreshed || !coursesRefreshed) {
     return { handled: false, pending: true, token: pending.token };
   }
 
@@ -4694,6 +4728,133 @@ function recordStudentAccessIssue(issue, user = null, context = {}) {
   });
 }
 
+function setStudentQuestionReadState(status, details = {}) {
+  const normalizedStatus = ["idle", "loading", "success", "error"].includes(String(status || "").trim())
+    ? String(status || "").trim()
+    : "idle";
+  const nowMs = Date.now();
+  state.studentQuestionReadStatus = normalizedStatus;
+  if (normalizedStatus === "loading") {
+    state.studentQuestionReadStartedAt = nowMs;
+    state.studentQuestionReadError = "";
+  } else if (normalizedStatus === "success") {
+    state.studentQuestionReadCompletedAt = nowMs;
+    state.studentQuestionReadError = "";
+  } else if (normalizedStatus === "error") {
+    state.studentQuestionReadCompletedAt = nowMs;
+    state.studentQuestionReadError = String(details?.message || details?.error?.message || "Question query failed.").trim();
+  } else {
+    state.studentQuestionReadError = "";
+    state.studentQuestionReadStartedAt = 0;
+    state.studentQuestionReadCompletedAt = 0;
+  }
+}
+
+function getStudentQuestionReadState() {
+  return {
+    status: String(state.studentQuestionReadStatus || "idle").trim() || "idle",
+    error: String(state.studentQuestionReadError || "").trim(),
+    startedAt: Number(state.studentQuestionReadStartedAt || 0),
+    completedAt: Number(state.studentQuestionReadCompletedAt || 0),
+  };
+}
+
+function logStudentContentAccessDecision(user = null, context = {}) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return;
+  }
+  const profileId = String(getCurrentSessionProfileId(currentUser) || getUserProfileId(currentUser) || "").trim();
+  const reason = String(context?.reason || "content_access").trim() || "content_access";
+  const surface = String(context?.surface || state.route || "student").trim() || "student";
+  const signature = `${profileId || "unknown"}:${surface}:${reason}`;
+  const nowMs = Date.now();
+  const lastAt = Number(studentQuestionAvailabilityLogTimes.get(signature) || 0);
+  if (lastAt && nowMs - lastAt < STUDENT_ACCESS_LOG_THROTTLE_MS) {
+    return;
+  }
+  studentQuestionAvailabilityLogTimes.set(signature, nowMs);
+  console.info("Student content access decision:", {
+    reason,
+    surface,
+    profileId: isUuidValue(profileId) ? profileId : "",
+    route: String(state.route || "").trim(),
+    approved: isUserAccessApproved(currentUser),
+    mcqAccessEnabled: isUserMcqAccessEnabled(currentUser),
+    coursesAccessEnabled: isUserCoursesAccessEnabled(currentUser),
+    availableCourseCount: Array.isArray(context?.availableCourses) ? context.availableCourses.length : getAvailableCoursesForUser(currentUser).length,
+    questionReadStatus: getStudentQuestionReadState().status,
+    questionCount: Number(context?.questionCount || 0),
+    details: context?.details && typeof context.details === "object" ? context.details : {},
+  });
+}
+
+function getStudentContentReadiness(user = null, context = {}) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return { loading: false, issue: null, error: "" };
+  }
+  const availableCourses = Array.isArray(context?.availableCourses)
+    ? context.availableCourses
+    : getAvailableCoursesForUser(currentUser);
+  const issue = getStudentAccessIssue(currentUser, { availableCourses });
+  const issueCode = String(issue?.code || "").trim();
+  if (issue && (issueCode === "not_approved" || issueCode === "profile_incomplete" || issueCode === "missing_enrollment_term")) {
+    return { loading: false, issue, error: "" };
+  }
+  const readState = getStudentQuestionReadState();
+  const hasManagedCloudIdentity = hasSupabaseManagedIdentity(currentUser);
+  const firstContentReadDone = Boolean(state.studentDataLastSyncAt && readState.status === "success");
+  const loading = Boolean(
+    state.studentDataRefreshing
+    || isPostAuthDataWarmupActive(currentUser)
+    || studentBootRefreshPromise
+  );
+  if (loading) {
+    return { loading: true, issue: null, error: "" };
+  }
+  if (readState.status === "error" && !state.studentDataRefreshing) {
+    return { loading: false, issue: null, error: readState.error || "Question data could not be loaded from Supabase." };
+  }
+  if (hasManagedCloudIdentity && !firstContentReadDone && readState.status === "idle") {
+    return {
+      loading: false,
+      issue: null,
+      error: "Supabase content refresh did not complete. Retry after your cloud session reconnects.",
+    };
+  }
+  return { loading: false, issue, error: "" };
+}
+
+function renderStudentContentLoadingPanel(title = "Checking Course Access", message = "Syncing your latest approval, enrollment, topics, and question bank from Supabase. This should only take a moment.") {
+  return `
+    <section class="panel">
+      <h2 class="title">${escapeHtml(title)}</h2>
+      <p class="subtle loading-inline"><span class="inline-loader" aria-hidden="true"></span><span>${escapeHtml(message)}</span></p>
+      <div class="stack">
+        <button class="btn ghost ${state.studentDataRefreshing ? "is-loading" : ""}" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+          ${renderStudentRefreshButtonContent()}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderStudentContentErrorPanel(title = "Content Could Not Load", message = "The latest course and question data could not be loaded from Supabase.") {
+  return `
+    <section class="panel">
+      <h2 class="title">${escapeHtml(title)}</h2>
+      <p class="subtle">${escapeHtml(message)}</p>
+      <div class="stack">
+        <button class="btn ghost ${state.studentDataRefreshing ? "is-loading" : ""}" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+          ${renderStudentRefreshButtonContent()}
+        </button>
+        <button class="btn" data-nav="profile">View profile</button>
+      </div>
+    </section>
+  `;
+}
+
 function canRevalidateApprovedStudentAccess(user = null, issue = null) {
   const currentUser = user || getCurrentUser();
   if (!currentUser || currentUser.role !== "student") {
@@ -4767,7 +4928,7 @@ async function revalidateApprovedStudentAccess(user = null, options = {}) {
     const refreshed = await refreshLocalUserFromRelationalProfile(authUserStub, latestUser).catch(() => null);
     let resolvedUser = refreshed?.user || null;
     if (!resolvedUser || resolvedUser.isApproved === false) {
-      const users = getUsers();
+      let users = getUsers();
       const index = users.findIndex((entry) => getStoredUserIdentityAliases(entry).includes(profileId));
       if (index < 0) {
         return false;
@@ -6711,11 +6872,19 @@ async function ensureFreshStudentDataAfterAuth(user, options = {}) {
     console.warn("Student course catalog prime failed.", primeResult.error?.message || primeResult.error);
   }
 
-  runStudentPostAuthDataWarmup(getCurrentUser() || currentUser, options).catch((warmupError) => {
-    console.warn("Student post-auth warmup failed.", warmupError?.message || warmupError);
-  });
+  const warmupResult = await runWithTimeoutResult(
+    runStudentPostAuthDataWarmup(getCurrentUser() || currentUser, options),
+    STUDENT_AUTH_CONTENT_WARMUP_TIMEOUT_MS,
+    "Student content warmup timed out.",
+  );
+  if (warmupResult?.error) {
+    if (!isTimeoutResultError(warmupResult.error)) {
+      console.warn("Student post-auth warmup failed.", warmupResult.error?.message || warmupResult.error);
+    }
+    return false;
+  }
 
-  return !primeResult?.error && primeResult?.data !== false;
+  return !primeResult?.error && primeResult?.data !== false && warmupResult?.data !== false;
 }
 
 function schedulePostAuthDataWarmup(user) {
@@ -6804,6 +6973,7 @@ function resetStudentLoginRefreshState(user = null) {
   state.analyticsCourse = "";
   state.studentDataLastSyncAt = 0;
   state.studentDataLastFullSyncAt = 0;
+  setStudentQuestionReadState("idle");
   invalidateAnalyticsCache({
     resetQuestionMeta: true,
   });
@@ -9159,6 +9329,22 @@ async function hydrateRelationalQuestions() {
       .filter(([externalId]) => Boolean(externalId)),
   );
   const currentUser = getCurrentUser();
+  const trackingStudentQuestionRead = currentUser?.role === "student";
+  const finishStudentQuestionRead = (ok, details = {}) => {
+    if (trackingStudentQuestionRead) {
+      setStudentQuestionReadState(ok ? "success" : "error", details);
+      logStudentContentAccessDecision(currentUser, {
+        reason: ok ? "question_read_success" : "question_read_error",
+        surface: "question_hydration",
+        questionCount: Number(details?.questionCount || 0),
+        details,
+      });
+    }
+    return ok;
+  };
+  if (trackingStudentQuestionRead) {
+    setStudentQuestionReadState("loading", { surface: "question_hydration" });
+  }
   let questionColumnSupport = relationalQuestionColumnSupport;
   try {
     questionColumnSupport = await getRelationalQuestionColumnSupport(client);
@@ -9241,7 +9427,10 @@ async function hydrateRelationalQuestions() {
   }
   if (questionsResult.error) {
     console.warn("Could not hydrate relational questions.", questionsResult.error?.message || questionsResult.error);
-    return false;
+    return finishStudentQuestionRead(false, {
+      message: questionsResult.error?.message || "Could not hydrate relational questions.",
+      source: useResilientCatalogRpc ? "resilient_catalog_rpc" : useFastCatalogRpc ? "fast_catalog_rpc" : "direct_tables",
+    });
   }
   const remoteQuestionRows = Array.isArray(questionsResult.data) ? questionsResult.data : [];
   if (!remoteQuestionRows.length) {
@@ -9265,23 +9454,47 @@ async function hydrateRelationalQuestions() {
         if (!retryResult.error && Array.isArray(retryResult.data) && retryResult.data.length) {
           questionsResult = retryResult;
         } else {
-          return false;
+          return finishStudentQuestionRead(false, {
+            message: retryResult?.error?.message || "Questions backfill returned no rows.",
+            source: "admin_backfill_retry",
+          });
         }
       } catch (syncError) {
         console.warn("Questions backfill failed.", syncError?.message || syncError);
-        return false;
+        return finishStudentQuestionRead(false, {
+          message: syncError?.message || "Questions backfill failed.",
+          source: "admin_backfill",
+        });
       }
     } else if (currentUser?.role === "student") {
       if (hasLocalQuestions) {
-        return true;
+        return finishStudentQuestionRead(true, {
+          source: "local_cache_after_empty_remote",
+          remoteQuestionCount: 0,
+          localQuestionCount: localQuestionsBefore.length,
+          questionCount: localQuestionsBefore.length,
+        });
       }
       const recoveredFromBackup = await hydrateQuestionsFromSupabaseBackup().catch(() => false);
       if (recoveredFromBackup) {
-        return true;
+        return finishStudentQuestionRead(true, {
+          source: "supabase_backup_after_empty_remote",
+          remoteQuestionCount: 0,
+          questionCount: getQuestions().length,
+        });
       }
-      return false;
+      return finishStudentQuestionRead(true, {
+        source: "empty_remote_success",
+        remoteQuestionCount: 0,
+        questionCount: 0,
+      });
     } else if (hasLocalQuestions) {
-      return true;
+      return finishStudentQuestionRead(true, {
+        source: "local_cache_after_empty_remote",
+        remoteQuestionCount: 0,
+        localQuestionCount: localQuestionsBefore.length,
+        questionCount: localQuestionsBefore.length,
+      });
     }
   }
 
@@ -9625,7 +9838,12 @@ async function hydrateRelationalQuestions() {
       });
     }
   }
-  return true;
+  return finishStudentQuestionRead(true, {
+    source: useResilientCatalogRpc ? "resilient_catalog_rpc" : useFastCatalogRpc ? "fast_catalog_rpc" : "direct_tables",
+    remoteQuestionCount: questionRows.length,
+    questionCount: normalizedMappedQuestions.length,
+    unresolvedChoiceCount: preservedMissingChoiceQuestionIds.length,
+  });
 }
 
 async function hydrateRelationalNotifications(currentUser) {
@@ -19065,6 +19283,7 @@ function render() {
     state.studentDataRefreshing = false;
     state.studentDataLastSyncAt = 0;
     state.studentDataLastFullSyncAt = 0;
+    setStudentQuestionReadState("idle");
     studentBootRefreshKey = "";
     studentBootRefreshPromise = null;
   }
@@ -20561,7 +20780,7 @@ function wireAuth(mode) {
         return;
       }
       const data = new FormData(form);
-      const users = getUsers();
+      let users = getUsers();
       const name = String(data.get("name") || "").trim();
       const email = String(data.get("email") || "").trim().toLowerCase();
       const phone = String(data.get("phone") || "").trim();
@@ -20598,7 +20817,7 @@ function wireAuth(mode) {
           toast(phoneValidation.message || "Phone number is invalid.");
           return;
         }
-        const idx = users.findIndex(
+        let idx = users.findIndex(
           (entry) =>
             entry.id === onboardingUser?.id
             || (onboardingUser?.supabaseAuthId && entry.supabaseAuthId === onboardingUser.supabaseAuthId)
@@ -20624,7 +20843,7 @@ function wireAuth(mode) {
             assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
           };
           const wasApproved = previousUser.isApproved === true;
-          const nextApproved = wasApproved || autoApproved;
+          let nextApproved = wasApproved || autoApproved;
           users[idx].name = onboardingUser?.name || name;
           users[idx].email = onboardingUser?.email || email;
           users[idx].phone = normalizedPhone;
@@ -20734,7 +20953,7 @@ function wireAuth(mode) {
       lockAuthForm(form, true, "Creating account...");
       const authClient = getSupabaseAuthClient();
       try {
-        const autoApproved = shouldAutoApproveStudentAccess({
+        let autoApproved = shouldAutoApproveStudentAccess({
           role: "student",
           phone: normalizedPhone,
           academicYear,
@@ -21262,7 +21481,7 @@ function wireCompleteProfile() {
         assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
       };
       const wasApproved = previousUser.isApproved === true;
-      const nextApproved = wasApproved || autoApproved;
+      let nextApproved = wasApproved || autoApproved;
       users[idx].phone = normalizedPhone;
       users[idx].role = "student";
       users[idx].academicYear = academicYear;
@@ -21482,7 +21701,41 @@ function wireNotifications() {
 
 function renderDashboard() {
   const user = getCurrentUser();
+  const availableCourses = getAvailableCoursesForUser(user);
+  const contentReadiness = getStudentContentReadiness(user, { availableCourses });
+  if (contentReadiness.loading) {
+    logStudentContentAccessDecision(user, {
+      reason: "dashboard_waiting_for_content",
+      surface: "dashboard",
+      availableCourses,
+    });
+    return renderStudentContentLoadingPanel("Checking Your Course Bank");
+  }
+  if (contentReadiness.issue) {
+    recordStudentAccessIssue(contentReadiness.issue, user, { surface: "dashboard" });
+    return `
+      <section class="panel">
+        <h2 class="title">Course Access Needs Attention</h2>
+        <p class="subtle">${escapeHtml(contentReadiness.issue.message)}</p>
+        <div class="stack">
+          <button class="btn ghost ${state.studentDataRefreshing ? "is-loading" : ""}" type="button" data-action="refresh-student-analytics" ${state.studentDataRefreshing ? "disabled" : ""}>
+            ${renderStudentRefreshButtonContent()}
+          </button>
+          <button class="btn" data-nav="profile">View profile</button>
+        </div>
+      </section>
+    `;
+  }
   const questions = getPublishedQuestionsForUser(user);
+  if (contentReadiness.error && !questions.length) {
+    logStudentContentAccessDecision(user, {
+      reason: "dashboard_question_query_error",
+      surface: "dashboard",
+      availableCourses,
+      details: { message: contentReadiness.error },
+    });
+    return renderStudentContentErrorPanel("Question Bank Could Not Load", contentReadiness.error);
+  }
   const analytics = getStudentAnalyticsSnapshot(user.id);
   const stats = analytics.stats;
   const solvedQuestionsCount = Number.isFinite(stats?.totalAnswered) ? stats.totalAnswered : 0;
@@ -22333,7 +22586,25 @@ function getCreateTestStartHelpMessage(options = {}) {
 function renderCreateTest() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
-  const accessIssue = getStudentAccessIssue(user, { availableCourses });
+  const contentReadiness = getStudentContentReadiness(user, { availableCourses });
+  if (contentReadiness.loading) {
+    logStudentContentAccessDecision(user, {
+      reason: "create_test_waiting_for_content",
+      surface: "create-test",
+      availableCourses,
+    });
+    return renderStudentContentLoadingPanel("Checking Question Bank");
+  }
+  if (contentReadiness.error) {
+    logStudentContentAccessDecision(user, {
+      reason: "create_test_question_query_error",
+      surface: "create-test",
+      availableCourses,
+      details: { message: contentReadiness.error },
+    });
+    return renderStudentContentErrorPanel("Question Bank Could Not Load", contentReadiness.error);
+  }
+  const accessIssue = contentReadiness.issue || getStudentAccessIssue(user, { availableCourses });
   const shouldRevalidateApprovedAccess = accessIssue?.code === "not_approved" && canRevalidateApprovedStudentAccess(user, accessIssue);
   if (shouldRevalidateApprovedAccess) {
     revalidateApprovedStudentAccess(user, {
@@ -25136,6 +25407,27 @@ function renderReviewFeedbackPane(question, response, isCorrect) {
 function renderAnalytics() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
+  const contentReadiness = getStudentContentReadiness(user, { availableCourses });
+  if (contentReadiness.loading) {
+    logStudentContentAccessDecision(user, {
+      reason: "analytics_waiting_for_content",
+      surface: "analytics",
+      availableCourses,
+    });
+    return renderStudentContentLoadingPanel("Checking Analytics Data");
+  }
+  if (contentReadiness.issue) {
+    recordStudentAccessIssue(contentReadiness.issue, user, { surface: "analytics" });
+    return `
+      <section class="panel">
+        <h2 class="title">Performance Analytics</h2>
+        <p class="subtle">${escapeHtml(contentReadiness.issue.message)}</p>
+      </section>
+    `;
+  }
+  if (contentReadiness.error) {
+    return renderStudentContentErrorPanel("Analytics Could Not Load", contentReadiness.error);
+  }
   if (!availableCourses.length) {
     return `
       <section class="panel">
@@ -45016,6 +45308,17 @@ async function adminDeleteCourseSuggestion(suggestionId) {
   return true;
 }
 
+function queueCoursePlatformStudentRefreshSignal(changedKeys = []) {
+  queueStudentRefreshSignal({
+    changedKeys: Array.isArray(changedKeys) && changedKeys.length
+      ? changedKeys
+      : ["platform_course_enrollments"],
+    reason: "course_platform_admin_change",
+    force: true,
+    flushNow: true,
+  });
+}
+
 async function adminResolveEnrollmentRequest(requestId, status) {
   const client = getCoursesPlatformClient();
   const request = (state.adminCoursesPlatformRequests || []).find((entry) => String(entry?.id || "").trim() === String(requestId || "").trim());
@@ -45033,6 +45336,7 @@ async function adminResolveEnrollmentRequest(requestId, status) {
       client.from("platform_course_enrollments").upsert({ user_id: request.user_id, course_id: request.course_id, assigned_by: getCurrentCoursePlatformUserId() || null }, { onConflict: "user_id,course_id", defaultToNull: false }),
       "Approved enrollment sync timed out.",
     );
+    queueCoursePlatformStudentRefreshSignal(["platform_course_enrollments", "platform_course_enrollment_requests"]);
   }
   await loadAdminCoursesPlatform({ force: true });
   return true;
@@ -45065,6 +45369,7 @@ async function adminApproveAllPendingEnrollmentRequests(courseId = "") {
       "Bulk approved enrollment sync timed out.",
     );
   }
+  queueCoursePlatformStudentRefreshSignal(["platform_course_enrollments", "platform_course_enrollment_requests"]);
   await loadAdminCoursesPlatform({ force: true });
   return pendingRequests.length;
 }
@@ -45228,6 +45533,7 @@ async function adminEnrollPlatformCourseUser(courseId, userId) {
       console.warn("Could not sync matching enrollment request status.", error?.message || error);
     });
   }
+  queueCoursePlatformStudentRefreshSignal(["platform_course_enrollments", "platform_course_enrollment_requests"]);
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }
@@ -45270,6 +45576,7 @@ async function adminEnrollPlatformCourseUsers(courseId, userIds) {
       console.warn("Could not sync matching enrollment request statuses.", error?.message || error);
     });
   }
+  queueCoursePlatformStudentRefreshSignal(["platform_course_enrollments", "platform_course_enrollment_requests"]);
   await loadAdminCoursesPlatform({ force: true });
   return targetUserIds.length;
 }
@@ -45285,6 +45592,7 @@ async function adminRemovePlatformCourseUser(courseId, userId) {
     client.from("platform_course_enrollments").delete().eq("course_id", targetCourseId).eq("user_id", targetUserId),
     "Course enrollment removal timed out.",
   );
+  queueCoursePlatformStudentRefreshSignal(["platform_course_enrollments"]);
   await loadAdminCoursesPlatform({ force: true });
   return true;
 }

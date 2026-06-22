@@ -9,6 +9,21 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-22 — Mobile responsiveness polish
+
+- Added phone-only CSS refinements for the MCQ solving view so answer controls keep larger tap targets without changing the desktop exam layout.
+- Added a mobile scroll fade to the admin sidebar navigation to make the horizontal tab rail clearer on very narrow screens.
+- Bumped `index.html` `app-version` to `2026-06-22.02` so static clients fetch the updated stylesheet.
+- Verified public auth, student dashboard, courses, lesson placeholder, MCQ session/review, profile, and admin users/dashboard at phone widths with Playwright.
+
+### 2026-06-22 — Student content access reliability
+
+- Made post-auth student warmup wait for the first Supabase profile/enrollment/question refresh before rendering empty dashboard/create-test/analytics states.
+- Added explicit student question-read status (`idle`/`loading`/`success`/`error`) so query failures and still-loading states no longer look like zero questions.
+- Added safe access-decision diagnostics with row counts/status only; question text, answers, tokens, and secrets are not logged.
+- Wired Courses platform enrollment mutations to the existing student refresh signal so admin enrollment changes prompt quick student-side course reloads.
+- Bumped `index.html` `app-version` to force static clients onto the updated served files.
+
 ### 2026-06-18 — Safety & tooling pass (no behavior change to the live site)
 
 A multi-part hardening/cleanup pass. **No served file changed behaviorally and

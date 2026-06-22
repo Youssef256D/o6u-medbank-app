@@ -187,6 +187,45 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-22 — Mobile responsiveness polish
+Scoped CSS-only mobile refinements. No business logic, Supabase, auth,
+enrollment, course, question, video, or desktop layout behavior was changed.
+
+1. **MCQ answer controls are easier to tap on phones.** The existing mobile
+   exam media query now gives radio controls, answer text, and submit actions
+   larger touch targets while preserving the desktop exam layout.
+2. **Admin side navigation has a mobile scroll affordance.** The admin sidebar
+   horizontal tab rail now fades at the right edge on phones, making it clearer
+   that additional admin sections can be swiped into view.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-06-22.02`
+   so clients fetch the updated mobile stylesheet.
+4. **Browser checks performed.** Verified public auth, student launcher/MCQ
+   dashboard, Courses dashboard, lesson placeholder, MCQ session/review,
+   student profile, and admin dashboard/users at phone widths with Playwright.
+
+**Files touched:** `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-22 — Student content access reliability
+Fixed stale/early empty states for approved enrolled students.
+
+1. **Auth/content warmup now waits for first student content refresh.** The
+   post-auth path awaits the existing boot refresh that loads profile,
+   enrollment, courses/topics, and questions before dashboard/create-test can
+   claim content is empty.
+2. **Question hydration has explicit read state.** `main.js` now tracks
+   student question-read status as `idle`, `loading`, `success`, or `error`.
+   Dashboard, create-test, and analytics use this to distinguish loading,
+   access issues, true zero questions, and query/database errors.
+3. **Safe diagnostics added.** Access-decision logs include route, status, and
+   row counts only. They do not log question stems, answers, tokens, or secrets.
+4. **Courses platform admin enrollment changes now signal students.** Admin
+   approve/enroll/remove flows queue the existing student refresh signal with
+   `platform_*` keys, and students reload Courses platform data when those keys
+   arrive.
+5. **Static cache bust bumped.** `index.html` app-version is `2026-06-22.01`.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-18 — Safety & tooling pass (no behavior change to live site)
 Performed a multi-part hardening/cleanup pass. **The live site was not affected:
 no served file changed behaviorally.** All changes are reversible.

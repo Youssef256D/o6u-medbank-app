@@ -8041,10 +8041,39 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
     gap: 0.42rem;
   }
 
-  .exam-choice-hit {
-    grid-template-columns: 16px 16px 14px 1fr;
-    gap: 0.4rem;
+  .exam-choice-hit,
+  .exam-question-card .exam-choice-hit {
+    grid-template-columns: 18px 30px minmax(0, 1fr);
+    gap: 0.5rem;
+    align-items: start;
     min-width: 0;
+  }
+
+  .exam-choice-indicator {
+    width: 18px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 0.08rem;
+  }
+
+  .exam-choice-radio-hit {
+    width: 30px;
+    min-width: 30px;
+    min-height: 44px;
+    align-items: flex-start;
+    padding-top: 0.15rem;
+  }
+
+  .exam-choice-radio {
+    width: 18px;
+    height: 18px;
+  }
+
+  .exam-choice-text-hit {
+    min-height: 44px;
+    padding: 0.02rem 0;
   }
 
   .exam-choice-text,
@@ -8094,6 +8123,15 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
 
   .exam-footer-tools {
     padding-bottom: 0.12rem;
+  }
+
+  .exam-answer-actions {
+    align-items: stretch;
+  }
+
+  .exam-answer-actions .btn {
+    min-height: 46px;
+    padding-inline: 1.05rem;
   }
 
   .exam-panel {
@@ -8767,6 +8805,8 @@ html body :is(.title,
     overflow-x: auto;
     padding-bottom: 0.12rem;
     scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
   }
 
   .admin-sidebar-nav::-webkit-scrollbar {
