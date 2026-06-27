@@ -19878,7 +19878,7 @@ function syncTopbar() {
       const courseTab = String(state.coursesHomeTab || "dashboard").trim();
       privateNavEl.innerHTML = `
         <button data-action="courses-home-tab" data-tab="dashboard" class="${courseTab === "dashboard" && state.coursesView === "home" ? "is-active" : ""}">Dashboard</button>
-        <button data-action="courses-home-tab" data-tab="enrolled" class="${courseTab === "enrolled" && state.coursesView === "home" ? "is-active" : ""}">Enrolled Courses</button>
+        <button data-action="courses-home-tab" data-tab="enrolled" class="${courseTab === "enrolled" && state.coursesView === "home" ? "is-active" : ""}">My Courses</button>
         <button data-action="courses-home-tab" data-tab="suggestions" class="${courseTab === "suggestions" && state.coursesView === "home" ? "is-active" : ""}">Course Suggestions</button>
       `;
       privateNavEl.classList.remove("hidden");
@@ -20024,6 +20024,8 @@ function getGsapRouteRevealTargets() {
     ".grid-3 > .card",
     ".grid-4 > .card",
     ".stats-grid > *",
+    ".student-stats-grid > *",
+    ".dash-quick-actions > .dash-action",
     ".app-launcher-card",
     ".courses-page-stat",
     ".course-card",
@@ -20116,8 +20118,64 @@ function runGsapRouteEnhancements(options = {}) {
   registerGsapMotionPlugins(gsap);
   setupGsapHoverMotion();
   setupGsapExamMotion(gsap);
+  setupGsapStudentMotion(gsap);
   if (!options.deferScroll) {
     setupGsapScrollReveals();
+  }
+}
+
+// Dashboard/analytics micro-motion: draw the accuracy trend line, grow topic
+// bars from zero, and gently stagger previous-test rows. Idempotent via dataset
+// flags and disabled under prefers-reduced-motion.
+function setupGsapStudentMotion(gsap = getGsapMotionApi()) {
+  if (!gsap || isReducedMotionEnabled()) {
+    return;
+  }
+  const route = String(state.route || "");
+  if (route !== "dashboard" && route !== "analytics") {
+    return;
+  }
+
+  appEl.querySelectorAll(".analytics-bar-fill").forEach((bar) => {
+    if (!(bar instanceof HTMLElement) || bar.dataset.gsapBar === "1") {
+      return;
+    }
+    bar.dataset.gsapBar = "1";
+    const targetWidth = bar.style.width || "0%";
+    gsap.fromTo(bar, { width: "0%" }, { width: targetWidth, duration: 0.7, ease: "power2.out", delay: 0.1 });
+  });
+
+  const line = appEl.querySelector(".analytics-trend-line");
+  if (line instanceof SVGPathElement && line.dataset.gsapLine !== "1" && typeof line.getTotalLength === "function") {
+    line.dataset.gsapLine = "1";
+    try {
+      const len = line.getTotalLength();
+      if (len > 0) {
+        gsap.fromTo(
+          line,
+          { strokeDasharray: len, strokeDashoffset: len },
+          {
+            strokeDashoffset: 0,
+            duration: 0.9,
+            ease: "power2.out",
+            delay: 0.15,
+            onComplete: () => {
+              line.style.strokeDasharray = "";
+              line.style.strokeDashoffset = "";
+            },
+          },
+        );
+      }
+    } catch (error) {
+      /* non-fatal: skip line-draw animation */
+    }
+  }
+
+  const newRows = Array.from(appEl.querySelectorAll(".previous-test-row"))
+    .filter((row) => row instanceof HTMLElement && row.dataset.gsapRow !== "1");
+  if (newRows.length) {
+    newRows.forEach((row) => { row.dataset.gsapRow = "1"; });
+    gsap.fromTo(newRows, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.4, ease: "power1.out", stagger: 0.04 });
   }
 }
 
@@ -22060,6 +22118,39 @@ function wireNotifications() {
 
 }
 
+function studentSvgIcon(name) {
+  const paths = {
+    accuracy: '<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>',
+    time: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 1.8"/>',
+    solved: '<path d="M4 12.5l2.5 2.5L11 10"/><path d="M14 8h6"/><path d="M14 12h6"/><path d="M14 16h6"/>',
+    bank: '<path d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Z"/><path d="M4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+    create: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+    review: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>',
+    chart: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-4"/><path d="M12 16V8"/><path d="M16 16v-6"/>',
+    flag: '<path d="M5 21V4"/><path d="M5 4h11l-2 3 2 3H5"/>',
+    streak: '<path d="M12 3s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3 1-3s.5 1.5 2 2c0-3 2-5 2-8Z"/>',
+  };
+  const inner = paths[name] || paths.chart;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
+}
+
+function renderStudentStatCard(icon, value, label, tone = "") {
+  return `
+    <article class="card student-stat${tone ? ` is-${tone}` : ""}">
+      <span class="student-stat-icon">${studentSvgIcon(icon)}</span>
+      <span class="student-stat-body">
+        <b class="student-stat-value">${value}</b>
+        <span class="student-stat-label">${escapeHtml(label)}</span>
+      </span>
+    </article>
+  `;
+}
+
+function getStudentIncorrectQueueCount(userId) {
+  const queue = load(STORAGE_KEYS.incorrectQueue, {})[userId];
+  return Array.isArray(queue) ? queue.length : 0;
+}
+
 function renderDashboard() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
@@ -22100,6 +22191,7 @@ function renderDashboard() {
   const analytics = getStudentAnalyticsSnapshot(user.id);
   const stats = analytics.stats;
   const solvedQuestionsCount = Number.isFinite(stats?.totalAnswered) ? stats.totalAnswered : 0;
+  const incorrectQueueCount = getStudentIncorrectQueueCount(user.id);
   const syncStatusText = getStudentDataSyncStatusText();
 
   return `
@@ -22116,25 +22208,39 @@ function renderDashboard() {
         </div>
       </div>
       <p class="subtle">${escapeHtml(syncStatusText)}</p>
-      <div class="stats-grid" style="margin-top: 0.9rem;">
-        <article class="card"><p class="metric">${stats.accuracy}%<small>Overall accuracy</small></p></article>
-        <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Avg time / question</small></p></article>
-        <article class="card"><p class="metric">${solvedQuestionsCount}<small>Solved questions</small></p></article>
-        <article class="card"><p class="metric">${questions.length}<small>Total questions in bank</small></p></article>
+      <div class="student-stats-grid">
+        ${renderStudentStatCard("accuracy", `${stats.accuracy}%`, "Overall accuracy", "brand")}
+        ${renderStudentStatCard("time", `${stats.timePerQuestion}s`, "Avg time / question", "accent")}
+        ${renderStudentStatCard("solved", solvedQuestionsCount, "Questions solved", "good")}
+        ${renderStudentStatCard("bank", questions.length, "Questions in bank")}
       </div>
     </section>
 
-    <section class="panel grid-2">
-      <article class="card">
-        <h3>Resume Practice</h3>
-        ${renderResumeCard(user.id)}
-      </article>
-      <article class="card">
-        <h3>Weak Areas</h3>
-        ${renderWeakAreas(analytics)}
-        <hr />
-        ${renderDashboardCoach(analytics)}
-      </article>
+    <section class="panel dashboard-next">
+      <div class="dash-next-grid">
+        <article class="card dash-resume-card">
+          <h3>Resume Practice</h3>
+          ${renderResumeCard(user.id)}
+        </article>
+        <article class="card dash-coach-card">
+          <h3>Study Coach</h3>
+          ${renderDashboardCoach(analytics)}
+        </article>
+      </div>
+      <div class="dash-quick-actions">
+        <button class="dash-action" type="button" data-nav="create-test">
+          <span class="dash-action-icon is-brand">${studentSvgIcon("create")}</span>
+          <span class="dash-action-copy"><b>Create a test</b><small>Build a custom block by course &amp; topic</small></span>
+        </button>
+        <button class="dash-action" type="button" data-action="dash-review-incorrect" ${incorrectQueueCount ? "" : "disabled"}>
+          <span class="dash-action-icon is-accent">${studentSvgIcon("review")}</span>
+          <span class="dash-action-copy"><b>Review incorrect</b><small>${incorrectQueueCount ? `${incorrectQueueCount} saved to retry` : "Nothing saved yet"}</small></span>
+        </button>
+        <button class="dash-action" type="button" data-nav="analytics">
+          <span class="dash-action-icon is-good">${studentSvgIcon("chart")}</span>
+          <span class="dash-action-copy"><b>Open analytics</b><small>See trends &amp; what to study next</small></span>
+        </button>
+      </div>
     </section>
 
     ${renderPreviousTestsSection(user)}
@@ -22194,22 +22300,6 @@ function setStudentRefreshButtonBusy(button, busy) {
   button.innerHTML = busy
     ? `<span class="inline-loader" aria-hidden="true"></span><span>Getting updates...</span>`
     : "Get Updates";
-}
-
-function renderWeakAreas(snapshotOrUserId, courseFilter = "") {
-  const snapshot = typeof snapshotOrUserId === "string"
-    ? getStudentAnalyticsSnapshot(snapshotOrUserId, courseFilter)
-    : snapshotOrUserId;
-  const weak = Array.isArray(snapshot?.weakAreas) ? snapshot.weakAreas : [];
-  if (!weak.length) {
-    return `<p class="subtle">No weak areas yet. Complete a block first.</p>`;
-  }
-
-  const items = weak
-    .slice(0, 4)
-    .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% accuracy (${entry.total} q)</p>`)
-    .join("");
-  return items;
 }
 
 function renderDashboardCoach(snapshot) {
@@ -22601,6 +22691,12 @@ function renderPreviousTestsSection(userOrId) {
 }
 
 function wireDashboard() {
+  appEl.querySelector("[data-action='dash-review-incorrect']")?.addEventListener("click", () => {
+    state.createTestSource = "incorrect";
+    state.skipNextRouteAnimation = true;
+    navigate("create-test");
+  });
+
   appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
     const refreshButton = appEl.querySelector("[data-action='refresh-student-analytics']");
     if (state.studentDataRefreshing || refreshButton?.disabled) {
@@ -25809,6 +25905,70 @@ function renderReviewFeedbackPane(question, response, isCorrect) {
   `;
 }
 
+function renderAnalyticsTrend(sessionRollups) {
+  const points = (Array.isArray(sessionRollups) ? sessionRollups : []).slice(-12);
+  if (points.length < 2) {
+    return `
+      <div class="analytics-empty">
+        <span class="analytics-empty-icon">${studentSvgIcon("chart")}</span>
+        <b>Not enough data yet</b>
+        <span class="subtle">Complete at least two tests in this course to see your accuracy trend.</span>
+      </div>
+    `;
+  }
+  const w = 300;
+  const h = 92;
+  const pad = 8;
+  const n = points.length;
+  const xFor = (i) => pad + (i * (w - pad * 2)) / (n - 1);
+  const yFor = (a) => pad + (h - pad * 2) * (1 - Math.max(0, Math.min(100, Number(a) || 0)) / 100);
+  const coords = points.map((p, i) => [xFor(i), yFor(p.accuracy)]);
+  const line = coords.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+  const area = `M${coords[0][0].toFixed(1)} ${(h - pad).toFixed(1)} `
+    + coords.map(([x, y]) => `L${x.toFixed(1)} ${y.toFixed(1)}`).join(" ")
+    + ` L${coords[n - 1][0].toFixed(1)} ${(h - pad).toFixed(1)} Z`;
+  const last = Number(points[n - 1].accuracy) || 0;
+  const first = Number(points[0].accuracy) || 0;
+  const delta = last - first;
+  return `
+    <div class="analytics-trend">
+      <svg class="analytics-trend-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Accuracy across your recent tests">
+        <path class="analytics-trend-area" d="${area}" />
+        <path class="analytics-trend-line" d="${line}" />
+      </svg>
+      <div class="analytics-trend-meta">
+        <span><b>${last}%</b><small>latest test</small></span>
+        <span class="analytics-trend-delta ${delta >= 0 ? "is-up" : "is-down"}"><b>${delta >= 0 ? "+" : ""}${delta}%</b><small>across last ${n}</small></span>
+      </div>
+    </div>
+  `;
+}
+
+function renderAnalyticsTopicBars(topicStats) {
+  const list = (Array.isArray(topicStats) ? topicStats : [])
+    .slice()
+    .sort((a, b) => b.total - a.total || a.accuracy - b.accuracy)
+    .slice(0, 8);
+  if (!list.length) {
+    return `<p class="subtle">No topic data yet. Complete a block to see per-topic accuracy.</p>`;
+  }
+  return `
+    <div class="analytics-bars">
+      ${list.map((t) => {
+    const tone = t.accuracy >= 75 ? "good" : t.accuracy >= 50 ? "warn" : "bad";
+    return `
+        <div class="analytics-bar-row">
+          <div class="analytics-bar-head">
+            <span class="analytics-bar-topic">${escapeHtml(t.topic)}</span>
+            <span class="analytics-bar-val">${t.accuracy}% <small>(${t.correct}/${t.total})</small></span>
+          </div>
+          <div class="analytics-bar-track"><span class="analytics-bar-fill is-${tone}" style="width:${Math.max(3, Math.min(100, t.accuracy))}%"></span></div>
+        </div>`;
+  }).join("")}
+    </div>
+  `;
+}
+
 function renderAnalytics() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
@@ -25853,22 +26013,14 @@ function renderAnalytics() {
   const insights = analytics.insights;
   const syncStatusText = getStudentDataSyncStatusText();
 
-  const rows = topicStats
-    .map(
-      (entry) => `
-      <tr>
-        <td>${escapeHtml(entry.topic)}</td>
-        <td>${entry.correct}/${entry.total}</td>
-        <td>${entry.accuracy}%</td>
-      </tr>
-    `,
-    )
-    .join("");
+  const incorrectQueueCount = getStudentIncorrectQueueCount(user.id);
+  const flaggedCount = Number(analytics.flaggedCount || 0);
+  const completedTestCount = Array.isArray(analytics.sessionRollups) ? analytics.sessionRollups.length : 0;
 
   return `
     <section class="panel">
       <h2 class="title">Performance Analytics</h2>
-      <p class="subtle">Course trends and weak-area detection.</p>
+      <p class="subtle">Real insights from your completed tests — what is improving and what to study next.</p>
       <div class="flex-between" style="gap: 0.8rem; align-items: flex-end; flex-wrap: wrap;">
         <form id="analytics-course-form" style="margin-top: 0.8rem; max-width: 520px;" autocomplete="off">
           <label>Course
@@ -25884,33 +26036,50 @@ function renderAnalytics() {
         </button>
       </div>
       <small class="subtle">Showing analytics for <b>${escapeHtml(selectedCourse)}</b>. ${escapeHtml(syncStatusText)}</small>
-      <div class="stats-grid" style="margin-top: 0.85rem;">
-        <article class="card"><p class="metric">${stats.accuracy}%<small>Accuracy</small></p></article>
-        <article class="card"><p class="metric">${stats.timePerQuestion}s<small>Time / question</small></p></article>
-        <article class="card"><p class="metric">${stats.streak}<small>Current streak</small></p></article>
-        <article class="card"><p class="metric">${stats.totalAnswered}<small>Total answered</small></p></article>
+      <div class="student-stats-grid" style="margin-top: 0.85rem;">
+        ${renderStudentStatCard("accuracy", `${stats.accuracy}%`, "Accuracy", "brand")}
+        ${renderStudentStatCard("time", `${stats.timePerQuestion}s`, "Time / question", "accent")}
+        ${renderStudentStatCard("streak", stats.streak, "Perfect-test streak", "good")}
+        ${renderStudentStatCard("solved", stats.totalAnswered, "Total answered")}
       </div>
     </section>
 
     <section class="panel grid-2">
       <article class="card">
-        <h4>By Topic</h4>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Topic</th><th>Correct</th><th>Accuracy</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="3">No data yet.</td></tr>`}</tbody>
-          </table>
-        </div>
+        <h4>Accuracy Trend</h4>
+        <p class="subtle">Per-test accuracy across your recent ${escapeHtml(selectedCourse)} blocks.</p>
+        ${renderAnalyticsTrend(analytics.sessionRollups)}
       </article>
       <article class="card">
-        <h4>Weak Areas</h4>
+        <h4>Topic Accuracy</h4>
+        <p class="subtle">Strongest and weakest topics, by accuracy.</p>
+        ${renderAnalyticsTopicBars(topicStats)}
+      </article>
+    </section>
+
+    <section class="panel grid-2">
+      <article class="card">
+        <h4>Focus Areas</h4>
+        <p class="subtle">Your weakest topics in this course — prioritise these.</p>
         ${weak.length
-      ? weak
+      ? `<div class="analytics-focus-list">${weak
         .slice(0, 6)
-        .map((entry) => `<p><b>${escapeHtml(entry.topic)}</b> - ${entry.accuracy}% (${entry.total} q) • ${entry.timePerQuestion || 0}s/q</p>`)
-        .join("")
-      : `<p class="subtle">No weak areas until you complete a block.</p>`
+        .map((entry) => `<p class="analytics-focus-item"><b>${escapeHtml(entry.topic)}</b><span class="subtle">${entry.accuracy}% • ${entry.total} q • ${entry.timePerQuestion || 0}s/q</span></p>`)
+        .join("")}</div>`
+      : `<div class="analytics-empty"><span class="analytics-empty-icon">${studentSvgIcon("flag")}</span><b>No focus areas yet</b><span class="subtle">Complete a block to surface your weak topics.</span></div>`
     }
+      </article>
+      <article class="card analytics-review-card">
+        <h4>Review &amp; Retry</h4>
+        <p class="subtle">Close the loop on questions you missed or flagged.</p>
+        <div class="analytics-review-stats">
+          <span><b>${incorrectQueueCount}</b><small>saved incorrect</small></span>
+          <span><b>${flaggedCount}</b><small>flagged</small></span>
+          <span><b>${completedTestCount}</b><small>tests completed</small></span>
+        </div>
+        <button class="btn" type="button" data-action="dash-review-incorrect" ${incorrectQueueCount ? "" : "disabled"}>
+          ${incorrectQueueCount ? `Review ${incorrectQueueCount} incorrect question${incorrectQueueCount === 1 ? "" : "s"}` : "No saved incorrect questions"}
+        </button>
       </article>
     </section>
 
@@ -25944,6 +26113,12 @@ function renderAnalytics() {
 }
 
 function wireAnalytics() {
+  appEl.querySelector("[data-action='dash-review-incorrect']")?.addEventListener("click", () => {
+    state.createTestSource = "incorrect";
+    state.skipNextRouteAnimation = true;
+    navigate("create-test");
+  });
+
   const form = document.getElementById("analytics-course-form");
   form?.addEventListener("change", () => {
     const data = new FormData(form);
@@ -42351,7 +42526,7 @@ function filterCoursePlatformRows(rows, tab, query, filter) {
 function renderCoursePlatformTabs(activeTab) {
   const tabs = [
     ["dashboard", "Dashboard"],
-    ["enrolled", "Enrolled Courses"],
+    ["enrolled", "My Courses"],
     ["suggestions", "Course Suggestions"],
   ];
   return `
@@ -42963,7 +43138,7 @@ function renderCourseDetail(courseId) {
           ${!enrollment.isEnrolled ? `
             <div class="course-detail-request-note">
               <b>${requestStatus === "pending" ? "Waiting for admin approval" : requestStatus === "rejected" ? "Request rejected" : "Enrollment requires admin approval"}</b>
-              <span>${requestStatus === "pending" ? "Your request was sent. Once an admin approves it, this course will move to Enrolled Courses." : requestStatus === "rejected" ? "You can contact an admin if you still need access to this course." : "Send a request and an admin can approve it from Access Requests."}</span>
+              <span>${requestStatus === "pending" ? "Your request was sent. Once an admin approves it, this course will move to My Courses." : requestStatus === "rejected" ? "You can contact an admin if you still need access to this course." : "Send a request and an admin can approve it from Access Requests."}</span>
             </div>
           ` : ""}
         </div>
@@ -47288,7 +47463,7 @@ function adminRenderCourseBuilder(courseId) {
     },
     requests: {
       title: "Enrollment requests",
-      description: "Approve or reject student requests so approved courses move into their Enrolled Courses page.",
+      description: "Approve or reject student requests so approved courses move into their My Courses page.",
     },
     availability: {
       title: "Course availability",
