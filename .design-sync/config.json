@@ -1,0 +1,9 @@
+{
+  "projectId": "1a7f6742-251b-45d0-a2b7-6cd121871a83",
+  "pkg": "o6u-medbank-static-site",
+  "globalName": "MedBank",
+  "shape": "package",
+  "cssEntry": "styles.css",
+  "componentSrcMap": {},
+  "runtimeFontPrefixes": ["Bricolage Grotesque", "Inter"]
+}
