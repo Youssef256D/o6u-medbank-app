@@ -1,5 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&display=swap");
-
 :root {
   --bg: #f2f7f5;
   --surface: rgba(255, 255, 255, 0.84);
@@ -20,15 +18,19 @@
   --radius-lg: 22px;
   --radius-md: 14px;
   --radius-sm: 10px;
-  --font-ui: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-display: "Iowan Old Style", "Times New Roman", Georgia, serif;
-  --font-admin-ui: "Manrope", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-admin-display: "Sora", "Manrope", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-heading: "Bricolage Grotesque", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-ui: var(--font-body);
+  --font-display: var(--font-heading);
+  --font-admin-ui: var(--font-body);
+  --font-admin-display: var(--font-heading);
   --exam-blue: #3e53a8;
   --exam-blue-2: #304594;
   --exam-side: #edf0f6;
   --exam-surface: #f4f5fb;
   --exam-ink: #1f2b3d;
+  --exam-muted: #3f4c59;
+  --exam-panel-bg: #f3ead7;
 }
 
 * {
@@ -46,7 +48,7 @@ body {
   width: 100%;
   max-width: 100%;
   min-height: 100vh;
-  font-family: var(--font-ui);
+  font-family: var(--font-body);
   font-size: 16px;
   line-height: 1.5;
   letter-spacing: 0.005em;
@@ -79,6 +81,8 @@ body.theme-dark {
   --exam-side: #080808;
   --exam-surface: #141414;
   --exam-ink: #f3f3f3;
+  --exam-muted: #b9c6d8;
+  --exam-panel-bg: #141414;
   background: #000000;
 }
 
@@ -105,6 +109,8 @@ body.theme-comfort {
   --exam-side: #ece6dc;
   --exam-surface: #f3eee5;
   --exam-ink: #4f3f33;
+  --exam-muted: #6b5a4b;
+  --exam-panel-bg: #f3ece2;
   background:
     radial-gradient(980px 460px at 50% -170px, rgba(129, 96, 68, 0.17), transparent 72%),
     linear-gradient(180deg, #ecebe8 0%, #e6e5e2 52%, #e4e3e0 100%);
@@ -1048,7 +1054,8 @@ body[data-route-transition="courses-out"] .app-shell.route-enter {
 }
 
 body.no-panel-animations .panel,
-body.no-panel-animations .card {
+body.no-panel-animations .card,
+body.no-panel-animations .simple-home-inner>* {
   animation: none !important;
 }
 
@@ -4545,6 +4552,38 @@ label {
   letter-spacing: 0.04em;
 }
 
+/* Quiet "new topic" signal: a small dot instead of a repeated text badge. */
+.create-test-topic-new-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+
+.create-test-active-block {
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.create-test-active-block-meta {
+  display: block;
+  margin-top: 0.18rem;
+}
+
+.create-test-active-block-actions {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
 .create-test-topic-chip.is-all {
   border-color: rgba(23, 126, 137, 0.35);
 }
@@ -5130,26 +5169,26 @@ th {
 
 .exam-question-status-moodle {
   max-width: 8ch;
-  color: #2e3338;
+  color: var(--exam-muted);
   font-size: calc(0.98rem * var(--exam-font-scale));
   line-height: 1.45;
 }
 
 .exam-question-status.good {
-  color: #2b2f33;
+  color: var(--exam-ink);
 }
 
 .exam-question-status.bad {
-  color: #2b2f33;
+  color: var(--exam-ink);
 }
 
 .exam-question-status.neutral {
-  color: var(--muted);
+  color: var(--exam-muted);
 }
 
 .exam-mark-line {
   margin: 0;
-  color: #2e3338;
+  color: var(--exam-muted);
   font-size: calc(0.96rem * var(--exam-font-scale));
 }
 
@@ -5563,25 +5602,23 @@ th {
   align-items: center;
   justify-content: center;
   gap: 0.36rem;
-  border: 0;
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: linear-gradient(135deg, #0d5ea8 0%, #1d8cd8 52%, #2ea6c8 100%);
-  color: #ffffff;
+  background: var(--brand-soft);
+  color: var(--exam-ink);
   width: auto;
-  min-height: 36px;
-  padding: 0.36rem 0.92rem;
-  font-size: 0.86rem;
-  font-weight: 700;
+  min-height: 32px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.8rem;
+  font-weight: 600;
   letter-spacing: 0.01em;
   cursor: pointer;
-  box-shadow: 0 8px 20px rgba(13, 94, 168, 0.28);
-  transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, opacity 140ms ease;
 }
 
 .exam-ask-ai-btn:hover {
   transform: translateY(-1px);
-  filter: saturate(1.06);
-  box-shadow: 0 10px 24px rgba(13, 94, 168, 0.34);
+  border-color: var(--brand);
 }
 
 .exam-ask-ai-btn:active {
@@ -5589,35 +5626,33 @@ th {
 }
 
 .exam-ask-ai-btn:disabled {
-  background: #d5dae1;
-  color: #6b7482;
-  box-shadow: none;
   cursor: not-allowed;
-  opacity: 0.92;
+  opacity: 0.5;
 }
 
 .exam-ask-ai-spark {
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   line-height: 1;
+  color: var(--brand);
 }
 
 .exam-copy-question-btn {
-  border: 1px solid #9db5d1;
-  background: #ffffff;
-  color: #0f3f67;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--exam-muted);
   border-radius: 999px;
-  min-height: 36px;
-  padding: 0.36rem 0.88rem;
-  font-size: 0.82rem;
-  font-weight: 700;
+  min-height: 32px;
+  padding: 0.3rem 0.76rem;
+  font-size: 0.78rem;
+  font-weight: 600;
   cursor: pointer;
-  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+  transition: transform 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .exam-copy-question-btn:hover {
   transform: translateY(-1px);
-  border-color: #6f97be;
-  box-shadow: 0 8px 20px rgba(29, 86, 138, 0.15);
+  border-color: var(--line-strong);
+  color: var(--exam-ink);
 }
 
 .exam-copy-question-btn:active {
@@ -5790,19 +5825,19 @@ th {
 .exam-feedback-head h4 {
   margin: 0;
   font-size: 1rem;
-  color: #a47a2f;
-  font-weight: 500;
+  color: var(--exam-ink);
+  font-weight: 600;
 }
 
 .exam-feedback-answer {
   margin: 0;
   font-weight: 500;
-  color: #a47a2f;
+  color: var(--exam-ink);
 }
 
 .exam-feedback-block .exam-review-rationale {
   margin: 0;
-  color: #a47a2f;
+  color: var(--exam-ink);
   font-weight: 500;
 }
 
@@ -5829,8 +5864,9 @@ th {
 
 .exam-stem {
   color: var(--exam-ink);
-  font-size: calc(0.98rem * var(--exam-font-scale));
-  line-height: 1.52;
+  font-size: calc(1.04rem * var(--exam-font-scale));
+  line-height: 1.62;
+  max-width: 74ch;
 }
 
 .exam-stem,
@@ -5841,11 +5877,11 @@ th {
 }
 
 .exam-shell.font-compact .exam-stem {
-  font-size: calc(0.98rem * var(--exam-font-scale));
+  font-size: calc(0.95rem * var(--exam-font-scale));
 }
 
 .exam-shell.font-large .exam-stem {
-  font-size: calc(0.98rem * var(--exam-font-scale));
+  font-size: calc(1.16rem * var(--exam-font-scale));
 }
 
 .exam-line {
@@ -5976,7 +6012,7 @@ th {
 
 .exam-choice-text {
   color: var(--exam-ink);
-  font-size: calc(0.97rem * var(--exam-font-scale));
+  font-size: calc(1rem * var(--exam-font-scale));
 }
 
 .exam-choice-radio-hit {
@@ -5994,9 +6030,67 @@ th {
   width: 100%;
   text-align: left;
   font: inherit;
-  font-size: calc(0.97rem * var(--exam-font-scale));
-  line-height: 1.52;
+  font-size: calc(1rem * var(--exam-font-scale));
+  line-height: 1.55;
   cursor: pointer;
+}
+
+.exam-shell.font-compact .exam-choice-text-hit {
+  font-size: calc(0.93rem * var(--exam-font-scale));
+}
+
+.exam-shell.font-large .exam-choice-text-hit {
+  font-size: calc(1.12rem * var(--exam-font-scale));
+}
+
+/* Strike / eliminate is a deliberate secondary control, separate from
+   selecting the answer (which is the whole option text). */
+.exam-choice-strike {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  margin-top: 0.05rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--exam-muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: line-through;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease, color 140ms ease;
+}
+
+.exam-choice-strike:hover {
+  opacity: 1;
+  border-color: var(--line-strong);
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.exam-choice-strike.is-active {
+  opacity: 1;
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(196, 58, 58, 0.1);
+}
+
+.exam-choice-strike:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+@media (max-width: 720px) {
+  .exam-choice-strike {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+  }
 }
 
 .exam-choice-text-hit.is-text-highlighted {
@@ -8218,7 +8312,7 @@ body.theme-comfort .exam-question-meta .exam-meta-link:hover {
 
 /* Global typography normalization across the app. */
 html body {
-  font-family: var(--font-ui) !important;
+  font-family: var(--font-body) !important;
 }
 
 html body :where(*, *::before, *::after) {
@@ -8239,29 +8333,83 @@ html body :is(.btn,
   font-weight: 500 !important;
 }
 
-/* Keep brand/logo and major headings in display style. */
+/* Keep brand/logo, headings, controls, labels, timers, and metrics in the heading face. */
+html body :is(h1,
+  h2,
+  h3,
+  h4,
+  .brand,
+  button,
+  .btn,
+  .pill,
+  .badge,
+  .cloud-sync-pill,
+  .cloud-sync-label,
+  .notification-count-indicator,
+  .notification-bell-badge,
+  .countdown,
+  .exam-countdown,
+  .metric,
+  .metric small,
+  .exam-nav-link,
+  .exam-nav-item .num,
+  .exam-nav-item .state,
+  .exam-meta-badge,
+  .exam-question-status,
+  .exam-question-title-moodle b,
+  .exam-nav-setting-label,
+  .exam-nav-font-value,
+  .admin-user-account b,
+  .admin-dashboard-breakdown-value,
+  .admin-courses-minimal-stat b,
+  .admin-course-stat b,
+  .admin-course-stat-card b,
+  .courses-stat-value,
+  .courses-stat-unit,
+  .courses-page-stat-value,
+  .course-upload-progress-percent,
+  .score,
+  [class*="-label"],
+  [class*="-badge"],
+  [class*="-count"],
+  [class*="-metric"],
+  [class*="-number"],
+  [class*="-score"]) {
+  font-family: var(--font-heading) !important;
+}
+
 html body .brand {
-  font-family: var(--font-display) !important;
   font-weight: 600 !important;
 }
 
-html body :is(.title,
-  .hero h1,
-  .home-copy h1,
-  .card h3,
-  .card h4,
-  .panel h2,
-  .panel h3,
-  .admin-shell .title,
-  .admin-shell h2,
-  .admin-shell h3,
-  .exam-question-meta h3,
-  .exam-nav-panel h3,
-  .exam-feedback-head h4,
-  .exam-review-head h4,
-  .exam-panel-head h4) {
-  font-family: var(--font-display) !important;
+html body :is(h1,
+  h2,
+  h3,
+  h4,
+  .title,
+  .admin-shell .title) {
   font-weight: 600 !important;
+}
+
+/* Keep MCQ reading surfaces in the body face, even when implemented as buttons. */
+html body :is(.exam-stem,
+  .exam-line,
+  .exam-choice,
+  .exam-choice-hit,
+  .exam-choice-text,
+  .exam-choice-text-body,
+  .exam-choice-inline-note,
+  .exam-feedback-answer,
+  .exam-review-rationale,
+  .choice,
+  .choice-text) {
+  font-family: var(--font-body) !important;
+}
+
+html body :is(.exam-choice .exam-choice-text,
+  button.exam-choice-text,
+  label.exam-choice-hit) {
+  font-family: var(--font-body) !important;
 }
 
 /* Mobile phone layout layer. Desktop rules above stay unchanged. */

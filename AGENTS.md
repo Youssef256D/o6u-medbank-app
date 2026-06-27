@@ -187,6 +187,42 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-27 — Custom font system
+Replaced the older Manrope/Sora CSS import with a static-SPA-friendly Google
+Fonts setup in `index.html` and centralized font variables in `styles.css`.
+
+1. **Fonts load from the document head.** The app now preconnects to Google
+   Fonts and requests only Bricolage Grotesque 500/700 and Inter 400/500 with
+   `display=swap`; no CSS `@import` is used.
+2. **Typography is routed through variables.** `--font-heading` and
+   `--font-body` drive the app, with the older UI/display/admin variables kept
+   as aliases so existing selectors remain maintainable.
+3. **Reading surfaces stay body-focused.** MCQ stems, answer options,
+   explanations, and rationales explicitly use Inter even when an option is
+   implemented as a button.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-27.02`.
+
+**Files touched:** `index.html`, `styles.css`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-27 — GSAP animation runtime
+Installed the official GSAP agent skills into `.agents/skills/` and wired GSAP
+into the static SPA without changing the deploy model.
+
+1. **GSAP loads through the existing bootstrap path.** `bootstrap.js` now loads
+   GSAP 3.13 and ScrollTrigger from public CDNs in the background, registers
+   ScrollTrigger when present, and leaves the CSS motion fallback active if the
+   CDN is unavailable.
+2. **Route and card motion now use GSAP when available.** `main.js` adds
+   GSAP-powered route intro timelines, card hover movement, and ScrollTrigger
+   reveal hooks for offscreen cards. Admin, exam session, and review surfaces
+   stay conservative.
+3. **Accessibility fallback is preserved.** `prefers-reduced-motion` skips GSAP
+   motion, and the existing CSS route animation remains the fallback.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-27.01`.
+
+**Files touched:** `bootstrap.js`, `main.js`, `styles.css`, `index.html`,
+`CHANGELOG.md`, `AGENTS.md`, `skills-lock.json`, `.agents/skills/*`.
+
 ### 2026-06-22 — Admin user create refresh fix
 Fixed the admin Users dashboard race where a newly added/edited local user could
 briefly appear, then lose admin-entered fields after the next Supabase profile

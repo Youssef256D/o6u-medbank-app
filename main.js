@@ -938,9 +938,13 @@ const relationalQuestionColumnSupport = {
 let timerHandle = null;
 let lastRenderedRoute = null;
 let routeTransitionHandle = null;
+let routeTransitionAnimation = null;
 let sessionQuestionTransitionHandle = null;
 let lastRenderedSessionPointer = null;
+let lastExamChoiceAnimKey = "";
+let lastExamFeedbackAnimKey = "";
 let lastRenderedCoursesTransitionKey = "";
+let gsapReadyEnhancementHandle = null;
 let wasAdminQuestionModalOpen = false;
 let adminPresencePollHandle = null;
 let adminDashboardPollHandle = null;
@@ -19316,6 +19320,7 @@ function render() {
   document.removeEventListener("mouseup", handleSessionHighlighterMouseup);
   document.removeEventListener("keydown", handleReviewKeydown);
   cleanupDetachedLessonVideoFullscreenArtifacts();
+  cleanupGsapPageMotion();
 
   const user = getCurrentUser();
   const authRestorePending = isSupabaseAuthRestorePending(user, state.route);
@@ -19686,12 +19691,14 @@ function render() {
     state.coursesTransitionMode = "";
     lastRenderedRoute = state.route;
     state.skipNextRouteAnimation = false;
+    runGsapRouteEnhancements();
     restoreFocusState();
     return;
   }
   if (routeChanged) {
     animateRouteTransition();
   }
+  runGsapRouteEnhancements({ deferScroll: routeChanged });
   lastRenderedCoursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
   state.coursesTransitionMode = "";
   lastRenderedRoute = state.route;
@@ -19956,23 +19963,311 @@ function markActiveNav() {
   });
 }
 
+function isReducedMotionEnabled() {
+  return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+}
+
+function getGsapMotionApi() {
+  const gsap = window.gsap;
+  if (!gsap || typeof gsap.timeline !== "function" || typeof gsap.to !== "function") {
+    return null;
+  }
+  return gsap;
+}
+
+function registerGsapMotionPlugins(gsap = getGsapMotionApi()) {
+  if (!gsap || !window.ScrollTrigger || window.__MCQ_GSAP_SCROLLTRIGGER_REGISTERED__) {
+    return;
+  }
+  try {
+    gsap.registerPlugin(window.ScrollTrigger);
+    window.__MCQ_GSAP_SCROLLTRIGGER_REGISTERED__ = true;
+  } catch (error) {
+    console.warn("GSAP ScrollTrigger registration failed.", error?.message || error);
+  }
+}
+
+function cleanupGsapPageMotion() {
+  if (routeTransitionAnimation) {
+    routeTransitionAnimation.kill();
+    routeTransitionAnimation = null;
+  }
+  if (window.ScrollTrigger?.getAll) {
+    window.ScrollTrigger.getAll().forEach((trigger) => {
+      const triggerId = String(trigger?.vars?.id || "");
+      if (triggerId.startsWith("mcq-")) {
+        trigger.kill();
+      }
+    });
+  }
+}
+
+function getGsapRouteOffset() {
+  const transitionKey = String(document.body.dataset.routeTransition || "").trim();
+  if (transitionKey === "courses-in" || transitionKey === "courses-app") {
+    return { y: 18, scale: 0.985, filter: "blur(3px) saturate(0.9)" };
+  }
+  if (transitionKey === "courses-out") {
+    return { y: -12, scale: 0.99, filter: "blur(2px) saturate(0.94)" };
+  }
+  return { y: 10, scale: 0.995, filter: "saturate(0.97)" };
+}
+
+function getGsapRouteRevealTargets() {
+  if (!appEl || ["admin", "session", "review"].includes(String(state.route || ""))) {
+    return [];
+  }
+  const selectors = [
+    ".simple-home-inner > *",
+    ".panel .card",
+    ".grid-2 > .card",
+    ".grid-3 > .card",
+    ".grid-4 > .card",
+    ".stats-grid > *",
+    ".app-launcher-card",
+    ".courses-page-stat",
+    ".course-card",
+  ].join(", ");
+  const seen = new Set();
+  return Array.from(appEl.querySelectorAll(selectors))
+    .filter((node) => {
+      if (!(node instanceof HTMLElement) || seen.has(node) || node.offsetParent === null) {
+        return false;
+      }
+      seen.add(node);
+      return true;
+    })
+    .slice(0, 32);
+}
+
+function setupGsapScrollReveals(excludeNodes = new Set()) {
+  const gsap = getGsapMotionApi();
+  if (!gsap || !window.ScrollTrigger || isReducedMotionEnabled()) {
+    return;
+  }
+  registerGsapMotionPlugins(gsap);
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const targets = getGsapRouteRevealTargets()
+    .filter((node) => !excludeNodes.has(node))
+    .filter((node) => node.getBoundingClientRect().top > viewportHeight * 0.86);
+  if (!targets.length || !window.ScrollTrigger?.batch) {
+    return;
+  }
+  gsap.set(targets, { autoAlpha: 0, y: 22, willChange: "transform, opacity" });
+  window.ScrollTrigger.batch(targets, {
+    id: "mcq-scroll-reveal",
+    start: "top 88%",
+    once: true,
+    onEnter: (batch) => {
+      gsap.to(batch, {
+        autoAlpha: 1,
+        y: 0,
+        duration: 0.5,
+        ease: "power2.out",
+        stagger: 0.055,
+        overwrite: "auto",
+        clearProps: "opacity,visibility,transform,willChange",
+      });
+    },
+  });
+  window.setTimeout(() => {
+    window.ScrollTrigger?.refresh?.();
+  }, 80);
+}
+
+function setupGsapHoverMotion() {
+  const gsap = getGsapMotionApi();
+  if (!gsap || isReducedMotionEnabled() || ["admin", "session", "review"].includes(String(state.route || ""))) {
+    return;
+  }
+  const hoverTargets = appEl.querySelectorAll(".panel .card, .app-launcher-card, .courses-page-stat");
+  hoverTargets.forEach((node) => {
+    if (!(node instanceof HTMLElement) || node.dataset.gsapHoverWired === "1") {
+      return;
+    }
+    node.dataset.gsapHoverWired = "1";
+    node.addEventListener("pointerenter", () => {
+      gsap.to(node, {
+        y: -4,
+        scale: 1.01,
+        duration: 0.22,
+        ease: "power2.out",
+        overwrite: "auto",
+      });
+    });
+    node.addEventListener("pointerleave", () => {
+      gsap.to(node, {
+        y: 0,
+        scale: 1,
+        duration: 0.24,
+        ease: "power2.out",
+        overwrite: "auto",
+        clearProps: "transform",
+      });
+    });
+  });
+}
+
+function runGsapRouteEnhancements(options = {}) {
+  const gsap = getGsapMotionApi();
+  if (!gsap || isReducedMotionEnabled()) {
+    return;
+  }
+  registerGsapMotionPlugins(gsap);
+  setupGsapHoverMotion();
+  setupGsapExamMotion(gsap);
+  if (!options.deferScroll) {
+    setupGsapScrollReveals();
+  }
+}
+
+// Gentle exam motion: stagger answer choices when a new question appears and
+// reveal the explanation pane when an answer is checked. Gated by a per-question
+// key so routine re-renders (e.g. selecting an option) do not re-animate.
+function setupGsapExamMotion(gsap = getGsapMotionApi()) {
+  if (!gsap || isReducedMotionEnabled() || state.route !== "session") {
+    lastExamChoiceAnimKey = "";
+    lastExamFeedbackAnimKey = "";
+    return;
+  }
+  const user = getCurrentUser();
+  const session = user ? getActiveSession(user.id, state.sessionId) : null;
+  if (!session) {
+    return;
+  }
+  const questionKey = `${session.id}:${session.currentIndex}`;
+  if (questionKey !== lastExamChoiceAnimKey) {
+    lastExamChoiceAnimKey = questionKey;
+    const choices = Array.from(appEl.querySelectorAll(".exam-answers .exam-choice"));
+    if (choices.length) {
+      gsap.killTweensOf(choices);
+      gsap.fromTo(
+        choices,
+        { autoAlpha: 0, x: -10 },
+        {
+          autoAlpha: 1,
+          x: 0,
+          duration: 0.34,
+          ease: "power2.out",
+          stagger: 0.05,
+          clearProps: "opacity,visibility,transform",
+        },
+      );
+    }
+    const stem = appEl.querySelector(".exam-stem");
+    if (stem) {
+      gsap.fromTo(
+        stem,
+        { autoAlpha: 0, y: 8 },
+        { autoAlpha: 1, y: 0, duration: 0.36, ease: "power2.out", clearProps: "opacity,visibility,transform" },
+      );
+    }
+  }
+
+  const feedback = appEl.querySelector(".exam-feedback-block");
+  const feedbackKey = feedback ? `${questionKey}:fb` : "";
+  if (feedbackKey && feedbackKey !== lastExamFeedbackAnimKey) {
+    lastExamFeedbackAnimKey = feedbackKey;
+    gsap.killTweensOf(feedback);
+    gsap.fromTo(
+      feedback,
+      { autoAlpha: 0, y: 12 },
+      { autoAlpha: 1, y: 0, duration: 0.4, ease: "power2.out", clearProps: "opacity,visibility,transform" },
+    );
+  } else if (!feedbackKey) {
+    lastExamFeedbackAnimKey = "";
+  }
+}
+
 function animateRouteTransition() {
   if (routeTransitionHandle) {
     window.clearTimeout(routeTransitionHandle);
     routeTransitionHandle = null;
   }
+  if (routeTransitionAnimation) {
+    routeTransitionAnimation.kill();
+    routeTransitionAnimation = null;
+  }
   document.body.classList.add("is-routing");
-  applyStaggerIndices();
+  const gsap = getGsapMotionApi();
 
+  if (!gsap || isReducedMotionEnabled()) {
+    document.body.classList.remove("no-panel-animations");
+    applyStaggerIndices();
+
+    appEl.classList.remove("route-enter", "route-enter-active");
+    void appEl.offsetWidth;
+    appEl.classList.add("route-enter");
+
+    window.requestAnimationFrame(() => {
+      appEl.classList.add("route-enter-active");
+    });
+
+    routeTransitionHandle = window.setTimeout(() => {
+      appEl.classList.remove("route-enter", "route-enter-active");
+      document.body.classList.remove("is-routing");
+      delete document.body.dataset.routeTransition;
+      routeTransitionHandle = null;
+    }, ROUTE_TRANSITION_MS);
+    return;
+  }
+
+  registerGsapMotionPlugins(gsap);
+  document.body.classList.add("no-panel-animations");
   appEl.classList.remove("route-enter", "route-enter-active");
-  void appEl.offsetWidth;
-  appEl.classList.add("route-enter");
+  const offset = getGsapRouteOffset();
+  const revealTargets = getGsapRouteRevealTargets();
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const introTargets = revealTargets.filter((node) => node.getBoundingClientRect().top <= viewportHeight * 0.92);
+  const introTargetSet = new Set(introTargets);
 
-  window.requestAnimationFrame(() => {
-    appEl.classList.add("route-enter-active");
+  gsap.set(appEl, {
+    autoAlpha: 0,
+    y: offset.y,
+    scale: offset.scale,
+    filter: offset.filter,
+    willChange: "transform, opacity, filter",
+  });
+  if (introTargets.length) {
+    gsap.set(introTargets, { autoAlpha: 0, y: 18, willChange: "transform, opacity" });
+  }
+
+  routeTransitionAnimation = gsap.timeline({
+    defaults: { ease: "power2.out" },
+    onComplete: () => {
+      appEl.classList.remove("route-enter", "route-enter-active");
+      document.body.classList.remove("is-routing", "no-panel-animations");
+      delete document.body.dataset.routeTransition;
+      routeTransitionAnimation = null;
+      setupGsapScrollReveals(introTargetSet);
+    },
   });
 
+  routeTransitionAnimation
+    .to(appEl, {
+      autoAlpha: 1,
+      y: 0,
+      scale: 1,
+      filter: "none",
+      duration: 0.42,
+      clearProps: "opacity,visibility,transform,filter,willChange",
+    }, 0);
+
+  if (introTargets.length) {
+    routeTransitionAnimation.to(introTargets, {
+      autoAlpha: 1,
+      y: 0,
+      duration: 0.44,
+      stagger: { each: 0.045, from: "start" },
+      clearProps: "opacity,visibility,transform,willChange",
+    }, 0.08);
+  }
+
   routeTransitionHandle = window.setTimeout(() => {
+    if (routeTransitionAnimation) {
+      routeTransitionAnimation.progress(1).kill();
+      routeTransitionAnimation = null;
+    }
     appEl.classList.remove("route-enter", "route-enter-active");
     document.body.classList.remove("is-routing");
     delete document.body.dataset.routeTransition;
@@ -22823,12 +23118,12 @@ function renderCreateTest() {
       <p class="subtle">Choose course and topics, then generate a test block.</p>
       ${inProgress
       ? `
-        <div class="card" style="margin-top: 0.7rem; display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap;">
+        <div class="card create-test-active-block">
           <div>
             <span><b>Active block detected</b></span>
-            <small class="subtle" style="display: block; margin-top: 0.18rem;">${escapeHtml([inProgressName, inProgressTopicSummary].filter(Boolean).join(" • "))}</small>
+            <small class="subtle create-test-active-block-meta">${escapeHtml([inProgressName, inProgressTopicSummary].filter(Boolean).join(" • "))}</small>
           </div>
-          <div style="display: flex; gap: 0.55rem; flex-wrap: wrap;">
+          <div class="create-test-active-block-actions">
             <button class="btn" data-nav="session">Resume</button>
             <button class="btn ghost" type="button" data-action="end-active-block" data-session-id="${escapeHtml(inProgress.id)}">End block</button>
           </div>
@@ -22896,7 +23191,7 @@ function renderCreateTest() {
                             <label class="admin-course-check create-test-topic-chip is-list-item">
                               <input type="checkbox" name="createTestTopics" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
                               <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
-                              ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
+                              ${isNewTopic ? '<span class="create-test-topic-new-dot" title="New topic" aria-label="New topic"></span>' : ""}
                             </label>
                           `;
         })
@@ -22917,7 +23212,7 @@ function renderCreateTest() {
                                     <label class="admin-course-check create-test-topic-chip">
                                       <input type="checkbox" name="createTestTopics" data-role="create-test-topic" value="${escapeHtml(topic)}" ${(allTopicsSelected || selectedTopics.includes(topic)) ? "checked" : ""} />
                                       <span class="create-test-topic-chip-copy">${escapeHtml(topic)}</span>
-                                      ${isNewTopic ? '<span class="badge create-test-topic-badge">New</span>' : ""}
+                                      ${isNewTopic ? '<span class="create-test-topic-new-dot" title="New topic" aria-label="New topic"></span>' : ""}
                                     </label>
                                   `;
             })
@@ -23965,12 +24260,22 @@ function renderSession() {
             <button
               type="button"
               class="exam-choice-text exam-choice-text-hit"
-              data-action="toggle-strike"
+              data-action="select-choice"
               data-choice-id="${choice.id}"
               ${isSubmitted ? "disabled" : ""}
-              aria-label="Strike or unstrike choice ${choice.id}"
+              aria-label="Select answer ${choice.id}"
             ><b>${choice.id}.</b> <span class="exam-choice-text-body" data-highlight-kind="choice" data-choice-id="${choice.id}">${renderedChoiceText}</span> ${inlineFeedback}</button>
           </div>
+          <button
+            type="button"
+            class="exam-choice-strike ${struck ? "is-active" : ""}"
+            data-action="toggle-strike"
+            data-choice-id="${choice.id}"
+            ${isSubmitted ? "disabled" : ""}
+            aria-pressed="${struck ? "true" : "false"}"
+            aria-label="${struck ? "Restore" : "Eliminate"} choice ${choice.id}"
+            title="${struck ? "Restore this option" : "Eliminate this option"}"
+          ><span aria-hidden="true">S</span></button>
         </div>
       `;
     })
@@ -24077,7 +24382,6 @@ function renderSession() {
               </div>
               <div class="exam-nav-grid">${sideRows}</div>
               <button class="exam-nav-link" data-action="submit-session">Submit all and finish</button>
-              <button class="btn ghost exam-nav-new" data-nav="create-test">Start a new preview</button>
             </aside>
             ${navCollapsed ? `<button
               type="button"
@@ -24562,6 +24866,42 @@ async function handleSessionClick(event) {
     currentContext.response.flagged = !currentContext.response.flagged;
   }
 
+  if (action === "select-choice") {
+    const choiceId = normalizeQuestionChoiceLabel(target.getAttribute("data-choice-id"));
+    if (!choiceId) {
+      return;
+    }
+    if (!currentContext) {
+      state.skipNextRouteAnimation = true;
+      render();
+      return;
+    }
+    if (currentContext.response.submitted) {
+      return;
+    }
+    // Ignore the click that ends a text-highlight drag on this choice.
+    if (shouldSuppressStrikeClick(session.id, currentContext.qid, choiceId)) {
+      return;
+    }
+    const choiceInput = Array.from(appEl.querySelectorAll("input[name='answer']"))
+      .find((entry) => String(entry.value || "").trim().toUpperCase() === choiceId);
+    if (!choiceInput || choiceInput.disabled) {
+      return;
+    }
+    if (choiceInput.type === "checkbox") {
+      choiceInput.checked = !choiceInput.checked;
+    } else {
+      choiceInput.checked = true;
+    }
+    syncActiveResponseSelectionFromDom(session);
+    currentContext.response.submitted = false;
+    session.updatedAt = nowISO();
+    upsertSession(session);
+    state.skipNextRouteAnimation = true;
+    render();
+    return;
+  }
+
   if (action === "toggle-strike") {
     const choiceId = normalizeQuestionChoiceLabel(target.getAttribute("data-choice-id"));
     if (!choiceId) {
@@ -24779,12 +25119,11 @@ function handleSessionKeydown(event) {
     return;
   }
 
+  // Only map shortcuts whose target controls actually exist in the current
+  // session UI. The notes/labs/calculator/shortcuts tool panels are not
+  // rendered, so their keys were silent no-ops and have been removed.
   const mapped = {
     f: "toggle-flag",
-    n: "open-notes",
-    l: "open-labs",
-    c: "open-calculator",
-    k: "open-shortcuts",
     m: "toggle-marker-mode",
     s: "submit-answer",
   };
@@ -47717,6 +48056,19 @@ function renderAppLauncher() {
 
 function wireAppLauncher() {
 }
+
+function handleGsapReadyForCurrentRoute() {
+  if (gsapReadyEnhancementHandle) {
+    window.cancelAnimationFrame(gsapReadyEnhancementHandle);
+  }
+  gsapReadyEnhancementHandle = window.requestAnimationFrame(() => {
+    gsapReadyEnhancementHandle = null;
+    runGsapRouteEnhancements();
+  });
+}
+
+window.__MCQ_ON_GSAP_READY__ = handleGsapReadyForCurrentRoute;
+window.addEventListener("mcq:gsap-ready", handleGsapReadyForCurrentRoute);
 
 init().catch((error) => {
   console.error("Application bootstrap failed:", error);

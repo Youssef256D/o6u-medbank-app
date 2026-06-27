@@ -9,6 +9,18 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-27 — Custom font system
+
+- Swapped the static SPA font loading from a CSS `@import` to document-head Google Fonts links with preconnects, `font-display=swap`, and only Bricolage Grotesque 500/700 plus Inter 400/500.
+- Added centralized `--font-heading` and `--font-body` variables, kept the older font variables as aliases, and routed headings, UI labels, timers, metrics, MCQ stems, options, and explanations through those variables.
+- Bumped `index.html` `app-version` to `2026-06-27.02` so installed/PWA clients fetch the updated shell and stylesheet.
+
+### 2026-06-27 — GSAP animation runtime
+
+- Installed the official GSAP agent skills into the workspace and added GSAP/ScrollTrigger CDN loading through `bootstrap.js` so the static GitHub Pages app can use GSAP without a build step.
+- Added GSAP-powered route intro timelines, card hover motion, and scroll reveal hooks with CSS fallbacks and `prefers-reduced-motion` support.
+- Bumped `index.html` `app-version` to `2026-06-27.01` so static clients fetch the updated scripts/styles.
+
 ### 2026-06-22 — Admin user create refresh fix
 
 - Preserved recently entered admin-side user fields during the immediate Supabase profile refresh, preventing stale/partial profile rows from wiping name, role, phone, approval, or enrollment details right after adding a user.

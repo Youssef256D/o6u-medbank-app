@@ -16,7 +16,16 @@
     "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
     "https://unpkg.com/@supabase/supabase-js@2",
   ];
+  const GSAP_SDK_SOURCES = [
+    "https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js",
+    "https://unpkg.com/gsap@3.13.0/dist/gsap.min.js",
+  ];
+  const GSAP_SCROLLTRIGGER_SOURCES = [
+    "https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js",
+    "https://unpkg.com/gsap@3.13.0/dist/ScrollTrigger.min.js",
+  ];
   const SCRIPT_LOAD_TIMEOUT_MS = 45000;
+  const GSAP_LOAD_TIMEOUT_MS = 9000;
   const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
   const APP_BACKGROUND_PREFETCH_DELAY_MS = 1200;
   const BOOTSTRAP_STATUS_ID = "bootstrap-status";
@@ -68,6 +77,7 @@
   let appLoadPromise = null;
   let appPrefetchTriggered = false;
   let supabaseSdkLoadPromise = null;
+  let gsapSdkLoadPromise = null;
 
   function parseOAuthHashParams(hashValue) {
     const rawHash = String(hashValue || "").replace(/^#/, "").trim();
@@ -356,6 +366,9 @@
 
     appLoadPromise = Promise.resolve()
       .then(() => loadScript(`supabase.config.js${versionSuffix}`, { defer: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
+      .then(() => {
+        ensureGsapLoaded();
+      })
       .then(() => loadScript(`main.js${versionSuffix}`, { defer: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
       .then(() => {
         if (window.supabase?.createClient) {
@@ -371,6 +384,54 @@
       });
 
     return appLoadPromise;
+  }
+
+  function notifyGsapReady() {
+    if (window.gsap && window.ScrollTrigger && !window.__MCQ_GSAP_SCROLLTRIGGER_REGISTERED__) {
+      try {
+        window.gsap.registerPlugin(window.ScrollTrigger);
+        window.__MCQ_GSAP_SCROLLTRIGGER_REGISTERED__ = true;
+      } catch (error) {
+        console.warn("GSAP ScrollTrigger registration failed.", error?.message || error);
+      }
+    }
+    if (typeof window.__MCQ_ON_GSAP_READY__ === "function") {
+      try {
+        window.__MCQ_ON_GSAP_READY__();
+      } catch (error) {
+        console.warn("GSAP ready hook failed.", error?.message || error);
+      }
+    }
+    try {
+      window.dispatchEvent(new CustomEvent("mcq:gsap-ready"));
+    } catch {
+      // Ignore event dispatch failures in older embedded browsers.
+    }
+  }
+
+  function ensureGsapLoaded() {
+    if (window.gsap) {
+      notifyGsapReady();
+      return Promise.resolve();
+    }
+    if (gsapSdkLoadPromise) {
+      return gsapSdkLoadPromise;
+    }
+    gsapSdkLoadPromise = loadScriptWithFallback(GSAP_SDK_SOURCES, { async: true, timeoutMs: GSAP_LOAD_TIMEOUT_MS })
+      .then(() => loadScriptWithFallback(GSAP_SCROLLTRIGGER_SOURCES, { async: true, timeoutMs: GSAP_LOAD_TIMEOUT_MS })
+        .catch((error) => {
+          console.warn("GSAP ScrollTrigger did not finish loading.", error?.message || error);
+        }))
+      .then(() => {
+        notifyGsapReady();
+      })
+      .catch((error) => {
+        console.warn("GSAP did not finish loading; CSS motion fallback remains active.", error?.message || error);
+      })
+      .finally(() => {
+        gsapSdkLoadPromise = null;
+      });
+    return gsapSdkLoadPromise;
   }
 
   function notifySupabaseSdkReady() {
