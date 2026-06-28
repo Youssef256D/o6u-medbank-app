@@ -9,6 +9,21 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Faster student Supabase sync
+
+- Split student refresh into a critical first pass and a background non-critical pass so login/page-load routes stop waiting on notifications, session-history hydration, and legacy app-state reads after the course/question catalog is ready.
+- Parallelized the critical student course/profile/question reads so the question catalog no longer waits for course/topic and profile hydration to finish first.
+- Increased the Supabase question catalog page size from 500 to 1000 rows to reduce round trips for large course banks and admin question hydration.
+- Kept manual/full refresh paths intact and bumped the local preview `app-version` to `2026-06-29.01-local`.
+
+### 2026-06-29 — MCQ question visibility data repair
+
+- Added and applied a hosted Supabase migration to clean up MCQ rows that admins could see but students could not receive in generated tests.
+- Removed invalid duplicate published question rows when a usable same-stem copy already existed in the same course.
+- Moved remaining published rows with missing answer choices or missing correct-answer flags back to draft so they no longer appear published while being silently excluded from student blocks.
+- Merged duplicate Gynecology topic labels such as Basic/General Gynecology, Female Genital Infections, and Gynecologic Endocrinology.
+- Verified the live database now has zero published questions across all courses with unusable choice/correct-answer data and zero case/spacing duplicate topic-name groups.
+
 ### 2026-06-28 — Student dashboard icon refresh
 
 - Added Lucide icons via the static bootstrap CDN fallback chain for cleaner student dashboard iconography.

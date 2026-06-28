@@ -197,9 +197,10 @@ const RELATIONAL_INSERT_BATCH_SIZE = 250;
 const RELATIONAL_DELETE_BATCH_SIZE = 250;
 const QUESTION_RELATIONAL_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 30000);
 const STUDENT_AUTH_CONTENT_WARMUP_TIMEOUT_MS = Math.max(QUESTION_RELATIONAL_TIMEOUT_MS, SUPABASE_QUERY_TIMEOUT_MS, 15000) + 5000;
-const QUESTION_RELATIONAL_PAGE_SIZE = 500;
+const QUESTION_RELATIONAL_PAGE_SIZE = 1000;
 const QUESTION_CHOICE_RELATIONAL_PAGE_SIZE = 1000;
 const QUESTION_RELATIONAL_BATCH_SIZE = 100;
+const STUDENT_NON_CRITICAL_HYDRATION_DELAY_MS = 250;
 const RELATIONAL_SESSION_HISTORY_TABLE = "test_history_entries";
 const SESSION_HISTORY_SYNC_BATCH_SIZE = 25;
 const SESSION_HISTORY_SYNC_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 45000);
@@ -1038,6 +1039,9 @@ let pendingSyncBackgroundPromise = null;
 let lifecycleResumeHandle = null;
 let studentBootRefreshPromise = null;
 let studentBootRefreshKey = "";
+let studentNonCriticalHydrationTimer = null;
+let studentNonCriticalHydrationKey = "";
+let studentNonCriticalHydrationInFlight = false;
 let adminQuestionsLastHydratedAt = 0;
 const presenceRuntime = {
   timer: null,
@@ -2450,6 +2454,7 @@ async function init() {
       scheduleStudentBootRefresh(bootUser, {
         rerender: true,
         reason: "page load",
+        criticalOnly: true,
       }).catch(() => false);
     }
   }
@@ -2736,6 +2741,7 @@ async function tryRecoverSupabaseSessionInBackground() {
       scheduleStudentBootRefresh(getCurrentUser(), {
         rerender: true,
         reason: "session recovery",
+        criticalOnly: true,
       }).catch(() => false);
       scheduleSyncStatusUiRefresh();
       state.skipNextRouteAnimation = true;
@@ -6781,6 +6787,7 @@ function scheduleStudentBootRefresh(user = null, options = {}) {
 
   const rerender = options?.rerender !== false;
   const reason = String(options?.reason || "boot").trim() || "boot";
+  const criticalOnly = Boolean(options?.criticalOnly);
   studentBootRefreshKey = key;
   studentBootRefreshPromise = Promise.resolve().then(async () => {
     const latestUser = getCurrentUser();
@@ -6792,6 +6799,7 @@ function scheduleStudentBootRefresh(user = null, options = {}) {
       force: true,
       rerender,
       requireFreshContent: true,
+      criticalOnly,
     });
   }).catch((error) => {
     console.warn(`Student ${reason} refresh failed.`, error?.message || error);
@@ -6862,14 +6870,13 @@ async function runStudentPostAuthDataWarmup(user = null, options = {}) {
   const refreshed = await scheduleStudentBootRefresh(currentUser, {
     rerender: false,
     reason,
+    criticalOnly: options?.criticalOnly !== false,
   }).catch(() => false);
 
   const latestUserAfterContent = getCurrentUser() || currentUser;
-  try {
-    await hydrateUserScopedSupabaseState(latestUserAfterContent);
-  } catch (hydrateError) {
-    console.warn("Could not hydrate user scoped data.", hydrateError?.message || hydrateError);
-  }
+  scheduleStudentNonCriticalHydration(latestUserAfterContent, {
+    delayMs: STUDENT_NON_CRITICAL_HYDRATION_DELAY_MS,
+  });
 
   const latestUser = getCurrentUser() || latestUserAfterContent;
   const completedLocalSessions = getCompletedSessionsForRelationalHistorySync()
@@ -6877,7 +6884,7 @@ async function runStudentPostAuthDataWarmup(user = null, options = {}) {
   if (completedLocalSessions.length && hasActiveSupabaseSessionForUser(latestUser)) {
     relationalSync.blockedStorageKeys.delete(STORAGE_KEYS.sessions);
     sessionSyncRuntime.dirty = true;
-    await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
+    flushPendingSyncNow({ throwOnRelationalFailure: false }).catch((syncError) => {
       console.warn("Could not backfill completed session history after auth.", syncError?.message || syncError);
     });
   }
@@ -18823,12 +18830,108 @@ async function refreshStudentDataFromSupabaseState(user) {
   return true;
 }
 
+async function hydrateStudentNonCriticalData(user, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    return false;
+  }
+  const activeUser = getCurrentUser();
+  if (
+    !activeUser
+    || activeUser.role !== "student"
+    || String(getUserProfileId(activeUser) || "").trim() !== profileId
+  ) {
+    return false;
+  }
+
+  const force = Boolean(options?.force);
+  await Promise.all([
+    loadCoursesComingSoonFlag({ force }).catch(() => false),
+    hydrateRelationalNotifications(currentUser).catch(() => false),
+    hydrateSupabaseSyncKeys([
+      STORAGE_KEYS.siteMaintenance,
+      STORAGE_KEYS.courseTopicGroups,
+      STORAGE_KEYS.courseNotebookLinks,
+      STORAGE_KEYS.topicNewCatalog,
+      STORAGE_KEYS.autoApproveStudentAccess,
+      STORAGE_KEYS.studentRefreshTrigger,
+    ]).catch(() => ({ hadRemoteData: false })),
+  ]);
+
+  if (!shouldDeferSessionHydrationOnActiveRoute(currentUser)) {
+    await protectLocalSessionStateBeforeCloudRead(currentUser, {
+      flush: true,
+    });
+    await hydrateRelationalSessions(currentUser).catch(() => false);
+    const scope = getSyncScopeForUser(currentUser);
+    if (scope) {
+      await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
+    }
+  }
+
+  state.studentDataLastSyncAt = Date.now();
+  return true;
+}
+
+function scheduleStudentNonCriticalHydration(user = null, options = {}) {
+  const currentUser = user || getCurrentUser();
+  const profileId = String(getUserProfileId(currentUser) || "").trim();
+  if (!currentUser || currentUser.role !== "student" || !isUuidValue(profileId)) {
+    return false;
+  }
+
+  const key = profileId;
+  const delayMs = Math.max(0, Number(options?.delayMs ?? STUDENT_NON_CRITICAL_HYDRATION_DELAY_MS) || 0);
+  if (studentNonCriticalHydrationTimer && studentNonCriticalHydrationKey === key) {
+    return true;
+  }
+  if (studentNonCriticalHydrationTimer) {
+    window.clearTimeout(studentNonCriticalHydrationTimer);
+    studentNonCriticalHydrationTimer = null;
+  }
+
+  studentNonCriticalHydrationKey = key;
+  studentNonCriticalHydrationTimer = window.setTimeout(() => {
+    studentNonCriticalHydrationTimer = null;
+    const latestUser = getCurrentUser();
+    const latestProfileId = String(getUserProfileId(latestUser) || "").trim();
+    if (!latestUser || latestUser.role !== "student" || latestProfileId !== key) {
+      studentNonCriticalHydrationKey = "";
+      return;
+    }
+    if (studentNonCriticalHydrationInFlight || state.studentDataRefreshing) {
+      studentNonCriticalHydrationKey = "";
+      scheduleStudentNonCriticalHydration(latestUser, {
+        ...options,
+        delayMs: Math.max(STUDENT_NON_CRITICAL_HYDRATION_DELAY_MS, delayMs),
+      });
+      return;
+    }
+
+    studentNonCriticalHydrationInFlight = true;
+    hydrateStudentNonCriticalData(latestUser, options)
+      .catch((error) => {
+        console.warn("Student background hydration failed.", error?.message || error);
+      })
+      .finally(() => {
+        studentNonCriticalHydrationInFlight = false;
+        if (studentNonCriticalHydrationKey === key) {
+          studentNonCriticalHydrationKey = "";
+        }
+        scheduleSyncStatusUiRefresh();
+      });
+  }, delayMs);
+  return true;
+}
+
 async function refreshStudentDataSnapshot(user, options = {}) {
   if (!user || user.role !== "student") {
     return false;
   }
   const force = Boolean(options?.force);
   const requireFreshContent = Boolean(options?.requireFreshContent);
+  const criticalOnly = Boolean(options?.criticalOnly);
   const rerender = options?.rerender !== false;
   if (!force && !shouldRefreshStudentData(user)) {
     return true;
@@ -18877,18 +18980,19 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     const hasPendingQuestionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.questions);
     let completedFullSync = false;
     if (needsFullSync) {
-      // Run courses/topics and profiles in parallel — they are independent DB reads.
-      const [coursesAndTopicsHydrated] = await Promise.all([
+      // Run the critical student reads in parallel; RLS evaluates access on the
+      // server, so the question catalog does not need the local profile merge
+      // to finish before it can hydrate safely.
+      const [coursesAndTopicsHydrated, profilesHydrated, questionsHydrated] = await Promise.all([
         hydrateRelationalCoursesAndTopics(),
         hasPendingUserWrites ? Promise.resolve() : hydrateRelationalProfiles(user),
+        hasPendingQuestionWrites ? Promise.resolve(true) : hydrateRelationalQuestions(),
       ]);
       const hasFreshCoursesAndTopics = coursesAndTopicsHydrated !== false;
-      let hasFreshQuestions = true;
-      if (!hasPendingQuestionWrites) {
-        hasFreshQuestions = (await hydrateRelationalQuestions()) !== false;
-      }
-      completedFullSync = hasFreshCoursesAndTopics && hasFreshQuestions && !hasPendingUserWrites && !hasPendingQuestionWrites;
-      if (requireFreshContent && (!hasFreshCoursesAndTopics || !hasFreshQuestions)) {
+      const hasFreshProfiles = hasPendingUserWrites || profilesHydrated !== false;
+      const hasFreshQuestions = hasPendingQuestionWrites || questionsHydrated !== false;
+      completedFullSync = hasFreshCoursesAndTopics && hasFreshProfiles && hasFreshQuestions && !hasPendingUserWrites && !hasPendingQuestionWrites;
+      if (requireFreshContent && (!hasFreshCoursesAndTopics || !hasFreshProfiles || !hasFreshQuestions)) {
         return false;
       }
     }
@@ -18898,27 +19002,12 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     if (!hasPendingUserWrites && !needsFullSync) {
       await hydrateRelationalProfiles(user);
     }
-    // Run notifications and Supabase state keys in parallel — they are independent.
-    await Promise.all([
-      loadCoursesComingSoonFlag({ force }).catch(() => false),
-      hydrateRelationalNotifications(user),
-      hydrateSupabaseSyncKeys([
-        STORAGE_KEYS.siteMaintenance,
-        STORAGE_KEYS.courseTopicGroups,
-        STORAGE_KEYS.courseNotebookLinks,
-        STORAGE_KEYS.topicNewCatalog,
-        STORAGE_KEYS.autoApproveStudentAccess,
-        STORAGE_KEYS.studentRefreshTrigger,
-      ]).catch(() => ({ hadRemoteData: false })),
-    ]);
-    if (!shouldDeferSessionHydrationOnActiveRoute(user)) {
-      await hydrateRelationalSessions(user);
-      const scope = getSyncScopeForUser(user);
-      if (scope) {
-        await hydrateSupabaseSyncKeys([STORAGE_KEYS.sessions], scope).catch(() => ({ hadRemoteData: false }));
-      }
+    if (criticalOnly) {
+      state.studentDataLastSyncAt = Date.now();
+      scheduleStudentNonCriticalHydration(user, { force });
+    } else {
+      await hydrateStudentNonCriticalData(user, { force });
     }
-    state.studentDataLastSyncAt = Date.now();
     if (
       rerender
       && !shouldPreserveOnboardingDraft
@@ -19489,7 +19578,10 @@ function render() {
     && !["session", "review"].includes(state.route)
     && shouldRefreshStudentData(user)
   ) {
-    refreshStudentDataSnapshot(user, { force: !state.studentDataLastSyncAt })
+    refreshStudentDataSnapshot(user, {
+      force: !state.studentDataLastSyncAt,
+      criticalOnly: !state.studentDataLastSyncAt,
+    })
       .catch((error) => {
         console.warn("Student data refresh failed.", error?.message || error);
       });
@@ -24729,6 +24821,7 @@ function renderSession() {
       scheduleStudentBootRefresh(user, {
         rerender: true,
         reason: "session recovery",
+        criticalOnly: true,
       }).catch(() => { });
     }
     if (!questionStore.list.length || user?.role === "student") {

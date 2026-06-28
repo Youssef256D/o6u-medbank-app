@@ -187,6 +187,49 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Faster student Supabase sync
+Reduced how long student routes wait on Supabase after login/page load without
+weakening the existing profile, enrollment, or question-bank checks.
+
+1. **Student refresh is split by priority.** The automatic login/page-load
+   refresh now waits for the critical relational pass (courses/topics,
+   profile/enrollment, and questions), then queues notifications, helper
+   app-state keys, and session-history hydration in the background.
+2. **Critical reads run in parallel.** Courses/topics, profile/enrollment, and
+   question catalog hydration now start together because Supabase RLS enforces
+   the access checks server-side.
+3. **Question catalog hydration uses larger pages.** The question page size is
+   now 1000 rows, matching the catalog RPC cap and reducing round trips for
+   larger banks.
+4. **Manual/full refresh remains thorough.** Explicit refresh paths still await
+   the non-critical hydration work so admin/user flows that expect a full sync
+   keep their behavior.
+5. **Static cache bust bumped.** `index.html` app-version is
+   `2026-06-29.01-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-29 — MCQ question visibility data repair
+Fixed a hosted Supabase data issue where some admin-visible MCQ rows could not
+appear in student-generated tests because they were published without usable
+answer choices or correct-answer flags.
+
+1. **Invalid duplicate rows were removed.** Published question rows with missing
+   usable answer data were deleted only when a usable same-stem question already
+   existed in the same course and the invalid row had no test-block references.
+2. **Remaining invalid rows were drafted.** Published rows without enough
+   non-empty answer choices or without any correct choice were moved back to
+   `draft` instead of being filled with placeholder answers.
+3. **Gynecology topics were combined.** Duplicate/synonymous Gynecology topic
+   labels were merged into one active topic per concept for Basic Gynecology,
+   General Gynecology, Female Genital Infections, and Gynecologic Endocrinology.
+4. **All-course verification passed.** Live SQL checks confirmed zero published
+   questions across all courses with unusable choice/correct-answer data and
+   zero case/spacing duplicate topic-name groups after applying the migration.
+
+**Files touched:** `supabase/migrations/20260628212914_repair_mcq_question_visibility_and_gyne_topics.sql`,
+`CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-28 — Student dashboard icon refresh
 Improved the student dashboard stat/action icons using a static-SPA-safe icon library.
 
