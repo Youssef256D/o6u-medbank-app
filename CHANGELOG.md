@@ -9,6 +9,13 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-27 — Student content loading speed
+
+- Stopped the student dashboard from staying on the "Checking Your Course Bank" loading panel while the first question-bank refresh is still running.
+- Let create-test and analytics skip blocking only when usable cached/local course questions already exist, preserving their first-load safety.
+- Kept the Supabase refresh running in the background and showed the dashboard question-bank stat as syncing until questions arrive.
+- Bumped `index.html` `app-version` to `2026-06-27.03` so static clients fetch the updated student readiness logic.
+
 ### 2026-06-27 — Custom font system
 
 - Swapped the static SPA font loading from a CSS `@import` to document-head Google Fonts links with preconnects, `font-display=swap`, and only Bricolage Grotesque 500/700 plus Inter 400/500.

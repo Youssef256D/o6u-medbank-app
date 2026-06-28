@@ -4793,6 +4793,20 @@ function logStudentContentAccessDecision(user = null, context = {}) {
   });
 }
 
+function hasUsableLocalStudentContent(user = null, availableCourses = null) {
+  const currentUser = user || getCurrentUser();
+  if (!currentUser || currentUser.role !== "student") {
+    return false;
+  }
+  const courseList = Array.isArray(availableCourses)
+    ? availableCourses
+    : getAvailableCoursesForUser(currentUser);
+  if (!courseList.length) {
+    return false;
+  }
+  return getPublishedQuestionsForUser(currentUser).length > 0;
+}
+
 function getStudentContentReadiness(user = null, context = {}) {
   const currentUser = user || getCurrentUser();
   if (!currentUser || currentUser.role !== "student") {
@@ -4807,20 +4821,24 @@ function getStudentContentReadiness(user = null, context = {}) {
     return { loading: false, issue, error: "" };
   }
   const readState = getStudentQuestionReadState();
+  const hasUsableLocalContent = hasUsableLocalStudentContent(currentUser, availableCourses);
   const hasManagedCloudIdentity = hasSupabaseManagedIdentity(currentUser);
   const firstContentReadDone = Boolean(state.studentDataLastSyncAt && readState.status === "success");
   const loading = Boolean(
-    state.studentDataRefreshing
-    || isPostAuthDataWarmupActive(currentUser)
-    || studentBootRefreshPromise
+    !hasUsableLocalContent
+    && (
+      state.studentDataRefreshing
+      || isPostAuthDataWarmupActive(currentUser)
+      || studentBootRefreshPromise
+    )
   );
   if (loading) {
     return { loading: true, issue: null, error: "" };
   }
-  if (readState.status === "error" && !state.studentDataRefreshing) {
+  if (readState.status === "error" && !state.studentDataRefreshing && !hasUsableLocalContent) {
     return { loading: false, issue: null, error: readState.error || "Question data could not be loaded from Supabase." };
   }
-  if (hasManagedCloudIdentity && !firstContentReadDone && readState.status === "idle") {
+  if (hasManagedCloudIdentity && !firstContentReadDone && readState.status === "idle" && !hasUsableLocalContent) {
     return {
       loading: false,
       issue: null,
@@ -22155,13 +22173,13 @@ function renderDashboard() {
   const user = getCurrentUser();
   const availableCourses = getAvailableCoursesForUser(user);
   const contentReadiness = getStudentContentReadiness(user, { availableCourses });
+  const dashboardSyncingContent = Boolean(contentReadiness.loading);
   if (contentReadiness.loading) {
     logStudentContentAccessDecision(user, {
-      reason: "dashboard_waiting_for_content",
+      reason: "dashboard_rendering_during_content_sync",
       surface: "dashboard",
       availableCourses,
     });
-    return renderStudentContentLoadingPanel("Checking Your Course Bank");
   }
   if (contentReadiness.issue) {
     recordStudentAccessIssue(contentReadiness.issue, user, { surface: "dashboard" });
@@ -22193,6 +22211,9 @@ function renderDashboard() {
   const solvedQuestionsCount = Number.isFinite(stats?.totalAnswered) ? stats.totalAnswered : 0;
   const incorrectQueueCount = getStudentIncorrectQueueCount(user.id);
   const syncStatusText = getStudentDataSyncStatusText();
+  const questionBankStatValue = dashboardSyncingContent && !questions.length
+    ? `<span class="inline-loader" aria-hidden="true"></span>`
+    : questions.length;
 
   return `
     <section class="panel">
@@ -22212,7 +22233,7 @@ function renderDashboard() {
         ${renderStudentStatCard("accuracy", `${stats.accuracy}%`, "Overall accuracy", "brand")}
         ${renderStudentStatCard("time", `${stats.timePerQuestion}s`, "Avg time / question", "accent")}
         ${renderStudentStatCard("solved", solvedQuestionsCount, "Questions solved", "good")}
-        ${renderStudentStatCard("bank", questions.length, "Questions in bank")}
+        ${renderStudentStatCard("bank", questionBankStatValue, dashboardSyncingContent && !questions.length ? "Syncing bank" : "Questions in bank")}
       </div>
     </section>
 

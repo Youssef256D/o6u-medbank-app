@@ -187,6 +187,27 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-27 — Student content loading speed
+Reduced how often approved students are held on the "Checking Your Course Bank"
+loading panel while Supabase content sync is still running.
+
+1. **The dashboard can render during sync.** The student dashboard no longer
+   blocks on the full question-bank refresh after access checks pass; its
+   question-bank stat shows a small syncing indicator until questions arrive.
+2. **Usable cached question banks can render immediately.** Create-test and
+   analytics readiness now checks whether the current student already has
+   assigned courses and usable published questions locally before showing a
+   blocking loading panel.
+3. **First-load safety stays intact.** Students with no usable local content
+   still wait for the first Supabase refresh instead of seeing a false empty
+   state in create-test/analytics, and real query errors still surface when
+   there is no local fallback.
+4. **Background sync is preserved.** The refresh continues to run and the
+   existing sync status/button show that updates are in progress.
+5. **Static cache bust bumped.** `index.html` app-version is `2026-06-27.03`.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-27 — Custom font system
 Replaced the older Manrope/Sora CSS import with a static-SPA-friendly Google
 Fonts setup in `index.html` and centralized font variables in `styles.css`.
