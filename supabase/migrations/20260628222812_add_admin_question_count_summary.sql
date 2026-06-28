@@ -2,6 +2,14 @@
 -- The browser calls this with an authenticated admin session; the function
 -- verifies the caller before returning database-wide counts.
 
+-- Supports the EXISTS checks below and existing question-choice hydration paths.
+create index if not exists idx_question_choices_question_id
+  on public.question_choices(question_id);
+
+create index if not exists idx_question_choices_correct_by_question
+  on public.question_choices(question_id)
+  where is_correct;
+
 create or replace function public.get_admin_question_count_summary()
 returns jsonb
 language plpgsql
