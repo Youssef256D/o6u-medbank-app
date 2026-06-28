@@ -37685,22 +37685,6 @@ function getQbankCourseTopicMeta(question) {
   const explicitCourse = String(question.qbankCourse || question.course || "").trim();
   const explicitTopic = String(question.qbankTopic || question.topic || "").trim();
   const sanitizedExplicitTopic = isRemovedTopicName(explicitTopic) ? "" : explicitTopic;
-  // Relationally-synced questions carry their authoritative course/topic straight
-  // from the database (course_name/topic_name via the catalog RPC). Trust those
-  // values verbatim instead of remapping them through the build-time defaults or
-  // the keyword-rules fallback below. Remapping could attribute a question to a
-  // renamed/legacy course (e.g. DB "Nerology (SM 407)" -> stale "Surgery Medical
-  // 407 (SM 407)") and hide it from the enrolled student, who would then see the
-  // course and topic but zero questions.
-  if (isUuidValue(question?.dbId) && explicitCourse && sanitizedExplicitTopic) {
-    const canonicalTopic = (QBANK_COURSE_TOPICS[explicitCourse] || []).find(
-      (topic) => doTopicNamesMatch(topic, sanitizedExplicitTopic),
-    );
-    return {
-      course: explicitCourse,
-      topic: canonicalTopic || sanitizedExplicitTopic,
-    };
-  }
   const matchedExplicitCourse = resolveMatchingCourseKeyInMap(explicitCourse, QBANK_COURSE_TOPICS);
   if (matchedExplicitCourse && QBANK_COURSE_TOPICS[matchedExplicitCourse]) {
     const canonicalTopic = (() => {
@@ -39009,34 +38993,8 @@ function normalizeStudentEnrollmentProfile(user) {
 }
 
 function sanitizeCourseAssignments(courses) {
-  const input = [...new Set(
-    (courses || []).map((course) => String(course || "").trim()).filter(Boolean),
-  )];
-  const allowedKeys = Object.keys(QBANK_COURSE_TOPICS);
-  // Course catalog not hydrated yet (still on build-time defaults): preserve the
-  // student's real enrollments rather than dropping them. Otherwise a hydration
-  // race (profiles loading before courses) could strip admin-renamed courses and
-  // leave the student with no questions.
-  if (!allowedKeys.length) {
-    return input;
-  }
-  const result = [];
-  const seen = new Set();
-  input.forEach((course) => {
-    // Resolve by exact name, course code, or normalized name so admin-renamed
-    // courses (e.g. "Nerology (SM 407)") still map to their canonical catalog
-    // entry instead of being filtered out by a brittle exact-string check.
-    const matchedKey = resolveMatchingCourseKeyInMap(course, QBANK_COURSE_TOPICS);
-    if (!matchedKey) {
-      return;
-    }
-    if (seen.has(matchedKey)) {
-      return;
-    }
-    seen.add(matchedKey);
-    result.push(matchedKey);
-  });
-  return result;
+  const allowed = Object.keys(QBANK_COURSE_TOPICS);
+  return [...new Set((courses || []).map(String).filter((course) => allowed.includes(course)))];
 }
 
 function getAvailableCoursesForUser(user) {
