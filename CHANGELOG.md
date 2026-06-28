@@ -9,6 +9,12 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-28 — Typography refresh
+
+- Replaced the playful Bricolage Grotesque heading face with Geist for a cleaner, more premium medical-study interface.
+- Loaded 400/500/600/700 weights for Geist and Inter so headings, buttons, stats, and MCQ reading surfaces render without browser-synthesized weights.
+- Kept Inter as the body/MCQ reading font and bumped `index.html` `app-version` to `2026-06-28.01` so static clients fetch the updated typography.
+
 ### 2026-06-27 — Student content loading speed
 
 - Stopped the student dashboard from staying on the "Checking Your Course Bank" loading panel while the first question-bank refresh is still running.

@@ -187,6 +187,22 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-28 — Typography refresh
+Replaced the playful heading font with a cleaner, more premium medical-study
+font pairing.
+
+1. **Headings now use Geist.** The app loads Geist 400/500/600/700 from Google
+   Fonts and routes `--font-heading`, `--font-display`, and admin display text
+   through it.
+2. **MCQ reading stays on Inter.** Body text, stems, options, explanations,
+   buttons, and admin UI continue using Inter for high readability.
+3. **Font weights are explicit.** Both Geist and Inter now load 400/500/600/700
+   to avoid browser-synthesized semi-bold/bold text across dashboards and exam
+   surfaces.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.01`.
+
+**Files touched:** `index.html`, `styles.css`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-27 — Student content loading speed
 Reduced how often approved students are held on the "Checking Your Course Bank"
 loading panel while Supabase content sync is still running.
