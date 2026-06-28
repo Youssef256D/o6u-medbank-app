@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="939" viewBox="0 0 1400 939">
+  <rect width="1400" height="939" rx="80" fill="#f7fbfa"/>
+  <g transform="translate(400 165)" fill="#fff" stroke="#177e89" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M50 250c92-58 185-58 278 0v250c-93-59-186-59-278 0z"/>
+    <path d="M328 250c92-58 185-58 278 0v250c-93-59-186-59-278 0z"/>
+    <path d="M328 250v250"/>
+    <path d="M248 95h160M328 15v160"/>
+    <path d="M548 75l96 96M644 171V75h-96" stroke="#f4a259"/>
+  </g>
+  <text x="700" y="710" text-anchor="middle" font-family="Source Sans 3, Inter, Arial, sans-serif" font-size="144" font-weight="700" fill="#102a43">MedBank</text>
+  <text x="700" y="790" text-anchor="middle" font-family="Source Sans 3, Inter, Arial, sans-serif" font-size="42" font-weight="500" letter-spacing="7" fill="#486581">MEDICAL MCQ PRACTICE</text>
+</svg>

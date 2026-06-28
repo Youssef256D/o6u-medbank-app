@@ -49,7 +49,7 @@ const ROUTE_STATE_ADMIN_PAGE_LOCAL_KEY = "mcq_last_admin_page_local";
 const ACTIVE_SESSION_ID_KEY = "mcq_active_session_id";
 const ACTIVE_SESSION_ID_LOCAL_KEY = "mcq_active_session_id_local";
 const GOOGLE_OAUTH_PENDING_STARTED_AT_KEY = "mcq_google_oauth_pending_started_at";
-const SESSION_VAULT_DB_NAME = "o6u_medbank_session_vault";
+const SESSION_VAULT_DB_NAME = "medbank_session_vault";
 const SESSION_VAULT_DB_VERSION = 1;
 const SESSION_VAULT_STORE_NAME = "payloads";
 const SESSION_VAULT_PAYLOAD_KEY = STORAGE_KEYS.sessions;
@@ -94,6 +94,7 @@ const PRIVATE_ROUTE_SET = new Set([
   "profile",
   "admin",
 ]);
+const PUBLIC_MARKETING_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact"]);
 const AUTH_ENTRY_ROUTE_SET = new Set(["landing", "features", "pricing", "about", "contact", "login", "signup", "forgot"]);
 const ADMIN_DATA_PAGES = ["dashboard", "users", "courses", "questions", "bulk-import", "notifications", "site-access", "ai-agents", "activity", "logs"];
 const ADMIN_COURSES_PLATFORM_PAGE = "course-platform";
@@ -221,7 +222,7 @@ const ENROLLMENT_SYNC_WRITE_BATCH_SIZE = 100;
 const ENROLLMENT_BACKFILL_RETRY_COOLDOWN_MS = 60000;
 const ENROLLMENT_BACKFILL_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
 const DEFAULT_AUTO_APPROVE_STUDENT_ACCESS = false;
-const DEFAULT_SITE_MAINTENANCE_TITLE = "O6U MedBank is temporarily unavailable";
+const DEFAULT_SITE_MAINTENANCE_TITLE = "MedBank is temporarily unavailable";
 const DEFAULT_SITE_MAINTENANCE_MESSAGE = "We are applying updates right now. Please check back again shortly.";
 const AUTO_APPROVAL_ACTOR = "system:auto";
 const BOOT_RECOVERY_FLAG = "mcq_boot_recovery_attempted";
@@ -790,7 +791,7 @@ const COURSE_MATERIAL_ALLOWED_MIME_TYPES = new Set([
   "application/zip",
 ]);
 const QUESTION_CHOICE_LABELS = ["A", "B", "C", "D", "E"];
-const ASK_AI_WINDOW_NAME = "o6u-medbank-ask-ai";
+const ASK_AI_WINDOW_NAME = "medbank-ask-ai";
 
 const SYNCABLE_STORAGE_KEYS = [
   STORAGE_KEYS.users,
@@ -1128,7 +1129,7 @@ const SYSTEM_LOG_AUDITED_STORAGE_KEYS = new Set([
   STORAGE_KEYS.flashcards,
 ]);
 
-const DEFAULT_O6U_CURRICULUM = {
+const DEFAULT_MEDBANK_CURRICULUM = {
   1: {
     1: [
       "Introduction for All Students (Intro 100)",
@@ -1385,7 +1386,7 @@ const COURSE_TOPIC_RECOVERY_PROFILE_ALIASES = {
   sm407: "ner206",
 };
 
-let O6U_CURRICULUM = deepClone(DEFAULT_O6U_CURRICULUM);
+let MEDBANK_CURRICULUM = deepClone(DEFAULT_MEDBANK_CURRICULUM);
 let CURRICULUM_COURSE_LIST = [];
 let COURSE_TOPIC_OVERRIDES = {};
 let COURSE_TOPIC_GROUPS = {};
@@ -1432,9 +1433,9 @@ function isStorageQuotaExceededError(error) {
     || (message.includes("quota") && (message.includes("exceeded") || message.includes("full")));
 }
 
-const DEMO_ADMIN_EMAIL = "admin@o6umed.local";
-const DEMO_STUDENT_EMAIL = "student@o6umed.local";
-const DEMO_PENDING_STUDENT_EMAIL = "student.pending@o6umed.local";
+const DEMO_ADMIN_EMAIL = "admin@medbank.local";
+const DEMO_STUDENT_EMAIL = "student@medbank.local";
+const DEMO_PENDING_STUDENT_EMAIL = "student.pending@medbank.local";
 const FORCED_ADMIN_EMAILS = new Set([
   "code.youssefaayoub@gmail.com",
   "code.youssefayoub@gmail.com",
@@ -1443,7 +1444,7 @@ const FORCED_ADMIN_EMAILS = new Set([
 const SAMPLE_QUESTIONS = [
   {
     id: "q1",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Cardiovascular",
     topic: "Hemodynamics",
     difficulty: "Easy",
@@ -1467,7 +1468,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q2",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Cardiovascular",
     topic: "Pharmacology",
     difficulty: "Medium",
@@ -1491,7 +1492,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q3",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Respiratory",
     topic: "Acid-Base",
     difficulty: "Medium",
@@ -1510,12 +1511,12 @@ const SAMPLE_QUESTIONS = [
     explanation:
       "Low pH and low bicarbonate indicate metabolic acidosis with respiratory compensation.",
     objective: "Identify primary acid-base disorders from ABG values.",
-    references: "O6U Internal QBank",
+    references: "MedBank Internal QBank",
     status: "published",
   },
   {
     id: "q4",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Endocrine",
     topic: "Diabetes",
     difficulty: "Easy",
@@ -1539,7 +1540,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q5",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Neurology",
     topic: "Stroke",
     difficulty: "Hard",
@@ -1563,7 +1564,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q6",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Renal",
     topic: "Electrolytes",
     difficulty: "Medium",
@@ -1587,7 +1588,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q7",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Immunology",
     topic: "Hypersensitivity",
     difficulty: "Easy",
@@ -1611,7 +1612,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q8",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "GI",
     topic: "Liver",
     difficulty: "Medium",
@@ -1635,7 +1636,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q9",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Biostatistics",
     topic: "Diagnostics",
     difficulty: "Hard",
@@ -1658,7 +1659,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q10",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Microbiology",
     topic: "Antibiotics",
     difficulty: "Medium",
@@ -1681,7 +1682,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q11",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "OB/GYN",
     topic: "Prenatal Care",
     difficulty: "Easy",
@@ -1705,7 +1706,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     id: "q12",
-    course: "O6U MBBS",
+    course: "Medical MBBS",
     system: "Psychiatry",
     topic: "Mood Disorders",
     difficulty: "Medium",
@@ -3644,6 +3645,12 @@ async function handleSupabaseAuthStateChange(event, session) {
     ]);
     if (privateRoutes.has(state.route)) {
       navigate("login");
+      return;
+    }
+    // After a clean logout (skipRecovery=true), logout() already navigated to
+    // the landing page. A second render here would replace the DOM mid-transition
+    // and leave hero elements stuck at opacity 0 from GSAP's fromTo start state.
+    if (skipRecovery) {
       return;
     }
     render();
@@ -7002,7 +7009,7 @@ function resetStudentLoginRefreshState(user = null) {
   return true;
 }
 
-const STUDENT_ONBOARDING_DRAFT_STORAGE_KEY = "o6u_student_onboarding_draft";
+const STUDENT_ONBOARDING_DRAFT_STORAGE_KEY = "medbank_student_onboarding_draft";
 
 function getStudentOnboardingDraftScope(user = null, route = null) {
   const currentUser = user || getCurrentUser();
@@ -8817,7 +8824,7 @@ async function hydrateRelationalCoursesAndTopics() {
   const pendingLocalTopics = relationalSync.pendingWrites.has(STORAGE_KEYS.courseTopics)
     ? COURSE_TOPIC_OVERRIDES
     : null;
-  O6U_CURRICULUM = normalizeCurriculum(curriculum);
+  MEDBANK_CURRICULUM = normalizeCurriculum(curriculum);
   COURSE_TOPIC_OVERRIDES = normalizeCourseTopicMap(courseTopicOverrides);
   if (pendingLocalTopics && typeof pendingLocalTopics === "object") {
     Object.entries(pendingLocalTopics).forEach(([courseName, localTopics]) => {
@@ -8836,13 +8843,13 @@ async function hydrateRelationalCoursesAndTopics() {
     });
   }
   rebuildCurriculumCatalog();
-  saveLocalOnly(STORAGE_KEYS.curriculum, O6U_CURRICULUM, { audit: false });
+  saveLocalOnly(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM, { audit: false });
   saveLocalOnly(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES, { audit: false });
   saveLocalOnly(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS, { audit: false });
   syncUsersWithCurriculum();
   const currentUser = getCurrentUser();
   if (currentUser?.role === "admin") {
-    scheduleSupabaseWrite(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    scheduleSupabaseWrite(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
     scheduleSupabaseWrite(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   }
   return true;
@@ -11614,7 +11621,7 @@ async function fetchSupabaseBackupPayloads(storageKeys, scope = "") {
 }
 
 function countCurriculumCourses(curriculum) {
-  const normalized = normalizeCurriculum(curriculum || DEFAULT_O6U_CURRICULUM);
+  const normalized = normalizeCurriculum(curriculum || DEFAULT_MEDBANK_CURRICULUM);
   let count = 0;
   for (let year = 1; year <= 5; year += 1) {
     for (let semester = 1; semester <= 2; semester += 1) {
@@ -11625,8 +11632,8 @@ function countCurriculumCourses(curriculum) {
 }
 
 function mergeCurriculumWithBackup(localCurriculum, backupCurriculum) {
-  const local = normalizeCurriculum(localCurriculum || DEFAULT_O6U_CURRICULUM);
-  const backup = normalizeCurriculum(backupCurriculum || DEFAULT_O6U_CURRICULUM);
+  const local = normalizeCurriculum(localCurriculum || DEFAULT_MEDBANK_CURRICULUM);
+  const backup = normalizeCurriculum(backupCurriculum || DEFAULT_MEDBANK_CURRICULUM);
   const merged = deepClone(local);
   for (let year = 1; year <= 5; year += 1) {
     for (let semester = 1; semester <= 2; semester += 1) {
@@ -11655,8 +11662,8 @@ function mergeQuestionsWithBackup(localQuestions, backupQuestions) {
 }
 
 function hasCurriculumAdditions(baseCurriculum, nextCurriculum) {
-  const base = normalizeCurriculum(baseCurriculum || DEFAULT_O6U_CURRICULUM);
-  const next = normalizeCurriculum(nextCurriculum || DEFAULT_O6U_CURRICULUM);
+  const base = normalizeCurriculum(baseCurriculum || DEFAULT_MEDBANK_CURRICULUM);
+  const next = normalizeCurriculum(nextCurriculum || DEFAULT_MEDBANK_CURRICULUM);
   for (let year = 1; year <= 5; year += 1) {
     for (let semester = 1; semester <= 2; semester += 1) {
       const baseKeys = new Set(
@@ -11698,7 +11705,7 @@ function mergeHydratedBackupPayloadWithLocal(storageKey, remotePayload) {
   }
   if (storageKey === STORAGE_KEYS.curriculum) {
     return mergeCurriculumWithBackup(
-      load(STORAGE_KEYS.curriculum, O6U_CURRICULUM),
+      load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM),
       remotePayload,
     );
   }
@@ -11782,7 +11789,7 @@ async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
   const restoredKeys = [];
   const relationalContentCounts = await fetchRelationalContentCountsForRestore();
 
-  const currentCurriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  const currentCurriculum = load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
   const backupCurriculum = backupPayloads[STORAGE_KEYS.curriculum];
   if (backupCurriculum && typeof backupCurriculum === "object") {
     const mergedCurriculum = mergeCurriculumWithBackup(currentCurriculum, backupCurriculum);
@@ -11841,7 +11848,7 @@ async function restoreAdminContentFromSupabaseBackupIfNeeded(options = {}) {
   rehydrateCourseCatalogConfigFromStorage();
   const repairResult = repairCourseTopicCatalogFromQuestions({ persist: false });
   if (restoredKeys.includes(STORAGE_KEYS.curriculum)) {
-    save(STORAGE_KEYS.curriculum, load(STORAGE_KEYS.curriculum, O6U_CURRICULUM));
+    save(STORAGE_KEYS.curriculum, load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM));
   }
   if (restoredKeys.includes(STORAGE_KEYS.courseTopics) || repairResult.topicsChanged) {
     save(STORAGE_KEYS.courseTopics, load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES));
@@ -13839,7 +13846,7 @@ async function syncRelationalKey(storageKey, payload, options = {}) {
       : null;
     const curriculum = storageKey === STORAGE_KEYS.curriculum
       ? (bundledCourseSyncPayload ? bundledCourseSyncPayload.curriculum : payload)
-      : load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+      : load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
     const topics = storageKey === STORAGE_KEYS.courseTopics
       ? payload
       : (bundledCourseSyncPayload ? bundledCourseSyncPayload.courseTopics : load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES));
@@ -14266,7 +14273,7 @@ async function syncCoursesTopicsToRelational(curriculumPayload, topicPayload) {
     return;
   }
 
-  const curriculum = normalizeCurriculum(curriculumPayload || O6U_CURRICULUM);
+  const curriculum = normalizeCurriculum(curriculumPayload || MEDBANK_CURRICULUM);
   const topicsByCourseName = normalizeCourseTopicMap(topicPayload || COURSE_TOPIC_OVERRIDES);
 
   const desiredCourses = [];
@@ -14718,7 +14725,7 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
   if (unresolvedCourseNames.length) {
     // Keep course/topic dictionaries aligned with the latest local curriculum before syncing questions.
     await syncCoursesTopicsToRelational(
-      load(STORAGE_KEYS.curriculum, O6U_CURRICULUM),
+      load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM),
       load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES),
     );
     await loadActiveCourseTopicRows();
@@ -15136,7 +15143,7 @@ async function persistImportedQuestionsNow(questionsPayload) {
   await flushPendingSyncNow({ throwOnRelationalFailure: false }).catch(() => { });
 
   try {
-    const curriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+    const curriculum = load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
     const topics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
     await syncCoursesTopicsToRelational(curriculum, topics);
     try {
@@ -15449,10 +15456,10 @@ async function syncSessionsToRelational(sessionsPayload) {
 
 function seedData() {
   const savedCurriculum = load(STORAGE_KEYS.curriculum, null);
-  const baseCurriculum = savedCurriculum || DEFAULT_O6U_CURRICULUM;
-  O6U_CURRICULUM = normalizeCurriculum(baseCurriculum);
-  if (!savedCurriculum || JSON.stringify(savedCurriculum) !== JSON.stringify(O6U_CURRICULUM)) {
-    save(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  const baseCurriculum = savedCurriculum || DEFAULT_MEDBANK_CURRICULUM;
+  MEDBANK_CURRICULUM = normalizeCurriculum(baseCurriculum);
+  if (!savedCurriculum || JSON.stringify(savedCurriculum) !== JSON.stringify(MEDBANK_CURRICULUM)) {
+    save(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
   }
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, null);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
@@ -15480,7 +15487,7 @@ function seedData() {
   const createLocalDemoUsers = () => [
     {
       id: "u_admin",
-      name: "O6U Demo Admin",
+      name: "MedBank Demo Admin",
       email: DEMO_ADMIN_EMAIL,
       password: "admin123",
       phone: "",
@@ -15497,7 +15504,7 @@ function seedData() {
     },
     {
       id: "u_student",
-      name: "O6U Approved Demo Student",
+      name: "MedBank Approved Demo Student",
       email: DEMO_STUDENT_EMAIL,
       password: "student123",
       phone: "+201000000000",
@@ -15514,7 +15521,7 @@ function seedData() {
     },
     {
       id: "u_student_pending",
-      name: "O6U Pending Demo Student",
+      name: "MedBank Pending Demo Student",
       email: DEMO_PENDING_STUDENT_EMAIL,
       password: "student123",
       phone: "+201000000001",
@@ -15573,16 +15580,16 @@ function seedData() {
     }
     users.forEach((user) => {
       if (!SUPABASE_CONFIG.enabled && user.id === "u_admin") {
-        if (user.email !== DEMO_ADMIN_EMAIL || user.name !== "O6U Demo Admin") {
+        if (user.email !== DEMO_ADMIN_EMAIL || user.name !== "MedBank Demo Admin") {
           user.email = DEMO_ADMIN_EMAIL;
-          user.name = "O6U Demo Admin";
+          user.name = "MedBank Demo Admin";
           changed = true;
         }
       }
       if (!SUPABASE_CONFIG.enabled && user.id === "u_student") {
-        if (user.email !== DEMO_STUDENT_EMAIL || user.name !== "O6U Demo Student") {
+        if (user.email !== DEMO_STUDENT_EMAIL || user.name !== "MedBank Demo Student") {
           user.email = DEMO_STUDENT_EMAIL;
-          user.name = "O6U Demo Student";
+          user.name = "MedBank Demo Student";
           changed = true;
         }
         if (!validateAndNormalizePhoneNumber(String(user.phone || "")).ok) {
@@ -15696,7 +15703,7 @@ function seedData() {
   }
 
   if (!load(STORAGE_KEYS.invites, null)) {
-    save(STORAGE_KEYS.invites, ["O6U-FACMED-2026", "O6U-DEMO-BETA"]);
+    save(STORAGE_KEYS.invites, ["MEDBANK-FACMED-2026", "MEDBANK-DEMO-BETA"]);
   }
 
   if (!load(STORAGE_KEYS.feedback, null)) {
@@ -16205,6 +16212,15 @@ function bindGlobalEvents() {
       state.userMenuOpen = false;
       state.notificationMenuOpen = false;
       const route = navTarget.getAttribute("data-nav");
+      if (state.route === "landing" && PUBLIC_MARKETING_ROUTE_SET.has(route) && route !== "login" && route !== "signup") {
+        const targetId = route === "landing" ? "landing-home" : "landing-" + route;
+        const landingScrollTarget = document.getElementById(targetId);
+        if (landingScrollTarget) {
+          const scrollTop = Math.round(landingScrollTarget.getBoundingClientRect().top + window.scrollY);
+          window.setTimeout(() => window.scrollTo({ top: scrollTop, behavior: "smooth" }), 0);
+          return;
+        }
+      }
       if (String(route || "").trim().toLowerCase() === "dashboard" && getCurrentUser()?.role === "student") {
         if (!isUserMcqAccessEnabled(getCurrentUser())) {
           toast(getMcqAccessBlockedMessage());
@@ -18675,7 +18691,7 @@ function renderAdminActivityReportWorkbook(snapshot) {
 <head>
   <meta charset="utf-8" />
   <meta name="ProgId" content="Excel.Sheet" />
-  <meta name="Generator" content="O6U MedBank" />
+  <meta name="Generator" content="MedBank" />
   <style>
     body { font-family: Arial, sans-serif; color: #0f172a; }
     h1, h2 { margin: 0 0 12px; }
@@ -18688,7 +18704,7 @@ function renderAdminActivityReportWorkbook(snapshot) {
   </style>
 </head>
 <body>
-  <h1>O6U MedBank Daily Activity Report</h1>
+  <h1>MedBank Daily Activity Report</h1>
   <p class="subtle">Daily operational report for ${escapeHtml(snapshot.dayRange.label)}.</p>
 
   <div class="section">
@@ -18721,7 +18737,7 @@ async function downloadAdminActivityReport() {
   const snapshot = await buildAdminActivityReportSnapshot();
   const workbookHtml = renderAdminActivityReportWorkbook(snapshot);
   const blob = new Blob(["\ufeff", workbookHtml], { type: "application/vnd.ms-excel;charset=utf-8" });
-  const fileName = `o6u-medbank-daily-activity-${snapshot.dayRange.label}.xls`;
+  const fileName = `medbank-daily-activity-${snapshot.dayRange.label}.xls`;
   downloadBlobFile(blob, fileName);
   appendSystemLog("admin.activity.report", "Admin daily activity report downloaded.", {
     reportDate: snapshot.dayRange.label,
@@ -19490,6 +19506,7 @@ function render() {
 
   const isExamWideRoute = state.route === "session" || state.route === "review";
   const isAdminRoute = state.route === "admin";
+  const isPublicMarketingRoute = PUBLIC_MARKETING_ROUTE_SET.has(String(state.route || ""));
   const coursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
   if (
     state.route === "courses"
@@ -19501,6 +19518,7 @@ function render() {
     state.coursesTransitionMode = "forward";
   }
   document.body.classList.toggle("is-session-route", isExamWideRoute);
+  document.body.classList.toggle("is-public-marketing-route", isPublicMarketingRoute);
   appEl.classList.toggle("is-session", isExamWideRoute);
   appEl.classList.toggle("is-admin", isAdminRoute);
   topbarEl?.classList.toggle("hidden", false);
@@ -19534,6 +19552,7 @@ function render() {
     switch (state.route) {
       case "landing":
         appEl.innerHTML = renderLanding();
+        wireLanding();
         break;
       case "features":
         appEl.innerHTML = renderFeatures();
@@ -19637,6 +19656,7 @@ function render() {
         break;
       default:
         appEl.innerHTML = renderLanding();
+        wireLanding();
     }
   }
   discardUnrestoredLessonVideoContainer();
@@ -19709,6 +19729,7 @@ function render() {
     state.coursesTransitionMode = "";
     lastRenderedRoute = state.route;
     state.skipNextRouteAnimation = false;
+    renderLucideIcons();
     runGsapRouteEnhancements();
     restoreFocusState();
     return;
@@ -19716,6 +19737,7 @@ function render() {
   if (routeChanged) {
     animateRouteTransition();
   }
+  renderLucideIcons();
   runGsapRouteEnhancements({ deferScroll: routeChanged });
   lastRenderedCoursesTransitionKey = state.route === "courses" ? getCoursesTransitionKey() : "";
   state.coursesTransitionMode = "";
@@ -19897,7 +19919,7 @@ function syncTopbar() {
       privateNavEl.innerHTML = `
         <button data-action="courses-home-tab" data-tab="dashboard" class="${courseTab === "dashboard" && state.coursesView === "home" ? "is-active" : ""}">Dashboard</button>
         <button data-action="courses-home-tab" data-tab="enrolled" class="${courseTab === "enrolled" && state.coursesView === "home" ? "is-active" : ""}">My Courses</button>
-        <button data-action="courses-home-tab" data-tab="suggestions" class="${courseTab === "suggestions" && state.coursesView === "home" ? "is-active" : ""}">Course Suggestions</button>
+        <button data-action="courses-home-tab" data-tab="suggestions" class="${courseTab === "suggestions" && state.coursesView === "home" ? "is-active" : ""}">Explore</button>
       `;
       privateNavEl.classList.remove("hidden");
     }
@@ -20032,21 +20054,23 @@ function getGsapRouteOffset() {
 }
 
 function getGsapRouteRevealTargets() {
-  if (!appEl || ["admin", "session", "review"].includes(String(state.route || ""))) {
+  if (!appEl || !PUBLIC_MARKETING_ROUTE_SET.has(String(state.route || ""))) {
     return [];
   }
   const selectors = [
     ".simple-home-inner > *",
-    ".panel .card",
-    ".grid-2 > .card",
-    ".grid-3 > .card",
-    ".grid-4 > .card",
-    ".stats-grid > *",
-    ".student-stats-grid > *",
-    ".dash-quick-actions > .dash-action",
-    ".app-launcher-card",
-    ".courses-page-stat",
-    ".course-card",
+    ".marketing-page-hero > *",
+    ".feature-showcase-card",
+    ".feature-pill",
+    ".about-story-node",
+    ".about-principle-card",
+    ".about-visual-card",
+    ".pricing-plan-card",
+    ".pricing-step-card",
+    ".contact-method-card",
+    ".contact-faq-item",
+    ".landing-proof-card",
+    ".landing-auth-card",
   ].join(", ");
   const seen = new Set();
   return Array.from(appEl.querySelectorAll(selectors))
@@ -20062,7 +20086,7 @@ function getGsapRouteRevealTargets() {
 
 function setupGsapScrollReveals(excludeNodes = new Set()) {
   const gsap = getGsapMotionApi();
-  if (!gsap || !window.ScrollTrigger || isReducedMotionEnabled()) {
+  if (!gsap || !window.ScrollTrigger || isReducedMotionEnabled() || !PUBLIC_MARKETING_ROUTE_SET.has(String(state.route || ""))) {
     return;
   }
   registerGsapMotionPlugins(gsap);
@@ -20134,11 +20158,103 @@ function runGsapRouteEnhancements(options = {}) {
     return;
   }
   registerGsapMotionPlugins(gsap);
+  setupGsapMarketingPageMotion(gsap);
   setupGsapHoverMotion();
   setupGsapExamMotion(gsap);
   setupGsapStudentMotion(gsap);
   if (!options.deferScroll) {
     setupGsapScrollReveals();
+  }
+}
+
+function setupGsapMarketingPageMotion(gsap = getGsapMotionApi()) {
+  if (!gsap || isReducedMotionEnabled()) {
+    return;
+  }
+
+  const marketingPage = appEl.querySelector(".marketing-page");
+  if (!(marketingPage instanceof HTMLElement) || marketingPage.dataset.gsapMarketingWired === "1") {
+    return;
+  }
+  marketingPage.dataset.gsapMarketingWired = "1";
+
+  const _vp = window.innerHeight || document.documentElement.clientHeight || 0;
+  const _inVp = (el) => el.getBoundingClientRect().top < _vp * 1.1;
+  const heroItems = Array.from(marketingPage.querySelectorAll(
+    ".marketing-page-kicker, .marketing-page-title, .marketing-page-lede, .marketing-page-stat"
+  )).filter(_inVp);
+  if (heroItems.length) {
+    gsap.fromTo(heroItems,
+      { autoAlpha: 0, y: 18 },
+      {
+        autoAlpha: 1,
+        y: 0,
+        duration: 0.58,
+        ease: "power2.out",
+        stagger: 0.065,
+        clearProps: "opacity,visibility,transform",
+      },
+    );
+  }
+
+  const featureCards = Array.from(marketingPage.querySelectorAll(
+    ".feature-showcase-card, .pricing-plan-card, .pricing-step-card, .contact-method-card, .landing-proof-card"
+  )).filter(_inVp);
+  if (featureCards.length) {
+    gsap.fromTo(featureCards,
+      { autoAlpha: 0, y: 24, scale: 0.985 },
+      {
+        autoAlpha: 1,
+        y: 0,
+        scale: 1,
+        duration: 0.52,
+        ease: "power2.out",
+        stagger: 0.07,
+        delay: 0.06,
+        clearProps: "opacity,visibility,transform",
+      },
+    );
+  }
+
+  const storyRail = marketingPage.querySelector(".about-story-rail");
+  if (storyRail instanceof HTMLElement && _inVp(storyRail)) {
+    gsap.fromTo(storyRail,
+      { scaleY: 0, transformOrigin: "top center" },
+      { scaleY: 1, duration: 0.95, ease: "power2.out", clearProps: "transform,transformOrigin" },
+    );
+  }
+
+  const visualCards = Array.from(marketingPage.querySelectorAll(".about-visual-card")).filter(_inVp);
+  if (visualCards.length) {
+    gsap.fromTo(visualCards,
+      { autoAlpha: 0, y: 22, rotate: -1.5 },
+      {
+        autoAlpha: 1,
+        y: 0,
+        rotate: 0,
+        duration: 0.62,
+        ease: "power2.out",
+        stagger: 0.08,
+        delay: 0.1,
+        clearProps: "opacity,visibility,transform",
+      },
+    );
+  }
+
+  const storyNodes = Array.from(marketingPage.querySelectorAll(".about-story-node")).filter(_inVp);
+  if (storyNodes.length) {
+    gsap.fromTo(storyNodes,
+      { autoAlpha: 0, x: -18 },
+      {
+        autoAlpha: 1,
+        x: 0,
+        duration: 0.52,
+        ease: "power2.out",
+        stagger: 0.12,
+        delay: 0.12,
+        clearProps: "opacity,visibility,transform",
+      },
+    );
   }
 }
 
@@ -20415,40 +20531,209 @@ function applyStaggerIndices() {
 
 function renderLanding() {
   return `
-    <section class="panel simple-home-wrap">
-      <div class="simple-home-inner">
-        <p class="kicker simple-home-kicker">O6U MedBank</p>
-        <h1 class="simple-home-title">October 6 University Faculty of Medicine practice platform.</h1>
-        <div class="simple-home-logo-wrap" aria-hidden="true">
-          <img class="simple-home-logo" src="Assets/web%20Logo.png" alt="" />
+    <div class="panel marketing-page landing-page landing-page-scroll">
+
+      <section id="landing-home" class="landing-scroll-section">
+        <div class="marketing-page-hero landing-simple-hero">
+          <p class="kicker marketing-page-kicker">MedBank</p>
+          <h1 class="marketing-page-title landing-title">Focused medical MCQ practice.</h1>
+          <p class="marketing-page-lede">Create course-specific blocks, review explanations, and keep your weak topics clear without a busy study dashboard.</p>
+          <div class="landing-auth-card" aria-label="Start using MedBank">
+            <p>Ready to study?</p>
+            <div class="landing-auth-actions">
+              <button class="btn landing-primary-cta" data-nav="login">Log in</button>
+              <button class="btn ghost landing-secondary-cta" data-nav="signup">Create account</button>
+            </div>
+            <span>New students can sign up and wait for course access approval.</span>
+          </div>
+          <div class="marketing-page-stats landing-simple-chips" aria-label="MedBank home highlights">
+            <span class="marketing-page-stat">Course-led practice</span>
+            <span class="marketing-page-stat">Autosaved sessions</span>
+            <span class="marketing-page-stat">Clear review loop</span>
+          </div>
         </div>
-        <p class="simple-home-sub">Create focused tests by course and topic, solve with exam-style tools, and review clear explanations after every question.</p>
-        <div class="simple-home-chips">
-          <span>O6U course tracks</span>
-          <span>Exam-style testing</span>
-          <span>Progress tracking</span>
+      </section>
+
+      <section id="landing-features" class="landing-scroll-section">
+        <div class="marketing-page-hero">
+          <p class="kicker marketing-page-kicker">Features</p>
+          <h2 class="marketing-page-title">Everything a serious MCQ practice bank needs, without making studying feel heavy.</h2>
+          <p class="marketing-page-lede">MedBank combines focused test creation, exam-mode discipline, instant review, and clean admin workflows in one calm workspace for medical learning.</p>
+          <div class="marketing-page-stats" aria-label="MedBank feature highlights">
+            <span class="marketing-page-stat"><b>Focused</b> course + topic blocks</span>
+            <span class="marketing-page-stat"><b>Fast</b> review after every answer</span>
+            <span class="marketing-page-stat"><b>Clear</b> progress analytics</span>
+          </div>
         </div>
-        <div class="stack simple-home-actions">
-          <button class="btn" data-nav="login">Log in</button>
-          <button class="btn ghost" data-nav="signup">Sign up</button>
+        <div class="feature-showcase-grid">
+          <article class="feature-showcase-card is-emphasis">
+            <span class="feature-card-icon" aria-hidden="true">01</span>
+            <h3>Build the exact block you need</h3>
+            <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix.</p>
+            <div class="feature-pill-row">
+              <span class="feature-pill">Tutor mode</span>
+              <span class="feature-pill">Timed mode</span>
+              <span class="feature-pill">Unused / incorrect / flagged</span>
+            </div>
+          </article>
+          <article class="feature-showcase-card">
+            <span class="feature-card-icon" aria-hidden="true">02</span>
+            <h3>Practice with exam rhythm</h3>
+            <p>Flag questions, strike options, take notes, use tools, and keep autosaved progress so the studying experience feels closer to a real exam surface.</p>
+          </article>
+          <article class="feature-showcase-card">
+            <span class="feature-card-icon" aria-hidden="true">03</span>
+            <h3>Review while the memory is fresh</h3>
+            <p>Each answer opens the explanation, references, and feedback context immediately, helping students understand the reasoning instead of memorizing a letter.</p>
+          </article>
+          <article class="feature-showcase-card">
+            <span class="feature-card-icon" aria-hidden="true">04</span>
+            <h3>See your weak spots clearly</h3>
+            <p>Accuracy, timing, topic trends, and previous sessions turn practice into a feedback loop: test, review, adjust, then repeat smarter.</p>
+          </article>
+          <article class="feature-showcase-card">
+            <span class="feature-card-icon" aria-hidden="true">05</span>
+            <h3>Admin tools stay organized</h3>
+            <p>Editors can manage users, courses, questions, bulk imports, notifications, and access controls without scattering the work across spreadsheets.</p>
+          </article>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <section id="landing-pricing" class="landing-scroll-section">
+        <div class="marketing-page-hero">
+          <p class="kicker marketing-page-kicker">Pricing</p>
+          <h2 class="marketing-page-title">Simple access now, flexible tiers when MedBank grows.</h2>
+          <p class="marketing-page-lede">The current priority is a high-quality study experience. Pricing is structured so student access stays clear while faculty and department workflows can expand later.</p>
+        </div>
+        <div class="pricing-plan-grid">
+          <article class="pricing-plan-card">
+            <p class="pricing-plan-label">Student</p>
+            <h3>Starter</h3>
+            <p class="pricing-price">$0 <span>/ preview</span></p>
+            <p>Core course practice, tutor/timed blocks, saved sessions, and explanation review.</p>
+            <button class="btn ghost" data-nav="signup">Start practicing</button>
+          </article>
+          <article class="pricing-plan-card is-featured">
+            <p class="pricing-plan-label">Faculty</p>
+            <h3>Content team</h3>
+            <p class="pricing-price">Custom</p>
+            <p>Question management, bulk import support, course assignment, and notification workflows.</p>
+            <button class="btn" data-scroll-to="landing-contact">Talk to us</button>
+          </article>
+          <article class="pricing-plan-card">
+            <p class="pricing-plan-label">Department</p>
+            <h3>Program workspace</h3>
+            <p class="pricing-price">Custom</p>
+            <p>Cohort-level oversight, admin governance, shared moderation, and performance dashboards.</p>
+            <button class="btn ghost" data-scroll-to="landing-contact">Plan rollout</button>
+          </article>
+        </div>
+      </section>
+
+      <section id="landing-about" class="landing-scroll-section">
+        <div class="marketing-page-hero about-hero">
+          <p class="kicker marketing-page-kicker">About MedBank</p>
+          <h2 class="marketing-page-title">MCQ practice and course study, in one focused place.</h2>
+          <p class="marketing-page-lede">MedBank is built for students who want to practice course-aligned MCQs, review every explanation, and track which topics still need work — without a cluttered dashboard getting in the way.</p>
+          <div class="marketing-page-stats" aria-label="MedBank product principles">
+            <span class="marketing-page-stat"><b>Course-aligned</b> MCQ banks</span>
+            <span class="marketing-page-stat"><b>Focused</b> exam practice</span>
+            <span class="marketing-page-stat"><b>Clear</b> progress tracking</span>
+          </div>
+        </div>
+        <div class="about-visual-grid about-visual-grid-three" aria-label="MedBank visual study flow">
+          <figure class="about-visual-card">
+            <img src="Assets/branding/about-study-workspace.svg" alt="Calm MedBank study workspace with MCQ cards and notes" loading="lazy" />
+            <figcaption>One quiet place to study.</figcaption>
+          </figure>
+          <figure class="about-visual-card">
+            <img src="Assets/branding/about-review-flow.svg" alt="Question to explanation to next study step flow" loading="lazy" />
+            <figcaption>Reasoning first, memorization second.</figcaption>
+          </figure>
+          <figure class="about-visual-card">
+            <img src="Assets/branding/about-analytics.svg" alt="Topic progress analytics and accuracy chart" loading="lazy" />
+            <figcaption>Weak topics become visible.</figcaption>
+          </figure>
+        </div>
+        <div class="about-story-layout">
+          <div class="about-story-heading">
+            <p class="kicker">Our start</p>
+            <h3>Built for students studying MCQ-based courses.</h3>
+            <p>MedBank started from a simple problem: students needed one reliable place to practice course-specific MCQs, revisit wrong answers, and understand the reasoning — without juggling scattered files or unclear tools.</p>
+          </div>
+          <div class="about-story-timeline" aria-label="MedBank story timeline">
+            <span class="about-story-rail" aria-hidden="true"></span>
+            <article class="about-story-node"><span class="about-story-date">2026 · Start</span><h4>A focused MCQ bank</h4></article>
+            <article class="about-story-node"><span class="about-story-date">2026 · Build</span><h4>Exam-style sessions</h4></article>
+            <article class="about-story-node"><span class="about-story-date">Today</span><h4>A complete study loop</h4></article>
+            <article class="about-story-node"><span class="about-story-date">Next</span><h4>Smarter learning support</h4></article>
+          </div>
+        </div>
+      </section>
+
+      <section id="landing-contact" class="landing-scroll-section">
+        <div class="marketing-page-hero contact-hero">
+          <p class="kicker marketing-page-kicker">Contact</p>
+          <h2 class="marketing-page-title">Get in touch.</h2>
+          <p class="marketing-page-lede">Questions about access, course content, or product feedback — send a note and we'll respond.</p>
+        </div>
+        <form id="support-form" class="contact-form-card" autocomplete="on">
+          <label>Name <input name="name" autocomplete="name" required /></label>
+          <label>Email <input type="email" name="email" autocomplete="email" required /></label>
+          <label>Message <textarea name="message" autocomplete="off" required></textarea></label>
+          <button class="btn" type="submit">Send message</button>
+        </form>
+      </section>
+
+    </div>
   `;
 }
 
 function renderFeatures() {
   return `
-    <section class="panel">
-      <h2 class="title">Features</h2>
-      <p class="subtle">Built for October 6 University medical students and faculty editors.</p>
-      <div class="grid-3" style="margin-top: 0.8rem;">
-        <article class="card"><h4>O6U course routing</h4><p>Students only see courses assigned by admin year/semester enrollment.</p></article>
-        <article class="card"><h4>Create a test</h4><p>Build tutor/timed blocks by course/topic with question source controls.</p></article>
-        <article class="card"><h4>Exam tools</h4><p>Flagging, marker, notes, labs, calculator, shortcuts, and autosave.</p></article>
-        <article class="card"><h4>Guided review</h4><p>Immediate correctness feedback with explanation panel and references.</p></article>
-        <article class="card"><h4>Student analytics</h4><p>Track accuracy, timing, weak topics, and trend improvements.</p></article>
-        <article class="card"><h4>Faculty admin</h4><p>Assign courses, edit question banks, and bulk import content.</p></article>
+    <section class="panel marketing-page features-page">
+      <div class="marketing-page-hero">
+        <p class="kicker marketing-page-kicker">Features</p>
+        <h2 class="marketing-page-title">Everything a serious MCQ practice bank needs, without making studying feel heavy.</h2>
+        <p class="marketing-page-lede">MedBank combines focused test creation, exam-mode discipline, instant review, and clean admin workflows in one calm workspace for medical learning.</p>
+        <div class="marketing-page-stats" aria-label="MedBank feature highlights">
+          <span class="marketing-page-stat"><b>Focused</b> course + topic blocks</span>
+          <span class="marketing-page-stat"><b>Fast</b> review after every answer</span>
+          <span class="marketing-page-stat"><b>Clear</b> progress analytics</span>
+        </div>
+      </div>
+
+      <div class="feature-showcase-grid">
+        <article class="feature-showcase-card is-emphasis">
+          <span class="feature-card-icon" aria-hidden="true">01</span>
+          <h3>Build the exact block you need</h3>
+          <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix.</p>
+          <div class="feature-pill-row">
+            <span class="feature-pill">Tutor mode</span>
+            <span class="feature-pill">Timed mode</span>
+            <span class="feature-pill">Unused / incorrect / flagged</span>
+          </div>
+        </article>
+        <article class="feature-showcase-card">
+          <span class="feature-card-icon" aria-hidden="true">02</span>
+          <h3>Practice with exam rhythm</h3>
+          <p>Flag questions, strike options, take notes, use tools, and keep autosaved progress so the studying experience feels closer to a real exam surface.</p>
+        </article>
+        <article class="feature-showcase-card">
+          <span class="feature-card-icon" aria-hidden="true">03</span>
+          <h3>Review while the memory is fresh</h3>
+          <p>Each answer opens the explanation, references, and feedback context immediately, helping students understand the reasoning instead of memorizing a letter.</p>
+        </article>
+        <article class="feature-showcase-card">
+          <span class="feature-card-icon" aria-hidden="true">04</span>
+          <h3>See your weak spots clearly</h3>
+          <p>Accuracy, timing, topic trends, and previous sessions turn practice into a feedback loop: test, review, adjust, then repeat smarter.</p>
+        </article>
+        <article class="feature-showcase-card">
+          <span class="feature-card-icon" aria-hidden="true">05</span>
+          <h3>Admin tools stay organized</h3>
+          <p>Editors can manage users, courses, questions, bulk imports, notifications, and access controls without scattering the work across spreadsheets.</p>
+        </article>
       </div>
     </section>
   `;
@@ -20456,13 +20741,39 @@ function renderFeatures() {
 
 function renderPricing() {
   return `
-    <section class="panel">
-      <h2 class="title">Pricing</h2>
-      <p class="subtle">Optional structure if O6U departments need subscription tiers later.</p>
-      <div class="grid-3" style="margin-top: 0.8rem;">
-        <article class="card"><h4>Student</h4><p><b>$0</b> starter</p><p>Core O6U course practice and explanation review.</p></article>
-        <article class="card"><h4>Faculty</h4><p><b>Custom</b></p><p>Question management, import pipelines, and course assignment control.</p></article>
-        <article class="card"><h4>Department</h4><p><b>Custom</b></p><p>Cohort analytics, moderation workflow, and shared governance tools.</p></article>
+    <section class="panel marketing-page pricing-page">
+      <div class="marketing-page-hero">
+        <p class="kicker marketing-page-kicker">Pricing</p>
+        <h2 class="marketing-page-title">Simple access now, flexible tiers when MedBank grows.</h2>
+        <p class="marketing-page-lede">The current priority is a high-quality study experience. Pricing is structured so student access stays clear while faculty and department workflows can expand later.</p>
+      </div>
+      <div class="pricing-plan-grid">
+        <article class="pricing-plan-card">
+          <p class="pricing-plan-label">Student</p>
+          <h3>Starter</h3>
+          <p class="pricing-price">$0 <span>/ preview</span></p>
+          <p>Core course practice, tutor/timed blocks, saved sessions, and explanation review.</p>
+          <button class="btn ghost" data-nav="signup">Start practicing</button>
+        </article>
+        <article class="pricing-plan-card is-featured">
+          <p class="pricing-plan-label">Faculty</p>
+          <h3>Content team</h3>
+          <p class="pricing-price">Custom</p>
+          <p>Question management, bulk import support, course assignment, and notification workflows.</p>
+          <button class="btn" data-nav="contact">Talk to us</button>
+        </article>
+        <article class="pricing-plan-card">
+          <p class="pricing-plan-label">Department</p>
+          <h3>Program workspace</h3>
+          <p class="pricing-price">Custom</p>
+          <p>Cohort-level oversight, admin governance, shared moderation, and performance dashboards.</p>
+          <button class="btn ghost" data-nav="contact">Plan rollout</button>
+        </article>
+      </div>
+      <div class="pricing-steps-grid">
+        <article class="pricing-step-card"><span>1</span><h4>Approve access</h4><p>Admins keep course visibility clean and controlled.</p></article>
+        <article class="pricing-step-card"><span>2</span><h4>Assign content</h4><p>Students see only the relevant course bank.</p></article>
+        <article class="pricing-step-card"><span>3</span><h4>Track progress</h4><p>Practice data becomes a study plan, not noise.</p></article>
       </div>
     </section>
   `;
@@ -20470,13 +20781,76 @@ function renderPricing() {
 
 function renderAbout() {
   return `
-    <section class="panel">
-      <h2 class="title">About</h2>
-      <p class="subtle">O6U MedBank is tailored for October 6 University Faculty of Medicine study workflows.</p>
-      <div class="card" style="margin-top: 0.8rem;">
-        <p>
-          The product direction is simple: course-aligned content, reliable session saving, clear analytics, and a clean editor workflow so faculty teams can update banks quickly.
-        </p>
+    <section class="panel marketing-page about-page">
+      <div class="marketing-page-hero about-hero">
+        <p class="kicker marketing-page-kicker">About MedBank</p>
+        <h2 class="marketing-page-title">MCQ practice and course study, in one focused place.</h2>
+        <p class="marketing-page-lede">MedBank is built for students who want to practice course-aligned MCQs, review every explanation, and track which topics still need work — without a cluttered dashboard getting in the way.</p>
+        <div class="marketing-page-stats" aria-label="MedBank product principles">
+          <span class="marketing-page-stat"><b>Course-aligned</b> MCQ banks</span>
+          <span class="marketing-page-stat"><b>Focused</b> exam practice</span>
+          <span class="marketing-page-stat"><b>Clear</b> progress tracking</span>
+        </div>
+      </div>
+
+      <div class="about-visual-grid about-visual-grid-three" aria-label="MedBank visual study flow">
+        <figure class="about-visual-card">
+          <img src="Assets/branding/about-study-workspace.svg" alt="Calm MedBank study workspace with MCQ cards and notes" loading="lazy" />
+          <figcaption>One quiet place to study.</figcaption>
+        </figure>
+        <figure class="about-visual-card">
+          <img src="Assets/branding/about-review-flow.svg" alt="Question to explanation to next study step flow" loading="lazy" />
+          <figcaption>Reasoning first, memorization second.</figcaption>
+        </figure>
+        <figure class="about-visual-card">
+          <img src="Assets/branding/about-analytics.svg" alt="Topic progress analytics and accuracy chart" loading="lazy" />
+          <figcaption>Weak topics become visible.</figcaption>
+        </figure>
+      </div>
+
+      <div class="about-story-layout">
+        <div class="about-story-heading">
+          <p class="kicker">Our start</p>
+          <h3>Built for students studying MCQ-based courses.</h3>
+          <p>MedBank started from a simple problem: students needed one reliable place to practice course-specific MCQs, revisit wrong answers, and understand the reasoning — without juggling scattered files or unclear tools.</p>
+        </div>
+        <div class="about-story-timeline" aria-label="MedBank story timeline">
+          <span class="about-story-rail" aria-hidden="true"></span>
+          <article class="about-story-node">
+            <span class="about-story-date">2026 · Start</span>
+            <h4>A focused MCQ bank</h4>
+          </article>
+          <article class="about-story-node">
+            <span class="about-story-date">2026 · Build</span>
+            <h4>Exam-style sessions</h4>
+          </article>
+          <article class="about-story-node">
+            <span class="about-story-date">Today</span>
+            <h4>A complete study loop</h4>
+          </article>
+          <article class="about-story-node">
+            <span class="about-story-date">Next</span>
+            <h4>Smarter learning support</h4>
+          </article>
+        </div>
+      </div>
+
+      <div class="about-principles-grid">
+        <article class="about-principle-card">
+          <span>01</span>
+          <h4>Course-aligned practice</h4>
+          <p>Every block matches your course and topics so practice time maps directly to what you are being tested on.</p>
+        </article>
+        <article class="about-principle-card">
+          <span>02</span>
+          <h4>Explanations over memorization</h4>
+          <p>The answer is only useful when the reasoning becomes clear enough to carry into the next question.</p>
+        </article>
+        <article class="about-principle-card">
+          <span>03</span>
+          <h4>Progress you can act on</h4>
+          <p>Analytics point students toward the next best topic to study, not overwhelm them with numbers.</p>
+        </article>
       </div>
     </section>
   `;
@@ -20484,24 +20858,18 @@ function renderAbout() {
 
 function renderContact() {
   return `
-    <section class="panel">
-      <h2 class="title">O6U Support</h2>
-      <p class="subtle">FAQ and support form for O6U medical students and editors (stored locally in this prototype).</p>
-      <div class="grid-2" style="margin-top: 0.8rem;">
-        <article class="card">
-          <h4>FAQ</h4>
-          <p><b>Can I resume blocks later?</b><br />Yes, in-progress sessions are saved automatically.</p>
-          <p><b>Does timed mode auto-submit?</b><br />Yes, when the timer hits zero.</p>
-          <p><b>Can I practice only assigned courses?</b><br />Yes, admin assignment controls course visibility per student.</p>
-        </article>
-        <form id="support-form" class="card" autocomplete="on">
-          <h4>Support Form</h4>
-          <label>Name <input name="name" autocomplete="name" required /></label>
-          <label>Email <input type="email" name="email" autocomplete="email" required /></label>
-          <label>Message <textarea name="message" autocomplete="off" required></textarea></label>
-          <button class="btn" type="submit">Send</button>
-        </form>
+    <section class="panel marketing-page contact-page">
+      <div class="marketing-page-hero contact-hero">
+        <p class="kicker marketing-page-kicker">Contact</p>
+        <h2 class="marketing-page-title">Get in touch.</h2>
+        <p class="marketing-page-lede">Questions about access, course content, or product feedback — send a note and we'll respond.</p>
       </div>
+      <form id="support-form" class="contact-form-card" autocomplete="on">
+        <label>Name <input name="name" autocomplete="name" required /></label>
+        <label>Email <input type="email" name="email" autocomplete="email" required /></label>
+        <label>Message <textarea name="message" autocomplete="off" required></textarea></label>
+        <button class="btn" type="submit">Send message</button>
+      </form>
     </section>
   `;
 }
@@ -20514,8 +20882,40 @@ function wireContact() {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    toast("O6U support request captured (prototype mode).");
+    toast("MedBank support request captured (prototype mode).");
     form.reset();
+  });
+}
+
+function wireLanding() {
+  wireContact();
+
+  const sections = Array.from(document.querySelectorAll(".landing-scroll-section[id]"));
+  if (!sections.length) return;
+
+  const navBtns = Array.from(document.querySelectorAll("#public-nav [data-nav]"));
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const sectionId = entry.target.id;
+        const routePart = sectionId === "landing-home" ? "landing" : sectionId.replace("landing-", "");
+        navBtns.forEach((btn) => {
+          btn.classList.toggle("is-active", btn.getAttribute("data-nav") === routePart);
+        });
+      });
+    },
+    { rootMargin: "0px 0px -55% 0px", threshold: 0 },
+  );
+
+  sections.forEach((section) => observer.observe(section));
+
+  document.querySelectorAll("[data-scroll-to]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = document.getElementById(btn.dataset.scrollTo);
+      if (target) target.scrollIntoView({ behavior: isReducedMotionEnabled() ? "auto" : "smooth", block: "start" });
+    });
   });
 }
 
@@ -20538,7 +20938,7 @@ function normalizeConfiguredAuthRedirectUrl(rawUrl) {
 }
 
 function shouldUseMobileAuthRedirect() {
-  if (SUPABASE_CONFIG.forceMobileAuthRedirect || window.__O6U_MEDBANK_MOBILE_APP__ === true) {
+  if (SUPABASE_CONFIG.forceMobileAuthRedirect || window.__MEDBANK_MOBILE_APP__ === true) {
     return true;
   }
   if (window.Capacitor?.isNativePlatform?.() || window.cordova || window.ReactNativeWebView) {
@@ -20658,35 +21058,47 @@ async function startGoogleOAuthSignIn(authClient) {
 function renderAuth(mode) {
   if (mode === "login") {
     return `
-      <section class="panel" style="max-width: 560px; margin-inline: auto;">
-        <h2 class="title">Log In</h2>
-        <p class="subtle">Access your O6U course question bank and saved blocks.</p>
-        ${isLocalDemoAuthEnabled() ? `
-          <div class="demo-panel">
-            <h4>Local demo accounts</h4>
-            <div class="stack">
-              <button class="btn ghost" type="button" data-action="quick-login-admin">Demo admin</button>
-              <button class="btn ghost" type="button" data-action="quick-login-student">Demo student</button>
-              <button class="btn ghost" type="button" data-action="quick-login-pending-student">Pending student</button>
+      <section class="panel auth-public-shell auth-login-shell">
+        <div class="auth-public-copy">
+          <p class="kicker">Student workspace</p>
+          <h2>Welcome back.</h2>
+          <p>Log in to continue your saved blocks, review explanations, and return to the topics that need the most attention.</p>
+          <div class="auth-public-points" aria-label="Login benefits">
+            <span>Saved sessions</span>
+            <span>Course access</span>
+            <span>Progress review</span>
+          </div>
+        </div>
+        <div class="auth-public-card">
+          <h3>Log in</h3>
+          <p class="subtle">Access your course question bank and saved blocks.</p>
+          ${isLocalDemoAuthEnabled() ? `
+            <div class="demo-panel">
+              <h4>Local demo accounts</h4>
+              <div class="stack">
+                <button class="btn ghost" type="button" data-action="quick-login-admin">Demo admin</button>
+                <button class="btn ghost" type="button" data-action="quick-login-student">Demo student</button>
+                <button class="btn ghost" type="button" data-action="quick-login-pending-student">Pending student</button>
+              </div>
+              <p class="subtle" style="margin:0.7rem 0 0;">Admin: ${escapeHtml(DEMO_ADMIN_EMAIL)} / admin123</p>
+              <p class="subtle" style="margin:0.2rem 0 0;">Student: ${escapeHtml(DEMO_STUDENT_EMAIL)} / student123</p>
+              <p class="subtle" style="margin:0.2rem 0 0;">Pending: ${escapeHtml(DEMO_PENDING_STUDENT_EMAIL)} / student123</p>
             </div>
-            <p class="subtle" style="margin:0.7rem 0 0;">Admin: ${escapeHtml(DEMO_ADMIN_EMAIL)} / admin123</p>
-            <p class="subtle" style="margin:0.2rem 0 0;">Student: ${escapeHtml(DEMO_STUDENT_EMAIL)} / student123</p>
-            <p class="subtle" style="margin:0.2rem 0 0;">Pending: ${escapeHtml(DEMO_PENDING_STUDENT_EMAIL)} / student123</p>
+          ` : ""}
+          <form id="login-form" class="auth-form auth-public-form" method="post" autocomplete="on">
+            <label>Email <input type="email" id="login-email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
+            <label>Password <input type="password" id="login-password" name="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required /></label>
+            <div class="auth-submit-row">
+              <button class="btn auth-submit-btn" type="submit">Log in</button>
+              <button class="btn ghost" type="button" data-nav="forgot">Forgot password</button>
+            </div>
+            <div class="auth-divider"><span>or</span></div>
+            <button class="btn ghost auth-google-btn" id="login-google-btn" type="button">Continue with Google</button>
+          </form>
+          <div class="auth-inline auth-public-switch">
+            <span class="text">Need an account?</span>
+            <button data-nav="signup" class="btn ghost" type="button">Create account</button>
           </div>
-        ` : ""}
-        <form id="login-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-          <label>Email <input type="email" id="login-email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required /></label>
-          <label>Password <input type="password" id="login-password" name="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required /></label>
-          <div class="stack">
-            <button class="btn" type="submit">Log in</button>
-            <button class="btn ghost" type="button" data-nav="forgot">Forgot password</button>
-          </div>
-          <div class="auth-divider"><span>or</span></div>
-          <button class="btn ghost auth-google-btn" id="login-google-btn" type="button">Continue with Google</button>
-        </form>
-        <div class="auth-inline">
-          <span class="text">Need an account?</span>
-          <button data-nav="signup" class="btn ghost" type="button">Sign up</button>
         </div>
       </section>
     `;
@@ -20722,16 +21134,108 @@ function renderAuth(mode) {
 
     if (isGoogleOnboardingFlow) {
       return `
-        <section class="panel" style="max-width: 680px; margin-inline: auto;">
-          <h2 class="title">Create Account</h2>
-          <p class="subtle">Complete your Google sign-up details. Name and email are locked to your Google account. Phone format examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
-          <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
+        <section class="panel auth-public-shell auth-signup-shell auth-onboarding-shell">
+          <div class="auth-public-copy">
+            <p class="kicker">Finish sign-up</p>
+            <h2>Connect your Google account to MedBank.</h2>
+            <p>Complete your student details once so your course bank can be assigned correctly.</p>
+            <div class="auth-public-points" aria-label="Signup details">
+              <span>Locked Google email</span>
+              <span>Year + semester</span>
+              <span>Course access</span>
+            </div>
+          </div>
+          <div class="auth-public-card auth-signup-card">
+            <h3>Create account</h3>
+            <p class="subtle">Name and email are locked to your Google account. Phone examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+            <form id="signup-form" class="auth-form auth-public-form" method="post" autocomplete="on">
+              <div class="form-row">
+                <label>Full name <input name="name" autocomplete="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
+                <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
+              </div>
+              <div class="form-row">
+                <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
+              </div>
+              <div class="form-row">
+                <label>Year
+                  <select name="academicYear" id="signup-academic-year" required aria-required="true">
+                    <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
+                    <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
+                    <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
+                    <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
+                    <option value="4" ${defaultYear === 4 ? "selected" : ""}>Year 4</option>
+                    <option value="5" ${defaultYear === 5 ? "selected" : ""}>Year 5</option>
+                  </select>
+                </label>
+                <label>Semester
+                  <select name="academicSemester" id="signup-academic-semester" required aria-required="true">
+                    <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
+                    <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
+                    <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
+                  </select>
+                </label>
+              </div>
+              <div class="signup-course-field">
+                <p class="signup-course-label">Courses (from selected year and semester)</p>
+                <div id="signup-course-options" class="signup-course-grid">
+                  ${defaultCourses
+            .map(
+              (course) => `
+                        <label class="admin-course-check">
+                          <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" ${initiallyCheckedCourses.includes(course) ? "checked" : ""} />
+                          <span>${escapeHtml(course)}</span>
+                        </label>
+                      `,
+            )
+            .join("")}
+                </div>
+                <small id="signup-course-help" class="subtle">Choose one or more courses.</small>
+              </div>
+              <div class="stack">
+                <button class="btn ghost" type="button" id="signup-select-all-courses">Select all</button>
+                <button class="btn ghost" type="button" id="signup-clear-courses">Clear</button>
+              </div>
+              <div class="auth-submit-row">
+                <button class="btn auth-submit-btn" type="submit">Create account</button>
+                <button class="btn ghost" type="button" data-action="logout">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </section>
+      `;
+    }
+
+    return `
+      <section class="panel auth-public-shell auth-signup-shell">
+        <div class="auth-public-copy">
+          <p class="kicker">Join MedBank</p>
+          <h2>Create your student account.</h2>
+          <p>Sign up with your details, select your academic year and semester, then wait for admin approval to unlock your course bank.</p>
+          <div class="auth-public-points" aria-label="Signup steps">
+            <span>Student details</span>
+            <span>Course selection</span>
+            <span>Admin approval</span>
+          </div>
+        </div>
+        <div class="auth-public-card auth-signup-card">
+          <h3>Create account</h3>
+          <p class="subtle">Use Google or sign up with email. Phone examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
+          <form id="signup-form" class="auth-form auth-public-form" method="post" autocomplete="on">
+            <button class="btn ghost auth-google-btn" id="signup-google-btn" type="button">Continue with Google</button>
+            <div class="auth-divider"><span>or sign up with email</span></div>
             <div class="form-row">
-              <label>Full name <input name="name" autocomplete="name" value="${escapeHtml(currentUser?.name || "")}" readonly required /></label>
-              <label>Email <input type="email" name="email" autocomplete="email" value="${escapeHtml(currentUser?.email || "")}" readonly required /></label>
+              <label>Full name <input name="name" autocomplete="name" required /></label>
+              <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required aria-required="true" /></label>
             </div>
             <div class="form-row">
-              <label>Phone number <input type="tel" name="phone" value="${escapeHtml(defaultPhone)}" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
+              <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
+              <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
+            </div>
+            <div class="form-row">
+              <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
+            </div>
+            <div class="form-row">
+              <label>Invite code (optional) <input name="inviteCode" autocomplete="one-time-code" /></label>
             </div>
             <div class="form-row">
               <label>Year
@@ -20759,7 +21263,7 @@ function renderAuth(mode) {
           .map(
             (course) => `
                       <label class="admin-course-check">
-                        <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" ${initiallyCheckedCourses.includes(course) ? "checked" : ""} />
+                        <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" checked />
                         <span>${escapeHtml(course)}</span>
                       </label>
                     `,
@@ -20772,87 +21276,26 @@ function renderAuth(mode) {
               <button class="btn ghost" type="button" id="signup-select-all-courses">Select all</button>
               <button class="btn ghost" type="button" id="signup-clear-courses">Clear</button>
             </div>
-            <div class="stack">
-              <button class="btn" type="submit">Create account</button>
-              <button class="btn ghost" type="button" data-action="logout">Cancel</button>
-            </div>
+            <button class="btn auth-submit-btn" type="submit">Create account</button>
           </form>
-        </section>
-      `;
-    }
-
-    return `
-      <section class="panel" style="max-width: 680px; margin-inline: auto;">
-        <h2 class="title">Create Account</h2>
-        <p class="subtle">Student sign-up with year, semester, and course enrollment. Phone format examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
-        <form id="signup-form" class="auth-form" style="margin-top: 1rem;" method="post" autocomplete="on">
-          <button class="btn ghost auth-google-btn" id="signup-google-btn" type="button">Continue with Google</button>
-          <div class="auth-divider"><span>or sign up with email</span></div>
-          <div class="form-row">
-            <label>Full name <input name="name" autocomplete="name" required /></label>
-            <label>Email <input type="email" name="email" autocomplete="username email" inputmode="email" autocapitalize="none" spellcheck="false" required aria-required="true" /></label>
-          </div>
-          <div class="form-row">
-            <label>Password <input type="password" name="password" minlength="6" autocomplete="new-password" required /></label>
-            <label>Confirm password <input type="password" name="confirmPassword" minlength="6" autocomplete="new-password" required /></label>
-          </div>
-          <div class="form-row">
-            <label>Phone number <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="+20 10 0000 0000" required aria-required="true" minlength="8" maxlength="20" /></label>
-          </div>
-          <div class="form-row">
-            <label>Invite code (optional) <input name="inviteCode" autocomplete="one-time-code" /></label>
-          </div>
-          <div class="form-row">
-            <label>Year
-              <select name="academicYear" id="signup-academic-year" required aria-required="true">
-                <option value="" ${defaultYear === null ? "selected" : ""}>Select year</option>
-                <option value="1" ${defaultYear === 1 ? "selected" : ""}>Year 1</option>
-                <option value="2" ${defaultYear === 2 ? "selected" : ""}>Year 2</option>
-                <option value="3" ${defaultYear === 3 ? "selected" : ""}>Year 3</option>
-                <option value="4" ${defaultYear === 4 ? "selected" : ""}>Year 4</option>
-                <option value="5" ${defaultYear === 5 ? "selected" : ""}>Year 5</option>
-              </select>
-            </label>
-            <label>Semester
-              <select name="academicSemester" id="signup-academic-semester" required aria-required="true">
-                <option value="" ${defaultSemester === null ? "selected" : ""}>Select semester</option>
-                <option value="1" ${defaultSemester === 1 ? "selected" : ""}>Semester 1</option>
-                <option value="2" ${defaultSemester === 2 ? "selected" : ""}>Semester 2</option>
-              </select>
-            </label>
-          </div>
-          <div class="signup-course-field">
-            <p class="signup-course-label">Courses (from selected year and semester)</p>
-            <div id="signup-course-options" class="signup-course-grid">
-              ${defaultCourses
-        .map(
-          (course) => `
-                    <label class="admin-course-check">
-                      <input type="checkbox" name="signupCourses" value="${escapeHtml(course)}" checked />
-                      <span>${escapeHtml(course)}</span>
-                    </label>
-                  `,
-        )
-        .join("")}
-            </div>
-            <small id="signup-course-help" class="subtle">Choose one or more courses.</small>
-          </div>
-          <div class="stack">
-            <button class="btn ghost" type="button" id="signup-select-all-courses">Select all</button>
-            <button class="btn ghost" type="button" id="signup-clear-courses">Clear</button>
-          </div>
-          <button class="btn" type="submit">Create account</button>
-        </form>
+        </div>
       </section>
     `;
   }
 
   return `
-    <section class="panel" style="max-width: 560px; margin-inline: auto;">
-      <h2 class="title">Forgot Password</h2>
-      <p class="subtle">Please contact the website admin to reset your password.</p>
-      <div class="auth-inline">
-        <button class="btn ghost" data-nav="login" type="button">Back to login</button>
+    <section class="panel auth-public-shell auth-forgot-shell">
+      <div class="auth-public-copy">
+        <p class="kicker">Password help</p>
+        <h2>Reset access calmly.</h2>
+        <p>If you cannot log in, contact the website admin and they can help restore your account access.</p>
+      </div>
+      <div class="auth-public-card">
+        <h3>Forgot password</h3>
+        <p class="subtle">Please contact the website admin to reset your password.</p>
+        <div class="auth-inline auth-public-switch">
+          <button class="btn ghost" data-nav="login" type="button">Back to login</button>
+        </div>
       </div>
     </section>
   `;
@@ -22137,6 +22580,21 @@ function wireNotifications() {
 }
 
 function studentSvgIcon(name) {
+  const lucideIcons = {
+    accuracy: "target",
+    time: "timer-reset",
+    solved: "list-checks",
+    bank: "database-zap",
+    create: "plus-circle",
+    review: "rotate-ccw",
+    chart: "chart-no-axes-combined",
+    flag: "flag",
+    streak: "flame",
+  };
+  const lucideName = lucideIcons[name];
+  if (lucideName && window.lucide?.createIcons) {
+    return `<i class="student-lucide-icon" data-lucide="${lucideName}" aria-hidden="true"></i>`;
+  }
   const paths = {
     accuracy: '<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>',
     time: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 1.8"/>',
@@ -22150,6 +22608,22 @@ function studentSvgIcon(name) {
   };
   const inner = paths[name] || paths.chart;
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
+}
+
+function renderLucideIcons() {
+  if (!window.lucide?.createIcons) {
+    return;
+  }
+  try {
+    window.lucide.createIcons({
+      attrs: {
+        "aria-hidden": "true",
+        "stroke-width": "2",
+      },
+    });
+  } catch (error) {
+    console.warn("Lucide icon rendering failed.", error?.message || error);
+  }
 }
 
 function renderStudentStatCard(icon, value, label, tone = "") {
@@ -27184,7 +27658,7 @@ function renderAdmin() {
 
     pageContent = `
       <section class="card admin-section" id="admin-stats-section">
-        <h2 class="title">O6U Admin Dashboard</h2>
+        <h2 class="title">MedBank Admin Dashboard</h2>
         <p class="subtle">User totals first, with admin counts and academic year distribution summarized underneath.</p>
         <div class="stats-grid" style="margin-top: 0.85rem;">
           ${dashboardUserCards}
@@ -27552,7 +28026,7 @@ function renderAdmin() {
     const questions = getQuestions();
     const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-    const selectedSemesterCourses = O6U_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
+    const selectedSemesterCourses = MEDBANK_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
     if (state.adminCourseTopicModalCourse && !selectedSemesterCourses.includes(state.adminCourseTopicModalCourse)) {
       state.adminCourseTopicModalCourse = "";
       state.adminCourseTopicGroupCreateModalOpen = false;
@@ -28622,7 +29096,7 @@ function renderAdmin() {
     <section class="panel admin-shell">
       <aside class="admin-sidebar card">
         <h3 style="margin-top: 0;">${isCoursesPlatformAdmin ? "Courses App" : "Admin Panel"}</h3>
-        <p class="subtle">${isCoursesPlatformAdmin ? "Manage the learning website: lessons, suggestions, requests, and announcements." : "Manage the full O6U MedBank platform from one place."}</p>
+        <p class="subtle">${isCoursesPlatformAdmin ? "Manage the learning website: lessons, suggestions, requests, and announcements." : "Manage the full MedBank platform from one place."}</p>
         <div class="admin-sidebar-nav">
           ${isCoursesPlatformAdmin
             ? renderAdminCoursesPlatformSidebarNav(activeCoursePlatformSection)
@@ -29870,13 +30344,13 @@ function wireAdmin() {
 
     const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const semester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-    const existing = O6U_CURRICULUM[year]?.[semester] || [];
+    const existing = MEDBANK_CURRICULUM[year]?.[semester] || [];
     if (existing.some((course) => course.toLowerCase() === newCourseName.toLowerCase())) {
       toast("This course already exists in the selected semester.");
       return;
     }
 
-    const nextCurriculum = deepClone(O6U_CURRICULUM);
+    const nextCurriculum = deepClone(MEDBANK_CURRICULUM);
     nextCurriculum[year][semester].push(newCourseName);
     applyCurriculumUpdate(nextCurriculum);
     state.adminCourseSearch = "";
@@ -29931,7 +30405,7 @@ function wireAdmin() {
       const newName = String(input?.value || "").trim();
       const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
       const semester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-      const currentCourses = O6U_CURRICULUM[year]?.[semester] || [];
+      const currentCourses = MEDBANK_CURRICULUM[year]?.[semester] || [];
       const oldName = currentCourses[index];
 
       if (!oldName) return;
@@ -29952,7 +30426,7 @@ function wireAdmin() {
         return;
       }
 
-      const nextCurriculum = deepClone(O6U_CURRICULUM);
+      const nextCurriculum = deepClone(MEDBANK_CURRICULUM);
       nextCurriculum[year][semester][index] = newName;
       queuePendingCourseDeletion(oldName, year, semester);
       applyCurriculumUpdate(nextCurriculum, { renamedFrom: oldName, renamedTo: newName });
@@ -29977,7 +30451,7 @@ function wireAdmin() {
       const index = Number(row.getAttribute("data-course-index"));
       const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
       const semester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-      const currentCourses = O6U_CURRICULUM[year]?.[semester] || [];
+      const currentCourses = MEDBANK_CURRICULUM[year]?.[semester] || [];
       const removedCourse = currentCourses[index];
       if (!removedCourse) return;
 
@@ -29989,7 +30463,7 @@ function wireAdmin() {
         return;
       }
 
-      const nextCurriculum = deepClone(O6U_CURRICULUM);
+      const nextCurriculum = deepClone(MEDBANK_CURRICULUM);
       nextCurriculum[year][semester].splice(index, 1);
       queuePendingCourseDeletion(removedCourse, year, semester);
       const replacementCourse = nextCurriculum[year][semester][0] || CURRICULUM_COURSE_LIST[0] || removedCourse;
@@ -30049,7 +30523,7 @@ function wireAdmin() {
     const index = Number(row.getAttribute("data-course-index"));
     const year = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const semester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
-    const currentCourses = O6U_CURRICULUM[year]?.[semester] || [];
+    const currentCourses = MEDBANK_CURRICULUM[year]?.[semester] || [];
     const course = currentCourses[index];
     if (!course) return;
 
@@ -32639,7 +33113,7 @@ function wireAdmin() {
       return;
     }
     const content = [
-      "O6U MedBank Bulk Import Error Report",
+      "MedBank Bulk Import Error Report",
       `Generated: ${new Date(report.createdAt).toLocaleString()}`,
       `Rows in file: ${report.total}`,
       `Imported rows: ${report.added}`,
@@ -37503,7 +37977,7 @@ function normalizeCurriculum(raw) {
   for (let year = 1; year <= 5; year += 1) {
     normalized[year] = {};
     for (let semester = 1; semester <= 2; semester += 1) {
-      const fallback = sanitizeCurriculumCourseList(DEFAULT_O6U_CURRICULUM[year]?.[semester] || []);
+      const fallback = sanitizeCurriculumCourseList(DEFAULT_MEDBANK_CURRICULUM[year]?.[semester] || []);
       const incoming = Array.isArray(raw?.[year]?.[semester]) ? raw[year][semester] : fallback;
       const deduped = sanitizeCurriculumCourseList(incoming);
       normalized[year][semester] = deduped.length ? deduped : [...fallback];
@@ -37903,8 +38377,8 @@ function formatTopicFilterSummary(topics) {
 }
 
 function rehydrateCourseCatalogConfigFromStorage() {
-  const savedCurriculum = load(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
-  O6U_CURRICULUM = normalizeCurriculum(savedCurriculum || DEFAULT_O6U_CURRICULUM);
+  const savedCurriculum = load(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
+  MEDBANK_CURRICULUM = normalizeCurriculum(savedCurriculum || DEFAULT_MEDBANK_CURRICULUM);
   const savedCourseTopics = load(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   COURSE_TOPIC_OVERRIDES = savedCourseTopics && typeof savedCourseTopics === "object" ? savedCourseTopics : {};
   const savedCourseTopicGroups = load(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
@@ -38172,7 +38646,7 @@ function resolveAskAiNotebookUrlForQuestion(question) {
 function rebuildCurriculumCatalog() {
   CURRICULUM_COURSE_LIST = [
     ...new Set(
-      Object.values(O6U_CURRICULUM)
+      Object.values(MEDBANK_CURRICULUM)
         .flatMap((yearMap) => Object.values(yearMap))
         .flat(),
     ),
@@ -38300,9 +38774,9 @@ function applyCurriculumUpdate(nextCurriculum, options = {}) {
     delete COURSE_NOTEBOOK_LINKS[removedCourse];
   }
 
-  O6U_CURRICULUM = normalizeCurriculum(nextCurriculum);
+  MEDBANK_CURRICULUM = normalizeCurriculum(nextCurriculum);
   rebuildCurriculumCatalog();
-  save(STORAGE_KEYS.curriculum, O6U_CURRICULUM);
+  save(STORAGE_KEYS.curriculum, MEDBANK_CURRICULUM);
   save(STORAGE_KEYS.courseTopics, COURSE_TOPIC_OVERRIDES);
   save(STORAGE_KEYS.courseTopicGroups, COURSE_TOPIC_GROUPS);
   save(STORAGE_KEYS.courseNotebookLinks, COURSE_NOTEBOOK_LINKS);
@@ -38426,7 +38900,7 @@ function sanitizeAcademicSemester(value) {
 function getCurriculumCourses(year, semester) {
   const normalizedYear = sanitizeAcademicYear(year);
   const normalizedSemester = sanitizeAcademicSemester(semester);
-  const yearMap = O6U_CURRICULUM[normalizedYear] || {};
+  const yearMap = MEDBANK_CURRICULUM[normalizedYear] || {};
   const courses = yearMap[normalizedSemester] || [];
   return sanitizeCourseAssignments(courses);
 }
@@ -42548,7 +43022,7 @@ function renderCoursePlatformTabs(activeTab) {
   const tabs = [
     ["dashboard", "Dashboard"],
     ["enrolled", "My Courses"],
-    ["suggestions", "Course Suggestions"],
+    ["suggestions", "Explore"],
   ];
   return `
     <div class="courses-tabs" role="tablist" aria-label="Courses sections">
@@ -42607,7 +43081,7 @@ function renderCoursePlatformCard(row, options = {}) {
           ` : ""}
         </div>
 
-        <p class="course-card-desc">${escapeHtml(course.description || "Structured course materials for O6U medical students.")}</p>
+        <p class="course-card-desc">${escapeHtml(course.description || "Structured course materials for medical students.")}</p>
         ${isSuggestion ? `<p class="course-suggestion-reason-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>${escapeHtml(suggestionReason || "Recommended by your course admin.")}</span></p>` : ""}
 
         <div class="course-card-footer">
@@ -42755,7 +43229,7 @@ function renderCoursesDashboard() {
   return `
     <section class="courses-dashboard-welcome">
       <div>
-        <p class="kicker">O6U Courses</p>
+        <p class="kicker">Courses</p>
         <h2 class="title">Welcome back${currentUser?.name ? `, ${escapeHtml(currentUser.name.split(" ")[0])}` : ""}</h2>
         <p class="subtle">Continue lessons, follow announcements, and track your learning from one Courses dashboard.</p>
       </div>
@@ -48263,8 +48737,14 @@ function handleGsapReadyForCurrentRoute() {
   });
 }
 
+function handleLucideReadyForCurrentRoute() {
+  window.requestAnimationFrame(renderLucideIcons);
+}
+
 window.__MCQ_ON_GSAP_READY__ = handleGsapReadyForCurrentRoute;
 window.addEventListener("mcq:gsap-ready", handleGsapReadyForCurrentRoute);
+window.__MCQ_ON_LUCIDE_READY__ = handleLucideReadyForCurrentRoute;
+window.addEventListener("mcq:lucide-ready", handleLucideReadyForCurrentRoute);
 
 init().catch((error) => {
   console.error("Application bootstrap failed:", error);

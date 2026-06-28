@@ -1,6 +1,6 @@
-# MedBank (o6u-medbank-static-site@0.0.0)
+# MedBank (medbank-static-site@0.0.0)
 
-This design system is the published o6u-medbank-static-site React library, bundled as a single
+This design system is the published medbank-static-site React library, bundled as a single
 browser global. All 0 components are the real upstream code.
 
 ## Where things are
@@ -32,7 +32,7 @@ ReactDOM.createRoot(document.getElementById('ds-root')).render(<Component />);
 
 ## Tokens
 
-33 CSS custom properties from o6u-medbank-static-site. Names are
+33 CSS custom properties from medbank-static-site. Names are
 preserved verbatim from upstream. They are declared inside `_ds_bundle.css` (this DS ships one compiled stylesheet rather than separate token files).
 
 - **color** (4): `--surface`, `--surface-strong`, `--surface-soft`, …

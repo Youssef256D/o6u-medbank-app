@@ -1,39 +1,39 @@
--- O6U MedBank seed data
+-- MedBank seed data
 -- Safe to run multiple times.
 
 BEGIN;
 
 -- Demo users
 INSERT INTO users (full_name, email, password_hash, role, is_verified, academic_year, academic_semester)
-SELECT 'O6U Admin', 'admin@o6umed.local', crypt('admin123', gen_salt('bf')), 'admin', TRUE, NULL, NULL
+SELECT 'MedBank Admin', 'admin@medbank.local', crypt('admin123', gen_salt('bf')), 'admin', TRUE, NULL, NULL
 WHERE NOT EXISTS (
-  SELECT 1 FROM users WHERE LOWER(email) = LOWER('admin@o6umed.local')
+  SELECT 1 FROM users WHERE LOWER(email) = LOWER('admin@medbank.local')
 );
 
 INSERT INTO users (full_name, email, password_hash, role, is_verified, academic_year, academic_semester)
-SELECT 'O6U Demo Student', 'student@o6umed.local', crypt('student123', gen_salt('bf')), 'student', TRUE, 1, 1
+SELECT 'MedBank Demo Student', 'student@medbank.local', crypt('student123', gen_salt('bf')), 'student', TRUE, 1, 1
 WHERE NOT EXISTS (
-  SELECT 1 FROM users WHERE LOWER(email) = LOWER('student@o6umed.local')
+  SELECT 1 FROM users WHERE LOWER(email) = LOWER('student@medbank.local')
 );
 
 -- Keep demo users aligned
 UPDATE users
 SET
-  full_name = 'O6U Admin',
+  full_name = 'MedBank Admin',
   role = 'admin',
   is_verified = TRUE,
   academic_year = NULL,
   academic_semester = NULL
-WHERE LOWER(email) = LOWER('admin@o6umed.local');
+WHERE LOWER(email) = LOWER('admin@medbank.local');
 
 UPDATE users
 SET
-  full_name = 'O6U Demo Student',
+  full_name = 'MedBank Demo Student',
   role = 'student',
   is_verified = TRUE,
   academic_year = 1,
   academic_semester = 1
-WHERE LOWER(email) = LOWER('student@o6umed.local');
+WHERE LOWER(email) = LOWER('student@medbank.local');
 
 -- Curriculum courses (Skills/Elective removed)
 WITH course_seed(course_code, course_name, academic_year, academic_semester) AS (
@@ -153,7 +153,7 @@ WHERE NOT EXISTS (
 
 -- Enroll admin in all active courses
 WITH admin_user AS (
-  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@o6umed.local') LIMIT 1
+  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@medbank.local') LIMIT 1
 )
 INSERT INTO user_course_enrollments (user_id, course_id, assigned_by)
 SELECT a.id, c.id, a.id
@@ -165,13 +165,13 @@ WHERE NOT EXISTS (
 
 -- Enroll demo student in Year 1 Semester 1 courses
 WITH student_user AS (
-  SELECT id FROM users WHERE LOWER(email) = LOWER('student@o6umed.local') LIMIT 1
+  SELECT id FROM users WHERE LOWER(email) = LOWER('student@medbank.local') LIMIT 1
 ),
 sem_courses AS (
   SELECT id FROM courses WHERE academic_year = 1 AND academic_semester = 1 AND is_active = TRUE
 ),
 admin_user AS (
-  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@o6umed.local') LIMIT 1
+  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@medbank.local') LIMIT 1
 )
 INSERT INTO user_course_enrollments (user_id, course_id, assigned_by)
 SELECT s.id, c.id, a.id
@@ -184,10 +184,10 @@ WHERE NOT EXISTS (
 
 -- Invite codes
 WITH admin_user AS (
-  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@o6umed.local') LIMIT 1
+  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@medbank.local') LIMIT 1
 ),
 invite_seed(code) AS (
-  VALUES ('O6U-FACMED-2026'), ('O6U-DEMO-BETA')
+  VALUES ('MEDBANK-FACMED-2026'), ('MEDBANK-DEMO-BETA')
 )
 INSERT INTO invites (code, is_active, created_by)
 SELECT i.code, TRUE, a.id
@@ -210,7 +210,7 @@ WHERE NOT EXISTS (
 
 -- One sample published question + choices
 WITH author_admin AS (
-  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@o6umed.local') LIMIT 1
+  SELECT id FROM users WHERE LOWER(email) = LOWER('admin@medbank.local') LIMIT 1
 ),
 seed_course AS (
   SELECT id AS course_id
@@ -249,7 +249,7 @@ insert_question AS (
     'ADA Clinical Practice Recommendations',
     'medium',
     'published',
-    'O6U Internal QBank',
+    'MedBank Internal QBank',
     NOW()
   FROM seed_course c
   JOIN seed_topic t ON TRUE

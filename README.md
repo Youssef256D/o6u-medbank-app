@@ -1,6 +1,6 @@
-# O6U MedBank
+# MedBank
 
-O6U MedBank is a hosted browser app for October 6 University Faculty of Medicine students. The website is static on GitHub Pages, and the live hosted Supabase project is the single source of truth for auth, courses, questions, progress, enrollments, and admin data.
+MedBank is a hosted browser app for medical students. The website is static on GitHub Pages, and the live hosted Supabase project is the single source of truth for auth, courses, questions, progress, enrollments, and admin data.
 
 ## Live App
 
@@ -66,7 +66,7 @@ In Supabase Dashboard:
    - Google: enable Google provider and set authorized redirect/client settings in Supabase.
 2. Authentication -> URL Configuration:
    - Site URL: your deployed URL
-   - Redirect URLs: add your deployed URL and the mobile deep link `o6umedbank://auth/callback`
+   - Redirect URLs: add your deployed URL and the mobile deep link `medbank://auth/callback`
 3. Enable leaked-password protection (recommended for production).
 4. (Optional) Disable "Confirm email" during testing if you want instant login after sign-up.
 

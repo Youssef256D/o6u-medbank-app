@@ -24,12 +24,17 @@
     "https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js",
     "https://unpkg.com/gsap@3.13.0/dist/ScrollTrigger.min.js",
   ];
+  const LUCIDE_SDK_SOURCES = [
+    "https://cdn.jsdelivr.net/npm/lucide@1.21.0/dist/umd/lucide.min.js",
+    "https://unpkg.com/lucide@1.21.0/dist/umd/lucide.min.js",
+  ];
   const SCRIPT_LOAD_TIMEOUT_MS = 45000;
   const GSAP_LOAD_TIMEOUT_MS = 9000;
+  const LUCIDE_LOAD_TIMEOUT_MS = 5000;
   const APP_VERSION_FETCH_TIMEOUT_MS = 2500;
   const APP_BACKGROUND_PREFETCH_DELAY_MS = 1200;
   const BOOTSTRAP_STATUS_ID = "bootstrap-status";
-  const STATIC_CACHE_PREFIX = "o6u-medbank-static-v";
+  const STATIC_CACHE_PREFIX = "medbank-static-v";
   const APP_VERSION_SEEN_KEY = "mcq_app_version_seen";
   const APP_VERSION_FORCED_KEY = "mcq_app_version_forced";
   const BOOTSTRAP_RELOAD_TARGET_KEY = "mcq_bootstrap_reload_target";
@@ -78,6 +83,7 @@
   let appPrefetchTriggered = false;
   let supabaseSdkLoadPromise = null;
   let gsapSdkLoadPromise = null;
+  let lucideSdkLoadPromise = null;
 
   function parseOAuthHashParams(hashValue) {
     const rawHash = String(hashValue || "").replace(/^#/, "").trim();
@@ -115,7 +121,7 @@
 
     const searchParams = new URLSearchParams(currentUrl.search || "");
     const hashParams = parseOAuthHashParams(currentUrl.hash);
-    const nativeRedirect = String(searchParams.get(NATIVE_OAUTH_REDIRECT_PARAM) || "o6umedbank://auth/callback").trim();
+    const nativeRedirect = String(searchParams.get(NATIVE_OAUTH_REDIRECT_PARAM) || "medbank://auth/callback").trim();
     const isNativeOAuth = searchParams.get(NATIVE_OAUTH_FLAG_PARAM) === "1"
       || searchParams.has(NATIVE_OAUTH_REDIRECT_PARAM);
     if (!isNativeOAuth || !nativeRedirect || !hasOAuthCallbackParams()) {
@@ -366,6 +372,7 @@
 
     appLoadPromise = Promise.resolve()
       .then(() => loadScript(`supabase.config.js${versionSuffix}`, { defer: true, timeoutMs: SCRIPT_LOAD_TIMEOUT_MS }))
+      .then(() => ensureLucideLoaded())
       .then(() => {
         ensureGsapLoaded();
       })
@@ -432,6 +439,42 @@
         gsapSdkLoadPromise = null;
       });
     return gsapSdkLoadPromise;
+  }
+
+  function notifyLucideReady() {
+    if (typeof window.__MCQ_ON_LUCIDE_READY__ === "function") {
+      try {
+        window.__MCQ_ON_LUCIDE_READY__();
+      } catch (error) {
+        console.warn("Lucide ready hook failed.", error?.message || error);
+      }
+    }
+    try {
+      window.dispatchEvent(new CustomEvent("mcq:lucide-ready"));
+    } catch {
+      // Ignore event dispatch failures in older embedded browsers.
+    }
+  }
+
+  function ensureLucideLoaded() {
+    if (window.lucide?.createIcons) {
+      notifyLucideReady();
+      return Promise.resolve();
+    }
+    if (lucideSdkLoadPromise) {
+      return lucideSdkLoadPromise;
+    }
+    lucideSdkLoadPromise = loadScriptWithFallback(LUCIDE_SDK_SOURCES, { async: true, timeoutMs: LUCIDE_LOAD_TIMEOUT_MS })
+      .then(() => {
+        notifyLucideReady();
+      })
+      .catch((error) => {
+        console.warn("Lucide icons did not finish loading; inline icon fallback remains active.", error?.message || error);
+      })
+      .finally(() => {
+        lucideSdkLoadPromise = null;
+      });
+    return lucideSdkLoadPromise;
   }
 
   function notifySupabaseSdkReady() {
@@ -620,7 +663,7 @@
     let reloadedForControllerChange = false;
     window.addEventListener("load", () => {
       const currentSwUrl = new URL(`./sw.js${versionSuffix}`, window.location.href).href;
-      const currentCacheName = `o6u-medbank-static-v${effectiveAppVersion.replaceAll(".", "-") || "runtime"}`;
+      const currentCacheName = `medbank-static-v${effectiveAppVersion.replaceAll(".", "-") || "runtime"}`;
 
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (reloadedForControllerChange) {
@@ -648,7 +691,7 @@
             caches.keys()
               .then((keys) => Promise.all(
                 keys
-                  .filter((key) => key.startsWith("o6u-medbank-static-v") && key !== currentCacheName)
+                  .filter((key) => key.startsWith("medbank-static-v") && key !== currentCacheName)
                   .map((key) => caches.delete(key)),
               ))
               .catch((error) => {

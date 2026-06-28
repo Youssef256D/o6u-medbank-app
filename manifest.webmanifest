@@ -1,7 +1,7 @@
 {
-  "name": "O6U MedBank",
-  "short_name": "O6U MedBank",
-  "description": "MCQ practice platform for October 6 University Faculty of Medicine students.",
+  "name": "MedBank",
+  "short_name": "MedBank",
+  "description": "MCQ practice platform for medical students.",
   "id": "/o6u-medbank-app/",
   "start_url": "/o6u-medbank-app/",
   "scope": "/o6u-medbank-app/",

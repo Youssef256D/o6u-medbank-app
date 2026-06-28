@@ -1,4 +1,4 @@
--- Supabase quota triage for O6U MedBank.
+-- Supabase quota triage for MedBank.
 -- Run the audit sections first in the Supabase SQL Editor.
 -- The cleanup section is intentionally commented out until the largest tables are confirmed.
 

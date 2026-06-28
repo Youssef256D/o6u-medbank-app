@@ -1,6 +1,6 @@
 {
   "namespace": "MedBank",
-  "source": "o6u-medbank-static-site@0.0.0",
+  "source": "medbank-static-site@0.0.0",
   "shape": "package",
   "provider": null,
   "componentCount": 0,

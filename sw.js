@@ -1,7 +1,7 @@
 const serviceWorkerUrl = new URL(self.location.href);
 const cacheVersion = String(serviceWorkerUrl.searchParams.get("v") || "").trim();
 const versionSuffix = cacheVersion ? `?v=${encodeURIComponent(cacheVersion)}` : "";
-const CACHE_NAME = `o6u-medbank-static-v${(cacheVersion || "runtime").replace(/\./g, "-")}`;
+const CACHE_NAME = `medbank-static-v${(cacheVersion || "runtime").replace(/\./g, "-")}`;
 const APP_SHELL_URL = new URL("./index.html", self.location.href).toString();
 const APP_ROOT_URL = new URL("./", self.location.href).toString();
 const APP_SHELL_PATHNAME = new URL(APP_SHELL_URL).pathname;
@@ -17,7 +17,10 @@ const PRECACHE_URLS = [
   "./manifest.webmanifest",
   "./robots.txt",
   "./sitemap.xml",
-  "./Assets/web%20Logo.png",
+  "./Assets/branding/medbank-logo.png",
+  "./Assets/branding/about-study-workspace.svg",
+  "./Assets/branding/about-review-flow.svg",
+  "./Assets/branding/about-analytics.svg",
   "./Assets/branding/apple-touch-icon.png",
   "./Assets/branding/favicon-192x192.png",
   "./Assets/branding/favicon.png"

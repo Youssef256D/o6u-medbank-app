@@ -1,4 +1,4 @@
-# AGENTS.md — O6U MedBank
+# AGENTS.md — MedBank
 
 This file is the shared instruction guide for any AI coding tool working on this
 repo (Codex, Antigravity, Zcode, Claude, Cursor, Windsurf, etc.). It states the
@@ -186,6 +186,74 @@ can reactivate them.
 ---
 
 ## 7. Refactor log (most recent first)
+
+### 2026-06-28 — Student dashboard icon refresh
+Improved the student dashboard stat/action icons using a static-SPA-safe icon library.
+
+1. **Lucide loads through bootstrap.** `bootstrap.js` now loads Lucide from jsDelivr with unpkg fallback before `main.js`, without introducing a bundler dependency.
+2. **Dashboard icons use Lucide.** `studentSvgIcon()` maps student stats/actions to Lucide icons (`target`, `timer-reset`, `list-checks`, `database-zap`, etc.) and still returns inline SVG fallbacks if Lucide is unavailable.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.12-local` for preview testing.
+
+**Files touched:** `bootstrap.js`, `main.js`, `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-28 — Public hero scale cleanup
+Adjusted public page hero sizing and the landing CTA area after visual review.
+
+1. **Outer hero titles are smaller.** Marketing hero headings now use a lower desktop/mobile clamp so public headers do not dominate the viewport.
+2. **Landing CTA is no longer boxed.** The login/create-account controls remain in place, but the surrounding landing auth card border, background, blur, padding, and shadow were removed.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.10-local` for preview testing.
+
+**Files touched:** `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-28 — Public-only full-frame shell
+Changed the outer marketing layout so public pages use the full browser frame while logged-in app pages keep the centered card shell.
+
+1. **Full-frame is route-scoped.** `body.is-public-marketing-route` now controls the edge-to-edge `.app-shell` and applies only to `landing`, `features`, `pricing`, `about`, and `contact`.
+2. **Private pages keep cards.** The default `.app-shell` is back to the centered `1200px` card layout, with the existing wider admin/session exceptions preserved.
+3. **Scroll reveal is public-only.** GSAP item reveal/ScrollTrigger targets now exclude auth and logged-in routes, so inner app cards do not animate into view while scrolling.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.08-local` for preview testing.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-28 — Home and auth page simplification
+Simplified the public landing screen and made authentication routes more prominent after visual review.
+
+1. **Landing is calmer.** The home hero now uses a shorter headline, centered copy, compact proof chips, and a focused login/create-account card instead of the busier simulated MCQ preview.
+2. **Auth routes have dedicated layouts.** Login, signup, Google onboarding completion, and forgot-password routes now use `auth-public-*` shell/card/form classes with stronger primary actions and clearer explanatory copy.
+3. **Responsive and motion coverage was updated.** New auth/landing elements stack cleanly on mobile and participate in the existing GSAP route reveal target system.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.06-local` for preview testing.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-28 — Public page visual polish
+Expanded the public marketing polish beyond About/Features while preserving the static GitHub Pages SPA model.
+
+1. **About now has visual relief.** Added three static SVG illustrations under `Assets/branding/` for the study workspace, review flow, and analytics/progress story; these are local assets with no runtime API dependency.
+2. **Landing, Pricing, and Contact were redesigned.** Landing now has a simulated MCQ/review preview and proof cards; Pricing uses plan/process cards; Contact uses support-routing cards, a signal card, form, and FAQ tiles.
+3. **GSAP marketing motion was broadened.** The existing marketing-page motion now covers the new visual/card systems while preserving `prefers-reduced-motion` gating.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-28.05-local`; the new SVGs are included in `sw.js` precache.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `sw.js`, `CHANGELOG.md`, `AGENTS.md`, `Assets/branding/about-*.svg`.
+
+### 2026-06-28 — Public About and Features refresh
+Expanded the public marketing routes while preserving the static GitHub Pages SPA model.
+
+1. **Features is now a polished marketing page.** The route uses a large hero, proof chips, and premium feature cards covering focused block creation, exam rhythm, review, analytics, and admin workflows.
+2. **About now tells the MedBank story.** Added stronger positioning copy, an "Our start" vertical timeline with milestone/date labels, and principle cards for the product direction.
+3. **GSAP page motion was extended.** Marketing pages now animate hero text, feature cards, and the About timeline rail/nodes through existing GSAP runtime hooks, with reduced-motion gating intact.
+4. **Local cache bust bumped.** `index.html` app-version is `2026-06-28.04-local` for preview testing.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-28 — MedBank identity refresh
+Renamed the public-facing product identity from the previous university-branded name to MedBank while preserving the static GitHub Pages deployment model.
+
+1. **Visible identity is now MedBank.** Page title, meta descriptions, nav brand, landing hero, public route copy, admin/report labels, manifest name, docs, and package metadata now use MedBank naming.
+2. **Brand assets were refreshed.** Added `Assets/branding/medbank-logo.png` and `.svg`, updated landing/social/precache references, and regenerated the hero brand asset without university-specific text.
+3. **Deployment path remains unchanged.** Canonical URLs still point to `/o6u-medbank-app/` until the GitHub repository/pages path is renamed.
+4. **Local cache bust bumped.** `index.html` app-version is `2026-06-28.03-local` for preview testing.
+
+**Files touched:** `index.html`, `main.js`, `bootstrap.js`, `sw.js`, `manifest.webmanifest`, `package.json`, `package-lock.json`, `README.md`, `CHANGELOG.md`, `AGENTS.md`, `styles.css`, SQL/docs snapshots, and `Assets/branding/*`.
 
 ### 2026-06-28 — Typography refresh
 Replaced the playful heading font with a cleaner, more premium medical-study

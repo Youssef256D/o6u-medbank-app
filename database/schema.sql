@@ -11,7 +11,7 @@
 -- it to the hosted Supabase project. See ../AGENTS.md §5 ("Schema source of truth").
 -- ============================================================================
 
--- O6U MedBank relational schema
+-- MedBank relational schema
 -- Target: PostgreSQL 15+
 
 BEGIN;

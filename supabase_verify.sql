@@ -1,4 +1,4 @@
--- Supabase verification checks for O6U MedBank schema + sync table.
+-- Supabase verification checks for MedBank schema + sync table.
 -- Run in Supabase SQL editor after setup scripts.
 
 BEGIN;

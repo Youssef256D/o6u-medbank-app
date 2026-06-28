@@ -1,4 +1,4 @@
-# O6U MedBank Hosted Database Notes
+# MedBank Hosted Database Notes
 
 The production database for this app is the hosted Supabase project. This folder keeps older SQL reference files, but the website runtime does not depend on a local PostgreSQL or local Supabase instance.
 

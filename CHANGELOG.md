@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to O6U MedBank are recorded here. This is a human-readable
+All notable changes to MedBank are recorded here. This is a human-readable
 companion to `AGENTS.md` (which is the machine-oriented guide for AI coding
 tools). Dates are YYYY-MM-DD.
 
@@ -8,6 +8,53 @@ The live site is a static SPA served from the committed files on GitHub Pages;
 hosted Supabase is the source of truth.
 
 ## [Unreleased]
+
+### 2026-06-28 — Student dashboard icon refresh
+
+- Added Lucide icons via the static bootstrap CDN fallback chain for cleaner student dashboard iconography.
+- Swapped the dashboard stat/action icons to Lucide targets, timers, list checks, database, and action symbols while keeping inline SVG fallbacks if the CDN fails.
+- Bumped the local preview `app-version` to `2026-06-28.12-local`.
+
+### 2026-06-28 — Public hero scale cleanup
+
+- Reduced public marketing hero heading sizes across landing, features, pricing, about, and contact so the headers no longer dominate the viewport.
+- Removed the landing login/create-account container card while keeping the buttons and helper text visible.
+- Bumped the local preview `app-version` to `2026-06-28.10-local`.
+
+### 2026-06-28 — Public-only full-frame shell
+
+- Scoped the edge-to-edge shell and flattened top-level panel to public marketing routes only (`landing`, `features`, `pricing`, `about`, `contact`).
+- Restored logged-in/private pages to the centered card-style app shell while keeping admin/session width exceptions intact.
+- Restricted GSAP route item and scroll reveal targets to public marketing routes so inner app cards no longer appear while scrolling.
+- Bumped the local preview `app-version` to `2026-06-28.08-local`.
+
+### 2026-06-28 — Home and auth page simplification
+
+- Simplified the landing route after visual review: shorter headline, less competing mockup content, centered copy, and a stronger login/create-account call-to-action card.
+- Rebuilt login, signup, Google onboarding, and forgot-password routes with a two-column public auth layout, clearer form card, stronger primary submit buttons, and responsive mobile stacking.
+- Added the new auth/landing elements to GSAP route reveal targets and bumped the local preview `app-version` to `2026-06-28.06-local`.
+
+### 2026-06-28 — Public page visual polish
+
+- Added three static SVG About illustrations for study workspace, review flow, and progress analytics so the About route is less text-heavy without adding runtime dependencies.
+- Reworked the landing route into a richer marketing hero with a simulated MCQ/review preview and proof cards.
+- Rebuilt Pricing and Contact as polished marketing pages with plan cards, process cards, contact method cards, a support form, and FAQ tiles.
+- Extended GSAP marketing-page animation hooks to the new About visual cards plus landing, pricing, and contact cards while keeping reduced-motion behavior intact.
+- Added the new About SVGs to the service-worker precache and bumped the local preview `app-version` to `2026-06-28.05-local`.
+
+### 2026-06-28 — Public About and Features refresh
+
+- Rebuilt the Features route with a polished marketing hero, feature highlight cards, and concise copy for focused blocks, exam rhythm, review, analytics, and admin workflows.
+- Rebuilt the About route with richer MedBank positioning, an "Our start" vertical story timeline, milestone labels, and principle cards.
+- Added GSAP-specific marketing page motion for hero text, feature cards, and the About timeline while preserving reduced-motion behavior and CSS fallback layout.
+- Bumped the local preview `app-version` to `2026-06-28.04-local`.
+
+### 2026-06-28 — MedBank identity refresh
+
+- Renamed the public-facing product identity from the previous university-branded name to MedBank across page titles, metadata, navigation, landing copy, admin/report labels, docs, package metadata, and static cache labels.
+- Added new MedBank social/brand logo assets and pointed Open Graph, Twitter, service-worker precache, and landing logo references at the new asset.
+- Kept the current GitHub Pages URL path unchanged because the deployed repository is still served from `/o6u-medbank-app/`.
+- Bumped the local preview `app-version` to `2026-06-28.03-local`.
 
 ### 2026-06-28 — Typography refresh
 
