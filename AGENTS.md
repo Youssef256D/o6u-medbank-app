@@ -187,6 +187,21 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Gynecology topic alias filter fix
+Fixed a create-test zero-question state caused by stale cached Gynecology topic
+aliases after the hosted Supabase topic merge.
+
+1. **Topic aliases now canonicalize in filters.** `Gynecological endocrinology`
+   matches `Gynecologic Endocrinology`, and `Female genital infection` matches
+   `Female Genital Infections`.
+2. **Create-test topic options dedupe by lookup key.** The topic picker now
+   prefers topic names present on published usable questions when a configured
+   stale alias and a live question topic share the same canonical key.
+3. **Static cache bust bumped.** `index.html` app-version is
+   `2026-06-29.02-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Faster student Supabase sync
 Reduced how long student routes wait on Supabase after login/page load without
 weakening the existing profile, enrollment, or question-bank checks.

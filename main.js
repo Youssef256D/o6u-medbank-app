@@ -37518,7 +37518,20 @@ function getAvailableTopicsForCourse(course, questions = [], options = {}) {
     ? configuredTopics
     : configuredTopics.filter((topic) => questionTopicKeys.has(normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
   const extraTopics = questionTopics.filter((topic) => !configuredTopicKeys.has(normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase()));
-  return [...orderedConfigured, ...extraTopics];
+  const questionTopicByKey = new Map(
+    questionTopics.map((topic) => [normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase(), topic]),
+  );
+  const dedupedTopics = [];
+  const returnedKeys = new Set();
+  [...orderedConfigured, ...extraTopics].forEach((topic) => {
+    const topicKey = normalizeTopicLookupKey(topic) || String(topic || "").trim().toLowerCase();
+    if (!topicKey || returnedKeys.has(topicKey)) {
+      return;
+    }
+    returnedKeys.add(topicKey);
+    dedupedTopics.push(questionTopicByKey.get(topicKey) || topic);
+  });
+  return dedupedTopics;
 }
 
 function buildTopicNewKey(course, topic) {
@@ -38523,13 +38536,18 @@ function normalizeCourseLookupKey(courseName) {
 }
 
 function normalizeTopicLookupKey(topicName) {
-  return String(topicName || "")
+  const lookupKey = String(topicName || "")
     .trim()
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .replace(/\s+/g, " ");
+  const aliasMap = {
+    "gynecological endocrinology": "gynecologic endocrinology",
+    "female genital infection": "female genital infections",
+  };
+  return aliasMap[lookupKey] || lookupKey;
 }
 
 function extractCourseCodeKey(courseName) {

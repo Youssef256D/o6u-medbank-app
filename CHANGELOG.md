@@ -9,6 +9,12 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Gynecology topic alias filter fix
+
+- Canonicalized stale Gynecology topic aliases in client-side matching so `Gynecological endocrinology` maps to `Gynecologic Endocrinology` and `Female genital infection` maps to `Female Genital Infections`.
+- Deduped create-test topic options by normalized topic key, preferring topic names that actually appear on published usable questions.
+- Bumped the local preview `app-version` to `2026-06-29.02-local`.
+
 ### 2026-06-29 — Faster student Supabase sync
 
 - Split student refresh into a critical first pass and a background non-critical pass so login/page-load routes stop waiting on notifications, session-history hydration, and legacy app-state reads after the course/question catalog is ready.
