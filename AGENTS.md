@@ -187,6 +187,27 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Full question usability repair and fade cleanup
+Finished the hosted question-bank repair and fixed a stuck route-fade state.
+
+1. **All questions are usable.** Added/applied a Supabase migration that repaired draft shell rows from the preserved `g:mcq_questions` backup, restored missing backup-backed Neurology rows, and published archived rows that already had valid answer data.
+2. **No MCQ content was invented.** The repair only used backup payloads with at least two choices and at least one correct answer.
+3. **Live database verified clean.** Hosted Supabase now reports 3,024 total questions, 3,024 published questions, 3,024 published usable questions, and 0 non-published or missing-answer rows. Gynecology is 572/572 usable.
+4. **Interrupted fades recover.** `cleanupGsapPageMotion()` now clears route animation handles/classes and inline opacity/blur/transform props so refresh rerenders cannot leave the dashboard washed out.
+5. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.05-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `supabase/migrations/20260628234242_repair_all_question_usability.sql`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-29 — Student refresh button reliability
+Tightened student manual refresh wiring without changing the underlying Supabase sync model.
+
+1. **Student refresh buttons are centralized.** `wireStudentRefreshButtons()` now owns the shared loading state and call to `refreshStudentAnalyticsNow()`.
+2. **Create-test recovery buttons work.** Loading/error panels shown from create-test now bind their `Get Updates` button instead of rendering a dead control while content hydration recovers.
+3. **Question-choice indexes support count checks.** The admin question-count migration now adds safe indexes on `question_choices(question_id)` and correct choices so the database summary and choice hydration use indexed lookups.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.04-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `supabase/migrations/20260629003000_add_admin_question_count_summary.sql`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Admin/student Supabase sync count reliability
 Improved data-sync correctness and speed for dashboard question counts without changing the static SPA deployment model.
 

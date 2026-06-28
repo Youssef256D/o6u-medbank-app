@@ -20418,6 +20418,23 @@ function cleanupGsapPageMotion() {
       }
     });
   }
+  if (routeTransitionHandle) {
+    window.clearTimeout(routeTransitionHandle);
+    routeTransitionHandle = null;
+  }
+  document.body.classList.remove("is-routing", "no-panel-animations");
+  delete document.body.dataset.routeTransition;
+  appEl.classList.remove("route-enter", "route-enter-active");
+  const gsap = getGsapMotionApi();
+  if (gsap?.set) {
+    gsap.set(appEl, { clearProps: "opacity,visibility,transform,filter,willChange" });
+  } else {
+    appEl.style.opacity = "";
+    appEl.style.visibility = "";
+    appEl.style.transform = "";
+    appEl.style.filter = "";
+    appEl.style.willChange = "";
+  }
 }
 
 function getGsapRouteOffset() {
@@ -23175,6 +23192,24 @@ function setStudentRefreshButtonBusy(button, busy) {
     : "Get Updates";
 }
 
+function wireStudentRefreshButtons() {
+  appEl.querySelectorAll("[data-action='refresh-student-analytics']").forEach((refreshButton) => {
+    refreshButton.addEventListener("click", async () => {
+      if (state.studentDataRefreshing || refreshButton.disabled) {
+        return;
+      }
+      setStudentRefreshButtonBusy(refreshButton, true);
+      try {
+        await refreshStudentAnalyticsNow();
+      } finally {
+        if (!state.studentDataRefreshing && appEl.contains(refreshButton)) {
+          setStudentRefreshButtonBusy(refreshButton, false);
+        }
+      }
+    });
+  });
+}
+
 function renderDashboardCoach(snapshot) {
   const insights = snapshot?.insights;
   if (!insights) {
@@ -23570,20 +23605,7 @@ function wireDashboard() {
     navigate("create-test");
   });
 
-  appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
-    const refreshButton = appEl.querySelector("[data-action='refresh-student-analytics']");
-    if (state.studentDataRefreshing || refreshButton?.disabled) {
-      return;
-    }
-    setStudentRefreshButtonBusy(refreshButton, true);
-    try {
-      await refreshStudentAnalyticsNow();
-    } finally {
-      if (!state.studentDataRefreshing && refreshButton && appEl.contains(refreshButton)) {
-        setStudentRefreshButtonBusy(refreshButton, false);
-      }
-    }
-  });
+  wireStudentRefreshButtons();
 
   appEl.querySelectorAll("[data-role='previous-test-filter']").forEach((control) => {
     control.addEventListener("change", () => {
@@ -24254,6 +24276,8 @@ function renderCreateTest() {
 }
 
 function wireCreateTest() {
+  wireStudentRefreshButtons();
+
   const courseSelect = document.getElementById("create-test-course-select");
   const topicSourceSelect = document.getElementById("create-test-topic-source-select");
   const sourceSelect = document.getElementById("create-test-source-select");
@@ -27000,20 +27024,7 @@ function wireAnalytics() {
     render();
   });
 
-  appEl.querySelector("[data-action='refresh-student-analytics']")?.addEventListener("click", async () => {
-    const refreshButton = appEl.querySelector("[data-action='refresh-student-analytics']");
-    if (state.studentDataRefreshing || refreshButton?.disabled) {
-      return;
-    }
-    setStudentRefreshButtonBusy(refreshButton, true);
-    try {
-      await refreshStudentAnalyticsNow();
-    } finally {
-      if (!state.studentDataRefreshing && refreshButton && appEl.contains(refreshButton)) {
-        setStudentRefreshButtonBusy(refreshButton, false);
-      }
-    }
-  });
+  wireStudentRefreshButtons();
 
   appEl.querySelector("[data-action='apply-analytics-plan']")?.addEventListener("click", () => {
     const user = getCurrentUser();

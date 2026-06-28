@@ -9,6 +9,20 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Full question usability repair and fade cleanup
+
+- Restored/repaired hosted Supabase question data so all 3,024 stored questions are published and usable, including all 572 Gynecology questions.
+- Rebuilt missing/empty answer choices from the preserved `g:mcq_questions` backup instead of inventing MCQ content.
+- Fixed interrupted route animations that could leave the dashboard faded during/after student refreshes.
+- Bumped the local preview `app-version` to `2026-06-29.05-local`.
+
+### 2026-06-29 — Student refresh button reliability
+
+- Centralized the student cloud refresh button wiring so dashboard, analytics, and create-test loading/error states all run the same targeted refresh action.
+- Fixed create-test loading/error refresh buttons that could render without a click handler while content access or question hydration was still recovering.
+- Added safe question-choice indexes to the admin question-count migration so choice existence/correct-answer checks and choice hydration use indexed lookups.
+- Bumped the local preview `app-version` to `2026-06-29.04-local`.
+
 ### 2026-06-29 — Admin/student Supabase sync count reliability
 
 - Added a database-backed admin question-count summary RPC and frontend fallback so dashboard/course counts no longer depend on partially hydrated question rows.
