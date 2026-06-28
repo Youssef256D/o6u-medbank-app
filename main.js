@@ -1187,21 +1187,22 @@ const DEFAULT_MEDBANK_CURRICULUM = {
     ],
     2: [
       "Pediatric 405 (Ped 405)",
-      "Surgery Medical 406 (SM 406)",
-      "Surgery Medical 407 (SM 407)",
+      "Endocrinology (SM 406)",
+      "Nerology (SM 407)",
     ],
   },
   5: {
     1: [
       "Obstetric (Obs 501)",
-      "Surgery Medical 502 (SM 502)",
-      "Surgery Medical 503 (SM 503)",
+      "Nephrology (SM 502)",
+      "GIT (SM 503)",
     ],
     2: [
       "Gynecology (Gyn 504)",
-      "Surgery Medical 505 (SM 505)",
-      "Surgery Medical 506 (SM 506)",
-      "Surgery Medical 507 (SM 507)",
+      "Dermatology & Andrology (SM 505)",
+      "Blood & Vascular (SM 506)",
+      "Obesity (SM 507)",
+      "Professionalism 2",
     ],
   },
 };
