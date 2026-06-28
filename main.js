@@ -418,6 +418,10 @@ const state = {
   adminDataSyncError: "",
   adminForceRefreshRunning: false,
   adminApproveAllPendingRunning: false,
+  adminQuestionCountSnapshot: null,
+  adminQuestionCountLoading: false,
+  adminQuestionCountError: "",
+  adminQuestionCountLastSyncAt: 0,
   adminCourseQuestionCountCache: null,
   adminCourseQuestionCountCacheRevision: 0,
   questionsRevision: 0,
@@ -1043,6 +1047,7 @@ let studentNonCriticalHydrationTimer = null;
 let studentNonCriticalHydrationKey = "";
 let studentNonCriticalHydrationInFlight = false;
 let adminQuestionsLastHydratedAt = 0;
+let adminQuestionCountSnapshotRequestSeq = 0;
 const presenceRuntime = {
   timer: null,
   solvingStartedAt: null,
@@ -3632,6 +3637,10 @@ async function handleSupabaseAuthStateChange(event, session) {
     state.adminDataLastSyncAt = 0;
     state.adminDataSyncError = "";
     state.adminForceRefreshRunning = false;
+    state.adminQuestionCountSnapshot = null;
+    state.adminQuestionCountLoading = false;
+    state.adminQuestionCountError = "";
+    state.adminQuestionCountLastSyncAt = 0;
     state.adminPresenceLoading = false;
     state.adminPresenceError = "";
     state.adminPresenceRows = [];
@@ -12608,6 +12617,277 @@ async function fetchRowsPagedOrThrow(fetchPage, options = {}) {
   return Array.isArray(result.data) ? result.data : [];
 }
 
+function toAdminCountNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function normalizeAdminQuestionCountEntry(entry = {}) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const courseName = String(source.courseName || source.course_name || source.course || "").trim();
+  const topicName = String(source.topicName || source.topic_name || source.topic || "").trim();
+  return {
+    courseName,
+    topicName,
+    total: toAdminCountNumber(source.total),
+    published: toAdminCountNumber(source.published),
+    publishedUsable: toAdminCountNumber(source.publishedUsable ?? source.published_usable),
+    publishedUnusable: toAdminCountNumber(source.publishedUnusable ?? source.published_unusable),
+    draft: toAdminCountNumber(source.draft),
+    archived: toAdminCountNumber(source.archived),
+  };
+}
+
+function normalizeAdminQuestionCountSnapshot(payload = {}, options = {}) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const totals = normalizeAdminQuestionCountEntry(source.totals || {});
+  const byCourse = (Array.isArray(source.byCourse) ? source.byCourse : source.by_course || [])
+    .map((entry) => normalizeAdminQuestionCountEntry(entry))
+    .filter((entry) => entry.courseName);
+  const byTopic = (Array.isArray(source.byTopic) ? source.byTopic : source.by_topic || [])
+    .map((entry) => normalizeAdminQuestionCountEntry(entry))
+    .filter((entry) => entry.courseName && entry.topicName);
+  return {
+    generatedAt: String(source.generatedAt || source.generated_at || options.generatedAt || nowISO()),
+    latestQuestionAt: String((source.totals || {}).latestQuestionAt || (source.totals || {}).latest_question_at || ""),
+    lastSyncAt: Number(options.lastSyncAt || Date.now()),
+    source: String(options.source || source.source || "remote"),
+    totals,
+    byCourse,
+    byTopic,
+  };
+}
+
+function buildLocalAdminQuestionCountSnapshot() {
+  const courseMap = new Map();
+  const topicMap = new Map();
+  const totals = normalizeAdminQuestionCountEntry({});
+
+  const bump = (entry, question, usable) => {
+    const status = toRelationalQuestionStatus(question?.status);
+    entry.total += 1;
+    if (status === "published") {
+      entry.published += 1;
+      if (usable) {
+        entry.publishedUsable += 1;
+      } else {
+        entry.publishedUnusable += 1;
+      }
+    } else if (status === "archived") {
+      entry.archived += 1;
+    } else {
+      entry.draft += 1;
+    }
+  };
+
+  getQuestions().forEach((question) => {
+    const meta = getQbankCourseTopicMeta(question);
+    const courseName = String(meta.course || question?.qbankCourse || question?.course || "(No course)").trim() || "(No course)";
+    const topicName = String(meta.topic || question?.qbankTopic || question?.topic || "(No topic)").trim() || "(No topic)";
+    const usable = toRelationalQuestionStatus(question?.status) === "published" && isQuestionUsableForTesting(question);
+    if (!courseMap.has(courseName)) {
+      courseMap.set(courseName, normalizeAdminQuestionCountEntry({ courseName }));
+    }
+    const topicKey = `${courseName}\u0000${topicName}`;
+    if (!topicMap.has(topicKey)) {
+      topicMap.set(topicKey, normalizeAdminQuestionCountEntry({ courseName, topicName }));
+    }
+    bump(totals, question, usable);
+    bump(courseMap.get(courseName), question, usable);
+    bump(topicMap.get(topicKey), question, usable);
+  });
+
+  return normalizeAdminQuestionCountSnapshot({
+    totals,
+    byCourse: [...courseMap.values()].sort((a, b) => b.publishedUsable - a.publishedUsable || b.total - a.total || a.courseName.localeCompare(b.courseName)),
+    byTopic: [...topicMap.values()].sort((a, b) => a.courseName.localeCompare(b.courseName) || b.publishedUsable - a.publishedUsable || b.total - a.total || a.topicName.localeCompare(b.topicName)),
+  }, {
+    source: "local",
+    generatedAt: nowISO(),
+    lastSyncAt: 0,
+  });
+}
+
+function getAdminQuestionCountSnapshot(options = {}) {
+  if (state.adminQuestionCountSnapshot?.totals) {
+    return state.adminQuestionCountSnapshot;
+  }
+  return options?.allowLocalFallback === false ? null : buildLocalAdminQuestionCountSnapshot();
+}
+
+function getAdminCourseQuestionCount(course, metric = "total") {
+  const snapshot = getAdminQuestionCountSnapshot();
+  const normalizedMetric = ["total", "published", "publishedUsable", "publishedUnusable", "draft", "archived"].includes(metric)
+    ? metric
+    : "total";
+  const entry = (snapshot?.byCourse || []).find((row) => doCourseNamesMatch(row.courseName, course));
+  return toAdminCountNumber(entry?.[normalizedMetric]);
+}
+
+function getAdminTopQuestionCourses(limit = 8) {
+  const snapshot = getAdminQuestionCountSnapshot();
+  return (snapshot?.byCourse || [])
+    .slice()
+    .sort((a, b) => b.publishedUsable - a.publishedUsable || b.total - a.total || a.courseName.localeCompare(b.courseName))
+    .slice(0, Math.max(0, Number(limit) || 0));
+}
+
+function markAdminQuestionCountsStale(options = {}) {
+  state.adminQuestionCountSnapshot = null;
+  state.adminQuestionCountLastSyncAt = 0;
+  state.adminQuestionCountError = "";
+  if (options?.refresh === true && getCurrentUser()?.role === "admin") {
+    refreshAdminQuestionCountSnapshot({ force: true })
+      .then((ok) => {
+        if (ok && state.route === "admin" && ["dashboard", "courses"].includes(String(state.adminPage || ""))) {
+          state.skipNextRouteAnimation = true;
+          render();
+        }
+      })
+      .catch(() => { });
+  }
+}
+
+function buildAdminQuestionCountSnapshotFromRows(questionRows, courseRows, topicRows, choiceRows) {
+  const courseById = new Map((Array.isArray(courseRows) ? courseRows : [])
+    .map((course) => [String(course?.id || "").trim(), String(course?.course_name || "").trim()])
+    .filter(([id, name]) => id && name));
+  const topicById = new Map((Array.isArray(topicRows) ? topicRows : [])
+    .map((topic) => [String(topic?.id || "").trim(), String(topic?.topic_name || "").trim()])
+    .filter(([id, name]) => id && name));
+  const choicesByQuestionId = new Map();
+  (Array.isArray(choiceRows) ? choiceRows : []).forEach((choice) => {
+    const questionId = String(choice?.question_id || "").trim();
+    if (!questionId) {
+      return;
+    }
+    const current = choicesByQuestionId.get(questionId) || { hasChoices: false, hasCorrect: false };
+    current.hasChoices = true;
+    current.hasCorrect = current.hasCorrect || Boolean(choice?.is_correct);
+    choicesByQuestionId.set(questionId, current);
+  });
+
+  const courseMap = new Map();
+  const topicMap = new Map();
+  const totals = normalizeAdminQuestionCountEntry({});
+
+  const bump = (entry, status, usable) => {
+    entry.total += 1;
+    if (status === "published") {
+      entry.published += 1;
+      if (usable) {
+        entry.publishedUsable += 1;
+      } else {
+        entry.publishedUnusable += 1;
+      }
+    } else if (status === "archived") {
+      entry.archived += 1;
+    } else {
+      entry.draft += 1;
+    }
+  };
+
+  (Array.isArray(questionRows) ? questionRows : []).forEach((question) => {
+    const questionId = String(question?.id || "").trim();
+    const courseName = courseById.get(String(question?.course_id || "").trim()) || "(No course)";
+    const topicName = topicById.get(String(question?.topic_id || "").trim()) || "(No topic)";
+    const status = toRelationalQuestionStatus(question?.status);
+    const choiceStats = choicesByQuestionId.get(questionId) || { hasChoices: false, hasCorrect: false };
+    const usable = status === "published" && choiceStats.hasChoices && choiceStats.hasCorrect;
+    if (!courseMap.has(courseName)) {
+      courseMap.set(courseName, normalizeAdminQuestionCountEntry({ courseName }));
+    }
+    const topicKey = `${courseName}\u0000${topicName}`;
+    if (!topicMap.has(topicKey)) {
+      topicMap.set(topicKey, normalizeAdminQuestionCountEntry({ courseName, topicName }));
+    }
+    bump(totals, status, usable);
+    bump(courseMap.get(courseName), status, usable);
+    bump(topicMap.get(topicKey), status, usable);
+  });
+
+  return normalizeAdminQuestionCountSnapshot({
+    totals,
+    byCourse: [...courseMap.values()].sort((a, b) => b.publishedUsable - a.publishedUsable || b.total - a.total || a.courseName.localeCompare(b.courseName)),
+    byTopic: [...topicMap.values()].sort((a, b) => a.courseName.localeCompare(b.courseName) || b.publishedUsable - a.publishedUsable || b.total - a.total || a.topicName.localeCompare(b.topicName)),
+  }, {
+    source: "remote-fallback",
+    generatedAt: nowISO(),
+    lastSyncAt: Date.now(),
+  });
+}
+
+async function fetchAdminQuestionCountSnapshotFallback(client) {
+  const [questionsResult, coursesResult, topicsResult, choicesResult] = await Promise.all([
+    fetchRowsPaged((from, to) => (
+      client.from("questions").select("id,course_id,topic_id,status,created_at").range(from, to)
+    ), { pageSize: 1000, timeoutMessage: "Question count query timed out." }),
+    fetchRowsPaged((from, to) => (
+      client.from("courses").select("id,course_name").range(from, to)
+    ), { pageSize: 1000, timeoutMessage: "Course count lookup timed out." }),
+    fetchRowsPaged((from, to) => (
+      client.from("course_topics").select("id,course_id,topic_name").range(from, to)
+    ), { pageSize: 1000, timeoutMessage: "Topic count lookup timed out." }),
+    fetchRowsPaged((from, to) => (
+      client.from("question_choices").select("question_id,is_correct").range(from, to)
+    ), { pageSize: 1000, timeoutMessage: "Question choice count query timed out." }),
+  ]);
+  const firstError = questionsResult.error || coursesResult.error || topicsResult.error || choicesResult.error;
+  if (firstError) {
+    throw firstError;
+  }
+  return buildAdminQuestionCountSnapshotFromRows(
+    questionsResult.data,
+    coursesResult.data,
+    topicsResult.data,
+    choicesResult.data,
+  );
+}
+
+async function refreshAdminQuestionCountSnapshot(options = {}) {
+  const client = getRelationalClient();
+  if (!client || !relationalSync.enabled) {
+    return false;
+  }
+  const requestSeq = ++adminQuestionCountSnapshotRequestSeq;
+  state.adminQuestionCountLoading = true;
+  state.adminQuestionCountError = "";
+  try {
+    let snapshot = null;
+    const rpcResult = await runWithTimeoutResult(
+      client.rpc("get_admin_question_count_summary"),
+      SUPABASE_QUERY_TIMEOUT_MS,
+      "Question count summary timed out.",
+    );
+    if (rpcResult.error) {
+      if (!isMissingRpcFunctionError(rpcResult.error)) {
+        throw rpcResult.error;
+      }
+      snapshot = await fetchAdminQuestionCountSnapshotFallback(client);
+    } else {
+      snapshot = normalizeAdminQuestionCountSnapshot(rpcResult.data, {
+        source: "remote",
+        lastSyncAt: Date.now(),
+      });
+    }
+    if (requestSeq === adminQuestionCountSnapshotRequestSeq) {
+      state.adminQuestionCountSnapshot = snapshot;
+      state.adminQuestionCountLastSyncAt = Date.now();
+      state.adminQuestionCountError = "";
+    }
+    return true;
+  } catch (error) {
+    if (requestSeq === adminQuestionCountSnapshotRequestSeq) {
+      state.adminQuestionCountError = getErrorMessage(error, "Could not refresh question counts.");
+    }
+    return false;
+  } finally {
+    if (requestSeq === adminQuestionCountSnapshotRequestSeq) {
+      state.adminQuestionCountLoading = false;
+    }
+  }
+}
+
 async function runRelationalQueryWithTimeout(
   queryPromise,
   timeoutMessage = "Supabase query timed out.",
@@ -19163,6 +19443,7 @@ async function refreshAdminDataSnapshot(user, options = {}) {
     if (!hasPendingUserWrites) {
       hydrateTasks.push(hydrateRelationalProfiles(user));
     }
+    hydrateTasks.push(refreshAdminQuestionCountSnapshot({ force }).catch(() => false));
     hydrateTasks.push(hydrateRelationalNotifications(user));
     hydrateTasks.push(loadCoursesComingSoonFlag({ force }).catch(() => false));
     hydrateTasks.push(hydrateSupabaseSyncKeys([STORAGE_KEYS.siteMaintenance]).catch(() => ({ hadRemoteData: false })));
@@ -19453,6 +19734,10 @@ function render() {
     state.adminDataLastSyncAt = 0;
     state.adminDataSyncError = "";
     state.adminForceRefreshRunning = false;
+    state.adminQuestionCountSnapshot = null;
+    state.adminQuestionCountLoading = false;
+    state.adminQuestionCountError = "";
+    state.adminQuestionCountLastSyncAt = 0;
     state.adminPresenceLoading = false;
     state.adminPresenceError = "";
     state.adminPresenceRows = [];
@@ -27749,6 +28034,75 @@ function renderAdmin() {
         </article>
       `)
       .join("");
+    const questionSnapshot = getAdminQuestionCountSnapshot();
+    const questionTotals = questionSnapshot?.totals || normalizeAdminQuestionCountEntry({});
+    const questionCountLoading = Boolean(state.adminQuestionCountLoading && !state.adminQuestionCountLastSyncAt);
+    const questionCountError = String(state.adminQuestionCountError || "").trim();
+    const questionCountSyncLabel = state.adminQuestionCountLastSyncAt
+      ? new Date(state.adminQuestionCountLastSyncAt).toLocaleTimeString()
+      : (questionSnapshot?.source === "local" ? "Local cache" : "Not yet");
+    const latestQuestionLabel = questionSnapshot?.latestQuestionAt
+      ? new Date(questionSnapshot.latestQuestionAt).toLocaleString()
+      : "No timestamp";
+    const questionStatsCards = [
+      {
+        value: questionCountLoading ? `<span class="inline-loader" aria-hidden="true"></span>` : questionTotals.total,
+        label: "Total DB questions",
+        detail: `Latest: ${latestQuestionLabel}`,
+      },
+      {
+        value: questionTotals.published,
+        label: "Published",
+        detail: `${questionTotals.publishedUsable} usable in tests`,
+      },
+      {
+        value: questionTotals.publishedUsable,
+        label: "Student-usable",
+        detail: "Published with choices and an answer",
+      },
+      {
+        value: questionTotals.publishedUnusable,
+        label: "Published but blocked",
+        detail: "Missing choices or correct answer",
+      },
+      {
+        value: questionTotals.draft,
+        label: "Draft",
+        detail: "Hidden from students",
+      },
+      {
+        value: questionTotals.archived,
+        label: "Archived",
+        detail: "Not used for new tests",
+      },
+    ]
+      .map((card) => `
+        <article class="card">
+          <p class="metric">
+            ${card.value}
+            <small>${escapeHtml(card.label)}</small>
+            <small>${escapeHtml(card.detail)}</small>
+          </p>
+        </article>
+      `)
+      .join("");
+    const questionCourseRows = getAdminTopQuestionCourses(10)
+      .map((entry) => {
+        const usableShare = entry.published ? Math.round((entry.publishedUsable / entry.published) * 100) : 0;
+        return `
+          <tr>
+            <td>${escapeHtml(entry.courseName)}</td>
+            <td><b>${entry.total}</b></td>
+            <td>${entry.published}</td>
+            <td>${entry.publishedUsable}</td>
+            <td>${entry.publishedUnusable}</td>
+            <td>${entry.draft}</td>
+            <td>${entry.archived}</td>
+            <td>${usableShare}%</td>
+          </tr>
+        `;
+      })
+      .join("");
 
     pageContent = `
       <section class="card admin-section" id="admin-stats-section">
@@ -27774,6 +28128,44 @@ function renderAdmin() {
         : `<p class="subtle">No auth provider data available yet.</p>`
       }
           </article>
+        </div>
+      </section>
+      <section class="card admin-section" id="admin-question-stats-section">
+        <div class="flex-between" style="gap: 1rem;">
+          <div>
+            <h3 style="margin: 0;">Question Bank Totals</h3>
+            <p class="subtle">Fresh database counts separated by visibility and test usability.</p>
+          </div>
+          <div class="stack" style="align-items: flex-end;">
+            <span class="subtle">Question count sync: <b>${escapeHtml(questionCountSyncLabel)}</b></span>
+            ${questionSnapshot?.source && questionSnapshot.source !== "remote" ? `<span class="badge neutral">${escapeHtml(questionSnapshot.source)}</span>` : ""}
+          </div>
+        </div>
+        ${questionCountError
+        ? `<p class="subtle" style="margin-top: 0.7rem;">${escapeHtml(questionCountError)}</p>`
+        : ""
+      }
+        <div class="stats-grid" style="margin-top: 0.85rem;">
+          ${questionStatsCards}
+        </div>
+        <div class="table-wrap" style="margin-top: 0.9rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>Course</th>
+                <th>Total</th>
+                <th>Published</th>
+                <th>Usable</th>
+                <th>Blocked</th>
+                <th>Draft</th>
+                <th>Archived</th>
+                <th>Usable share</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${questionCourseRows || `<tr><td colspan="8" class="subtle">No question counts loaded yet.</td></tr>`}
+            </tbody>
+          </table>
         </div>
       </section>
     `;
@@ -28117,7 +28509,6 @@ function renderAdmin() {
   }
 
   if (activeAdminPage === "courses") {
-    const questions = getQuestions();
     const curriculumYear = sanitizeAcademicYear(state.adminCurriculumYear || 1);
     const curriculumSemester = sanitizeAcademicSemester(state.adminCurriculumSemester || 1);
     const selectedSemesterCourses = MEDBANK_CURRICULUM[curriculumYear]?.[curriculumSemester] || [];
@@ -28129,20 +28520,6 @@ function renderAdmin() {
     const notebookLinksByCourse = COURSE_NOTEBOOK_LINKS;
     const courseSearchQuery = String(state.adminCourseSearch || "").trim();
     const normalizedCourseSearch = courseSearchQuery.toLowerCase();
-    const questionsRevision = Number(state.questionsRevision || 0);
-    let questionCountByCourse = state.adminCourseQuestionCountCache;
-    if (!questionCountByCourse || state.adminCourseQuestionCountCacheRevision !== questionsRevision) {
-      questionCountByCourse = questions.reduce((acc, question) => {
-        const mappedCourse = getQbankCourseTopicMeta(question).course;
-        if (!mappedCourse) {
-          return acc;
-        }
-        acc[mappedCourse] = (acc[mappedCourse] || 0) + 1;
-        return acc;
-      }, {});
-      state.adminCourseQuestionCountCache = questionCountByCourse;
-      state.adminCourseQuestionCountCacheRevision = questionsRevision;
-    }
     const topicCountByCourse = Object.fromEntries(
       selectedSemesterCourses.map((course) => [course, (QBANK_COURSE_TOPICS[course] || []).length]),
     );
@@ -28162,12 +28539,12 @@ function renderAdmin() {
       || null;
     const focusedCourse = focusedCourseEntry?.course || "";
     const focusedCourseIndex = Number.isFinite(focusedCourseEntry?.idx) ? focusedCourseEntry.idx : -1;
-    const focusedQuestionCount = focusedCourse ? (questionCountByCourse[focusedCourse] || 0) : 0;
+    const focusedQuestionCount = focusedCourse ? getAdminCourseQuestionCount(focusedCourse, "total") : 0;
     const focusedTopicCount = focusedCourse ? (topicCountByCourse[focusedCourse] || 0) : 0;
     const courseCards = filteredCourseEntries
       .map(({ course, idx }) => {
         const topicCount = topicCountByCourse[course] || 0;
-        const questionCount = questionCountByCourse[course] || 0;
+        const questionCount = getAdminCourseQuestionCount(course, "total");
         const isActive = state.adminCourseTopicModalCourse === course;
         return `
           <button
@@ -29199,7 +29576,7 @@ function renderAdmin() {
         <div class="stack" style="margin-top: 0.85rem; align-items: flex-start;">
           <p class="subtle" style="margin: 0;">Last data sync: <b>${escapeHtml(adminLastSyncLabel)}</b></p>
           <div id="admin-cloud-sync-slot">${renderCloudSyncPill(cloudSyncModel, { compact: false })}</div>
-          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${!canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
+          <button class="btn ghost admin-btn-sm ${adminSyncBusy ? "is-loading" : ""}" type="button" data-action="refresh-admin-data" ${adminSyncBusy || !canManualSupabaseSync ? "disabled" : ""} ${!canManualSupabaseSync ? 'title="Sign in with your Supabase admin account to enable sync."' : ""}>
             ${adminSyncBusy ? `<span class="inline-loader" aria-hidden="true"></span><span>Refreshing...</span>` : "Refresh from cloud"}
           </button>
           <button class="btn ghost admin-btn-sm ${adminForceRefreshBusy ? "is-loading" : ""}" type="button" data-action="admin-force-student-refresh" ${adminForceRefreshBusy || !canForceStudentRefresh ? "disabled" : ""} ${!canForceStudentRefresh ? 'title="Supabase app-state sync must be active to broadcast this action."' : ""}>
@@ -29595,6 +29972,10 @@ function wireAdmin() {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
+    if (state.adminDataRefreshing) {
+      toast("Admin refresh is already running.");
+      return;
+    }
     if (typeof navigator !== "undefined" && navigator?.onLine === false) {
       const message = "You are offline. Showing locally cached admin data.";
       state.adminDataSyncError = message;
@@ -29649,7 +30030,7 @@ function wireAdmin() {
     // Ensure relational sync is re-checked after manual refresh.
     relationalSync.readyCheckedAt = 0;
     await ensureRelationalSyncReady({ force: true }).catch(() => { });
-    const synced = await refreshAdminDataSnapshot(currentUser, { force: true });
+    const synced = await refreshAdminDataSnapshot(currentUser, { force: true, deferBackupRestore: true });
     if (state.adminPage === "activity") {
       await refreshAdminPresenceSnapshot({ force: true, silent: true }).catch(() => { });
     }
@@ -30698,6 +31079,7 @@ function wireAdmin() {
         state.adminEditQuestionId = null;
       }
       save(STORAGE_KEYS.questions, nextQuestions);
+      markAdminQuestionCountsStale();
       toast(`Deleted ${removeSet.size} question(s) from ${course}.`);
       state.skipNextRouteAnimation = true;
       render();
@@ -30843,6 +31225,7 @@ function wireAdmin() {
         state.adminEditQuestionId = null;
       }
       save(STORAGE_KEYS.questions, nextQuestions);
+      markAdminQuestionCountsStale();
     }
     queuePendingCourseTopicDeletion(course, currentTopic);
     applyCourseTopicsUpdate(
@@ -32884,6 +33267,7 @@ function wireAdmin() {
           const nextQuestions = questions.filter((entry) => !selectedSet.has(String(entry.id || "").trim()));
           queueQuestionDeletions([...selectedSet]);
           save(STORAGE_KEYS.questions, nextQuestions);
+          markAdminQuestionCountsStale();
           if (state.adminEditQuestionId && selectedSet.has(String(state.adminEditQuestionId || "").trim())) {
             state.adminEditQuestionId = null;
             state.adminQuestionModalOpen = false;
@@ -32914,6 +33298,7 @@ function wireAdmin() {
             return;
           }
           save(STORAGE_KEYS.questions, nextQuestions);
+          markAdminQuestionCountsStale();
           localMessage = targetStatus === "draft"
             ? `Moved ${changedCount} question(s) to draft.`
             : `Published ${changedCount} question(s).`;
@@ -32928,6 +33313,7 @@ function wireAdmin() {
 
         try {
           await flushPendingSyncNow();
+          refreshAdminQuestionCountSnapshot({ force: true }).catch(() => { });
         } catch (syncError) {
           toast(`${localMessage} Saved locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
         }
@@ -32982,6 +33368,7 @@ function wireAdmin() {
       const questions = currentQuestions.filter((entry) => String(entry.id || "").trim() !== qid);
       queueQuestionDeletions([qid]);
       save(STORAGE_KEYS.questions, questions);
+      markAdminQuestionCountsStale();
       state.adminSelectedQuestionIds = normalizeQuestionIdList(
         state.adminSelectedQuestionIds,
         new Set(questions.map((entry) => String(entry.id || "").trim()).filter(Boolean)),
@@ -32996,6 +33383,7 @@ function wireAdmin() {
       render();
       toast("Question deleted.");
       await flushPendingSyncNow();
+      refreshAdminQuestionCountSnapshot({ force: true }).catch(() => { });
     } catch (syncError) {
       state.adminQuestionDeleteQid = "";
       state.skipNextRouteAnimation = true;
@@ -33348,6 +33736,7 @@ function wireAdmin() {
       }
 
       save(STORAGE_KEYS.questions, questions);
+      markAdminQuestionCountsStale();
       state.adminFilters.course = payload.qbankCourse;
       state.adminFilters.topic = payload.qbankTopic || "";
       state.adminEditQuestionId = null;
@@ -33362,6 +33751,7 @@ function wireAdmin() {
 
       try {
         await flushPendingSyncNow();
+        refreshAdminQuestionCountSnapshot({ force: true }).catch(() => { });
         if (correctedQuestionNotificationIds.length) {
           const deliveryResult = await flushPendingNotificationOutbox({
             user: getCurrentUser(),
@@ -33494,8 +33884,11 @@ function wireAdmin() {
       const sourceSummary = importSources.length > 1 ? ` across ${importSources.length} files` : "";
       if (result.added) {
         const syncResult = await persistImportedQuestionsNow(getQuestions());
+        markAdminQuestionCountsStale();
         if (!syncResult.ok) {
           syncMessage = syncResult.message || "Database sync failed.";
+        } else {
+          refreshAdminQuestionCountSnapshot({ force: true }).catch(() => { });
         }
       }
 

@@ -9,6 +9,13 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Admin/student Supabase sync count reliability
+
+- Added a database-backed admin question-count summary RPC and frontend fallback so dashboard/course counts no longer depend on partially hydrated question rows.
+- Made admin refresh update lightweight profile/course/notification data and fresh question totals without loading the full question bank unless the Questions/Bulk Import screens need row data.
+- Added admin dashboard question visibility/usability totals by status/course, including published-but-unusable counts for data-quality monitoring.
+- Bumped the local preview `app-version` to `2026-06-29.03-local`.
+
 ### 2026-06-29 — Gynecology topic alias filter fix
 
 - Canonicalized stale Gynecology topic aliases in client-side matching so `Gynecological endocrinology` maps to `Gynecologic Endocrinology` and `Female genital infection` maps to `Female Genital Infections`.

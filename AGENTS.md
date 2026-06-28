@@ -187,6 +187,16 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Admin/student Supabase sync count reliability
+Improved data-sync correctness and speed for dashboard question counts without changing the static SPA deployment model.
+
+1. **Admin question counts are database-backed.** Added `get_admin_question_count_summary()` so admin dashboard totals/course rows are computed in Supabase instead of from whichever question rows the browser has hydrated.
+2. **Admin refresh stays lightweight.** Dashboard/user refresh now fetches users, courses/topics, notifications, site flags, and the count summary, while full question-row hydration remains scoped to Questions/Bulk Import or explicit heavy refresh paths.
+3. **Question data quality is visible.** Admin dashboard now separates total, published, student-usable, published-but-blocked, draft, and archived counts by course.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.03-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `supabase/migrations/20260629003000_add_admin_question_count_summary.sql`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Gynecology topic alias filter fix
 Fixed a create-test zero-question state caused by stale cached Gynecology topic
 aliases after the hosted Supabase topic merge.
