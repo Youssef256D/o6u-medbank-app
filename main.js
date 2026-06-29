@@ -23,6 +23,7 @@ const STORAGE_KEYS = {
   siteMaintenance: "mcq_site_maintenance",
   appVersionSeen: "mcq_app_version_seen",
   appVersionForced: "mcq_app_version_forced",
+  questionCatalogRefreshVersion: "mcq_question_catalog_refresh_version",
   studentRefreshTrigger: "mcq_student_refresh_trigger",
   studentRefreshTriggerSeen: "mcq_student_refresh_trigger_seen",
   pendingAdminActions: "mcq_pending_admin_actions",
@@ -42,6 +43,7 @@ const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-20.05").trim();
+const REQUIRED_QUESTION_CATALOG_REFRESH_VERSION = "2026-06-29-full-question-repair";
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -19056,6 +19058,22 @@ function shouldRefreshStudentData(user) {
   return !last || (Date.now() - last) > STUDENT_DATA_REFRESH_MS;
 }
 
+function shouldForceStudentQuestionCatalogRefresh(user = null) {
+  const current = user || getCurrentUser();
+  if (!current || current.role !== "student" || !REQUIRED_QUESTION_CATALOG_REFRESH_VERSION) {
+    return false;
+  }
+  return String(load(STORAGE_KEYS.questionCatalogRefreshVersion, "") || "").trim() !== REQUIRED_QUESTION_CATALOG_REFRESH_VERSION;
+}
+
+function markStudentQuestionCatalogRefreshComplete() {
+  if (!REQUIRED_QUESTION_CATALOG_REFRESH_VERSION) {
+    return false;
+  }
+  saveLocalOnly(STORAGE_KEYS.questionCatalogRefreshVersion, REQUIRED_QUESTION_CATALOG_REFRESH_VERSION);
+  return true;
+}
+
 async function refreshStudentDataFromSupabaseState(user) {
   if (!user || user.role !== "student") {
     return false;
@@ -19210,10 +19228,12 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     return false;
   }
   const force = Boolean(options?.force);
+  const forceQuestionCatalogRefresh = shouldForceStudentQuestionCatalogRefresh(user);
+  const effectiveForce = force || forceQuestionCatalogRefresh;
   const requireFreshContent = Boolean(options?.requireFreshContent);
   const criticalOnly = Boolean(options?.criticalOnly);
   const rerender = options?.rerender !== false;
-  if (!force && !shouldRefreshStudentData(user)) {
+  if (!effectiveForce && !shouldRefreshStudentData(user)) {
     return true;
   }
   if (state.studentDataRefreshing) {
@@ -19228,7 +19248,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     await protectLocalSessionStateBeforeCloudRead(user, {
       flush: !shouldDeferSessionHydrationOnActiveRoute(user),
     });
-    const ready = await ensureRelationalSyncReady({ force });
+    const ready = await ensureRelationalSyncReady({ force: effectiveForce });
     if (!ready) {
       const fallbackRefreshed = await refreshStudentDataFromSupabaseState(user);
       if (fallbackRefreshed && requireFreshContent) {
@@ -19253,12 +19273,13 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       flushPendingSyncInBackground();
     }
     const now = Date.now();
-    const needsFullSync = force
+    const needsFullSync = effectiveForce
       || !state.studentDataLastFullSyncAt
       || (now - state.studentDataLastFullSyncAt) > STUDENT_FULL_DATA_REFRESH_MS;
     const hasPendingUserWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.users);
     const hasPendingQuestionWrites = isRelationalStorageKeyBusy(STORAGE_KEYS.questions);
     let completedFullSync = false;
+    let completedQuestionCatalogRefresh = false;
     if (needsFullSync) {
       // Run the critical student reads in parallel; RLS evaluates access on the
       // server, so the question catalog does not need the local profile merge
@@ -19272,6 +19293,7 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       const hasFreshProfiles = hasPendingUserWrites || profilesHydrated !== false;
       const hasFreshQuestions = hasPendingQuestionWrites || questionsHydrated !== false;
       completedFullSync = hasFreshCoursesAndTopics && hasFreshProfiles && hasFreshQuestions && !hasPendingUserWrites && !hasPendingQuestionWrites;
+      completedQuestionCatalogRefresh = forceQuestionCatalogRefresh && hasFreshQuestions && !hasPendingQuestionWrites;
       if (requireFreshContent && (!hasFreshCoursesAndTopics || !hasFreshProfiles || !hasFreshQuestions)) {
         return false;
       }
@@ -19279,14 +19301,17 @@ async function refreshStudentDataSnapshot(user, options = {}) {
     if (completedFullSync) {
       state.studentDataLastFullSyncAt = now;
     }
+    if (completedQuestionCatalogRefresh) {
+      markStudentQuestionCatalogRefreshComplete();
+    }
     if (!hasPendingUserWrites && !needsFullSync) {
       await hydrateRelationalProfiles(user);
     }
     if (criticalOnly) {
       state.studentDataLastSyncAt = Date.now();
-      scheduleStudentNonCriticalHydration(user, { force });
+      scheduleStudentNonCriticalHydration(user, { force: effectiveForce });
     } else {
-      await hydrateStudentNonCriticalData(user, { force });
+      await hydrateStudentNonCriticalData(user, { force: effectiveForce });
     }
     if (
       rerender

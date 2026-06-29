@@ -9,6 +9,12 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Student question catalog cache refresh
+
+- Published a cloud student-refresh signal for the repaired question bank so open tabs pull `mcq_questions` again.
+- Added a one-time student question-catalog refresh marker so browsers with the old local bank force a fresh Supabase question read after the full question repair.
+- Bumped the local preview `app-version` to `2026-06-29.06-local`.
+
 ### 2026-06-29 — Full question usability repair and fade cleanup
 
 - Restored/repaired hosted Supabase question data so all 3,024 stored questions are published and usable, including all 572 Gynecology questions.

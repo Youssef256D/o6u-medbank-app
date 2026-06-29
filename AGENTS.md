@@ -187,6 +187,15 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Student question catalog cache refresh
+Fixed stale browser question banks after the full hosted question repair.
+
+1. **Cloud signal sent.** Updated the global `mcq_student_refresh_trigger` payload in hosted Supabase with `mcq_questions`, `mcq_course_topics`, and `mcq_curriculum` so open student tabs force a content refresh.
+2. **Local stale banks are bypassed.** Added `mcq_question_catalog_refresh_version`; students who have not seen the `2026-06-29-full-question-repair` catalog force a relational question refresh before trusting old cached counts.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.06-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Full question usability repair and fade cleanup
 Finished the hosted question-bank repair and fixed a stuck route-fade state.
 
