@@ -43,7 +43,7 @@ const authActionsEl = document.getElementById("auth-actions");
 const adminLinkEl = document.getElementById("admin-link");
 const googleAuthLoadingEl = document.getElementById("google-auth-loading");
 const APP_VERSION = String(document.querySelector('meta[name="app-version"]')?.getAttribute("content") || "2026-05-20.05").trim();
-const REQUIRED_QUESTION_CATALOG_REFRESH_VERSION = "2026-06-29-full-question-repair";
+const REQUIRED_QUESTION_CATALOG_REFRESH_VERSION = "2026-06-29-full-question-repair-v2";
 const ROUTE_STATE_ROUTE_KEY = "mcq_last_route";
 const ROUTE_STATE_ADMIN_PAGE_KEY = "mcq_last_admin_page";
 const ROUTE_STATE_ROUTE_LOCAL_KEY = "mcq_last_route_local";
@@ -19054,6 +19054,9 @@ function shouldRefreshStudentData(user) {
   if (state.studentDataRefreshing) {
     return false;
   }
+  if (shouldForceStudentQuestionCatalogRefresh(user)) {
+    return true;
+  }
   const last = Number(state.studentDataLastSyncAt || 0);
   return !last || (Date.now() - last) > STUDENT_DATA_REFRESH_MS;
 }
@@ -19270,6 +19273,9 @@ async function refreshStudentDataSnapshot(user, options = {}) {
       return true;
     }
     if (relationalSync.pendingWrites.size || relationalSync.flushing) {
+      if (forceQuestionCatalogRefresh && relationalSync.pendingWrites.has(STORAGE_KEYS.questions)) {
+        relationalSync.pendingWrites.delete(STORAGE_KEYS.questions);
+      }
       flushPendingSyncInBackground();
     }
     const now = Date.now();
@@ -24100,7 +24106,7 @@ function renderCreateTest() {
     state.createTestSource = "all";
     sourceFiltered = filtered;
   }
-  const defaultQuestionCount = Math.max(0, Math.min(500, sourceFiltered.length || 0));
+  const defaultQuestionCount = Math.max(0, sourceFiltered.length || 0);
   const canStartTest = Boolean(selectedTopics.length) && sourceFiltered.length > 0 && (!hasTopicSources || Boolean(selectedTopicSource));
   const inProgressName = inProgress ? getSessionDisplayName(inProgress) : "";
   const inProgressTopicSummary = inProgress ? getSessionTopicSummary(inProgress) : "";
@@ -24250,7 +24256,7 @@ function renderCreateTest() {
       <form id="create-test-block-form" class="create-test-setup-form" autocomplete="off">
         <div class="create-test-setup-grid">
           <label class="create-test-setup-field">Number of questions
-            <input name="count" type="number" min="0" max="500" step="1" value="${defaultQuestionCount}" />
+            <input name="count" type="number" min="0" max="${defaultQuestionCount}" step="1" value="${defaultQuestionCount}" />
           </label>
           <label class="create-test-setup-field">Test name (optional)
             <input
@@ -24425,7 +24431,8 @@ function wireCreateTest() {
       startHelpEl.hidden = !startHelpMessage;
     }
     if (countInput) {
-      const suggestedCount = Math.max(0, Math.min(500, filtered.length || 0));
+      const suggestedCount = Math.max(0, filtered.length || 0);
+      countInput.max = String(suggestedCount);
       countInput.value = String(suggestedCount);
     }
     if (submitButton) {
@@ -24550,10 +24557,10 @@ function wireCreateTest() {
 	      pool = allMatchingPool;
 	      toast("No questions matched that source filter, so all matching questions were used.");
 	    }
-    const fallbackCount = Math.max(0, Math.min(500, pool.length || 0));
+    const fallbackCount = Math.max(0, pool.length || 0);
     const requestedCount = Math.floor(Number(data.get("count")));
     const count = Math.min(
-      500,
+      pool.length,
       Math.max(0, Number.isFinite(requestedCount) ? requestedCount : fallbackCount),
     );
     if (count <= 0) {

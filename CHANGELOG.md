@@ -13,7 +13,7 @@ hosted Supabase is the source of truth.
 
 - Published a cloud student-refresh signal for the repaired question bank so open tabs pull `mcq_questions` again.
 - Added a one-time student question-catalog refresh marker so browsers with the old local bank force a fresh Supabase question read after the full question repair.
-- Bumped the local preview `app-version` to `2026-06-29.06-local`.
+- Made the forced catalog refresh participate in the automatic student refresh check, removed the old 500-question Create Test cap, and bumped the local preview `app-version` to `2026-06-29.07-local`.
 
 ### 2026-06-29 — Full question usability repair and fade cleanup
 

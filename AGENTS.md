@@ -191,8 +191,9 @@ can reactivate them.
 Fixed stale browser question banks after the full hosted question repair.
 
 1. **Cloud signal sent.** Updated the global `mcq_student_refresh_trigger` payload in hosted Supabase with `mcq_questions`, `mcq_course_topics`, and `mcq_curriculum` so open student tabs force a content refresh.
-2. **Local stale banks are bypassed.** Added `mcq_question_catalog_refresh_version`; students who have not seen the `2026-06-29-full-question-repair` catalog force a relational question refresh before trusting old cached counts.
-3. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.06-local` for preview testing.
+2. **Local stale banks are bypassed.** Added `mcq_question_catalog_refresh_version`; students who have not seen the `2026-06-29-full-question-repair-v2` catalog force a relational question refresh before trusting old cached counts.
+3. **Full course blocks are allowed.** Removed the old 500-question Create Test cap so the count can show and generate all 572 Gynecology questions.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.07-local` for preview testing.
 
 **Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
 
