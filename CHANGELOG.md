@@ -9,6 +9,20 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-29 — Previous tests 20-day retention
+
+- Added a hosted Supabase retention helper, write guard, and cron job for `test_history_entries`, keeping only the last 20 days of previous-test history.
+- Pruned matching `mcq_sessions` app-state backups so deleted old tests do not rehydrate into student dashboards.
+- Blocked stale open tabs from re-inserting previous-test rows older than the 20-day retention window.
+- Added a Previous Tests warning that older test history is automatically deleted, matched local cache filtering to the 20-day window, and bumped the local preview `app-version` to `2026-06-29.09-local`.
+
+### 2026-06-29 — Cloud status pending-count cleanup
+
+- Stopped counting session recovery/app-state backup writes as extra user-visible cloud changes while keeping the backup sync active.
+- Avoided double-counting dirty session state once a relational session-history write is already queued.
+- Stopped re-queueing completed test-history sessions that already have Supabase `dbId`s; Aside confirmed the stuck live tab had 69 already-synced `mcq_sessions` in the pending relational payload.
+- Bumped the local preview `app-version` to `2026-06-29.08-local`.
+
 ### 2026-06-29 — Student question catalog cache refresh
 
 - Published a cloud student-refresh signal for the repaired question bank so open tabs pull `mcq_questions` again.

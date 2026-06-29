@@ -187,6 +187,28 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-29 — Previous tests 20-day retention
+Added automatic cleanup for previous-test history.
+
+1. **Hosted history is pruned.** Added `delete_old_test_history_entries(20)` and a Supabase Cron job that runs daily at 02:17 UTC, deleting `test_history_entries` older than 20 days.
+2. **Stale writes are blocked.** Added a `test_history_entries` trigger that skips inserts/updates older than the 20-day window, so old open tabs cannot reinsert deleted history.
+3. **Backups are pruned too.** The helper also removes old completed previous-test sessions from `mcq_sessions` app-state payloads so old deleted history cannot rehydrate later.
+4. **Frontend matches retention.** Local session cache, relational hydration, session backup, and session-history sync all enforce the same 20-day window.
+5. **Students are warned.** The Previous Tests panel now says previous tests are kept for 20 days and older history is automatically deleted.
+6. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.09-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `supabase/migrations/20260629192817_retain_previous_tests_20_days.sql`, `supabase/migrations/20260629193447_enforce_previous_test_retention_on_write.sql`, `CHANGELOG.md`, `AGENTS.md`.
+
+### 2026-06-29 — Cloud status pending-count cleanup
+Fixed a misleading dashboard cloud-status loop where session safety backups could appear as user-visible unsynced changes.
+
+1. **Session backup still syncs.** The `mcq_sessions` app-state backup remains queued/flushed for recovery, but it is hidden from the user-facing pending-change count.
+2. **Dirty session state is not double-counted.** When relational session history is already queued, `sessionSyncRuntime.dirty` no longer adds a second pending item to the status pill.
+3. **Already-synced test history is not re-queued.** Completed sessions with Supabase `dbId`s are skipped when building the relational history payload; Aside confirmed the stuck live tab had 69 already-synced `mcq_sessions` pending.
+4. **Static cache bust bumped.** `index.html` app-version is `2026-06-29.08-local` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Student question catalog cache refresh
 Fixed stale browser question banks after the full hosted question repair.
 

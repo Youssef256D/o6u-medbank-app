@@ -208,6 +208,8 @@ const SESSION_HISTORY_SYNC_BATCH_SIZE = 25;
 const SESSION_HISTORY_SYNC_TIMEOUT_MS = Math.max(SUPABASE_QUERY_TIMEOUT_MS, 45000);
 const SESSION_HISTORY_HYDRATE_PAGE_SIZE = 100;
 const SESSION_HISTORY_HYDRATE_FAILURE_COOLDOWN_MS = 60000;
+const PREVIOUS_TEST_RETENTION_DAYS = 20;
+const PREVIOUS_TEST_RETENTION_MS = PREVIOUS_TEST_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const LARGE_QUESTION_STORAGE_CHAR_LIMIT = 1_800_000;
 const LARGE_SESSION_STORAGE_CHAR_LIMIT = 1_800_000;
 const SUPABASE_AUTH_FETCH_TIMEOUT_MS = SUPABASE_SESSION_TIMEOUT_MS + 5000;
@@ -6569,7 +6571,9 @@ async function restoreSessionsFromLocalVault(options = {}) {
   }
 
   const localSessions = getRawStoredSessions();
-  const mergedSessions = mergeSessionCollectionsForRecovery(localSessions, vaultSessions);
+  const mergedSessions = filterSessionsForPreviousTestRetention(
+    mergeSessionCollectionsForRecovery(localSessions, vaultSessions),
+  );
   if (!mergedSessions.length || getSyncPayloadSignature(localSessions) === getSyncPayloadSignature(mergedSessions)) {
     return { restored: false, count: vaultSessions.length };
   }
@@ -6627,13 +6631,44 @@ function isReviewableCompletedSession(session) {
   );
 }
 
+function getPreviousTestRetentionCutoffMs(referenceMs = Date.now()) {
+  const reference = Number(referenceMs || Date.now());
+  return reference - PREVIOUS_TEST_RETENTION_MS;
+}
+
+function getSessionHistoryTimestampMs(session) {
+  return parseSyncTimestampMs(session?.completedAt || session?.updatedAt || session?.createdAt);
+}
+
+function isSessionWithinPreviousTestRetention(session, referenceMs = Date.now()) {
+  if (!isReviewableCompletedSession(session)) {
+    return true;
+  }
+  const historyMs = getSessionHistoryTimestampMs(session);
+  if (!historyMs) {
+    return true;
+  }
+  return historyMs >= getPreviousTestRetentionCutoffMs(referenceMs);
+}
+
+function filterSessionsForPreviousTestRetention(sessionsPayload = null, referenceMs = Date.now()) {
+  const sourceSessions = Array.isArray(sessionsPayload) ? sessionsPayload : [];
+  return sourceSessions.filter((session) => isSessionWithinPreviousTestRetention(session, referenceMs));
+}
+
+function shouldSyncCompletedSessionToRelational(session) {
+  return isReviewableCompletedSession(session)
+    && isSessionWithinPreviousTestRetention(session)
+    && !isUuidValue(String(session?.dbId || "").trim());
+}
+
 function getCompletedSessionsForRelationalHistorySync(sessionsPayload = null) {
   const sourceSessions = Array.isArray(sessionsPayload) ? sessionsPayload : getSessions();
   const completedSessionsById = new Map();
 
   sourceSessions.forEach((session) => {
     const sessionId = String(session?.id || "").trim();
-    if (!sessionId || !isReviewableCompletedSession(session)) {
+    if (!sessionId || !shouldSyncCompletedSessionToRelational(session)) {
       return;
     }
     completedSessionsById.set(sessionId, session);
@@ -6652,7 +6687,8 @@ function getSessionsForSupabaseStateBackup(sessionsPayload = null) {
     if (!isReviewableCompletedSession(session)) {
       return true;
     }
-    return !isUuidValue(String(session?.dbId || "").trim());
+    return isSessionWithinPreviousTestRetention(session)
+      && !isUuidValue(String(session?.dbId || "").trim());
   });
 }
 
@@ -7137,16 +7173,28 @@ const INTERNAL_SYNC_SIGNAL_KEYS = new Set([
   STORAGE_KEYS.studentRefreshTriggerSeen,
 ]);
 
+// Session state has two sync paths: relational test history and a safety
+// app-state backup for in-progress/local recovery. Keep the backup active, but
+// do not show it as an extra user-facing cloud change.
+const USER_HIDDEN_BACKUP_PENDING_KEYS = new Set([
+  STORAGE_KEYS.sessions,
+]);
+
 function getPendingCloudWriteBuckets() {
+  const hasQueuedSessionHistoryWrite = relationalSync.pendingWrites.has(STORAGE_KEYS.sessions);
   const relationalPendingCount = Number(relationalSync.pendingWrites.size || 0)
-    + Number(sessionSyncRuntime.dirty ? 1 : 0);
+    + Number(sessionSyncRuntime.dirty && !hasQueuedSessionHistoryWrite ? 1 : 0);
   // Only count supabase backup writes that are NOT already covered by
-  // relational sync and are NOT internal signals. This prevents
-  // double-counting the same data and oscillation from refresh signals.
+  // relational sync, are NOT internal signals, and are NOT safety backups.
+  // This prevents double-counting the same data and oscillation from refresh
+  // signals or session recovery writes.
   let backupPendingCount = 0;
   for (const [, pending] of supabaseSync.pendingWrites) {
     const storageKey = String(pending?.storageKey || "").trim();
     if (INTERNAL_SYNC_SIGNAL_KEYS.has(storageKey)) {
+      continue;
+    }
+    if (USER_HIDDEN_BACKUP_PENDING_KEYS.has(storageKey)) {
       continue;
     }
     if (storageKey && relationalSync.pendingWrites.has(storageKey)) {
@@ -10365,6 +10413,7 @@ async function hydrateRelationalSessions(currentUser) {
     let query = client
       .from(RELATIONAL_SESSION_HISTORY_TABLE)
       .select("id,external_id,user_id,course_id,session_name,session_test_id,mode,source,status,question_count,duration_minutes,elapsed_seconds,payload,created_at,updated_at,completed_at")
+      .gte("completed_at", new Date(getPreviousTestRetentionCutoffMs()).toISOString())
       .order("updated_at", { ascending: false })
       .order("id", { ascending: true });
     if (currentUser.role !== "admin") {
@@ -23445,6 +23494,7 @@ function renderPreviousTestsSection(userOrId) {
     return `
       <section class="panel">
         <h3 style="margin-top: 0;">Previous Tests</h3>
+        <p class="subtle">Previous tests are kept for ${PREVIOUS_TEST_RETENTION_DAYS} days. Older test history is automatically deleted.</p>
         <p class="subtle">No completed tests yet for this year/semester.</p>
       </section>
     `;
@@ -23562,6 +23612,7 @@ function renderPreviousTestsSection(userOrId) {
         <div>
           <h3>Previous Tests</h3>
           <p class="subtle">Review completed blocks or generate a new test from questions you got wrong.</p>
+          <p class="subtle">Previous tests are kept for ${PREVIOUS_TEST_RETENTION_DAYS} days. Older test history is automatically deleted.</p>
         </div>
         <button class="btn ghost admin-btn-sm" type="button" data-action="reset-previous-test-filters" ${hasActivePreviousTestFilters ? "" : "disabled"}>Reset filters</button>
       </div>
@@ -23573,7 +23624,7 @@ function renderPreviousTestsSection(userOrId) {
         <span><b>${filteredAccuracy}%</b><small>accuracy</small></span>
       </div>
       ${hiddenCompletedAnalysisCount || hiddenFilteredRecordCount
-      ? `<p class="subtle" style="margin: 0.75rem 0 0;">Showing recent test history in batches for stability${hiddenCompletedAnalysisCount ? `; ${hiddenCompletedAnalysisCount} older completed test(s) are kept in cloud/local history` : ""}${hiddenFilteredRecordCount ? `; narrow filters to see the ${hiddenFilteredRecordCount} hidden matching row(s)` : ""}.</p>`
+      ? `<p class="subtle" style="margin: 0.75rem 0 0;">Showing recent test history in batches for stability${hiddenCompletedAnalysisCount ? `; ${hiddenCompletedAnalysisCount} retained test(s) are outside this quick analysis batch` : ""}${hiddenFilteredRecordCount ? `; narrow filters to see the ${hiddenFilteredRecordCount} hidden matching row(s)` : ""}.</p>`
       : ""
     }
 
@@ -35734,7 +35785,11 @@ function buildPendingDeletedLocalUserSignature(targets = null) {
 function getSessionStore() {
   if (!sessionStoreRuntime.initialized) {
     const sessions = load(STORAGE_KEYS.sessions, []);
-    const list = Array.isArray(sessions) ? sessions : [];
+    const rawList = Array.isArray(sessions) ? sessions : [];
+    const list = filterSessionsForPreviousTestRetention(rawList);
+    if (list.length !== rawList.length) {
+      saveLocalOnly(STORAGE_KEYS.sessions, list, { audit: false });
+    }
     sessionStoreRuntime.initialized = true;
     sessionStoreRuntime.list = list;
     sessionStoreRuntime.byId = new Map(list.map((session) => [String(session?.id || "").trim(), session]));
