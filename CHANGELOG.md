@@ -9,6 +9,14 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-30 — Admin-created user cloud login fix
+
+- Added the canonical `admin-create-user` Supabase Edge Function so admin-created accounts are created in Supabase Auth before appearing as added in the dashboard.
+- Changed the Admin Users "Add user" flow to call the cloud creation endpoint for signed-in Supabase admins, preventing local-only accounts that cannot log in.
+- Allowed the same form to repair a local-only duplicate by re-adding the same email after cloud sync is healthy.
+- Kept the existing profile/enrollment sync after account creation so student course assignments still flow through the relational sync path.
+- Bumped the local preview `app-version` to `2026-06-30.02`.
+
 ### 2026-06-30 — Legal page content source and public privacy URL
 
 - Added canonical Markdown copy for Privacy Policy, Terms of Service, Support Policy, and Data Deletion Instructions under `docs/legal/`.

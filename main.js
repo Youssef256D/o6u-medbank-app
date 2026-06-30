@@ -31441,6 +31441,9 @@ function wireAdmin() {
   addUserForm?.addEventListener("change", syncAdminAddUserDraftFromForm);
   addUserForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (addUserForm.dataset.submitting === "1") {
+      return;
+    }
     const data = new FormData(addUserForm);
     const name = String(data.get("name") || "").trim();
     const email = String(data.get("email") || "")
@@ -31473,7 +31476,12 @@ function wireAdmin() {
     }
 
     const users = getUsers();
-    if (users.some((entry) => entry.email.toLowerCase() === email)) {
+    const currentAdmin = getCurrentUser();
+    const shouldUseCloudCreate = Boolean(getSupabaseAuthClient() && hasSupabaseManagedIdentity(currentAdmin));
+    const existingUserIndex = users.findIndex((entry) => String(entry.email || "").trim().toLowerCase() === email);
+    const existingUser = existingUserIndex >= 0 ? users[existingUserIndex] : null;
+    const canRepairLocalOnlyUser = Boolean(existingUser && !hasSupabaseManagedIdentity(existingUser) && shouldUseCloudCreate);
+    if (existingUser && !canRepairLocalOnlyUser) {
       toast("Email already exists.");
       return;
     }
@@ -31493,9 +31501,41 @@ function wireAdmin() {
       })
       : false;
     const newUserApproved = normalizedRole === "admin" ? true : newStudentAutoApproval;
+    const submitButton = addUserForm.querySelector("button[type='submit']");
+    if (submitButton) {
+      submitButton.dataset.baseLabel = submitButton.dataset.baseLabel || String(submitButton.textContent || "Add user").trim();
+      submitButton.disabled = true;
+      submitButton.textContent = "Creating...";
+    }
+    addUserForm.dataset.submitting = "1";
+
+    let cloudAuthId = "";
+    if (shouldUseCloudCreate) {
+      const createResult = await createSupabaseAuthUserAsAdmin({
+        email,
+        password,
+        fullName: name,
+        role: normalizedRole,
+        approved: newUserApproved,
+        phone: normalizedPhone,
+        academicYear,
+        academicSemester,
+      });
+      if (!createResult.ok) {
+        addUserForm.dataset.submitting = "0";
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = submitButton.dataset.baseLabel || "Add user";
+        }
+        toast(`User was not created. ${createResult.message || "Cloud account creation failed."}`);
+        return;
+      }
+      cloudAuthId = String(createResult.authId || "").trim();
+      rememberKnownRelationalProfileIds(cloudAuthId);
+    }
 
     const newUser = {
-      id: makeId("u"),
+      id: cloudAuthId || makeId("u"),
       name,
       email,
       password,
@@ -31509,8 +31549,24 @@ function wireAdmin() {
       academicYear: normalizedRole === "student" ? academicYear : null,
       academicSemester: normalizedRole === "student" ? academicSemester : null,
       createdAt: nowISO(),
+      supabaseAuthId: cloudAuthId || undefined,
+      authProvider: cloudAuthId ? "email" : "",
+      authAccessKnownActive: Boolean(cloudAuthId),
     };
-    users.push(newUser);
+    if (canRepairLocalOnlyUser && existingUserIndex >= 0) {
+      newUser.identityAliases = normalizeUserIdentityAliasList([
+        ...getStoredUserIdentityAliases(existingUser),
+        existingUser.id,
+        existingUser.supabaseAuthId,
+        cloudAuthId,
+      ]);
+      users[existingUserIndex] = newUser;
+      if (existingUser.id && existingUser.id !== newUser.id) {
+        migrateLocalUserReferences(existingUser.id, newUser.id);
+      }
+    } else {
+      users.push(newUser);
+    }
     save(STORAGE_KEYS.users, users, {
       userSyncScope: USER_RELATIONAL_SYNC_SCOPE_ADMIN,
       profileSyncIds: [getUserProfileId(newUser)],
@@ -31519,11 +31575,19 @@ function wireAdmin() {
     state.adminAddUserPanelOpen = false;
     try {
       await flushAdminUserAccountSyncNow();
-      toast("User added.");
+      toast(canRepairLocalOnlyUser ? "User cloud login is ready." : (cloudAuthId ? "User added and cloud login is ready." : "User added."));
       render();
     } catch (syncError) {
-      toast(`User added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
+      toast(cloudAuthId
+        ? `User login is ready, but course enrollment sync needs retry: ${getErrorMessage(syncError, "Sync failed.")}`
+        : `User added locally, but DB sync failed: ${getErrorMessage(syncError, "Sync failed.")}`);
       render();
+    } finally {
+      addUserForm.dataset.submitting = "0";
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = submitButton.dataset.baseLabel || "Add user";
+      }
     }
   });
 
@@ -36614,6 +36678,195 @@ async function setSupabaseAuthUserPasswordAsAdmin(targetAuthId, password) {
     return { ok: false, message: "Could not update Supabase user password." };
   } catch (error) {
     return { ok: false, message: error?.message || "Unexpected error during Supabase password update." };
+  }
+}
+
+async function createSupabaseAuthUserAsAdmin(userPayload = {}) {
+  const email = String(userPayload.email || "").trim().toLowerCase();
+  const password = String(userPayload.password || "");
+  const fullName = String(userPayload.fullName || userPayload.name || "").trim();
+  const role = String(userPayload.role || "student").trim() === "admin" ? "admin" : "student";
+  const approved = role === "admin" ? true : userPayload.approved === true;
+  const phone = String(userPayload.phone || "").trim();
+  const academicYear = role === "student" ? sanitizeAcademicYear(userPayload.academicYear || 1) : null;
+  const academicSemester = role === "student" ? sanitizeAcademicSemester(userPayload.academicSemester || 1) : null;
+
+  if (!email || !email.includes("@")) {
+    return { ok: false, message: "Enter a valid email address." };
+  }
+  if (!password || password.length < 6) {
+    return { ok: false, message: "Password must be at least 6 characters." };
+  }
+  if (password.length > 128) {
+    return { ok: false, message: "Password is too long (maximum 128 characters)." };
+  }
+  if (!fullName) {
+    return { ok: false, message: "Full name is required." };
+  }
+
+  const authClient = getSupabaseAuthClient();
+  if (!authClient) {
+    return { ok: false, message: "Supabase auth client is not available." };
+  }
+
+  try {
+    const serverCreateUserUrl = buildServerApiUrl("/admin-create-user");
+    const hasLegacySupabaseFunction = Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.legacyAnonKey);
+    if (!serverCreateUserUrl && !hasLegacySupabaseFunction) {
+      return {
+        ok: false,
+        message: "No admin user creation endpoint is configured in this app.",
+      };
+    }
+    const actingUser = getCurrentUser();
+    const currentUserProfileId = String(getUserProfileId(actingUser) || "").trim();
+    if (!actingUser || actingUser.role !== "admin") {
+      return {
+        ok: false,
+        message: "User creation requires a signed-in Supabase admin account. Log out and sign in again.",
+      };
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tokenResult = await getValidSupabaseAccessToken(authClient);
+      if (!tokenResult.ok) {
+        return { ok: false, message: tokenResult.message || "Could not verify Supabase session." };
+      }
+      const actingProfileId = String(tokenResult.sessionUserId || "").trim();
+      if (!isUuidValue(actingProfileId)) {
+        return {
+          ok: false,
+          message: "User creation requires a signed-in Supabase admin account. Log out and sign in again.",
+        };
+      }
+      supabaseAuth.activeUserId = actingProfileId;
+      if (isUuidValue(currentUserProfileId) && currentUserProfileId !== actingProfileId) {
+        return {
+          ok: false,
+          message: "Supabase session does not match the active admin account. Log out and sign in again.",
+        };
+      }
+
+      let response = null;
+      let payload = null;
+      let details = "";
+      let serverErrorMessage = "";
+
+      const requestBody = JSON.stringify({
+        email,
+        password,
+        fullName,
+        role,
+        approved,
+        phone,
+        academicYear,
+        academicSemester,
+      });
+
+      if (serverCreateUserUrl) {
+        try {
+          response = await fetchWithTimeout(serverCreateUserUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenResult.token}`,
+              "Content-Type": "application/json",
+            },
+            body: requestBody,
+          });
+          payload = await readJsonResponseSafe(response);
+          details = await getResponseDetails(response, payload);
+        } catch (serverError) {
+          response = null;
+          payload = null;
+          details = "";
+          serverErrorMessage = getErrorMessage(serverError, "Server API request failed.");
+        }
+
+        const canFallbackToLegacy = Boolean(response)
+          && hasLegacySupabaseFunction
+          && (
+            response.status === 404
+            || response.status === 405
+            || response.status === 501
+            || response.status >= 500
+            || /missing required environment variable/i.test(details)
+          );
+        if (canFallbackToLegacy || (!response && hasLegacySupabaseFunction)) {
+          response = null;
+          payload = null;
+          details = "";
+        }
+      }
+
+      if (!response) {
+        if (!hasLegacySupabaseFunction) {
+          return {
+            ok: false,
+            message: serverErrorMessage || "Admin user creation API is unavailable. Try again after cloud sync reconnects.",
+          };
+        }
+        response = await fetchWithTimeout(`${SUPABASE_CONFIG.url}/functions/v1/admin-create-user`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            apikey: SUPABASE_CONFIG.legacyAnonKey,
+            "Content-Type": "application/json",
+          },
+          body: requestBody,
+        });
+        payload = await readJsonResponseSafe(response);
+        details = await getResponseDetails(response, payload);
+      }
+
+      if (response.ok && payload?.ok !== false) {
+        const profileId = String(payload?.profile?.id || payload?.user?.id || "").trim();
+        if (!isUuidValue(profileId)) {
+          return { ok: false, message: "Supabase created the account but did not return a valid profile ID." };
+        }
+        return {
+          ok: true,
+          authId: profileId,
+          profile: payload?.profile || null,
+          user: payload?.user || null,
+        };
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        if (attempt === 0 && isInvalidJwtMessage(details)) {
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            "Supabase session refresh timed out.",
+          );
+          continue;
+        }
+        if (attempt === 0 && !details) {
+          await runSupabaseAuthRequestWithTimeout(
+            authClient,
+            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            "Supabase session refresh timed out.",
+          );
+          continue;
+        }
+        const authMessage = isInvalidJwtMessage(details)
+          ? "Supabase session expired. Log out and log in again with your Supabase admin account."
+          : (details || "Unauthorized. Log out and log in again with your Supabase admin account.");
+        return {
+          ok: false,
+          message: authMessage,
+        };
+      }
+      return {
+        ok: false,
+        message: details || `Admin user creation request failed (${response.status}).`,
+      };
+    }
+
+    return { ok: false, message: "Could not create Supabase user." };
+  } catch (error) {
+    return { ok: false, message: error?.message || "Unexpected error during Supabase user creation." };
   }
 }
 

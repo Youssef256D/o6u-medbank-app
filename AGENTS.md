@@ -73,9 +73,10 @@ api/                    OPTIONAL Node serverless endpoints (admin actions). Uses
 
 supabase/
   functions/            Deno/TS Edge Functions — CANONICAL admin path.
-    admin-delete-user/            } These three are the live admin endpoints;
-    admin-set-user-access/        } /api/*.js mirrors them but is unused in the
-    admin-set-user-password/      } GitHub Pages deploy (see §6).
+    admin-create-user/            } Live admin account endpoints used by
+    admin-delete-user/            } GitHub Pages. /api/*.js mirrors only the
+    admin-set-user-access/        } older delete/access/password path and is
+    admin-set-user-password/      } deprecated in the current deploy (see §6).
     admin-agent-tool/   Hermes AI admin assistant (scoped + full-admin tools).
     cloudflare-stream-token/      Protected long-course-video pipeline.
     cloudflare-stream-tus-upload/
@@ -169,8 +170,8 @@ Do not start or depend on a local Postgres/Supabase instance.
 ## 6. Admin endpoints (canonical vs. deprecated)
 
 **Canonical (used in production):** the Supabase Edge Functions
-`supabase/functions/admin-delete-user`, `admin-set-user-access`,
-`admin-set-user-password`. The frontend (`main.js`) calls these via
+`supabase/functions/admin-create-user`, `admin-delete-user`,
+`admin-set-user-access`, and `admin-set-user-password`. The frontend (`main.js`) calls these via
 `<project-url>/functions/v1/admin-*`. When `supabase.config.js → serverApiBaseUrl`
 is empty (the current GitHub Pages config), the `/api` Node path is never used —
 the code always falls back to the Edge Functions.
@@ -186,6 +187,17 @@ can reactivate them.
 ---
 
 ## 7. Refactor log (most recent first)
+
+### 2026-06-30 — Admin-created user cloud login fix
+Fixed admin-created email/password accounts that could be saved locally without a matching Supabase Auth identity.
+
+1. **Admin create now uses Auth.** Added `supabase/functions/admin-create-user`, which verifies the acting admin, creates the Supabase Auth user with a confirmed email/password, writes the matching `profiles` row, and disables access for unapproved students.
+2. **The dashboard no longer reports fake success.** `main.js` now calls the create-user Edge Function before adding a Supabase-managed user locally; if cloud creation fails, the user is not added locally.
+3. **Local-only duplicates can be repaired.** Re-adding the same email while signed in as a Supabase admin converts a local-only user row into a real Supabase Auth/profile identity instead of blocking on "Email already exists."
+4. **Enrollment sync remains after creation.** Once the Auth/profile IDs exist, the existing profile/enrollment relational sync handles assigned courses.
+5. **Static cache bust bumped.** `index.html` app-version is `2026-06-30.02` for preview testing.
+
+**Files touched:** `main.js`, `index.html`, `supabase/config.toml`, `supabase/functions/admin-create-user/index.ts`, `README.md`, `CHANGELOG.md`, `AGENTS.md`.
 
 ### 2026-06-30 — Legal page content source and public privacy URL
 Added canonical source copy for legal/trust pages and a store-listing Privacy Policy URL without changing the static SPA runtime.

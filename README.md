@@ -106,7 +106,7 @@ You still need to confirm these values in the Supabase project UI:
 5. Storage
    - create the `question-images` bucket if you want image upload to work
 6. Edge Functions or hosting UI
-   - if you deploy `supabase/functions/admin-delete-user` and `supabase/functions/admin-set-user-password`, set:
+   - if you deploy the canonical admin Edge Functions, set:
      - `SUPABASE_SERVICE_ROLE_KEY`
      - `ALLOWED_ORIGIN`
    - if you host your own `/api` backend instead, set the same server env vars there
@@ -177,6 +177,7 @@ The production GitHub Pages deploy uses Supabase Edge Functions as the canonical
 admin API:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-create-user/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-access/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
 
@@ -189,6 +190,7 @@ the `/api` copies for production behavior; extend the Edge Functions instead.
 You can deploy these Edge Functions and keep `serverApiBaseUrl` empty:
 
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-delete-user/index.ts`
+- `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-create-user/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-access/index.ts`
 - `/Users/youssefayoub/Documents/Apps/MCQs Website/supabase/functions/admin-set-user-password/index.ts`
 
@@ -196,6 +198,7 @@ Deploy to the hosted Supabase project:
 
 ```bash
 supabase functions deploy admin-delete-user
+supabase functions deploy admin-create-user
 supabase functions deploy admin-set-user-access
 supabase functions deploy admin-set-user-password
 ```
@@ -208,8 +211,9 @@ supabase secrets set ALLOWED_ORIGIN=https://your-site.example.com
 
 How it works with this app:
 
-- The frontend first tries `serverApiBaseUrl/admin-delete-user`, `serverApiBaseUrl/admin-set-user-access`, and `serverApiBaseUrl/admin-set-user-password` if configured.
+- The frontend first tries `serverApiBaseUrl/admin-create-user`, `serverApiBaseUrl/admin-delete-user`, `serverApiBaseUrl/admin-set-user-access`, and `serverApiBaseUrl/admin-set-user-password` if configured.
 - If not available, it automatically falls back to:
+  - `https://<project-ref>.supabase.co/functions/v1/admin-create-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-delete-user`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-access`
   - `https://<project-ref>.supabase.co/functions/v1/admin-set-user-password`
