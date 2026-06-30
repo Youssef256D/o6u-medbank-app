@@ -188,6 +188,15 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-07-01 — Question sync 409 cleanup
+Fixed a Supabase 409 during background `mcq_questions` relational sync.
+
+1. **Server question IDs now win over local cache.** `syncQuestionsToRelationalUnsafe()` always refreshes the Supabase `external_id` → `id` mapping before question upserts instead of trusting cached `question.dbId` values.
+2. **Primary keys are not rewritten from stale tabs.** Old browser caches can no longer make a question upsert try to update `questions.id`, which previously failed when `question_choices` already referenced the real row.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-07-01.02`.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-07-01 — Production hardening and auth cleanup
 Prepared the current update set for production push by documenting the security/auth changes and removing preview-only cache-bust state.
 

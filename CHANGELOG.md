@@ -9,6 +9,12 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-07-01 — Question sync 409 cleanup
+
+- Fixed a relational question sync 409 where stale local `dbId` values could make the browser try to update a Supabase `questions.id` that already had `question_choices` references.
+- Question sync now always refreshes the server `external_id` → `id` map before upserting question rows, keeping Supabase as the source of truth and preventing local cache drift from changing primary keys.
+- Bumped the production `app-version` to `2026-07-01.02`.
+
 ### 2026-07-01 — Production hardening and auth cleanup
 
 - Removed the hardcoded forced-admin email promotion path from frontend profile bootstrapping/admin controls and added the canonical Supabase migration that keeps new signups as unapproved students unless `profiles.role` is changed server-side.

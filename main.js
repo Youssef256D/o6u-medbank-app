@@ -14974,10 +14974,11 @@ async function syncQuestionsToRelationalUnsafe(questionsPayload) {
       .map((question) => [String(question?.id || "").trim(), String(question?.dbId || "").trim()])
       .filter(([externalId, dbId]) => externalId && isUuidValue(dbId)),
   );
-  const externalIdsNeedingLookup = payloadExternalIds.filter(
-    (externalId) => !isUuidValue(existingByExternalId[externalId]),
-  );
-  for (const externalIdBatch of splitIntoBatches(externalIdsNeedingLookup, QUESTION_RELATIONAL_BATCH_SIZE)) {
+  // Always let the server-side external_id mapping win over cached local dbId
+  // values. Older browsers can carry stale dbIds; using them in an upsert would
+  // try to update questions.id and fail when question_choices already reference
+  // the real row.
+  for (const externalIdBatch of splitIntoBatches(payloadExternalIds, QUESTION_RELATIONAL_BATCH_SIZE)) {
     const existingRows = await runRelationalQueryWithTimeout(
       client
         .from("questions")
