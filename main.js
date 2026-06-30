@@ -36832,16 +36832,7 @@ async function createSupabaseAuthUserAsAdmin(userPayload = {}) {
       }
 
       if (response.status === 401 || response.status === 403) {
-        if (attempt === 0 && isInvalidJwtMessage(details)) {
-          await runSupabaseAuthRequestWithTimeout(
-            authClient,
-            () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
-            SUPABASE_SESSION_TIMEOUT_MS,
-            "Supabase session refresh timed out.",
-          );
-          continue;
-        }
-        if (attempt === 0 && !details) {
+        if (attempt === 0 && (isInvalidJwtMessage(details) || /unauthorized/i.test(details) || !details)) {
           await runSupabaseAuthRequestWithTimeout(
             authClient,
             () => authClient.auth.refreshSession({ refresh_token: tokenResult.refreshToken || undefined }).catch(() => { }),
