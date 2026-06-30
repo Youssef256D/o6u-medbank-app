@@ -9,6 +9,14 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-30 — Legal page content source and public privacy URL
+
+- Added canonical Markdown copy for Privacy Policy, Terms of Service, Support Policy, and Data Deletion Instructions under `docs/legal/`.
+- Added a standalone public `privacy.html` page for Apple App Store Connect and Google Play Console at `https://youssef256d.github.io/o6u-medbank-app/privacy.html`.
+- Added the privacy page to `sitemap.xml`.
+- Covered MedBank's actual static GitHub Pages + hosted Supabase architecture, optional Google sign-in, Cloudflare Stream course video flow, admin/audit workflows, and 20-day previous-test retention.
+- Left app routing and design sync generation unchanged so the legal pages can be wired into the sync layer separately.
+
 ### 2026-06-29 — Previous tests 20-day retention
 
 - Added a hosted Supabase retention helper, write guard, and cron job for `test_history_entries`, keeping only the last 20 days of previous-test history.

@@ -187,6 +187,16 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-30 — Legal page content source and public privacy URL
+Added canonical source copy for legal/trust pages and a store-listing Privacy Policy URL without changing the static SPA runtime.
+
+1. **Legal Markdown now exists.** Added `docs/legal/privacy.md`, `terms.md`, `support.md`, and `deletion.md` with front matter for the sync/generation layer.
+2. **Privacy is publicly hosted.** Added standalone `privacy.html` and listed it in `sitemap.xml`; store forms can use `https://youssef256d.github.io/o6u-medbank-app/privacy.html`.
+3. **Copy matches MedBank architecture.** The pages mention the static GitHub Pages frontend, hosted Supabase source of truth, optional Google sign-in, Cloudflare Stream course-video path, admin/audit workflows, and 20-day previous-test retention.
+4. **No SPA route wiring yet.** App routing, service worker precache, and generated legal pages were intentionally left untouched so the sync layer can wire these sources separately.
+
+**Files touched:** `privacy.html`, `sitemap.xml`, `docs/legal/README.md`, `docs/legal/privacy.md`, `docs/legal/terms.md`, `docs/legal/support.md`, `docs/legal/deletion.md`, `README.md`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-29 — Previous tests 20-day retention
 Added automatic cleanup for previous-test history.
 

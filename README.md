@@ -21,6 +21,23 @@ The app does not need a local Supabase instance, local database, or your laptop 
 - Profile: update account/email/password and view incorrect queue size
 - Admin portal: assign courses to accounts, create/edit/delete/publish questions, and bulk import by course/topic
 
+## Legal content
+
+Canonical legal-page copy lives in `/Users/youssefayoub/Documents/Apps/MCQs Website/docs/legal/`:
+
+- `privacy.md` — Privacy Policy
+- `terms.md` — Terms of Service
+- `support.md` — Support Policy
+- `deletion.md` — Data Deletion Instructions
+
+The public Privacy Policy URL for Apple App Store Connect and Google Play
+Console is:
+
+- `https://youssef256d.github.io/o6u-medbank-app/privacy.html`
+
+These files are source copy for generated/public legal pages. Keep them in sync
+when privacy, retention, support, account deletion, or platform behavior changes.
+
 ## Data/storage
 
 Hosted Supabase is the database for the project. Browser storage is only used for session state, route memory, theme preference, and offline/cache safety; it is not the source of truth.
