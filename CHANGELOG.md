@@ -9,6 +9,11 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-06-30 — Admin create authorization validator fix
+
+- Fixed the `admin-create-user` Edge Function UUID validator so real Supabase Auth IDs pass the acting-admin authorization check instead of returning "Unauthorized."
+- Bumped the local preview `app-version` to `2026-06-30.04`.
+
 ### 2026-06-30 — Admin-created user cloud login fix
 
 - Added the canonical `admin-create-user` Supabase Edge Function so admin-created accounts are created in Supabase Auth before appearing as added in the dashboard.

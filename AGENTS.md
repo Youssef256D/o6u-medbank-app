@@ -188,6 +188,15 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-06-30 — Admin create authorization validator fix
+Fixed a typo in the new `admin-create-user` Edge Function auth gate.
+
+1. **Valid Auth UUIDs now pass.** The function's UUID regex now includes the standard fourth UUID group, matching the older delete/access admin functions.
+2. **Create-user no longer false-fails as unauthorized.** Real Supabase admin session user IDs now pass the initial acting-admin validation before the profile role check.
+3. **Static cache bust bumped.** `index.html` app-version is `2026-06-30.04` for preview testing.
+
+**Files touched:** `supabase/functions/admin-create-user/index.ts`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-30 — Admin-created user cloud login fix
 Fixed admin-created email/password accounts that could be saved locally without a matching Supabase Auth identity.
 
