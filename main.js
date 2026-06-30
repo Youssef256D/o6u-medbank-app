@@ -1450,11 +1450,6 @@ function isStorageQuotaExceededError(error) {
 const DEMO_ADMIN_EMAIL = "admin@medbank.local";
 const DEMO_STUDENT_EMAIL = "student@medbank.local";
 const DEMO_PENDING_STUDENT_EMAIL = "student.pending@medbank.local";
-const FORCED_ADMIN_EMAILS = new Set([
-  "code.youssefaayoub@gmail.com",
-  "code.youssefayoub@gmail.com",
-]);
-
 const SAMPLE_QUESTIONS = [
   {
     id: "q1",
@@ -4098,7 +4093,7 @@ function buildBootstrapProfileRowFromAuth(authUser, fallbackUser = null) {
   const fallbackSemester = normalizeAcademicSemesterOrNull(fallbackUser?.academicSemester);
   const phoneValidation = validateAndNormalizePhoneNumber(rawPhone);
   const normalizedPhone = phoneValidation.ok ? phoneValidation.number : "";
-  const role = isForcedAdminEmail(email) ? "admin" : "student";
+  const role = fallbackUser?.role === "admin" ? "admin" : "student";
   const studentYear = role === "student" ? (metadataYear ?? fallbackYear) : null;
   const studentSemester = role === "student" ? (metadataSemester ?? fallbackSemester) : null;
   const approved = role === "admin";
@@ -5827,9 +5822,6 @@ function shouldAllowSupabaseManagedDeleteFallback(error) {
     || message.includes("admin delete api is unavailable");
 }
 
-function isForcedAdminEmail(email) {
-  return FORCED_ADMIN_EMAILS.has(String(email || "").trim().toLowerCase());
-}
 
 function isLegacyDemoUser(user) {
   const id = String(user?.id || "").trim();
@@ -5861,11 +5853,9 @@ function upsertLocalUserFromAuth(authUser, profileOverrides = {}, options = {}) 
 
   const fallbackName = email.includes("@") ? email.split("@")[0] : "Student";
   const nextName = String(profileOverrides.name || authUser.user_metadata?.full_name || previous?.name || fallbackName).trim();
-  const nextRole = isForcedAdminEmail(email)
+  const nextRole = (previous?.role || profileOverrides.role || "student") === "admin"
     ? "admin"
-    : (previous?.role || profileOverrides.role || "student") === "admin"
-      ? "admin"
-      : "student";
+    : "student";
   const nextPhone = String(profileOverrides.phone || authUser.user_metadata?.phone_number || previous?.phone || "").trim();
   const nextAuthProvider = normalizeAuthProvider(
     profileOverrides.authProvider || getAuthProviderFromAuthUser(authUser) || previous?.authProvider || "",
@@ -15942,13 +15932,6 @@ function seedData() {
         user.phone = normalizedPhone;
         changed = true;
       }
-      if (isForcedAdminEmail(user.email) && user.role !== "admin") {
-        user.role = "admin";
-        user.academicYear = null;
-        user.academicSemester = null;
-        user.assignedCourses = [...allCourses];
-        changed = true;
-      }
       const shouldApprove = user.role === "admin"
         ? true
         : typeof user.isApproved === "boolean"
@@ -21011,10 +20994,10 @@ function renderLanding() {
       <section id="landing-home" class="landing-scroll-section">
         <div class="marketing-page-hero landing-simple-hero">
           <p class="kicker marketing-page-kicker">MedBank</p>
-          <h1 class="marketing-page-title landing-title">Focused medical MCQ practice.</h1>
-          <p class="marketing-page-lede">Create course-specific blocks, review explanations, and keep your weak topics clear without a busy study dashboard.</p>
+          <h1 class="marketing-page-title landing-title">Secure medical courses. Plus the MCQ bank no other platform has.</h1>
+          <p class="marketing-page-lede">Stream protected lecture videos, study your course material on any device, and practice course-aligned MCQs with instant explanations — all in one platform built for medical students and doctors.</p>
           <div class="landing-auth-card" aria-label="Start using MedBank">
-            <p>Ready to study?</p>
+            <p>Ready to learn?</p>
             <div class="landing-auth-actions">
               <button class="btn landing-primary-cta" data-nav="login">Log in</button>
               <button class="btn ghost landing-secondary-cta" data-nav="signup">Create account</button>
@@ -21022,9 +21005,9 @@ function renderLanding() {
             <span>New students can sign up and wait for course access approval.</span>
           </div>
           <div class="marketing-page-stats landing-simple-chips" aria-label="MedBank home highlights">
-            <span class="marketing-page-stat">Course-led practice</span>
-            <span class="marketing-page-stat">Autosaved sessions</span>
-            <span class="marketing-page-stat">Clear review loop</span>
+            <span class="marketing-page-stat">Protected course streaming</span>
+            <span class="marketing-page-stat">Integrated MCQ practice</span>
+            <span class="marketing-page-stat">Cross-device access</span>
           </div>
         </div>
       </section>
@@ -21032,44 +21015,54 @@ function renderLanding() {
       <section id="landing-features" class="landing-scroll-section">
         <div class="marketing-page-hero">
           <p class="kicker marketing-page-kicker">Features</p>
-          <h2 class="marketing-page-title">Everything a serious MCQ practice bank needs, without making studying feel heavy.</h2>
-          <p class="marketing-page-lede">MedBank combines focused test creation, exam-mode discipline, instant review, and clean admin workflows in one calm workspace for medical learning.</p>
+          <h2 class="marketing-page-title">A complete medical learning platform — protected courses and the MCQ bank built in.</h2>
+          <p class="marketing-page-lede">MedBank brings secure course streaming, cross-device study, exam-style practice, and clean admin workflows together in one place. The integrated MCQ bank is what no other course platform offers.</p>
           <div class="marketing-page-stats" aria-label="MedBank feature highlights">
-            <span class="marketing-page-stat"><b>Focused</b> course + topic blocks</span>
-            <span class="marketing-page-stat"><b>Fast</b> review after every answer</span>
+            <span class="marketing-page-stat"><b>Protected</b> course video</span>
+            <span class="marketing-page-stat"><b>Integrated</b> MCQ bank</span>
             <span class="marketing-page-stat"><b>Clear</b> progress analytics</span>
           </div>
         </div>
         <div class="feature-showcase-grid">
           <article class="feature-showcase-card is-emphasis">
             <span class="feature-card-icon" aria-hidden="true">01</span>
-            <h3>Build the exact block you need</h3>
-            <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix.</p>
+            <h3>The integrated MCQ bank — only on MedBank</h3>
+            <p>Practice course-aligned MCQs with instant explanations right alongside your lectures. No other medical course platform builds the question bank into the courses themselves.</p>
             <div class="feature-pill-row">
-              <span class="feature-pill">Tutor mode</span>
-              <span class="feature-pill">Timed mode</span>
-              <span class="feature-pill">Unused / incorrect / flagged</span>
+              <span class="feature-pill">Course-aligned</span>
+              <span class="feature-pill">Instant explanations</span>
+              <span class="feature-pill">Unique to MedBank</span>
+            </div>
+          </article>
+          <article class="feature-showcase-card is-emphasis">
+            <span class="feature-card-icon" aria-hidden="true">02</span>
+            <h3>Stream course videos securely</h3>
+            <p>Lectures play through a token-protected streaming pipeline so content stays inside the platform. Access is tied to each enrolled student and controlled by the course admin.</p>
+            <div class="feature-pill-row">
+              <span class="feature-pill">Protected streaming</span>
+              <span class="feature-pill">Access-controlled</span>
+              <span class="feature-pill">Cross-device</span>
             </div>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">02</span>
-            <h3>Practice with exam rhythm</h3>
-            <p>Flag questions, strike options, take notes, use tools, and keep autosaved progress so the studying experience feels closer to a real exam surface.</p>
+            <span class="feature-card-icon" aria-hidden="true">03</span>
+            <h3>Build the exact practice block you need</h3>
+            <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix — in tutor or timed exam mode.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">03</span>
+            <span class="feature-card-icon" aria-hidden="true">04</span>
             <h3>Review while the memory is fresh</h3>
             <p>Each answer opens the explanation, references, and feedback context immediately, helping students understand the reasoning instead of memorizing a letter.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">04</span>
-            <h3>See your weak spots clearly</h3>
-            <p>Accuracy, timing, topic trends, and previous sessions turn practice into a feedback loop: test, review, adjust, then repeat smarter.</p>
+            <span class="feature-card-icon" aria-hidden="true">05</span>
+            <h3>Study on any device</h3>
+            <p>Pick up courses and question blocks on desktop or mobile with autosaved progress, so learning continues wherever the student is — under the access their admin approved.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">05</span>
-            <h3>Admin tools stay organized</h3>
-            <p>Editors can manage users, courses, questions, bulk imports, notifications, and access controls without scattering the work across spreadsheets.</p>
+            <span class="feature-card-icon" aria-hidden="true">06</span>
+            <h3>Analytics and admin control</h3>
+            <p>Track accuracy, timing, and topic trends, while editors manage users, courses, questions, enrollment, and access without scattering the work across spreadsheets.</p>
           </article>
         </div>
       </section>
@@ -21077,31 +21070,48 @@ function renderLanding() {
       <section id="landing-pricing" class="landing-scroll-section">
         <div class="marketing-page-hero">
           <p class="kicker marketing-page-kicker">Pricing</p>
-          <h2 class="marketing-page-title">Simple access now, flexible tiers when MedBank grows.</h2>
-          <p class="marketing-page-lede">The current priority is a high-quality study experience. Pricing is structured so student access stays clear while faculty and department workflows can expand later.</p>
+          <h2 class="marketing-page-title">Pay only for active students.</h2>
+          <p class="marketing-page-lede">No fixed monthly subscription and no revenue sharing. You only pay for the students who are actually enrolled and active each month — with unlimited courses, storage, and features.</p>
+          <div class="marketing-page-stats" aria-label="MedBank pricing highlights">
+            <span class="marketing-page-stat"><b>No</b> fixed subscription</span>
+            <span class="marketing-page-stat"><b>No</b> revenue sharing</span>
+            <span class="marketing-page-stat"><b>14-day</b> money-back</span>
+          </div>
         </div>
         <div class="pricing-plan-grid">
           <article class="pricing-plan-card">
-            <p class="pricing-plan-label">Student</p>
+            <p class="pricing-plan-label">1–100 students</p>
             <h3>Starter</h3>
-            <p class="pricing-price">$0 <span>/ preview</span></p>
-            <p>Core course practice, tutor/timed blocks, saved sessions, and explanation review.</p>
-            <button class="btn ghost" data-nav="signup">Start practicing</button>
+            <p class="pricing-price">15 <span>EGP / active student / mo</span></p>
+            <p>For new instructors and small cohorts launching their first protected courses.</p>
+            <button class="btn ghost" data-nav="signup">Get started</button>
           </article>
           <article class="pricing-plan-card is-featured">
-            <p class="pricing-plan-label">Faculty</p>
-            <h3>Content team</h3>
-            <p class="pricing-price">Custom</p>
-            <p>Question management, bulk import support, course assignment, and notification workflows.</p>
-            <button class="btn" data-scroll-to="landing-contact">Talk to us</button>
+            <p class="pricing-plan-label">101–500 students</p>
+            <h3>Growth</h3>
+            <p class="pricing-price">5 <span>EGP / active student / mo</span></p>
+            <p>For growing courses and active student groups scaling their content and exams.</p>
+            <button class="btn" data-nav="signup">Get started</button>
           </article>
           <article class="pricing-plan-card">
-            <p class="pricing-plan-label">Department</p>
-            <h3>Program workspace</h3>
-            <p class="pricing-price">Custom</p>
-            <p>Cohort-level oversight, admin governance, shared moderation, and performance dashboards.</p>
-            <button class="btn ghost" data-scroll-to="landing-contact">Plan rollout</button>
+            <p class="pricing-plan-label">501–1,000 students</p>
+            <h3>Scale</h3>
+            <p class="pricing-price">4 <span>EGP / active student / mo</span></p>
+            <p>For large courses scaling across multiple departments and faculty teams.</p>
+            <button class="btn ghost" data-scroll-to="landing-contact">Talk to us</button>
           </article>
+          <article class="pricing-plan-card">
+            <p class="pricing-plan-label">1,001+ students</p>
+            <h3>Institution</h3>
+            <p class="pricing-price">3 <span>EGP / active student / mo</span></p>
+            <p>For faculty-wide rollouts — storage is included free at this scale.</p>
+            <button class="btn ghost" data-scroll-to="landing-contact">Talk to us</button>
+          </article>
+        </div>
+        <div class="pricing-steps-grid">
+          <article class="pricing-step-card"><span>GB</span><h4>Storage</h4><p>80 EGP per GB, one-time. 5% off every 5 GB (up to 50% off). Free for 1,000+ active students.</p></article>
+          <article class="pricing-step-card"><span>₤</span><h4>Wallet billing</h4><p>Top up a wallet and pay as students activate. Minimum activation balance 1,000 EGP.</p></article>
+          <article class="pricing-step-card"><span>14</span><h4>Money-back</h4><p>14-day refund policy from your subscription date — no revenue sharing, ever.</p></article>
         </div>
       </section>
 
@@ -21169,11 +21179,11 @@ function renderFeatures() {
     <section class="panel marketing-page features-page">
       <div class="marketing-page-hero">
         <p class="kicker marketing-page-kicker">Features</p>
-        <h2 class="marketing-page-title">Everything a serious MCQ practice bank needs, without making studying feel heavy.</h2>
-        <p class="marketing-page-lede">MedBank combines focused test creation, exam-mode discipline, instant review, and clean admin workflows in one calm workspace for medical learning.</p>
+        <h2 class="marketing-page-title">A complete medical learning platform — protected courses and the MCQ bank built in.</h2>
+        <p class="marketing-page-lede">MedBank brings secure course streaming, cross-device study, exam-style practice, and clean admin workflows together in one place. The integrated MCQ bank is what no other course platform offers.</p>
         <div class="marketing-page-stats" aria-label="MedBank feature highlights">
-          <span class="marketing-page-stat"><b>Focused</b> course + topic blocks</span>
-          <span class="marketing-page-stat"><b>Fast</b> review after every answer</span>
+          <span class="marketing-page-stat"><b>Protected</b> course video</span>
+          <span class="marketing-page-stat"><b>Integrated</b> MCQ bank</span>
           <span class="marketing-page-stat"><b>Clear</b> progress analytics</span>
         </div>
       </div>
@@ -21181,33 +21191,43 @@ function renderFeatures() {
       <div class="feature-showcase-grid">
         <article class="feature-showcase-card is-emphasis">
           <span class="feature-card-icon" aria-hidden="true">01</span>
-          <h3>Build the exact block you need</h3>
-          <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix.</p>
+          <h3>The integrated MCQ bank — only on MedBank</h3>
+          <p>Practice course-aligned MCQs with instant explanations right alongside your lectures. No other medical course platform builds the question bank into the courses themselves.</p>
           <div class="feature-pill-row">
-            <span class="feature-pill">Tutor mode</span>
-            <span class="feature-pill">Timed mode</span>
-            <span class="feature-pill">Unused / incorrect / flagged</span>
+            <span class="feature-pill">Course-aligned</span>
+            <span class="feature-pill">Instant explanations</span>
+            <span class="feature-pill">Unique to MedBank</span>
+          </div>
+        </article>
+        <article class="feature-showcase-card is-emphasis">
+          <span class="feature-card-icon" aria-hidden="true">02</span>
+          <h3>Stream course videos securely</h3>
+          <p>Lectures play through a token-protected streaming pipeline so content stays inside the platform. Access is tied to each enrolled student and controlled by the course admin.</p>
+          <div class="feature-pill-row">
+            <span class="feature-pill">Protected streaming</span>
+            <span class="feature-pill">Access-controlled</span>
+            <span class="feature-pill">Cross-device</span>
           </div>
         </article>
         <article class="feature-showcase-card">
-          <span class="feature-card-icon" aria-hidden="true">02</span>
-          <h3>Practice with exam rhythm</h3>
-          <p>Flag questions, strike options, take notes, use tools, and keep autosaved progress so the studying experience feels closer to a real exam surface.</p>
+          <span class="feature-card-icon" aria-hidden="true">03</span>
+          <h3>Build the exact practice block you need</h3>
+          <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix — in tutor or timed exam mode.</p>
         </article>
         <article class="feature-showcase-card">
-          <span class="feature-card-icon" aria-hidden="true">03</span>
+          <span class="feature-card-icon" aria-hidden="true">04</span>
           <h3>Review while the memory is fresh</h3>
           <p>Each answer opens the explanation, references, and feedback context immediately, helping students understand the reasoning instead of memorizing a letter.</p>
         </article>
         <article class="feature-showcase-card">
-          <span class="feature-card-icon" aria-hidden="true">04</span>
-          <h3>See your weak spots clearly</h3>
-          <p>Accuracy, timing, topic trends, and previous sessions turn practice into a feedback loop: test, review, adjust, then repeat smarter.</p>
+          <span class="feature-card-icon" aria-hidden="true">05</span>
+          <h3>Study on any device</h3>
+          <p>Pick up courses and question blocks on desktop or mobile with autosaved progress, so learning continues wherever the student is — under the access their admin approved.</p>
         </article>
         <article class="feature-showcase-card">
-          <span class="feature-card-icon" aria-hidden="true">05</span>
-          <h3>Admin tools stay organized</h3>
-          <p>Editors can manage users, courses, questions, bulk imports, notifications, and access controls without scattering the work across spreadsheets.</p>
+          <span class="feature-card-icon" aria-hidden="true">06</span>
+          <h3>Analytics and admin control</h3>
+          <p>Track accuracy, timing, and topic trends, while editors manage users, courses, questions, enrollment, and access without scattering the work across spreadsheets.</p>
         </article>
       </div>
     </section>
@@ -21219,36 +21239,48 @@ function renderPricing() {
     <section class="panel marketing-page pricing-page">
       <div class="marketing-page-hero">
         <p class="kicker marketing-page-kicker">Pricing</p>
-        <h2 class="marketing-page-title">Simple access now, flexible tiers when MedBank grows.</h2>
-        <p class="marketing-page-lede">The current priority is a high-quality study experience. Pricing is structured so student access stays clear while faculty and department workflows can expand later.</p>
+        <h2 class="marketing-page-title">Pay only for active students.</h2>
+        <p class="marketing-page-lede">No fixed monthly subscription and no revenue sharing. You only pay for the students who are actually enrolled and active each month — with unlimited courses, storage, and features.</p>
+        <div class="marketing-page-stats" aria-label="MedBank pricing highlights">
+          <span class="marketing-page-stat"><b>No</b> fixed subscription</span>
+          <span class="marketing-page-stat"><b>No</b> revenue sharing</span>
+          <span class="marketing-page-stat"><b>14-day</b> money-back</span>
+        </div>
       </div>
       <div class="pricing-plan-grid">
         <article class="pricing-plan-card">
-          <p class="pricing-plan-label">Student</p>
+          <p class="pricing-plan-label">1–100 students</p>
           <h3>Starter</h3>
-          <p class="pricing-price">$0 <span>/ preview</span></p>
-          <p>Core course practice, tutor/timed blocks, saved sessions, and explanation review.</p>
-          <button class="btn ghost" data-nav="signup">Start practicing</button>
+          <p class="pricing-price">15 <span>EGP / active student / mo</span></p>
+          <p>For new instructors and small cohorts launching their first protected courses.</p>
+          <button class="btn ghost" data-nav="signup">Get started</button>
         </article>
         <article class="pricing-plan-card is-featured">
-          <p class="pricing-plan-label">Faculty</p>
-          <h3>Content team</h3>
-          <p class="pricing-price">Custom</p>
-          <p>Question management, bulk import support, course assignment, and notification workflows.</p>
-          <button class="btn" data-nav="contact">Talk to us</button>
+          <p class="pricing-plan-label">101–500 students</p>
+          <h3>Growth</h3>
+          <p class="pricing-price">5 <span>EGP / active student / mo</span></p>
+          <p>For growing courses and active student groups scaling their content and exams.</p>
+          <button class="btn" data-nav="signup">Get started</button>
         </article>
         <article class="pricing-plan-card">
-          <p class="pricing-plan-label">Department</p>
-          <h3>Program workspace</h3>
-          <p class="pricing-price">Custom</p>
-          <p>Cohort-level oversight, admin governance, shared moderation, and performance dashboards.</p>
-          <button class="btn ghost" data-nav="contact">Plan rollout</button>
+          <p class="pricing-plan-label">501–1,000 students</p>
+          <h3>Scale</h3>
+          <p class="pricing-price">4 <span>EGP / active student / mo</span></p>
+          <p>For large courses scaling across multiple departments and faculty teams.</p>
+          <button class="btn ghost" data-nav="contact">Talk to us</button>
+        </article>
+        <article class="pricing-plan-card">
+          <p class="pricing-plan-label">1,001+ students</p>
+          <h3>Institution</h3>
+          <p class="pricing-price">3 <span>EGP / active student / mo</span></p>
+          <p>For faculty-wide rollouts — storage is included free at this scale.</p>
+          <button class="btn ghost" data-nav="contact">Talk to us</button>
         </article>
       </div>
       <div class="pricing-steps-grid">
-        <article class="pricing-step-card"><span>1</span><h4>Approve access</h4><p>Admins keep course visibility clean and controlled.</p></article>
-        <article class="pricing-step-card"><span>2</span><h4>Assign content</h4><p>Students see only the relevant course bank.</p></article>
-        <article class="pricing-step-card"><span>3</span><h4>Track progress</h4><p>Practice data becomes a study plan, not noise.</p></article>
+        <article class="pricing-step-card"><span>GB</span><h4>Storage</h4><p>80 EGP per GB, one-time. 5% off every 5 GB (up to 50% off). Free for 1,000+ active students.</p></article>
+        <article class="pricing-step-card"><span>₤</span><h4>Wallet billing</h4><p>Top up a wallet and pay as students activate. Minimum activation balance 1,000 EGP.</p></article>
+        <article class="pricing-step-card"><span>14</span><h4>Money-back</h4><p>14-day refund policy from your subscription date — no revenue sharing, ever.</p></article>
       </div>
     </section>
   `;
@@ -21530,6 +21562,53 @@ async function startGoogleOAuthSignIn(authClient) {
   return { ok: true };
 }
 
+async function startAppleOAuthSignIn(authClient) {
+  if (!authClient) {
+    return { ok: false, message: "Supabase auth is not configured. Apple sign-in is unavailable." };
+  }
+
+  const redirectTo = getAuthRedirectToUrl();
+  if (!redirectTo) {
+    return {
+      ok: false,
+      message: "Apple sign-in requires an http(s) app URL. Open the deployed site URL and try again.",
+    };
+  }
+
+  const { data, error } = await queueSupabaseAuthRequest(
+    authClient,
+    () => authClient.auth.signInWithOAuth({
+      provider: "apple",
+      options: {
+        redirectTo,
+        skipBrowserRedirect: true,
+        scopes: "name email",
+      },
+    }),
+    {
+      timeoutMs: GOOGLE_OAUTH_START_TIMEOUT_MS,
+      timeoutMessage: "Apple sign-in redirect timed out. Please try again.",
+    },
+  );
+
+  if (error) {
+    return { ok: false, message: error.message || "Could not start Apple sign-in." };
+  }
+
+  const providerUrl = String(data?.url || "").trim();
+  if (!providerUrl) {
+    return { ok: false, message: "Could not open Apple sign-in. Please try again." };
+  }
+
+  try {
+    window.location.assign(providerUrl);
+  } catch (error) {
+    return { ok: false, message: error?.message || "Could not open Apple sign-in. Please try again." };
+  }
+
+  return { ok: true };
+}
+
 function renderAuth(mode) {
   if (mode === "login") {
     return `
@@ -21569,6 +21648,7 @@ function renderAuth(mode) {
             </div>
             <div class="auth-divider"><span>or</span></div>
             <button class="btn ghost auth-google-btn" id="login-google-btn" type="button">Continue with Google</button>
+            <button class="btn ghost auth-apple-btn" id="login-apple-btn" type="button">Continue with Apple</button>
           </form>
           <div class="auth-inline auth-public-switch">
             <span class="text">Need an account?</span>
@@ -21697,6 +21777,7 @@ function renderAuth(mode) {
           <p class="subtle">Use Google or sign up with email. Phone examples: 01XXXXXXXXX, +20XXXXXXXXXX, 0020XXXXXXXXXX, or +countrycode.</p>
           <form id="signup-form" class="auth-form auth-public-form" method="post" autocomplete="on">
             <button class="btn ghost auth-google-btn" id="signup-google-btn" type="button">Continue with Google</button>
+            <button class="btn ghost auth-apple-btn" id="signup-apple-btn" type="button">Continue with Apple</button>
             <div class="auth-divider"><span>or sign up with email</span></div>
             <div class="form-row">
               <label>Full name <input name="name" autocomplete="name" required /></label>
@@ -21829,6 +21910,39 @@ function wireAuth(mode) {
         googleButton.dataset.submitting = "0";
         lockAuthActionButton(googleButton, false);
         toast(error?.message || "Google login failed. Please try again.");
+      }
+    });
+
+    const appleButton = document.getElementById("login-apple-btn");
+    appleButton?.addEventListener("click", async () => {
+      if (form?.dataset.submitting === "1" || appleButton.dataset.submitting === "1") {
+        return;
+      }
+      appleButton.dataset.submitting = "1";
+      lockAuthActionButton(appleButton, true, "Checking...");
+      try {
+        const authReady = await getSupabaseAuthClientForInteractiveSignIn();
+        const authClient = authReady.client;
+        if (!authClient) {
+          appleButton.dataset.submitting = "0";
+          lockAuthActionButton(appleButton, false);
+          toast(authReady.message || "Apple login is unavailable. Please try again.");
+          return;
+        }
+        lockAuthActionButton(appleButton, true, "Redirecting...");
+        setGoogleOAuthPendingState(true);
+        const outcome = await startAppleOAuthSignIn(authClient);
+        if (!outcome.ok) {
+          setGoogleOAuthPendingState(false);
+          appleButton.dataset.submitting = "0";
+          lockAuthActionButton(appleButton, false);
+          toast(outcome.message || "Apple login failed. Please try again.");
+        }
+      } catch (error) {
+        setGoogleOAuthPendingState(false);
+        appleButton.dataset.submitting = "0";
+        lockAuthActionButton(appleButton, false);
+        toast(error?.message || "Apple login failed. Please try again.");
       }
     });
 
@@ -22035,6 +22149,39 @@ function wireAuth(mode) {
           googleButton.dataset.submitting = "0";
           lockAuthActionButton(googleButton, false);
           toast(error?.message || "Google signup failed. Please try again.");
+        }
+      });
+
+      const appleButton = document.getElementById("signup-apple-btn");
+      appleButton?.addEventListener("click", async () => {
+        if (form?.dataset.submitting === "1" || appleButton.dataset.submitting === "1") {
+          return;
+        }
+        appleButton.dataset.submitting = "1";
+        lockAuthActionButton(appleButton, true, "Checking...");
+        try {
+          const authReady = await getSupabaseAuthClientForInteractiveSignIn();
+          const authClient = authReady.client;
+          if (!authClient) {
+            appleButton.dataset.submitting = "0";
+            lockAuthActionButton(appleButton, false);
+            toast(authReady.message || "Apple signup is unavailable. Please try again.");
+            return;
+          }
+          lockAuthActionButton(appleButton, true, "Redirecting...");
+          setGoogleOAuthPendingState(true);
+          const outcome = await startAppleOAuthSignIn(authClient);
+          if (!outcome.ok) {
+            setGoogleOAuthPendingState(false);
+            appleButton.dataset.submitting = "0";
+            lockAuthActionButton(appleButton, false);
+            toast(outcome.message || "Apple signup failed. Please try again.");
+          }
+        } catch (error) {
+          setGoogleOAuthPendingState(false);
+          appleButton.dataset.submitting = "0";
+          lockAuthActionButton(appleButton, false);
+          toast(error?.message || "Apple signup failed. Please try again.");
         }
       });
     }
@@ -27585,8 +27732,7 @@ function patchAdminUserRowUi(row, account, actorUser = null) {
   if (roleButton) {
     const currentAdmin = actorUser || getCurrentUser();
     const isSelf = account.id === currentAdmin?.id;
-    const isLockedAdmin = isForcedAdminEmail(account.email);
-    roleButton.disabled = Boolean(isSelf || isLockedAdmin);
+    roleButton.disabled = Boolean(isSelf);
     roleButton.textContent = account.role === "admin" ? "Make student" : "Make admin";
   }
 
@@ -28323,7 +28469,6 @@ function renderAdmin() {
         const coursePreview =
           visibleCourses.length > 2 ? `${compactCourses.join(", ")} +${visibleCourses.length - 2} more` : compactCourses.join(", ");
         const isSelf = account.id === user.id;
-        const isLockedAdmin = isForcedAdminEmail(account.email);
         const canBulkSelect = canBulkSelectAdminUser(account, user);
         const isSelected = accountId ? selectedUserSet.has(accountId) : false;
         const accountPhone = String(displayAccount.phone ?? "");
@@ -28433,7 +28578,7 @@ function renderAdmin() {
                 <button class="admin-access-switch admin-btn-sm" type="button" data-action="toggle-user-courses-access" role="switch" aria-checked="${coursesAccessEnabled ? "true" : "false"}" ${account.role === "admin" ? "disabled" : ""}>
                   ${renderAdminAccessSwitchContent("Courses", coursesAccessEnabled)}
                 </button>
-                <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf || isLockedAdmin ? "disabled" : ""}>
+                <button class="btn ghost admin-btn-sm" data-action="toggle-user-role" ${isSelf ? "disabled" : ""}>
                   ${account.role === "admin" ? "Make student" : "Make admin"}
                 </button>
                 <button class="btn danger admin-btn-sm" data-action="remove-user" ${isSelf ? "disabled" : ""}>Remove</button>
@@ -32631,11 +32776,6 @@ function wireAdmin() {
         toast("Account not found.");
         return;
       }
-      if (isForcedAdminEmail(users[idx].email)) {
-        toast("This account is locked as admin.");
-        return;
-      }
-
       const previousUser = {
         ...users[idx],
         assignedCourses: [...sanitizeCourseAssignments(users[idx].assignedCourses || [])],
@@ -38811,7 +38951,10 @@ function repairCourseTopicCatalogFromQuestions(options = {}) {
 }
 
 function deepClone(value) {
-  return JSON.parse(JSON.stringify(value));
+  if (typeof structuredClone === "function") {
+    try { return structuredClone(value); } catch (_) {}
+  }
+  try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
 }
 
 function normalizeCurriculum(raw) {
@@ -39515,13 +39658,6 @@ function syncUsersWithCurriculum() {
     const normalizedPhone = String(user.phone || "").trim();
     if (user.phone !== normalizedPhone) {
       user.phone = normalizedPhone;
-      changed = true;
-    }
-    if (isForcedAdminEmail(user.email) && user.role !== "admin") {
-      user.role = "admin";
-      user.academicYear = null;
-      user.academicSemester = null;
-      user.assignedCourses = [...allCourses];
       changed = true;
     }
     const shouldApprove = user.role === "admin"

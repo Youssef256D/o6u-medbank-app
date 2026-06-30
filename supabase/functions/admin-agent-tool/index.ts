@@ -186,24 +186,23 @@ const SHARED_SETTINGS: Record<string, string> = {
 };
 
 function parseAllowedOrigins(): string[] {
-  return String(Deno.env.get("ALLOWED_ORIGIN") || "https://youssef256d.github.io")
+  const configured = String(Deno.env.get("ALLOWED_ORIGIN") || "https://youssef256d.github.io")
     .split(",")
     .map((entry) => entry.trim())
-    .filter(Boolean);
+    .filter((entry) => entry && entry !== "*");
+  return configured.length ? configured : ["https://youssef256d.github.io"];
 }
 
 function buildCorsHeaders(requestOrigin: string): HeadersInit {
   const configured = parseAllowedOrigins();
-  const origin = !configured.length || configured.includes("*")
-    ? "*"
-    : configured.includes(requestOrigin) ? requestOrigin : configured[0];
-  const headers: Record<string, string> = {
+  // CORS never returns "*": parseAllowedOrigins() strips "*" and guarantees a non-empty allowlist.
+  const origin = configured.includes(requestOrigin) ? requestOrigin : configured[0];
+  return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Agent-Token, apikey, x-client-info",
+    "Vary": "Origin",
   };
-  if (origin !== "*") headers.Vary = "Origin";
-  return headers;
 }
 
 function jsonResponse(status: number, payload: unknown, requestOrigin = ""): Response {

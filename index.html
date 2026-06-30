@@ -3,12 +3,36 @@
 
 <head>
   <meta charset="UTF-8" />
+  <!--
+    Content-Security-Policy (defense-in-depth; escapeHtml() is the primary XSS guard).
+    Served via meta because GitHub Pages cannot set response headers.
+    script-src uses the layered pattern: modern browsers honor 'strict-dynamic' +
+    the inline-script hashes below (host allowlist and 'unsafe-inline' are ignored
+    by them); older browsers fall back to the host allowlist / 'unsafe-inline'.
+    IMPORTANT: editing ANY inline <script> in this file changes its hash — recompute
+    the 'sha256-...' entries below or the script will be blocked and the app will break.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    base-uri 'self';
+    object-src 'none';
+    script-src 'strict-dynamic' 'sha256-y5Ap2v7PdafPQ76mV7WtW2yUKDNNCyodHZMI1Fjtp+Y=' 'sha256-1S+8EQulXPWc991JVLmfT997fTdj2EFjgB0KF1IRTo4=' 'sha256-q8VYAUvV/EfqOXxdiZl1PY3W8Ki7BFJ4INnlmUtXzFw=' 'sha256-FPD7QAdFxGDXHyrsfXpNPWKJb6s+uB9Skt7nkPJAqdk=' https://cdn.jsdelivr.net https://unpkg.com 'self' 'unsafe-inline';
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com data:;
+    img-src 'self' data: blob: https:;
+    media-src 'self' blob: https://fzjzjzdamehxbgikiskt.supabase.co;
+    connect-src 'self' https://fzjzjzdamehxbgikiskt.supabase.co wss://fzjzjzdamehxbgikiskt.supabase.co;
+    frame-src https://*.cloudflarestream.com;
+    worker-src 'self';
+    manifest-src 'self';
+    form-action 'self';
+  " />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description"
     content="MedBank helps medical students build focused MCQ tests, solve in exam mode, and review detailed explanations." />
   <meta name="robots" content="index, follow, max-image-preview:large" />
   <meta name="googlebot" content="index, follow, max-image-preview:large" />
-  <meta name="app-version" content="2026-06-30.04" />
+  <meta name="app-version" content="2026-07-01.01" />
   <title>MedBank</title>
   <link rel="canonical" href="https://youssef256d.github.io/o6u-medbank-app/" />
   <meta property="og:type" content="website" />

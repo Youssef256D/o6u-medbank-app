@@ -188,6 +188,26 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-07-01 — Production hardening and auth cleanup
+Prepared the current update set for production push by documenting the security/auth changes and removing preview-only cache-bust state.
+
+1. **Forced-admin email promotion was removed.** Frontend profile bootstrapping/admin role controls no longer special-case specific email addresses, and the canonical hosted-schema change lives in `supabase/migrations/20260701000000_remove_forced_admin_promotion.sql`.
+2. **Edge Function CORS is stricter.** Admin, agent, and Cloudflare Stream functions strip wildcard allowed origins, fall back to the GitHub Pages origin, and return `Vary: Origin` when reflecting an allowed origin.
+3. **The static shell has defense-in-depth CSP.** `index.html` now includes a GitHub Pages-compatible meta CSP with matching inline-script hashes, and Apple OAuth buttons reuse the existing Supabase OAuth redirect flow.
+4. **Static cache bust bumped for production.** `index.html` app-version is `2026-07-01.01`.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `supabase/functions/*`, `supabase/migrations/20260701000000_remove_forced_admin_promotion.sql`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `docs/ARCHITECTURE.md`.
+
+### 2026-06-30 — Landing/pricing repositioning
+Repositioned the public marketing copy toward the secure course-platform + MCQ story (inspired by competitor ukkera.com) and applied an active-student pricing model.
+
+1. **Hero + Features now lead with the platform story.** `renderLanding` and `renderFeatures` present secure course-video streaming, cross-device study, and exam-style practice, with the integrated course-aligned MCQ bank called out as the unique differentiator no pure-LMS competitor offers.
+2. **Pricing is now pay-per-active-student.** Both the landing `#landing-pricing` section and the standalone `renderPricing` route show tiered per-active-student pricing (15/5/4/3 EGP for 1–100 / 101–500 / 501–1,000 / 1,001+), plus storage (80 EGP/GB one-time, 5%/5GB discount up to 50%, free at 1,000+), wallet billing (1,000 EGP min), and a 14-day money-back note.
+3. **Marketing copy only — no billing exists.** Access remains approval-based (`profiles.approved`/access flags). No Stripe/billing/wallet logic was added; these are display-only marketing values.
+4. **Static cache bust bumped.** `index.html` app-version was `2026-06-30.05-local` for preview testing before the production hardening update moved it to `2026-07-01.01`.
+
+**Files touched:** `main.js`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-06-30 — Admin create authorization validator fix
 Fixed a typo in the new `admin-create-user` Edge Function auth gate.
 

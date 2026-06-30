@@ -29,10 +29,11 @@ function splitIntoBatches<T>(values: T[], batchSize: number): T[][] {
 }
 
 function parseAllowedOrigins(): string[] {
-  return String(Deno.env.get("ALLOWED_ORIGIN") || "https://youssef256d.github.io")
+  const configured = String(Deno.env.get("ALLOWED_ORIGIN") || "https://youssef256d.github.io")
     .split(",")
     .map((entry) => entry.trim())
-    .filter(Boolean);
+    .filter((entry) => entry && entry !== "*");
+  return configured.length ? configured : ["https://youssef256d.github.io"];
 }
 
 function buildCorsHeaders(requestOrigin: string): HeadersInit {
@@ -42,13 +43,7 @@ function buildCorsHeaders(requestOrigin: string): HeadersInit {
     "Access-Control-Allow-Headers": "Authorization, Content-Type, apikey, x-client-info",
   };
 
-  if (!configured.length || configured.includes("*")) {
-    return {
-      ...base,
-      "Access-Control-Allow-Origin": "*",
-    };
-  }
-
+  // CORS never returns "*": parseAllowedOrigins() strips "*" and guarantees a non-empty allowlist.
   if (requestOrigin && configured.includes(requestOrigin)) {
     return {
       ...base,

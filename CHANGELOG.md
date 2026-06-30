@@ -9,6 +9,19 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-07-01 — Production hardening and auth cleanup
+
+- Removed the hardcoded forced-admin email promotion path from frontend profile bootstrapping/admin controls and added the canonical Supabase migration that keeps new signups as unapproved students unless `profiles.role` is changed server-side.
+- Tightened Edge Function CORS handling so admin/agent/video functions no longer emit `Access-Control-Allow-Origin: *` and always vary by origin when reflecting an allowed origin.
+- Added a GitHub Pages meta Content-Security-Policy with matching inline-script hashes, plus Apple OAuth buttons that reuse the existing Supabase OAuth redirect flow.
+- Bumped the production `app-version` to `2026-07-01.01`.
+
+### 2026-06-30 — Landing/pricing repositioning (course platform + MCQ + active-student pricing)
+
+- Rewrote the landing hero and Features sections (`renderLanding`/`renderFeatures`) to lead with secure medical course streaming while positioning the integrated, course-aligned MCQ bank as MedBank's unique differentiator versus pure-LMS competitors.
+- Replaced the placeholder Student/Faculty/Department pricing with a pay-per-active-student model (15 / 5 / 4 / 3 EGP per active student/month across 1–100, 101–500, 501–1,000, 1,001+ tiers), plus storage (80 EGP/GB one-time, volume discount, free at 1,000+ students), wallet billing, and 14-day money-back notes — in both the landing `#landing-pricing` section and the standalone `renderPricing` route. Marketing copy only; no billing/Stripe wiring exists or was added.
+- Bumped the local preview `app-version` to `2026-06-30.05-local` before the production hardening update moved it to `2026-07-01.01`.
+
 ### 2026-06-30 — Admin create authorization validator fix
 
 - Fixed the `admin-create-user` Edge Function UUID validator so real Supabase Auth IDs pass the acting-admin authorization check instead of returning "Unauthorized."
