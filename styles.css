@@ -16814,3 +16814,402 @@ body.theme-dark .course-card-actions .btn.is-suggestion-btn:hover {
   opacity: 0.7;
   flex-shrink: 0;
 }
+
+/* ============================================================
+   Marketing redesign — "The Answer Key" (2026-06-30)
+   Scoped to the public landing / features / pricing routes.
+   Every colour comes from an existing theme token so light,
+   dark, and comfort themes all stay coherent. The signature is
+   the hero MCQ specimen; the recurring motif is the A–E answer
+   key and mono exam-metadata labels.
+   ============================================================ */
+:root {
+  --mb-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+/* ---- Hero -------------------------------------------------- */
+.mb-hero {
+  width: 100%;
+  max-width: 1140px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(340px, 0.98fr);
+  gap: clamp(1.6rem, 4vw, 3.4rem);
+  align-items: center;
+}
+.mb-hero-copy {
+  min-width: 0;
+}
+.mb-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  font-family: var(--mb-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.mb-eyebrow-tick {
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.mb-hero-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.1rem, 4.4vw, 3.55rem);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  font-weight: 680;
+  color: var(--text);
+}
+.mb-hero-title em {
+  font-style: normal;
+  background-image: linear-gradient(transparent 60%, var(--brand-soft) 0);
+  padding-bottom: 0.02em;
+}
+.mb-hero-lede {
+  margin: 1.1rem 0 0;
+  max-width: 46ch;
+  color: var(--muted);
+  font-size: clamp(1.02rem, 1.5vw, 1.18rem);
+  line-height: 1.6;
+}
+.mb-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+}
+.mb-hero-actions .btn {
+  min-height: 50px;
+  min-width: 150px;
+  border-radius: 14px;
+  font-size: 1.02rem;
+}
+.mb-hero-note {
+  margin: 0.85rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.mb-datastrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 clamp(1.2rem, 3vw, 2.2rem);
+  margin: 1.7rem 0 0;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+.mb-datastrip div {
+  display: grid;
+  gap: 0.15rem;
+}
+.mb-datastrip dt {
+  font-family: var(--mb-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.mb-datastrip dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Hero signature: the MCQ specimen ---------------------- */
+.mcq-specimen {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface-strong);
+  box-shadow: 0 30px 70px rgba(9, 25, 39, 0.12);
+  padding: clamp(1.15rem, 2.2vw, 1.6rem);
+  overflow: hidden;
+}
+.mcq-specimen::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--brand);
+}
+.mcq-specimen-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+.mcq-tag {
+  font-family: var(--mb-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  padding: 0.28rem 0.55rem;
+  border-radius: 6px;
+}
+.mcq-tag.is-muted {
+  color: var(--muted);
+  background: transparent;
+}
+.mcq-stem {
+  margin: 0 0 1rem;
+  font-family: var(--font-body);
+  font-size: clamp(0.98rem, 1.4vw, 1.08rem);
+  line-height: 1.5;
+  color: var(--text);
+  font-weight: 500;
+}
+.mcq-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.mcq-option {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 0.95rem;
+}
+.mcq-key {
+  flex: none;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mb-mono);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.mcq-label {
+  flex: 1 1 auto;
+}
+.mcq-option.is-correct {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.mcq-option.is-correct .mcq-key {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #ffffff;
+}
+.mcq-option.is-correct .mcq-label {
+  font-weight: 600;
+}
+.mcq-check {
+  flex: none;
+  position: relative;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+.mcq-check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--brand);
+  border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+}
+.mcq-explain {
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--border);
+}
+.mcq-explain-label {
+  font-family: var(--mb-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--brand-strong);
+}
+.mcq-explain p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* One orchestrated reveal — the answer resolves, once, on load. */
+@media (prefers-reduced-motion: no-preference) {
+  .mcq-option.is-correct {
+    animation: mcqTint 520ms ease both;
+    animation-delay: 340ms;
+  }
+  .mcq-check {
+    opacity: 0;
+    animation: mcqPop 360ms ease forwards;
+    animation-delay: 640ms;
+  }
+  .mcq-explain {
+    opacity: 0;
+    transform: translateY(6px);
+    animation: mcqRise 460ms ease forwards;
+    animation-delay: 740ms;
+  }
+  @keyframes mcqTint {
+    from {
+      border-color: var(--border);
+      background: var(--surface-soft);
+    }
+  }
+  @keyframes mcqPop {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes mcqRise {
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* ---- Feature section codes (replace decorative numbering) --- */
+.feature-code {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mb-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  border-radius: 6px;
+  padding: 0.3rem 0.55rem;
+}
+.feature-showcase-card.is-emphasis .feature-code {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* ---- Pricing tiers as an answer key ------------------------ */
+.pricing-tier-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+}
+.pricing-tier-grid .pricing-plan-card {
+  min-height: 0;
+  gap: 0.5rem;
+  padding: clamp(1.1rem, 1.8vw, 1.4rem);
+}
+.pricing-tier-grid .pricing-plan-label {
+  font-family: var(--mb-mono);
+  letter-spacing: 0.06em;
+  text-transform: none;
+  font-size: 0.74rem;
+}
+.pricing-tier-grid .pricing-plan-card h3 {
+  margin: 0.1rem 0 0;
+  font-size: 1.15rem;
+}
+.pricing-tier-grid .pricing-price {
+  margin-top: 0.15rem;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  font-size: clamp(2.1rem, 3vw, 2.7rem);
+  font-variant-numeric: tabular-nums;
+}
+.pricing-tier-grid .pricing-price span {
+  font-family: var(--mb-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+.pricing-tier-grid .pricing-plan-card.is-featured .pricing-price span {
+  color: rgba(255, 255, 255, 0.74);
+}
+.pricing-tier-grid .pricing-plan-card > p:not(.pricing-plan-label):not(.pricing-price) {
+  font-size: 0.9rem;
+}
+
+.pricing-notes {
+  list-style: none;
+  margin: 1.1rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+.pricing-notes li {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+.pricing-note-key {
+  font-family: var(--mb-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brand-strong);
+}
+.pricing-notes p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+/* ---- Marketing responsive ---------------------------------- */
+@media (max-width: 960px) {
+  .mb-hero {
+    grid-template-columns: 1fr;
+    gap: 1.8rem;
+  }
+  .mcq-specimen {
+    order: 2;
+  }
+  .pricing-tier-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pricing-tier-grid .pricing-plan-card.is-featured {
+    transform: none;
+  }
+  .pricing-notes {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 560px) {
+  .pricing-tier-grid {
+    grid-template-columns: 1fr;
+  }
+  .mb-datastrip {
+    gap: 0.9rem 1.4rem;
+  }
+}

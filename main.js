@@ -20993,23 +20993,40 @@ function renderLanding() {
     <div class="panel marketing-page landing-page landing-page-scroll">
 
       <section id="landing-home" class="landing-scroll-section">
-        <div class="marketing-page-hero landing-simple-hero">
-          <p class="kicker marketing-page-kicker">MedBank</p>
-          <h1 class="marketing-page-title landing-title">Secure medical courses. Plus the MCQ bank no other platform has.</h1>
-          <p class="marketing-page-lede">Stream protected lecture videos, study your course material on any device, and practice course-aligned MCQs with instant explanations — all in one platform built for medical students and doctors.</p>
-          <div class="landing-auth-card" aria-label="Start using MedBank">
-            <p>Ready to learn?</p>
-            <div class="landing-auth-actions">
-              <button class="btn landing-primary-cta" data-nav="login">Log in</button>
-              <button class="btn ghost landing-secondary-cta" data-nav="signup">Create account</button>
+        <div class="mb-hero">
+          <div class="mb-hero-copy">
+            <p class="mb-eyebrow"><span class="mb-eyebrow-tick" aria-hidden="true"></span>MedBank — secure medical learning</p>
+            <h1 class="mb-hero-title">Protected course video — plus <em>the MCQ bank no other platform has.</em></h1>
+            <p class="mb-hero-lede">Stream lectures securely, study on any device, and practise course-aligned MCQs with instant explanations. One platform, built for medical students and doctors.</p>
+            <div class="mb-hero-actions">
+              <button class="btn" data-nav="signup">Create account</button>
+              <button class="btn ghost" data-nav="login">Log in</button>
             </div>
-            <span>New students can sign up and wait for course access approval.</span>
+            <p class="mb-hero-note">New students sign up and get in once a course admin approves them.</p>
+            <dl class="mb-datastrip" aria-label="MedBank at a glance">
+              <div><dt>Questions</dt><dd>3,024</dd></div>
+              <div><dt>Course video</dt><dd>Protected</dd></div>
+              <div><dt>Study</dt><dd>Any device</dd></div>
+            </dl>
           </div>
-          <div class="marketing-page-stats landing-simple-chips" aria-label="MedBank home highlights">
-            <span class="marketing-page-stat">Protected course streaming</span>
-            <span class="marketing-page-stat">Integrated MCQ practice</span>
-            <span class="marketing-page-stat">Cross-device access</span>
-          </div>
+          <aside class="mcq-specimen" aria-label="Example MedBank question">
+            <header class="mcq-specimen-head">
+              <span class="mcq-tag">Q · Cardiology</span>
+              <span class="mcq-tag is-muted">1 / 3,024</span>
+            </header>
+            <p class="mcq-stem">A 58-year-old man has central chest pain and ST-elevation in leads II, III and aVF. Which coronary artery is most likely occluded?</p>
+            <ol class="mcq-options">
+              <li class="mcq-option"><span class="mcq-key">A</span><span class="mcq-label">Left anterior descending</span></li>
+              <li class="mcq-option is-correct"><span class="mcq-key">B</span><span class="mcq-label">Right coronary artery</span><span class="mcq-check" aria-hidden="true"></span></li>
+              <li class="mcq-option"><span class="mcq-key">C</span><span class="mcq-label">Left circumflex</span></li>
+              <li class="mcq-option"><span class="mcq-key">D</span><span class="mcq-label">Left main stem</span></li>
+              <li class="mcq-option"><span class="mcq-key">E</span><span class="mcq-label">Posterior descending</span></li>
+            </ol>
+            <div class="mcq-explain">
+              <span class="mcq-explain-label">Explanation</span>
+              <p>Inferior STEMI (II, III, aVF) maps to the right coronary artery in most patients.</p>
+            </div>
+          </aside>
         </div>
       </section>
 
@@ -21026,7 +21043,7 @@ function renderLanding() {
         </div>
         <div class="feature-showcase-grid">
           <article class="feature-showcase-card is-emphasis">
-            <span class="feature-card-icon" aria-hidden="true">01</span>
+            <span class="feature-code" aria-hidden="true">MCQ</span>
             <h3>The integrated MCQ bank — only on MedBank</h3>
             <p>Practice course-aligned MCQs with instant explanations right alongside your lectures. No other medical course platform builds the question bank into the courses themselves.</p>
             <div class="feature-pill-row">
@@ -21036,7 +21053,7 @@ function renderLanding() {
             </div>
           </article>
           <article class="feature-showcase-card is-emphasis">
-            <span class="feature-card-icon" aria-hidden="true">02</span>
+            <span class="feature-code" aria-hidden="true">Video</span>
             <h3>Stream course videos securely</h3>
             <p>Lectures play through a token-protected streaming pipeline so content stays inside the platform. Access is tied to each enrolled student and controlled by the course admin.</p>
             <div class="feature-pill-row">
@@ -21046,22 +21063,22 @@ function renderLanding() {
             </div>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">03</span>
+            <span class="feature-code" aria-hidden="true">Blocks</span>
             <h3>Build the exact practice block you need</h3>
             <p>Choose course, topic, source, mode, and question count so every session matches the chapter, lecture, or weak area you are trying to fix — in tutor or timed exam mode.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">04</span>
+            <span class="feature-code" aria-hidden="true">Review</span>
             <h3>Review while the memory is fresh</h3>
             <p>Each answer opens the explanation, references, and feedback context immediately, helping students understand the reasoning instead of memorizing a letter.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">05</span>
+            <span class="feature-code" aria-hidden="true">Devices</span>
             <h3>Study on any device</h3>
             <p>Pick up courses and question blocks on desktop or mobile with autosaved progress, so learning continues wherever the student is — under the access their admin approved.</p>
           </article>
           <article class="feature-showcase-card">
-            <span class="feature-card-icon" aria-hidden="true">06</span>
+            <span class="feature-code" aria-hidden="true">Admin</span>
             <h3>Analytics and admin control</h3>
             <p>Track accuracy, timing, and topic trends, while editors manage users, courses, questions, enrollment, and access without scattering the work across spreadsheets.</p>
           </article>
@@ -21079,7 +21096,7 @@ function renderLanding() {
             <span class="marketing-page-stat"><b>14-day</b> money-back</span>
           </div>
         </div>
-        <div class="pricing-plan-grid">
+        <div class="pricing-plan-grid pricing-tier-grid">
           <article class="pricing-plan-card">
             <p class="pricing-plan-label">1–100 students</p>
             <h3>Starter</h3>
@@ -21109,11 +21126,11 @@ function renderLanding() {
             <button class="btn ghost" data-scroll-to="landing-contact">Talk to us</button>
           </article>
         </div>
-        <div class="pricing-steps-grid">
-          <article class="pricing-step-card"><span>GB</span><h4>Storage</h4><p>80 EGP per GB, one-time. 5% off every 5 GB (up to 50% off). Free for 1,000+ active students.</p></article>
-          <article class="pricing-step-card"><span>₤</span><h4>Wallet billing</h4><p>Top up a wallet and pay as students activate. Minimum activation balance 1,000 EGP.</p></article>
-          <article class="pricing-step-card"><span>14</span><h4>Money-back</h4><p>14-day refund policy from your subscription date — no revenue sharing, ever.</p></article>
-        </div>
+        <ul class="pricing-notes" aria-label="Billing details">
+          <li><span class="pricing-note-key">Storage</span><p>80 EGP / GB, one-time. 5% off per 5 GB, up to 50%. Free for 1,000+ active students.</p></li>
+          <li><span class="pricing-note-key">Wallet</span><p>Top up and pay as students activate. Minimum activation balance 1,000 EGP.</p></li>
+          <li><span class="pricing-note-key">Money-back</span><p>14-day refund from your subscription date. No revenue sharing, ever.</p></li>
+        </ul>
       </section>
 
       <section id="landing-about" class="landing-scroll-section">
@@ -21248,7 +21265,7 @@ function renderPricing() {
           <span class="marketing-page-stat"><b>14-day</b> money-back</span>
         </div>
       </div>
-      <div class="pricing-plan-grid">
+      <div class="pricing-plan-grid pricing-tier-grid">
         <article class="pricing-plan-card">
           <p class="pricing-plan-label">1–100 students</p>
           <h3>Starter</h3>
@@ -21278,11 +21295,11 @@ function renderPricing() {
           <button class="btn ghost" data-nav="contact">Talk to us</button>
         </article>
       </div>
-      <div class="pricing-steps-grid">
-        <article class="pricing-step-card"><span>GB</span><h4>Storage</h4><p>80 EGP per GB, one-time. 5% off every 5 GB (up to 50% off). Free for 1,000+ active students.</p></article>
-        <article class="pricing-step-card"><span>₤</span><h4>Wallet billing</h4><p>Top up a wallet and pay as students activate. Minimum activation balance 1,000 EGP.</p></article>
-        <article class="pricing-step-card"><span>14</span><h4>Money-back</h4><p>14-day refund policy from your subscription date — no revenue sharing, ever.</p></article>
-      </div>
+      <ul class="pricing-notes" aria-label="Billing details">
+        <li><span class="pricing-note-key">Storage</span><p>80 EGP / GB, one-time. 5% off per 5 GB, up to 50%. Free for 1,000+ active students.</p></li>
+        <li><span class="pricing-note-key">Wallet</span><p>Top up and pay as students activate. Minimum activation balance 1,000 EGP.</p></li>
+        <li><span class="pricing-note-key">Money-back</span><p>14-day refund from your subscription date. No revenue sharing, ever.</p></li>
+      </ul>
     </section>
   `;
 }

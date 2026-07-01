@@ -9,6 +9,14 @@ hosted Supabase is the source of truth.
 
 ## [Unreleased]
 
+### 2026-07-01 — Marketing "Answer Key" redesign
+
+- Gave the public landing / features / pricing routes a distinct visual identity built around the product's own world: a hero **MCQ specimen card** (a clinical question with A–E options, the correct one resolved with a check and a sliver of explanation) as the signature element that embodies MedBank's differentiator.
+- Replaced the decorative 01–06 feature numbering with meaningful mono "exam section" codes (`MCQ / Video / Blocks / Review / Devices / Admin`) and reworked pricing into a 4-tier table with tabular figures plus a quiet `Storage / Wallet / Money-back` billing-notes bar.
+- One restrained motion moment: the specimen's correct answer + explanation reveal once on load, gated by `prefers-reduced-motion`. All colours derive from existing theme tokens (`--brand`, `--accent`, `--text`, surfaces) so light/dark/comfort stay coherent; the new CSS is additive and scoped to the marketing routes.
+- Also carried the earlier landing/pricing repositioning + active-student pricing content. Marketing/display only — no billing or Stripe wiring exists or was added; access remains approval-based.
+- Bumped the production `app-version` to `2026-07-01.03`.
+
 ### 2026-07-01 — Question sync 409 cleanup
 
 - Fixed a relational question sync 409 where stale local `dbId` values could make the browser try to update a Supabase `questions.id` that already had `question_choices` references.

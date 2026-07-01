@@ -188,6 +188,16 @@ can reactivate them.
 
 ## 7. Refactor log (most recent first)
 
+### 2026-07-01 — Marketing "Answer Key" redesign
+Gave the public landing/features/pricing routes a distinct, subject-true visual identity without changing the static-SPA deploy model. Design-only; no business/auth/access logic touched.
+
+1. **Hero signature is an MCQ specimen.** `renderLanding` now leads with a two-column hero: thesis headline (highlighter-swiped differentiator phrase) + a live-looking clinical MCQ card with A–E options, the correct answer resolved, and a short explanation. This embodies the one thing pure-LMS competitors lack.
+2. **Structural motif replaces decoration.** Feature cards use meaningful mono section codes (`MCQ / Video / Blocks / Review / Devices / Admin`) via a new `.feature-code` element instead of the old decorative `01–06` `.feature-card-icon`. Pricing is a 4-tier table (`.pricing-tier-grid`) with tabular figures and a quiet `.pricing-notes` billing bar (replacing the `.pricing-steps-grid` badges). Standalone `renderFeatures`/`renderPricing` mirror the landing sections.
+3. **Theme-safe palette + one motion moment.** All new colours come from existing tokens (`--brand`, `--accent`, `--text`, surfaces) so light/dark/comfort stay coherent. New CSS is appended and scoped; a single `prefers-reduced-motion`-gated animation reveals the specimen's check + explanation on load. A `--mb-mono` system monospace stack drives the exam-metadata labels (zero font-load cost).
+4. **Static cache bust bumped.** `index.html` app-version is `2026-07-01.03`.
+
+**Files touched:** `main.js`, `styles.css`, `index.html`, `CHANGELOG.md`, `AGENTS.md`.
+
 ### 2026-07-01 — Question sync 409 cleanup
 Fixed a Supabase 409 during background `mcq_questions` relational sync.
 
